@@ -1,10 +1,19 @@
 //! Shared JSON-RPC wire contract ownership boundary.
 
 use forge_app::ApplicationStatus;
+use jsonrpsee::{core::RpcResult, proc_macros::rpc};
 use serde::{Deserialize, Serialize};
 
 /// The additive JSON-RPC method name for application readiness.
 pub const SYSTEM_STATUS_METHOD: &str = "system.status";
+
+/// The typed RPC contract shared by daemon clients and the daemon adapter.
+#[rpc(client, server, namespace = "system")]
+pub trait SystemApi {
+    /// Returns the application readiness boundary without transport-owned data.
+    #[method(name = "status")]
+    async fn status(&self) -> RpcResult<SystemStatusResponse>;
+}
 
 /// The serializable response returned by [`SYSTEM_STATUS_METHOD`].
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
