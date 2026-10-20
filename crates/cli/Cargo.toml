@@ -6,5 +6,21 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[dependencies]
+forge-rpc = { path = "../rpc" }
+clap = { version = "4.5.53", features = ["derive", "env"] }
+jsonrpsee = { version = "0.26.0", features = ["http-client"] }
+serde_json = "1.0.145"
+tokio = { version = "1.48.0", features = ["macros", "net", "rt-multi-thread"] }
+
+[dev-dependencies]
+axum = "0.8.8"
+forge-app = { path = "../app" }
+forge-server = { path = "../server" }
+
+[[bin]]
+name = "forge"
+path = "src/main.rs"
+
 [lints]
 workspace = true

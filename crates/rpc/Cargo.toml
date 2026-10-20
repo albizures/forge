@@ -9,7 +9,7 @@ repository.workspace = true
 [dependencies]
 forge-app = { path = "../app" }
 serde = { version = "1.0.228", features = ["derive"] }
-jsonrpsee = { version = "0.26.0", features = ["macros"] }
+jsonrpsee = { version = "0.26.0", features = ["macros", "server"] }
 
 [lints]
 workspace = true
