@@ -10,6 +10,7 @@ repository.workspace = true
 forge-app = { path = "../app" }
 forge-rpc = { path = "../rpc" }
 forge-store = { path = "../store" }
+askama = "0.14.0"
 axum = "0.8.8"
 jsonrpsee = { version = "0.26.0", features = ["http-client", "server"] }
 tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread", "signal"] }

@@ -5,14 +5,16 @@
 
 use std::{env, net::SocketAddr, str::FromStr, sync::Arc};
 
+use askama::Template;
 use axum::{
     Router,
     body::Body,
     extract::Request,
-    http::StatusCode,
+    http::{StatusCode, header},
+    response::Html,
     routing::{get, post},
 };
-use forge_app::Application;
+use forge_app::{Application, ApplicationStatus};
 use forge_rpc::{SystemApiServer, SystemStatusResponse};
 use jsonrpsee::{
     core::{RpcResult, async_trait},
@@ -82,15 +84,42 @@ impl SystemApiServer for Daemon {
     }
 }
 
-/// Builds the single listener's router, including the typed RPC Tower service.
+/// Builds the single listener's router, including the browser and typed RPC services.
 pub fn router(daemon: Daemon) -> Router {
+    let page_daemon = daemon.clone();
+    let status_daemon = daemon.clone();
     let methods = daemon.into_rpc();
     let service_builder = Server::builder().to_service_builder();
     let (stop_handle, server_handle) = stop_channel();
     let server_handle = Arc::new(server_handle);
 
     Router::new()
-        .route("/", get(|| async { "Forge daemon" }))
+        .route(
+            "/",
+            get(move || {
+                let daemon = page_daemon.clone();
+                async move { status_page(&daemon.application.status()) }
+            }),
+        )
+        .route(
+            "/status",
+            get(move || {
+                let daemon = status_daemon.clone();
+                async move { status_fragment(&daemon.application.status()) }
+            }),
+        )
+        .route(
+            "/assets/htmx.min.js",
+            get(|| async {
+                (
+                    [(
+                        header::CONTENT_TYPE,
+                        "application/javascript; charset=utf-8",
+                    )],
+                    include_str!("../assets/htmx.min.js"),
+                )
+            }),
+        )
         .route(
             "/rpc",
             post(move |request: Request| {
@@ -111,6 +140,70 @@ pub fn router(daemon: Daemon) -> Router {
                 }
             }),
         )
+}
+
+#[derive(Template)]
+#[template(
+    source = r##"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Forge daemon status</title>
+  <script src="/assets/htmx.min.js"></script>
+</head>
+<body>
+  <main>
+    <h1>Forge daemon</h1>
+    {{ status_html|safe }}
+  </main>
+</body>
+</html>"##,
+    ext = "html"
+)]
+struct StatusPageTemplate<'a> {
+    status_html: &'a str,
+}
+
+#[derive(Template)]
+#[template(
+    source = r##"<section id="status" aria-live="polite">
+  <p><strong>{{ status.name }}</strong> {{ status.version }}</p>
+  <p>Ready: {{ status.ready }}</p>
+  <button type="button" hx-get="/status" hx-target="#status" hx-swap="outerHTML">Refresh status</button>
+</section>"##,
+    ext = "html"
+)]
+struct StatusFragmentTemplate<'a> {
+    status: &'a ApplicationStatus,
+}
+
+fn status_page(status: &ApplicationStatus) -> Result<Html<String>, StatusCode> {
+    let status_html = StatusFragmentTemplate { status }
+        .render()
+        .map_err(|error| {
+            warn!(%error, "failed to render status fragment");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    StatusPageTemplate {
+        status_html: &status_html,
+    }
+    .render()
+    .map(Html)
+    .map_err(|error| {
+        warn!(%error, "failed to render status page");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })
+}
+
+fn status_fragment(status: &ApplicationStatus) -> Result<Html<String>, StatusCode> {
+    StatusFragmentTemplate { status }
+        .render()
+        .map(Html)
+        .map_err(|error| {
+            warn!(%error, "failed to render status fragment");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })
 }
 
 /// Runs the daemon until Ctrl-C or SIGTERM requests graceful shutdown.
@@ -159,7 +252,10 @@ async fn shutdown_signal() {
 mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-    use axum::{body::Body, http::Request};
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, header},
+    };
     use forge_app::Application;
     use forge_rpc::SystemApiClient;
     use jsonrpsee::http_client::HttpClientBuilder;
@@ -191,13 +287,81 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rpc_and_html_routes_share_the_daemon_router() {
-        let app = router(Daemon::new(Application::new()));
-        let response = app
+    async fn browser_routes_render_shared_status_without_cors() {
+        let response = router(Daemon::new(Application::new()))
             .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(response.status(), 200);
+        assert!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .is_none()
+        );
+        let page = String::from_utf8(
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(page.contains("src=\"/assets/htmx.min.js\""));
+        assert!(page.contains("hx-get=\"/status\""));
+        assert!(page.contains("forge"));
+
+        let response = router(Daemon::new(Application::new()))
+            .oneshot(
+                Request::builder()
+                    .uri("/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        assert!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .is_none()
+        );
+        let fragment = String::from_utf8(
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(fragment.contains("id=\"status\""));
+        assert!(fragment.contains("forge"));
+        assert!(fragment.contains("0.1.0"));
+    }
+
+    #[tokio::test]
+    async fn htmx_asset_is_served_locally_with_javascript_content_type() {
+        let response = router(Daemon::new(Application::new()))
+            .oneshot(
+                Request::builder()
+                    .uri("/assets/htmx.min.js")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/javascript; charset=utf-8"
+        );
+        let asset = String::from_utf8(
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(asset.starts_with("var htmx="));
     }
 
     #[tokio::test]
