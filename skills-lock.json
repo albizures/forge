@@ -1,0 +1,125 @@
+{
+  "version": 1,
+  "skills": {
+    "code-review": {
+      "source": "albizures/harness",
+      "sourceType": "github",
+      "skillPath": ".agents/skills/code-review/SKILL.md",
+      "computedHash": "caa9a086baaf9e0f7cd71f64edfa83da6821c05e826b083221f3d02e3d6a1905"
+    },
+    "codebase-design": {
+      "source": "albizures/harness",
+      "sourceType": "github",
+      "skillPath": ".agents/skills/codebase-design/SKILL.md",
+      "computedHash": "5a17552cc1482f1a40124bf4e6c9dbd90ac0dbb47e71c07d47369f9e5f2ae3b5"
+    },
+    "diagnosing-bugs": {
+      "source": "albizures/harness",
+      "sourceType": "github",
+      "skillPath": ".agents/skills/diagnosing-bugs/SKILL.md",
+      "computedHash": "37b5e9c624513551da790b52864dc8c84bff996a6d03a380cc6facdcc0a88354"
+    },
+    "domain-modeling": {
+      "source": "albizures/harness",
+      "sourceType": "github",
+      "skillPath": "skills/design/domain-modeling/SKILL.md",
+      "computedHash": "363cb0f53b0b431e7c00086ad1f823500b7e1b70b5616ee969c979f0934e9e6e"
+    },
+    "forge": {
+      "source": "albizures/harness",
+      "sourceType": "github",
+      "skillPath": "skills/workflow/forge/SKILL.md",
+      "computedHash": "6eaba44fd8feaba9c47e20cf859717f174269595deb2cca5551ff2162384fe4c"
+    },
+    "grill-me": {
+      "source": "albizures/harness",
+      "sourceType": "github",
+      "skillPath": "skills/design/grill-me/SKILL.md",
+      "computedHash": "f361db4e15e6bfd562a9282b1dccda513910a50061f9e838ce017be9c69dde3f"
+    },
+    "grill-with-docs": {
+      "source": "albizures/harness",
+      "sourceType": "github",
+      "skillPath": "skills/design/grill-with-docs/SKILL.md",
+      "computedHash": "9c460cbd94fd3c63cdef967dbdb6e66ca687103cdc380cd37834e4d10b738f78"
+    },
+    "grilling": {
+      "source": "albizures/harness",
+      "sourceType": "github",
+      "skillPath": "skills/design/grilling/SKILL.md",
+      "computedHash": "c052f84c3827133ecc587bf91e41bbaeda82532520b0b8e60222806421d22211"
+    },
+    "handoff": {
+      "source": "albizures/harness",
+      "sourceType": "github",
+      "skillPath": "skills/workflow/handoff/SKILL.md",
+      "computedHash": "5337dbf3bf0b9dffc4784afb7f3dde59163b91c92005d0d24eeed6d5d7feba43"
+    },
+    "implement": {
+      "source": "albizures/harness",
+      "sourceType": "github",
+      "skillPath": "skills/engineering/implement/SKILL.md",
+      "computedHash": "a1610b1b7f783dbb8b25af3cee523af9562ca4d39342af9bb3c068d2502ca3f4"
+    },
+    "improve-codebase-architecture": {
+      "source": "albizures/harness",
+      "sourceType": "github",
+      "skillPath": ".agents/skills/improve-codebase-architecture/SKILL.md",
+      "computedHash": "2449db6ab1ded9581f69fcc56c1f64818112d05e271fd4c5da23c6523f9d3d9d"
+    },
+    "prototype": {
+      "source": "albizures/harness",
+      "sourceType": "github",
+      "skillPath": ".agents/skills/prototype/SKILL.md",
+      "computedHash": "d3fc74689bd993e39c44bfae510d014eecffbeec2922764b065377fd1327c0f6"
+    },
+    "research": {
+      "source": "albizures/harness",
+      "sourceType": "github",
+      "skillPath": ".agents/skills/research/SKILL.md",
+      "computedHash": "c8c1cba327a6f824b554cd978079a3dadd7406d73174f8fb9bfef58824691970"
+    },
+    "resolving-merge-conflicts": {
+      "source": "albizures/harness",
+      "sourceType": "github",
+      "skillPath": ".agents/skills/resolving-merge-conflicts/SKILL.md",
+      "computedHash": "63b2dcadbe9124caeb3448f1378286fe18dcefb2494f60e136831b8b4986ca27"
+    },
+    "review-implementation": {
+      "source": "albizures/harness",
+      "sourceType": "github",
+      "skillPath": "skills/engineering/review-implementation/SKILL.md",
+      "computedHash": "4799ab8bd1f2168df7d9cadd69f833ea25a0e37d14b1bd31552675b98f0ec3b4"
+    },
+    "spec": {
+      "source": "albizures/harness",
+      "sourceType": "github",
+      "skillPath": "skills/design/spec/SKILL.md",
+      "computedHash": "9c099d06af9bc516bf75b53a839fdd055e6966d5dd701e1b5dd7c1455437ee7b"
+    },
+    "tdd": {
+      "source": "albizures/harness",
+      "sourceType": "github",
+      "skillPath": "skills/engineering/tdd/SKILL.md",
+      "computedHash": "ecaf1f621745fc645837243dd695b2d8e6339c44e2b9e0e619f81fc6c91b50c1"
+    },
+    "triage": {
+      "source": "albizures/harness",
+      "sourceType": "github",
+      "skillPath": ".agents/skills/triage/SKILL.md",
+      "computedHash": "b954d74c219c805bf353d6642251a713c9b2e9cfdb11babfe588bcfe7dfd16d5"
+    },
+    "wayfinder": {
+      "source": "albizures/harness",
+      "sourceType": "github",
+      "skillPath": "skills/design/wayfinder/SKILL.md",
+      "computedHash": "1463f8061dde78e62bd38c2e71d05b841064a4428a4c3745f461e00640be339b"
+    },
+    "writing-for-agents": {
+      "source": "albizures/harness",
+      "sourceType": "github",
+      "skillPath": ".agents/skills/writing-for-agents/SKILL.md",
+      "computedHash": "95da47fc97af998e85b7d7e6d57b3ac76727c1e290cfe9ea09005aacb826959f"
+    }
+  }
+}
