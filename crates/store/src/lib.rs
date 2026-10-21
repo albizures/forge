@@ -3,8 +3,8 @@
 use std::{path::Path, sync::Mutex};
 
 use forge_app::{
-    NewRecord, Project, ProjectRepository, Record, RecordRelationship, RecordRelationshipKind,
-    RecordRepository, RecordStatus, RegistrationError,
+    NewRecord, Project, ProjectRepository, Record, RecordListFilter, RecordRelationship,
+    RecordRelationshipKind, RecordRepository, RecordStatus, RegistrationError,
 };
 use rusqlite::{Connection, ErrorCode, OptionalExtension, params};
 
@@ -209,6 +209,22 @@ impl RecordRepository for SqliteProjectRepository {
         })
     }
 
+    fn list_records(&self, filter: &RecordListFilter) -> Result<Vec<Record>, RegistrationError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        let ids = match (&filter.project_slug, filter.status) {
+            (Some(project), Some(status)) => connection.prepare("SELECT record.id FROM records record JOIN record_projects scope ON scope.record_id = record.id WHERE scope.project_slug = ?1 AND record.status = ?2 ORDER BY record.id DESC").map_err(storage_error)?.query_map(params![project, status_name(status)], |row| row.get(0)).map_err(storage_error)?.collect::<Result<Vec<i64>, _>>().map_err(storage_error)?,
+            (Some(project), None) => connection.prepare("SELECT record.id FROM records record JOIN record_projects scope ON scope.record_id = record.id WHERE scope.project_slug = ?1 ORDER BY record.id DESC").map_err(storage_error)?.query_map([project], |row| row.get(0)).map_err(storage_error)?.collect::<Result<Vec<i64>, _>>().map_err(storage_error)?,
+            (None, Some(status)) => connection.prepare("SELECT id FROM records WHERE status = ?1 ORDER BY id DESC").map_err(storage_error)?.query_map([status_name(status)], |row| row.get(0)).map_err(storage_error)?.collect::<Result<Vec<i64>, _>>().map_err(storage_error)?,
+            (None, None) => connection.prepare("SELECT id FROM records ORDER BY id DESC").map_err(storage_error)?.query_map([], |row| row.get(0)).map_err(storage_error)?.collect::<Result<Vec<i64>, _>>().map_err(storage_error)?,
+        };
+        ids.into_iter()
+            .map(|id| load_record(&connection, id.cast_unsigned()))
+            .collect()
+    }
+
     fn show_record(&self, id: u64) -> Result<Record, RegistrationError> {
         let connection = self
             .connection
@@ -325,6 +341,14 @@ impl RecordRepository for SqliteProjectRepository {
             ));
         }
         load_record(&connection, child_id)
+    }
+}
+
+fn status_name(status: RecordStatus) -> &'static str {
+    match status {
+        RecordStatus::Open => "open",
+        RecordStatus::InProgress => "in_progress",
+        RecordStatus::Done => "done",
     }
 }
 
@@ -464,7 +488,9 @@ fn storage_error(error: rusqlite::Error) -> RegistrationError {
 #[cfg(test)]
 mod tests {
     use super::SqliteProjectRepository;
-    use forge_app::{NewRecord, Project, ProjectRepository, RecordRepository, RecordStatus};
+    use forge_app::{
+        NewRecord, Project, ProjectRepository, RecordListFilter, RecordRepository, RecordStatus,
+    };
     use std::path::{Path, PathBuf};
     fn project(slug: &str, folder: &str) -> Project {
         Project {
@@ -526,6 +552,57 @@ mod tests {
             "folder-overlap"
         );
     }
+    #[test]
+    fn lists_records_by_scope_membership_status_and_descending_id() {
+        let store = SqliteProjectRepository::in_memory().unwrap();
+        store.register(&project("alpha", "/repos/alpha")).unwrap();
+        store.register(&project("beta", "/repos/beta")).unwrap();
+        let alpha = store
+            .open_record(&NewRecord {
+                body: "alpha".into(),
+                project_slugs: vec!["alpha".into()],
+            })
+            .unwrap();
+        let both = store
+            .open_record(&NewRecord {
+                body: "both".into(),
+                project_slugs: vec!["alpha".into(), "beta".into()],
+            })
+            .unwrap();
+        let unscoped = store
+            .open_record(&NewRecord {
+                body: "unscoped".into(),
+                project_slugs: vec![],
+            })
+            .unwrap();
+        store.start_record(both.id).unwrap();
+
+        assert_eq!(
+            store
+                .list_records(&RecordListFilter {
+                    project_slug: Some("alpha".into()),
+                    status: None
+                })
+                .unwrap()
+                .into_iter()
+                .map(|record| record.id)
+                .collect::<Vec<_>>(),
+            vec![both.id, alpha.id]
+        );
+        assert_eq!(
+            store
+                .list_records(&RecordListFilter {
+                    project_slug: None,
+                    status: Some(RecordStatus::Open)
+                })
+                .unwrap()
+                .into_iter()
+                .map(|record| record.id)
+                .collect::<Vec<_>>(),
+            vec![unscoped.id, alpha.id]
+        );
+    }
+
     #[test]
     fn persists_content_changes_and_strict_lifecycle() {
         let store = SqliteProjectRepository::in_memory().unwrap();

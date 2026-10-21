@@ -1,10 +1,10 @@
 //! Command-line adapter that calls the running Forge daemon.
 
 use forge_rpc::{
-    DoneRecordRequest, EditRecordRequest, OpenRecordRequest, ProjectApiClient, ProjectHereRequest,
-    ProjectHereResponse, ProjectScopeRequest, RecordApiClient, RecordIdRequest, RecordResponse,
-    RegisterProjectRequest, RegisterProjectResponse, RelateRecordRequest, SystemApiClient,
-    SystemStatusResponse,
+    DoneRecordRequest, EditRecordRequest, ListRecordsRequest, ListRecordsResponse,
+    OpenRecordRequest, ProjectApiClient, ProjectHereRequest, ProjectHereResponse,
+    ProjectScopeRequest, RecordApiClient, RecordIdRequest, RecordResponse, RegisterProjectRequest,
+    RegisterProjectResponse, RelateRecordRequest, SystemApiClient, SystemStatusResponse,
 };
 use jsonrpsee::http_client::HttpClientBuilder;
 use std::{env, time::Duration};
@@ -94,6 +94,25 @@ pub async fn request_open_record(
 #[must_use]
 pub fn render_record_opened(record: &RecordResponse) -> String {
     format!("Opened Record {} ({})", record.id, record.status)
+}
+
+/// Lists Records through the daemon using optional scope and status filters.
+///
+/// # Errors
+///
+/// Returns an endpoint or daemon validation error.
+pub async fn request_list_records(
+    url: &str,
+    project_slug: Option<String>,
+    status: Option<String>,
+) -> Result<ListRecordsResponse, String> {
+    client(url)?
+        .list(ListRecordsRequest {
+            project_slug,
+            status,
+        })
+        .await
+        .map_err(record_error("list"))
 }
 
 /// Requests a Record lifecycle operation through the daemon.
@@ -194,6 +213,15 @@ pub fn render_record(record: &RecordResponse) -> String {
         record.id, record.status, record.body
     )
 }
+#[must_use]
+pub fn render_record_list(records: &ListRecordsResponse) -> String {
+    records
+        .records
+        .iter()
+        .map(render_record)
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
 /// Requests daemon status.
 ///
 /// # Errors
@@ -239,6 +267,23 @@ mod tests {
         );
         assert_eq!(server_url(None, None), DEFAULT_SERVER_URL);
     }
+    #[test]
+    fn record_list_renders_records_in_response_order() {
+        let records = ListRecordsResponse {
+            records: vec![RecordResponse {
+                id: 4,
+                body: "body".into(),
+                project_scope: ProjectScopeRequest {
+                    project_slugs: vec![],
+                },
+                status: "open".into(),
+                completion_resolution: None,
+                relationships: vec![],
+            }],
+        };
+        assert_eq!(render_record_list(&records), "Record 4 (open)\n\nbody");
+    }
+
     #[test]
     fn record_output_identifies_the_new_record() {
         assert_eq!(

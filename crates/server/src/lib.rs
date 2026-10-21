@@ -21,11 +21,14 @@ use axum::{
     response::Html,
     routing::{get, post},
 };
-use forge_app::{Application, ApplicationStatus, Project, RegistrationError, RepositoryInspector};
+use forge_app::{
+    Application, ApplicationStatus, Project, RecordStatus, RegistrationError, RepositoryInspector,
+};
 use forge_rpc::{
-    DoneRecordRequest, EditRecordRequest, OpenRecordRequest, ProjectApiServer, ProjectHereRequest,
-    ProjectHereResponse, RecordApiServer, RecordIdRequest, RecordResponse, RegisterProjectRequest,
-    RegisterProjectResponse, RelateRecordRequest, SystemApiServer, SystemStatusResponse,
+    DoneRecordRequest, EditRecordRequest, ListRecordsRequest, ListRecordsResponse,
+    OpenRecordRequest, ProjectApiServer, ProjectHereRequest, ProjectHereResponse, RecordApiServer,
+    RecordIdRequest, RecordResponse, RegisterProjectRequest, RegisterProjectResponse,
+    RelateRecordRequest, SystemApiServer, SystemStatusResponse,
 };
 use forge_store::SqliteProjectRepository;
 use jsonrpsee::{
@@ -210,6 +213,16 @@ impl RecordApiServer for Daemon {
             .map_err(rpc_error)
     }
 
+    async fn list(&self, request: ListRecordsRequest) -> RpcResult<ListRecordsResponse> {
+        let status = request.status.as_deref().map(record_status).transpose()?;
+        self.application
+            .list_records(request.project_slug, status)
+            .map(|records| ListRecordsResponse {
+                records: records.into_iter().map(Into::into).collect(),
+            })
+            .map_err(rpc_error)
+    }
+
     async fn edit(&self, request: EditRecordRequest) -> RpcResult<RecordResponse> {
         self.application
             .edit_record(request.id, &request.body)
@@ -245,6 +258,18 @@ impl RecordApiServer for Daemon {
             .unrelate_records(request.child_id, request.parent_id)
             .map(Into::into)
             .map_err(rpc_error)
+    }
+}
+
+fn record_status(status: &str) -> RpcResult<RecordStatus> {
+    match status {
+        "open" => Ok(RecordStatus::Open),
+        "in_progress" => Ok(RecordStatus::InProgress),
+        "done" => Ok(RecordStatus::Done),
+        _ => Err(rpc_error(RegistrationError::new(
+            "invalid-status",
+            "Record status must be open, in_progress, or done",
+        ))),
     }
 }
 
@@ -471,9 +496,9 @@ mod tests {
     };
     use forge_app::{Application, Project, RegistrationError, RepositoryInspector};
     use forge_rpc::{
-        DoneRecordRequest, EditRecordRequest, OpenRecordRequest, ProjectApiClient,
-        ProjectHereRequest, ProjectScopeRequest, RecordApiClient, RecordIdRequest,
-        RegisterProjectRequest, SystemApiClient,
+        DoneRecordRequest, EditRecordRequest, ListRecordsRequest, OpenRecordRequest,
+        ProjectApiClient, ProjectHereRequest, ProjectScopeRequest, RecordApiClient,
+        RecordIdRequest, RegisterProjectRequest, SystemApiClient,
     };
     use forge_store::SqliteProjectRepository;
     use jsonrpsee::http_client::HttpClientBuilder;
@@ -650,6 +675,17 @@ mod tests {
         assert_eq!(record.id, 1);
         assert_eq!(record.status, "open");
         assert_eq!(record.project_scope.project_slugs, ["server-test-project"]);
+        assert_eq!(
+            client
+                .list(ListRecordsRequest {
+                    project_slug: Some("server-test-project".into()),
+                    status: Some("open".into()),
+                })
+                .await
+                .unwrap()
+                .records,
+            vec![record.clone()]
+        );
         let edited = client
             .edit(EditRecordRequest {
                 id: record.id,

@@ -59,6 +59,13 @@ pub struct NewRecord {
     pub project_slugs: Vec<String>,
 }
 
+/// Optional discovery constraints for Records.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecordListFilter {
+    pub project_slug: Option<String>,
+    pub status: Option<RecordStatus>,
+}
+
 /// A domain error which can safely be shown to a user.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RegistrationError {
@@ -112,6 +119,12 @@ pub trait RecordRepository: ProjectRepository {
     ///
     /// Returns a user-facing validation or storage failure.
     fn open_record(&self, record: &NewRecord) -> Result<Record, RegistrationError>;
+    /// Lists Records matching Project Scope membership and lifecycle status.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-facing error when storage fails.
+    fn list_records(&self, filter: &RecordListFilter) -> Result<Vec<Record>, RegistrationError>;
     /// Returns the Record identified by `id`.
     ///
     /// # Errors
@@ -233,6 +246,22 @@ impl Application {
         self.records.open_record(&NewRecord {
             body: body.to_owned(),
             project_slugs,
+        })
+    }
+
+    /// Lists Records matching the supplied optional discovery filters.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-facing error when storage fails.
+    pub fn list_records(
+        &self,
+        project_slug: Option<String>,
+        status: Option<RecordStatus>,
+    ) -> Result<Vec<Record>, RegistrationError> {
+        self.records.list_records(&RecordListFilter {
+            project_slug,
+            status,
         })
     }
 
@@ -362,6 +391,26 @@ mod tests {
             };
             records.push(record.clone());
             Ok(record)
+        }
+        fn list_records(
+            &self,
+            filter: &RecordListFilter,
+        ) -> Result<Vec<Record>, RegistrationError> {
+            Ok(self
+                .records
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|record| {
+                    filter
+                        .project_slug
+                        .as_ref()
+                        .is_none_or(|slug| record.project_slugs.contains(slug))
+                        && filter.status.is_none_or(|status| record.status == status)
+                })
+                .cloned()
+                .rev()
+                .collect())
         }
         fn show_record(&self, id: u64) -> Result<Record, RegistrationError> {
             self.records
@@ -568,6 +617,34 @@ mod tests {
                 .unwrap_err()
                 .code,
             "duplicate-project"
+        );
+    }
+
+    #[test]
+    fn lists_records_by_scope_membership_and_status_newest_first() {
+        let app = application();
+        let alpha = app.open_record("alpha", vec!["alpha".into()]).unwrap();
+        let beta = app
+            .open_record("both", vec!["alpha".into(), "beta".into()])
+            .unwrap();
+        let unscoped = app.open_record("unscoped", vec![]).unwrap();
+        app.start_record(beta.id).unwrap();
+
+        assert_eq!(
+            app.list_records(Some("alpha".into()), None)
+                .unwrap()
+                .into_iter()
+                .map(|record| record.id)
+                .collect::<Vec<_>>(),
+            vec![beta.id, alpha.id]
+        );
+        assert_eq!(
+            app.list_records(None, Some(RecordStatus::Open))
+                .unwrap()
+                .into_iter()
+                .map(|record| record.id)
+                .collect::<Vec<_>>(),
+            vec![unscoped.id, alpha.id]
         );
     }
 

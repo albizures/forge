@@ -11,6 +11,7 @@ pub const PROJECT_REGISTER_METHOD: &str = "project.register";
 pub const PROJECT_HERE_METHOD: &str = "project.here";
 pub const RECORD_OPEN_METHOD: &str = "record.open";
 pub const RECORD_SHOW_METHOD: &str = "record.show";
+pub const RECORD_LIST_METHOD: &str = "record.list";
 pub const RECORD_EDIT_METHOD: &str = "record.edit";
 pub const RECORD_START_METHOD: &str = "record.start";
 pub const RECORD_DONE_METHOD: &str = "record.done";
@@ -36,6 +37,8 @@ pub trait RecordApi {
     async fn open(&self, request: OpenRecordRequest) -> RpcResult<RecordResponse>;
     #[method(name = "show")]
     async fn show(&self, request: RecordIdRequest) -> RpcResult<RecordResponse>;
+    #[method(name = "list")]
+    async fn list(&self, request: ListRecordsRequest) -> RpcResult<ListRecordsResponse>;
     #[method(name = "edit")]
     async fn edit(&self, request: EditRecordRequest) -> RpcResult<RecordResponse>;
     #[method(name = "start")]
@@ -103,6 +106,16 @@ pub struct ProjectScopeRequest {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RecordIdRequest {
     pub id: u64,
+}
+/// Optional Record discovery filters. Both filters combine with AND.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ListRecordsRequest {
+    pub project_slug: Option<String>,
+    pub status: Option<String>,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ListRecordsResponse {
+    pub records: Vec<RecordResponse>,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct EditRecordRequest {

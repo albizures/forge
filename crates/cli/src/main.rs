@@ -1,10 +1,10 @@
 use clap::{Args, Parser, Subcommand};
 use forge_cli::{
     render_human_status, render_json_status, render_project_here, render_project_registered,
-    render_record, render_record_opened, request_done_record, request_edit_record,
-    request_open_record, request_project_here, request_register_project, request_relate_record,
-    request_show_record, request_start_record, request_status, request_unrelate_record,
-    server_url_from_process,
+    render_record, render_record_list, render_record_opened, request_done_record,
+    request_edit_record, request_list_records, request_open_record, request_project_here,
+    request_register_project, request_relate_record, request_show_record, request_start_record,
+    request_status, request_unrelate_record, server_url_from_process,
 };
 use std::io::Read;
 
@@ -54,6 +54,8 @@ enum RecordCommand {
     Open(OpenRecordArgs),
     /// Show a Record.
     Show(RecordIdArgs),
+    /// List Records by optional Project Scope membership and status.
+    List(ListRecordsArgs),
     /// Edit a non-Done Record Body.
     Edit(EditRecordArgs),
     /// Advance an open Record to in-progress.
@@ -64,6 +66,19 @@ enum RecordCommand {
     Relate(RelationshipArgs),
     /// Remove a child Record's link to a parent with `--kind child-of`.
     Unrelate(RelationshipArgs),
+}
+#[derive(Args, Debug)]
+struct ListRecordsArgs {
+    /// Restrict results to Records whose Project Scope includes this Project.
+    #[arg(long, value_name = "SLUG")]
+    project: Option<String>,
+    /// Restrict results to open, in-progress, or done Records.
+    #[arg(long, value_parser = ["open", "in-progress", "done"])]
+    status: Option<String>,
+    #[arg(long, value_name = "URL")]
+    server_url: Option<String>,
+    #[arg(long)]
+    json: bool,
 }
 #[derive(Args, Debug)]
 struct RecordIdArgs {
@@ -148,6 +163,7 @@ async fn main() {
                 )
                 .await,
             ),
+            RecordCommand::List(args) => list_records(args).await,
             RecordCommand::Edit(args) => record_result(
                 "edit",
                 args.json,
@@ -253,6 +269,33 @@ async fn add_project(folder: &str, slug: &str, flag: Option<&str>) -> i32 {
         }
     }
 }
+async fn list_records(args: ListRecordsArgs) -> i32 {
+    let status = args.status.map(|status| status.replace('-', "_"));
+    match request_list_records(
+        &server_url_from_process(args.server_url.as_deref()),
+        args.project,
+        status,
+    )
+    .await
+    {
+        Ok(records) => {
+            println!(
+                "{}",
+                if args.json {
+                    serde_json::to_string(&records).expect("ListRecordsResponse must serialize")
+                } else {
+                    render_record_list(&records)
+                }
+            );
+            0
+        }
+        Err(error) => {
+            eprintln!("forge record list: {error}");
+            1
+        }
+    }
+}
+
 fn record_result(
     operation: &str,
     json: bool,
@@ -310,5 +353,35 @@ async fn open_record(args: OpenRecordArgs) -> i32 {
             eprintln!("forge record open: {error}");
             1
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Cli, Command, RecordCommand};
+    use clap::Parser;
+
+    #[test]
+    fn record_list_accepts_one_project_and_a_public_status_name() {
+        let cli = Cli::try_parse_from([
+            "forge",
+            "record",
+            "list",
+            "--project",
+            "alpha",
+            "--status",
+            "in-progress",
+            "--json",
+        ])
+        .unwrap();
+        let Command::Record {
+            command: RecordCommand::List(args),
+        } = cli.command
+        else {
+            panic!("expected record list command");
+        };
+        assert_eq!(args.project.as_deref(), Some("alpha"));
+        assert_eq!(args.status.as_deref(), Some("in-progress"));
+        assert!(args.json);
     }
 }
