@@ -2,8 +2,9 @@ use clap::{Args, Parser, Subcommand};
 use forge_cli::{
     render_human_status, render_json_status, render_project_here, render_project_registered,
     render_record, render_record_opened, request_done_record, request_edit_record,
-    request_open_record, request_project_here, request_register_project, request_show_record,
-    request_start_record, request_status, server_url_from_process,
+    request_open_record, request_project_here, request_register_project, request_relate_record,
+    request_show_record, request_start_record, request_status, request_unrelate_record,
+    server_url_from_process,
 };
 use std::io::Read;
 
@@ -59,6 +60,10 @@ enum RecordCommand {
     Start(RecordIdArgs),
     /// Complete an in-progress Record.
     Done(DoneRecordArgs),
+    /// Link a child Record to a parent with `--kind child-of`.
+    Relate(RelationshipArgs),
+    /// Remove a child Record's link to a parent with `--kind child-of`.
+    Unrelate(RelationshipArgs),
 }
 #[derive(Args, Debug)]
 struct RecordIdArgs {
@@ -83,6 +88,18 @@ struct DoneRecordArgs {
     id: u64,
     #[arg(long)]
     resolution: Option<String>,
+    #[arg(long, value_name = "URL")]
+    server_url: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Args, Debug)]
+struct RelationshipArgs {
+    child_id: u64,
+    #[arg(long, value_parser = ["child-of"])]
+    kind: String,
+    #[arg(long = "to")]
+    parent_id: u64,
     #[arg(long, value_name = "URL")]
     server_url: Option<String>,
     #[arg(long)]
@@ -157,6 +174,28 @@ async fn main() {
                     &server_url_from_process(args.server_url.as_deref()),
                     args.id,
                     args.resolution,
+                )
+                .await,
+            ),
+            RecordCommand::Relate(args) => record_result(
+                "relate",
+                args.json,
+                request_relate_record(
+                    &server_url_from_process(args.server_url.as_deref()),
+                    args.child_id,
+                    args.parent_id,
+                    args.kind,
+                )
+                .await,
+            ),
+            RecordCommand::Unrelate(args) => record_result(
+                "unrelate",
+                args.json,
+                request_unrelate_record(
+                    &server_url_from_process(args.server_url.as_deref()),
+                    args.child_id,
+                    args.parent_id,
+                    args.kind,
                 )
                 .await,
             ),

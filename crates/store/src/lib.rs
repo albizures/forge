@@ -3,10 +3,10 @@
 use std::{path::Path, sync::Mutex};
 
 use forge_app::{
-    NewRecord, Project, ProjectRepository, Record, RecordRepository, RecordStatus,
-    RegistrationError,
+    NewRecord, Project, ProjectRepository, Record, RecordRelationship, RecordRelationshipKind,
+    RecordRepository, RecordStatus, RegistrationError,
 };
-use rusqlite::{Connection, ErrorCode, params};
+use rusqlite::{Connection, ErrorCode, OptionalExtension, params};
 
 /// SQLite-backed Project and Record storage.
 pub struct SqliteProjectRepository {
@@ -51,6 +51,12 @@ impl SqliteProjectRepository {
                 record_id INTEGER NOT NULL REFERENCES records(id),
                 project_slug TEXT NOT NULL REFERENCES projects(slug),
                 PRIMARY KEY (record_id, project_slug)
+            );
+            CREATE TABLE IF NOT EXISTS record_relationships (
+                parent_id INTEGER NOT NULL REFERENCES records(id),
+                child_id INTEGER NOT NULL REFERENCES records(id) UNIQUE,
+                kind TEXT NOT NULL CHECK (kind IN ('parent-child')),
+                PRIMARY KEY (parent_id, child_id)
             );",
             )
             .map_err(storage_error)?;
@@ -199,6 +205,7 @@ impl RecordRepository for SqliteProjectRepository {
             project_slugs: record.project_slugs.clone(),
             status: RecordStatus::Open,
             completion_resolution: None,
+            relationships: vec![],
         })
     }
 
@@ -236,13 +243,88 @@ impl RecordRepository for SqliteProjectRepository {
         id: u64,
         completion_resolution: Option<&str>,
     ) -> Result<Record, RegistrationError> {
-        transition_record(
-            &self.connection,
-            id,
-            "in_progress",
-            "done",
-            completion_resolution,
-        )
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        let transaction = connection.transaction().map_err(storage_error)?;
+        let incomplete_child: Option<i64> = transaction.query_row(
+            "SELECT child.id FROM record_relationships relationship JOIN records child ON child.id = relationship.child_id WHERE relationship.parent_id = ?1 AND child.status != 'done' LIMIT 1",
+            [id.cast_signed()], |row| row.get(0),
+        ).optional().map_err(storage_error)?;
+        if incomplete_child.is_some() {
+            return Err(RegistrationError::new(
+                "children-not-done",
+                "all child Records must be Done before completing a parent",
+            ));
+        }
+        let updated = transaction.execute("UPDATE records SET status = 'done', completion_resolution = ?1 WHERE id = ?2 AND status = 'in_progress'", params![completion_resolution, id.cast_signed()]).map_err(storage_error)?;
+        if updated == 0 {
+            return record_or_transition_error(&transaction, id);
+        }
+        let record = load_record(&transaction, id)?;
+        transaction.commit().map_err(storage_error)?;
+        Ok(record)
+    }
+
+    fn relate_records(&self, child_id: u64, parent_id: u64) -> Result<Record, RegistrationError> {
+        if child_id == parent_id {
+            return Err(RegistrationError::new(
+                "invalid-relationship",
+                "a Record cannot be its own parent",
+            ));
+        }
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        let transaction = connection.transaction().map_err(storage_error)?;
+        let child = load_record(&transaction, child_id)?;
+        let parent = load_record(&transaction, parent_id)?;
+        if child.project_slugs != parent.project_slugs {
+            return Err(RegistrationError::new(
+                "scope-mismatch",
+                "parent and child Records must have identical Project Scopes",
+            ));
+        }
+        let cycle: bool = transaction.query_row(
+            "WITH RECURSIVE descendants(id) AS (SELECT child_id FROM record_relationships WHERE parent_id = ?1 UNION SELECT relationship.child_id FROM record_relationships relationship JOIN descendants ON relationship.parent_id = descendants.id) SELECT EXISTS(SELECT 1 FROM descendants WHERE id = ?2)",
+            params![child_id.cast_signed(), parent_id.cast_signed()], |row| row.get(0)
+        ).map_err(storage_error)?;
+        if cycle {
+            return Err(RegistrationError::new(
+                "relationship-cycle",
+                "parent/child Relationships cannot form a cycle",
+            ));
+        }
+        match transaction.execute("INSERT INTO record_relationships (parent_id, child_id, kind) VALUES (?1, ?2, 'parent-child')", params![parent_id.cast_signed(), child_id.cast_signed()]) {
+            Ok(_) => {},
+            Err(error) if matches!(error.sqlite_error_code(), Some(ErrorCode::ConstraintViolation)) => return Err(RegistrationError::new("child-already-related", "a child Record can have only one parent")),
+            Err(error) => return Err(storage_error(error)),
+        }
+        let record = load_record(&transaction, child_id)?;
+        transaction.commit().map_err(storage_error)?;
+        Ok(record)
+    }
+
+    fn unrelate_records(&self, child_id: u64, parent_id: u64) -> Result<Record, RegistrationError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        let deleted = connection
+            .execute(
+                "DELETE FROM record_relationships WHERE parent_id = ?1 AND child_id = ?2",
+                params![parent_id.cast_signed(), child_id.cast_signed()],
+            )
+            .map_err(storage_error)?;
+        if deleted == 0 {
+            return Err(RegistrationError::new(
+                "relationship-not-found",
+                "parent/child Relationship does not exist",
+            ));
+        }
+        load_record(&connection, child_id)
     }
 }
 
@@ -320,12 +402,26 @@ fn load_record(connection: &Connection, id: u64) -> Result<Record, RegistrationE
             ));
         }
     };
+    let relationships = connection
+        .prepare("SELECT parent_id, child_id, kind FROM record_relationships WHERE parent_id = ?1 OR child_id = ?1 ORDER BY parent_id, child_id")
+        .map_err(storage_error)?
+        .query_map([id.cast_signed()], |row| {
+            let kind: String = row.get(2)?;
+            Ok((row.get::<_, i64>(0)?.cast_unsigned(), row.get::<_, i64>(1)?.cast_unsigned(), kind))
+        })
+        .map_err(storage_error)?
+        .map(|row| match row.map_err(storage_error)? {
+            (parent_id, child_id, kind) if kind == "parent-child" => Ok(RecordRelationship { kind: RecordRelationshipKind::ParentChild, parent_id, child_id }),
+            _ => Err(RegistrationError::new("storage", "stored Record has an invalid Relationship kind")),
+        })
+        .collect::<Result<Vec<_>, RegistrationError>>()?;
     Ok(Record {
         id,
         body,
         project_slugs,
         status,
         completion_resolution,
+        relationships,
     })
 }
 
@@ -457,6 +553,66 @@ mod tests {
         assert_eq!(
             store.edit_record(record.id, "later").unwrap_err().code,
             "invalid-status-transition"
+        );
+    }
+
+    #[test]
+    fn persists_hierarchies_and_enforces_their_rules() {
+        let store = SqliteProjectRepository::in_memory().unwrap();
+        let parent = store
+            .open_record(&NewRecord {
+                body: "parent".into(),
+                project_slugs: vec![],
+            })
+            .unwrap();
+        let child = store
+            .open_record(&NewRecord {
+                body: "child".into(),
+                project_slugs: vec![],
+            })
+            .unwrap();
+        let grandchild = store
+            .open_record(&NewRecord {
+                body: "grandchild".into(),
+                project_slugs: vec![],
+            })
+            .unwrap();
+        assert_eq!(
+            store
+                .relate_records(child.id, parent.id)
+                .unwrap()
+                .relationships
+                .len(),
+            1
+        );
+        store.relate_records(grandchild.id, child.id).unwrap();
+        assert_eq!(
+            store
+                .relate_records(parent.id, grandchild.id)
+                .unwrap_err()
+                .code,
+            "relationship-cycle"
+        );
+        store.start_record(parent.id).unwrap();
+        assert_eq!(
+            store.done_record(parent.id, None).unwrap_err().code,
+            "children-not-done"
+        );
+        for record_id in [grandchild.id, child.id] {
+            store.start_record(record_id).unwrap();
+            store.done_record(record_id, None).unwrap();
+        }
+        assert_eq!(
+            store.done_record(parent.id, None).unwrap().status,
+            RecordStatus::Done
+        );
+        assert_eq!(
+            store
+                .unrelate_records(child.id, parent.id)
+                .unwrap()
+                .relationships
+                .len(),
+            1
         );
     }
 

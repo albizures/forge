@@ -1,6 +1,8 @@
 //! Shared JSON-RPC wire contract ownership boundary.
 
-use forge_app::{ApplicationStatus, Project, Record, RecordStatus, RegistrationError};
+use forge_app::{
+    ApplicationStatus, Project, Record, RecordRelationshipKind, RecordStatus, RegistrationError,
+};
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
 use serde::{Deserialize, Serialize};
 
@@ -12,6 +14,8 @@ pub const RECORD_SHOW_METHOD: &str = "record.show";
 pub const RECORD_EDIT_METHOD: &str = "record.edit";
 pub const RECORD_START_METHOD: &str = "record.start";
 pub const RECORD_DONE_METHOD: &str = "record.done";
+pub const RECORD_RELATE_METHOD: &str = "record.relate";
+pub const RECORD_UNRELATE_METHOD: &str = "record.unrelate";
 
 #[rpc(client, server, namespace = "system")]
 pub trait SystemApi {
@@ -38,6 +42,10 @@ pub trait RecordApi {
     async fn start(&self, request: RecordIdRequest) -> RpcResult<RecordResponse>;
     #[method(name = "done")]
     async fn done(&self, request: DoneRecordRequest) -> RpcResult<RecordResponse>;
+    #[method(name = "relate")]
+    async fn relate(&self, request: RelateRecordRequest) -> RpcResult<RecordResponse>;
+    #[method(name = "unrelate")]
+    async fn unrelate(&self, request: RelateRecordRequest) -> RpcResult<RecordResponse>;
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -106,6 +114,19 @@ pub struct DoneRecordRequest {
     pub id: u64,
     pub completion_resolution: Option<String>,
 }
+/// Links or unlinks `child_id` to/from `parent_id` using the sole supported kind.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RelateRecordRequest {
+    pub child_id: u64,
+    pub parent_id: u64,
+    pub kind: String,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RecordRelationshipResponse {
+    pub kind: String,
+    pub parent_id: u64,
+    pub child_id: u64,
+}
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RecordResponse {
     pub id: u64,
@@ -113,6 +134,7 @@ pub struct RecordResponse {
     pub project_scope: ProjectScopeRequest,
     pub status: String,
     pub completion_resolution: Option<String>,
+    pub relationships: Vec<RecordRelationshipResponse>,
 }
 impl From<Record> for RecordResponse {
     fn from(record: Record) -> Self {
@@ -129,6 +151,18 @@ impl From<Record> for RecordResponse {
             }
             .into(),
             completion_resolution: record.completion_resolution,
+            relationships: record
+                .relationships
+                .into_iter()
+                .map(|relationship| RecordRelationshipResponse {
+                    kind: match relationship.kind {
+                        RecordRelationshipKind::ParentChild => "parent-child",
+                    }
+                    .into(),
+                    parent_id: relationship.parent_id,
+                    child_id: relationship.child_id,
+                })
+                .collect(),
         }
     }
 }

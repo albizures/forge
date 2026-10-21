@@ -21,6 +21,20 @@ pub enum RecordStatus {
     Done,
 }
 
+/// The currently supported kind of typed Record Relationship.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecordRelationshipKind {
+    ParentChild,
+}
+
+/// An endpoint-neutral typed Relationship between two Records.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecordRelationship {
+    pub kind: RecordRelationshipKind,
+    pub parent_id: u64,
+    pub child_id: u64,
+}
+
 /// A generic, project-scoped unit of work.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Record {
@@ -34,6 +48,8 @@ pub struct Record {
     pub status: RecordStatus,
     /// Immutable optional explanation recorded when the Record was completed.
     pub completion_resolution: Option<String>,
+    /// All Relationships incident to this Record.
+    pub relationships: Vec<RecordRelationship>,
 }
 
 /// A Record before persistence assigns its identity and initial status.
@@ -124,6 +140,18 @@ pub trait RecordRepository: ProjectRepository {
         id: u64,
         completion_resolution: Option<&str>,
     ) -> Result<Record, RegistrationError>;
+    /// Links `child_id` beneath `parent_id` as a parent/child Relationship.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-facing error for invalid hierarchy changes.
+    fn relate_records(&self, child_id: u64, parent_id: u64) -> Result<Record, RegistrationError>;
+    /// Removes the parent/child Relationship from `child_id` to `parent_id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-facing error when the requested Relationship is absent.
+    fn unrelate_records(&self, child_id: u64, parent_id: u64) -> Result<Record, RegistrationError>;
 }
 
 /// The application boundary for operations shared by all transports.
@@ -260,6 +288,32 @@ impl Application {
         self.records.done_record(id, completion_resolution)
     }
 
+    /// Links a child Record to a parent Record.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-facing error for invalid hierarchy changes.
+    pub fn relate_records(
+        &self,
+        child_id: u64,
+        parent_id: u64,
+    ) -> Result<Record, RegistrationError> {
+        self.records.relate_records(child_id, parent_id)
+    }
+
+    /// Removes a child Record from a parent Record.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-facing error when the requested Relationship is absent.
+    pub fn unrelate_records(
+        &self,
+        child_id: u64,
+        parent_id: u64,
+    ) -> Result<Record, RegistrationError> {
+        self.records.unrelate_records(child_id, parent_id)
+    }
+
     /// Returns readiness information for this application instance.
     #[must_use]
     pub fn status(&self) -> ApplicationStatus {
@@ -304,6 +358,7 @@ mod tests {
                 project_slugs: record.project_slugs.clone(),
                 status: RecordStatus::Open,
                 completion_resolution: None,
+                relationships: vec![],
             };
             records.push(record.clone());
             Ok(record)
@@ -357,21 +412,133 @@ mod tests {
             completion_resolution: Option<&str>,
         ) -> Result<Record, RegistrationError> {
             let mut records = self.records.lock().unwrap();
-            let record = records
-                .iter_mut()
-                .find(|record| record.id == id)
+            let index = records
+                .iter()
+                .position(|record| record.id == id)
                 .ok_or_else(|| {
                     RegistrationError::new("record-not-found", "Record does not exist")
                 })?;
-            if record.status != RecordStatus::InProgress {
+            if records[index].status != RecordStatus::InProgress {
                 return Err(RegistrationError::new(
                     "invalid-status-transition",
                     "invalid transition",
                 ));
             }
-            record.status = RecordStatus::Done;
-            record.completion_resolution = completion_resolution.map(str::to_owned);
-            Ok(record.clone())
+            if records[index].relationships.iter().any(|relationship| {
+                relationship.parent_id == id
+                    && records
+                        .iter()
+                        .find(|record| record.id == relationship.child_id)
+                        .is_some_and(|child| child.status != RecordStatus::Done)
+            }) {
+                return Err(RegistrationError::new(
+                    "children-not-done",
+                    "all child Records must be Done before completing a parent",
+                ));
+            }
+            records[index].status = RecordStatus::Done;
+            records[index].completion_resolution = completion_resolution.map(str::to_owned);
+            Ok(records[index].clone())
+        }
+        fn relate_records(
+            &self,
+            child_id: u64,
+            parent_id: u64,
+        ) -> Result<Record, RegistrationError> {
+            if child_id == parent_id {
+                return Err(RegistrationError::new(
+                    "invalid-relationship",
+                    "a Record cannot be its own parent",
+                ));
+            }
+            let mut records = self.records.lock().unwrap();
+            let child = records
+                .iter()
+                .position(|record| record.id == child_id)
+                .ok_or_else(|| {
+                    RegistrationError::new("record-not-found", "Record does not exist")
+                })?;
+            let parent = records
+                .iter()
+                .position(|record| record.id == parent_id)
+                .ok_or_else(|| {
+                    RegistrationError::new("record-not-found", "Record does not exist")
+                })?;
+            if records[child].project_slugs != records[parent].project_slugs {
+                return Err(RegistrationError::new(
+                    "scope-mismatch",
+                    "parent and child Records must have identical Project Scopes",
+                ));
+            }
+            if records.iter().any(|record| {
+                record
+                    .relationships
+                    .iter()
+                    .any(|relationship| relationship.child_id == child_id)
+            }) {
+                return Err(RegistrationError::new(
+                    "child-already-related",
+                    "a child Record can have only one parent",
+                ));
+            }
+            let mut pending = vec![child_id];
+            while let Some(current) = pending.pop() {
+                if current == parent_id {
+                    return Err(RegistrationError::new(
+                        "relationship-cycle",
+                        "parent/child Relationships cannot form a cycle",
+                    ));
+                }
+                pending.extend(
+                    records
+                        .iter()
+                        .flat_map(|record| record.relationships.iter())
+                        .filter(|relationship| relationship.parent_id == current)
+                        .map(|relationship| relationship.child_id),
+                );
+            }
+            let relationship = RecordRelationship {
+                kind: RecordRelationshipKind::ParentChild,
+                parent_id,
+                child_id,
+            };
+            records[child].relationships.push(relationship.clone());
+            records[parent].relationships.push(relationship);
+            Ok(records[child].clone())
+        }
+        fn unrelate_records(
+            &self,
+            child_id: u64,
+            parent_id: u64,
+        ) -> Result<Record, RegistrationError> {
+            let mut records = self.records.lock().unwrap();
+            let child = records
+                .iter()
+                .position(|record| record.id == child_id)
+                .ok_or_else(|| {
+                    RegistrationError::new("record-not-found", "Record does not exist")
+                })?;
+            let parent = records
+                .iter()
+                .position(|record| record.id == parent_id)
+                .ok_or_else(|| {
+                    RegistrationError::new("record-not-found", "Record does not exist")
+                })?;
+            let exists = records[child].relationships.iter().any(|relationship| {
+                relationship.parent_id == parent_id && relationship.child_id == child_id
+            });
+            if !exists {
+                return Err(RegistrationError::new(
+                    "relationship-not-found",
+                    "parent/child Relationship does not exist",
+                ));
+            }
+            for index in [child, parent] {
+                records[index].relationships.retain(|relationship| {
+                    relationship.parent_id != parent_id || relationship.child_id != child_id
+                });
+            }
+            Ok(records[child].clone())
         }
     }
     struct Inspector;
@@ -438,6 +605,48 @@ mod tests {
     }
 
     #[test]
+    fn relationships_are_nested_and_gate_parent_completion() {
+        let app = application();
+        let parent = app.open_record("parent", vec![]).unwrap();
+        let child = app.open_record("child", vec![]).unwrap();
+        let grandchild = app.open_record("grandchild", vec![]).unwrap();
+        assert_eq!(
+            app.relate_records(child.id, parent.id)
+                .unwrap()
+                .relationships
+                .len(),
+            1
+        );
+        app.relate_records(grandchild.id, child.id).unwrap();
+        assert_eq!(
+            app.relate_records(parent.id, grandchild.id)
+                .unwrap_err()
+                .code,
+            "relationship-cycle"
+        );
+        app.start_record(parent.id).unwrap();
+        assert_eq!(
+            app.done_record(parent.id, None).unwrap_err().code,
+            "children-not-done"
+        );
+        for record_id in [grandchild.id, child.id] {
+            app.start_record(record_id).unwrap();
+            app.done_record(record_id, Some("complete")).unwrap();
+        }
+        assert_eq!(
+            app.done_record(parent.id, None).unwrap().status,
+            RecordStatus::Done
+        );
+        assert_eq!(
+            app.unrelate_records(child.id, parent.id)
+                .unwrap()
+                .relationships
+                .len(),
+            1
+        );
+    }
+
+    #[test]
     fn opening_assigns_open_status_and_sorts_scope() {
         assert_eq!(
             application()
@@ -449,6 +658,7 @@ mod tests {
                 project_slugs: vec!["alpha".into(), "zeta".into()],
                 status: RecordStatus::Open,
                 completion_resolution: None,
+                relationships: vec![],
             }
         );
     }

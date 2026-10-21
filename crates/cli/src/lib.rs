@@ -3,7 +3,8 @@
 use forge_rpc::{
     DoneRecordRequest, EditRecordRequest, OpenRecordRequest, ProjectApiClient, ProjectHereRequest,
     ProjectHereResponse, ProjectScopeRequest, RecordApiClient, RecordIdRequest, RecordResponse,
-    RegisterProjectRequest, RegisterProjectResponse, SystemApiClient, SystemStatusResponse,
+    RegisterProjectRequest, RegisterProjectResponse, RelateRecordRequest, SystemApiClient,
+    SystemStatusResponse,
 };
 use jsonrpsee::http_client::HttpClientBuilder;
 use std::{env, time::Duration};
@@ -143,6 +144,46 @@ pub async fn request_done_record(
         .await
         .map_err(record_error("done"))
 }
+/// Links a child Record to a parent Record through the daemon.
+///
+/// # Errors
+///
+/// Returns an endpoint or daemon validation error.
+pub async fn request_relate_record(
+    url: &str,
+    child_id: u64,
+    parent_id: u64,
+    kind: String,
+) -> Result<RecordResponse, String> {
+    client(url)?
+        .relate(RelateRecordRequest {
+            child_id,
+            parent_id,
+            kind,
+        })
+        .await
+        .map_err(record_error("relate"))
+}
+/// Removes a child-to-parent Relationship through the daemon.
+///
+/// # Errors
+///
+/// Returns an endpoint or daemon validation error.
+pub async fn request_unrelate_record(
+    url: &str,
+    child_id: u64,
+    parent_id: u64,
+    kind: String,
+) -> Result<RecordResponse, String> {
+    client(url)?
+        .unrelate(RelateRecordRequest {
+            child_id,
+            parent_id,
+            kind,
+        })
+        .await
+        .map_err(record_error("unrelate"))
+}
 fn record_error(operation: &'static str) -> impl FnOnce(jsonrpsee::core::client::Error) -> String {
     move |error| format!("could not {operation} Record through Forge daemon: {error}")
 }
@@ -209,6 +250,7 @@ mod tests {
                 },
                 status: "open".into(),
                 completion_resolution: None,
+                relationships: vec![],
             }),
             "Opened Record 4 (open)"
         );

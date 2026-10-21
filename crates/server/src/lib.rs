@@ -25,7 +25,7 @@ use forge_app::{Application, ApplicationStatus, Project, RegistrationError, Repo
 use forge_rpc::{
     DoneRecordRequest, EditRecordRequest, OpenRecordRequest, ProjectApiServer, ProjectHereRequest,
     ProjectHereResponse, RecordApiServer, RecordIdRequest, RecordResponse, RegisterProjectRequest,
-    RegisterProjectResponse, SystemApiServer, SystemStatusResponse,
+    RegisterProjectResponse, RelateRecordRequest, SystemApiServer, SystemStatusResponse,
 };
 use forge_store::SqliteProjectRepository;
 use jsonrpsee::{
@@ -229,6 +229,33 @@ impl RecordApiServer for Daemon {
             .done_record(request.id, request.completion_resolution.as_deref())
             .map(Into::into)
             .map_err(rpc_error)
+    }
+
+    async fn relate(&self, request: RelateRecordRequest) -> RpcResult<RecordResponse> {
+        relationship_kind(&request.kind)?;
+        self.application
+            .relate_records(request.child_id, request.parent_id)
+            .map(Into::into)
+            .map_err(rpc_error)
+    }
+
+    async fn unrelate(&self, request: RelateRecordRequest) -> RpcResult<RecordResponse> {
+        relationship_kind(&request.kind)?;
+        self.application
+            .unrelate_records(request.child_id, request.parent_id)
+            .map(Into::into)
+            .map_err(rpc_error)
+    }
+}
+
+fn relationship_kind(kind: &str) -> RpcResult<()> {
+    if kind == "child-of" {
+        Ok(())
+    } else {
+        Err(rpc_error(RegistrationError::new(
+            "unsupported-relationship-kind",
+            "only the child-of Relationship mutation kind is supported",
+        )))
     }
 }
 
