@@ -3,7 +3,14 @@
 //! The daemon listens on loopback by default. Binding it to a remote address
 //! exposes an unauthenticated service, so use that only on a trusted private network.
 
-use std::{env, net::SocketAddr, str::FromStr, sync::Arc};
+use std::{
+    env, fs,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    process::Command,
+    str::FromStr,
+    sync::Arc,
+};
 
 use askama::Template;
 use axum::{
@@ -14,8 +21,12 @@ use axum::{
     response::Html,
     routing::{get, post},
 };
-use forge_app::{Application, ApplicationStatus};
-use forge_rpc::{SystemApiServer, SystemStatusResponse};
+use forge_app::{Application, ApplicationStatus, Project, RegistrationError, RepositoryInspector};
+use forge_rpc::{
+    ProjectApiServer, RegisterProjectRequest, RegisterProjectResponse, SystemApiServer,
+    SystemStatusResponse,
+};
+use forge_store::SqliteProjectRepository;
 use jsonrpsee::{
     core::{RpcResult, async_trait},
     server::{Server, stop_channel},
@@ -62,7 +73,7 @@ impl DaemonConfig {
 }
 
 /// Owns the application and exposes it through the daemon transport adapters.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone)]
 pub struct Daemon {
     application: Arc<Application>,
 }
@@ -77,6 +88,104 @@ impl Daemon {
     }
 }
 
+/// Git command implementation kept at the daemon composition edge.
+pub struct GitInspector;
+
+impl RepositoryInspector for GitInspector {
+    fn inspect(&self, folder: &Path) -> Result<Project, RegistrationError> {
+        let canonical = fs::canonicalize(folder).map_err(|_| {
+            RegistrationError::new(
+                "invalid-folder",
+                format!("`{}` is not an existing folder", folder.display()),
+            )
+        })?;
+        if !canonical.is_dir() {
+            return Err(RegistrationError::new(
+                "invalid-folder",
+                format!("`{}` is not a folder", canonical.display()),
+            ));
+        }
+        let root = git(&canonical, &["rev-parse", "--show-toplevel"]).map_err(|()| {
+            RegistrationError::new(
+                "not-git",
+                format!(
+                    "`{}` is not an eligible Git repository",
+                    canonical.display()
+                ),
+            )
+        })?;
+        let root = fs::canonicalize(root).map_err(|_| {
+            RegistrationError::new("not-git", "could not resolve Git worktree root")
+        })?;
+        if root != canonical {
+            return Err(RegistrationError::new(
+                "not-main-worktree",
+                "the Project folder must be the Git main worktree root",
+            ));
+        }
+        let git_dir = resolve_git_path(
+            &root,
+            &git(&root, &["rev-parse", "--git-dir"]).map_err(|()| {
+                RegistrationError::new("not-git", "could not inspect Git directory")
+            })?,
+        );
+        let common_dir = resolve_git_path(
+            &root,
+            &git(&root, &["rev-parse", "--git-common-dir"]).map_err(|()| {
+                RegistrationError::new("not-git", "could not inspect Git common directory")
+            })?,
+        );
+        if git_dir != common_dir {
+            return Err(RegistrationError::new(
+                "not-main-worktree",
+                "only a Git main worktree may be registered as a Project",
+            ));
+        }
+        let origin_url = git(&root, &["remote", "get-url", "origin"]).map_err(|()| {
+            RegistrationError::new(
+                "missing-origin",
+                "Git remote `origin` is required to register a Project",
+            )
+        })?;
+        Ok(Project {
+            slug: String::new(),
+            registered_folder: root,
+            origin_url,
+        })
+    }
+}
+
+fn git(folder: &Path, arguments: &[&str]) -> Result<String, ()> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(folder)
+        .args(arguments)
+        .output()
+        .map_err(|_| ())?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    } else {
+        Err(())
+    }
+}
+
+fn resolve_git_path(root: &Path, value: &str) -> PathBuf {
+    let path = Path::new(value);
+    fs::canonicalize(if path.is_absolute() {
+        path.to_owned()
+    } else {
+        root.join(path)
+    })
+    .unwrap_or_else(|_| root.join(path))
+}
+
+fn application_from_process() -> Result<Application, String> {
+    let path = env::var_os("FORGE_STORE_PATH")
+        .map_or_else(|| PathBuf::from("forge.sqlite3"), PathBuf::from);
+    let store = SqliteProjectRepository::open(&path).map_err(|error| error.message)?;
+    Ok(Application::new(Box::new(store), Box::new(GitInspector)))
+}
+
 #[async_trait]
 impl SystemApiServer for Daemon {
     async fn status(&self) -> RpcResult<SystemStatusResponse> {
@@ -84,11 +193,33 @@ impl SystemApiServer for Daemon {
     }
 }
 
+#[async_trait]
+impl ProjectApiServer for Daemon {
+    async fn register(
+        &self,
+        request: RegisterProjectRequest,
+    ) -> RpcResult<RegisterProjectResponse> {
+        self.application
+            .register_project(Path::new(&request.folder), &request.slug)
+            .map(Into::into)
+            .map_err(|error| {
+                jsonrpsee::types::ErrorObjectOwned::owned(-32001, error.message, Some(error.code))
+            })
+    }
+}
+
 /// Builds the single listener's router, including the browser and typed RPC services.
+///
+/// # Panics
+///
+/// Panics if the statically defined RPC method sets overlap.
 pub fn router(daemon: Daemon) -> Router {
     let page_daemon = daemon.clone();
     let status_daemon = daemon.clone();
-    let methods = daemon.into_rpc();
+    let mut methods = SystemApiServer::into_rpc(daemon.clone());
+    methods
+        .merge(ProjectApiServer::into_rpc(daemon))
+        .expect("RPC method names must not overlap");
     let service_builder = Server::builder().to_service_builder();
     let (stop_handle, server_handle) = stop_channel();
     let server_handle = Arc::new(server_handle);
@@ -219,7 +350,8 @@ pub async fn serve(config: DaemonConfig) -> Result<(), std::io::Error> {
     }
     info!(%address, "Forge daemon listening");
 
-    axum::serve(listener, router(Daemon::new(Application::new())))
+    let application = application_from_process().map_err(std::io::Error::other)?;
+    axum::serve(listener, router(Daemon::new(application)))
         .with_graceful_shutdown(shutdown_signal())
         .await
 }
@@ -250,18 +382,41 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::{
+        net::{IpAddr, Ipv4Addr, SocketAddr},
+        path::{Path, PathBuf},
+    };
 
     use axum::{
         body::{Body, to_bytes},
         http::{Request, header},
     };
-    use forge_app::Application;
-    use forge_rpc::SystemApiClient;
+    use forge_app::{Application, Project, RegistrationError, RepositoryInspector};
+    use forge_rpc::{ProjectApiClient, RegisterProjectRequest, SystemApiClient};
+    use forge_store::SqliteProjectRepository;
     use jsonrpsee::http_client::HttpClientBuilder;
     use tower::ServiceExt;
 
     use super::{DEFAULT_BIND_ADDR, Daemon, DaemonConfig, router};
+
+    struct TestInspector;
+
+    impl RepositoryInspector for TestInspector {
+        fn inspect(&self, folder: &Path) -> Result<Project, RegistrationError> {
+            Ok(Project {
+                slug: String::new(),
+                registered_folder: PathBuf::from(folder),
+                origin_url: "https://example.test/origin.git".into(),
+            })
+        }
+    }
+
+    fn test_application() -> Application {
+        Application::new(
+            Box::new(SqliteProjectRepository::in_memory().unwrap()),
+            Box::new(TestInspector),
+        )
+    }
 
     #[test]
     fn bind_configuration_prioritizes_flag_then_environment_then_default() {
@@ -288,7 +443,7 @@ mod tests {
 
     #[tokio::test]
     async fn browser_routes_render_shared_status_without_cors() {
-        let response = router(Daemon::new(Application::new()))
+        let response = router(Daemon::new(test_application()))
             .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
             .await
             .unwrap();
@@ -310,7 +465,7 @@ mod tests {
         assert!(page.contains("hx-get=\"/status\""));
         assert!(page.contains("forge"));
 
-        let response = router(Daemon::new(Application::new()))
+        let response = router(Daemon::new(test_application()))
             .oneshot(
                 Request::builder()
                     .uri("/status")
@@ -340,7 +495,7 @@ mod tests {
 
     #[tokio::test]
     async fn htmx_asset_is_served_locally_with_javascript_content_type() {
-        let response = router(Daemon::new(Application::new()))
+        let response = router(Daemon::new(test_application()))
             .oneshot(
                 Request::builder()
                     .uri("/assets/htmx.min.js")
@@ -369,7 +524,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            axum::serve(listener, router(Daemon::new(Application::new())))
+            axum::serve(listener, router(Daemon::new(test_application())))
                 .await
                 .unwrap();
         });
@@ -380,6 +535,18 @@ mod tests {
         let status = client.status().await.unwrap();
         assert_eq!(status.name, "forge");
         assert!(status.ready);
+        let project = client
+            .register(RegisterProjectRequest {
+                folder: format!("{}/../..", env!("CARGO_MANIFEST_DIR")),
+                slug: "server-test-project".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(project.slug, "server-test-project");
+        assert_eq!(
+            project.registered_folder,
+            format!("{}/../..", env!("CARGO_MANIFEST_DIR"))
+        );
 
         server.abort();
     }

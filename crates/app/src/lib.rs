@@ -1,14 +1,95 @@
-//! Application-owned operations and their result types.
+//! Application-owned operations and persistence contracts.
+
+use std::path::{Path, PathBuf};
+
+/// A Project registered with Forge.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Project {
+    /// Immutable human-referenceable identity.
+    pub slug: String,
+    /// Canonical path of the Repository's main Worktree.
+    pub registered_folder: PathBuf,
+    /// URL configured for the Repository's `origin` remote.
+    pub origin_url: String,
+}
+
+/// A domain error which can safely be shown to a user.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RegistrationError {
+    /// Stable, transport-friendly category.
+    pub code: &'static str,
+    /// Actionable explanation.
+    pub message: String,
+}
+
+impl RegistrationError {
+    #[must_use]
+    pub fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+}
+
+/// Inspects a folder without coupling application policy to a Git implementation.
+pub trait RepositoryInspector: Send + Sync {
+    /// Returns the eligible main-worktree registration facts for `folder`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-facing error when the folder is not eligible.
+    fn inspect(&self, folder: &Path) -> Result<Project, RegistrationError>;
+}
+
+/// Persistence boundary owned by the application.
+pub trait ProjectRepository: Send + Sync {
+    /// Stores `project`, or returns the matching existing Project idempotently.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-facing error when persistence or identity validation fails.
+    fn register(&self, project: &Project) -> Result<Project, RegistrationError>;
+}
 
 /// The application boundary for operations shared by all transports.
-#[derive(Debug, Default)]
-pub struct Application;
+pub struct Application {
+    projects: Box<dyn ProjectRepository>,
+    inspector: Box<dyn RepositoryInspector>,
+}
 
 impl Application {
-    /// Creates the ready initial application instance.
+    /// Creates an application from its infrastructure boundaries.
     #[must_use]
-    pub const fn new() -> Self {
-        Self
+    pub fn new(
+        projects: Box<dyn ProjectRepository>,
+        inspector: Box<dyn RepositoryInspector>,
+    ) -> Self {
+        Self {
+            projects,
+            inspector,
+        }
+    }
+
+    /// Registers an eligible Git main Worktree as a Project.
+    ///
+    /// # Errors
+    ///
+    /// Returns the validation or persistence failure suitable for the calling adapter.
+    pub fn register_project(
+        &self,
+        folder: &Path,
+        slug: &str,
+    ) -> Result<Project, RegistrationError> {
+        if slug.is_empty() {
+            return Err(RegistrationError::new(
+                "invalid-slug",
+                "project slug must not be empty",
+            ));
+        }
+        let mut project = self.inspector.inspect(folder)?;
+        slug.clone_into(&mut project.slug);
+        self.projects.register(&project)
     }
 
     /// Returns readiness information for this application instance.
@@ -25,24 +106,7 @@ impl Application {
 /// Application-owned readiness information.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ApplicationStatus {
-    /// The application name.
     pub name: &'static str,
-    /// The application version.
     pub version: &'static str,
-    /// Whether the daemon/application is ready to serve requests.
     pub ready: bool,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::Application;
-
-    #[test]
-    fn status_reports_the_ready_application_identity() {
-        let status = Application::new().status();
-
-        assert_eq!(status.name, "forge");
-        assert_eq!(status.version, "0.1.0");
-        assert!(status.ready);
-    }
 }

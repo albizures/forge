@@ -1,5 +1,8 @@
 use clap::{Parser, Subcommand};
-use forge_cli::{render_human_status, render_json_status, request_status, server_url_from_process};
+use forge_cli::{
+    render_human_status, render_json_status, render_project_registered, request_register_project,
+    request_status, server_url_from_process,
+};
 
 #[derive(Debug, Parser)]
 #[command(name = "forge", about = "Client for the Forge daemon")]
@@ -12,12 +15,28 @@ struct Cli {
 enum Command {
     /// Print the daemon's shared application status.
     Status {
-        /// JSON-RPC endpoint for the running Forge daemon.
         #[arg(long, value_name = "URL")]
         server_url: Option<String>,
-        /// Print the status as stable JSON.
         #[arg(long)]
         json: bool,
+    },
+    /// Register a Git main worktree as a Project through the daemon.
+    Add {
+        #[command(subcommand)]
+        command: AddCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AddCommand {
+    /// Register a Project from its main worktree folder and immutable slug.
+    Project {
+        /// Git main worktree root to register.
+        folder: String,
+        /// Immutable Project slug.
+        slug: String,
+        #[arg(long, value_name = "URL")]
+        server_url: Option<String>,
     },
 }
 
@@ -26,6 +45,14 @@ async fn main() {
     let cli = Cli::parse();
     let exit_code = match cli.command {
         Command::Status { server_url, json } => status(server_url.as_deref(), json).await,
+        Command::Add {
+            command:
+                AddCommand::Project {
+                    folder,
+                    slug,
+                    server_url,
+                },
+        } => add_project(&folder, &slug, server_url.as_deref()).await,
     };
     std::process::exit(exit_code);
 }
@@ -43,6 +70,20 @@ async fn status(flag_server_url: Option<&str>, json: bool) -> i32 {
         }
         Err(error) => {
             eprintln!("forge status: {error}");
+            1
+        }
+    }
+}
+
+async fn add_project(folder: &str, slug: &str, flag_server_url: Option<&str>) -> i32 {
+    let server_url = server_url_from_process(flag_server_url);
+    match request_register_project(&server_url, folder, slug).await {
+        Ok(project) => {
+            println!("{}", render_project_registered(&project));
+            0
+        }
+        Err(error) => {
+            eprintln!("forge add project: {error}");
             1
         }
     }

@@ -2,7 +2,10 @@
 
 use std::{env, time::Duration};
 
-use forge_rpc::{SystemApiClient, SystemStatusResponse};
+use forge_rpc::{
+    ProjectApiClient, RegisterProjectRequest, RegisterProjectResponse, SystemApiClient,
+    SystemStatusResponse,
+};
 use jsonrpsee::http_client::HttpClientBuilder;
 
 /// RPC endpoint used when no endpoint configuration is supplied.
@@ -25,6 +28,40 @@ pub fn server_url_from_process(flag_server_url: Option<&str>) -> String {
     server_url(
         flag_server_url,
         env::var("FORGE_SERVER_URL").ok().as_deref(),
+    )
+}
+
+/// Requests the shared status result through the daemon's JSON-RPC endpoint.
+///
+/// # Errors
+///
+/// Returns an error when the endpoint is invalid, unavailable, or rejects the registration.
+pub async fn request_register_project(
+    server_url: &str,
+    folder: &str,
+    slug: &str,
+) -> Result<RegisterProjectResponse, String> {
+    let client = HttpClientBuilder::default()
+        .request_timeout(REQUEST_TIMEOUT)
+        .build(server_url)
+        .map_err(|error| {
+            format!("could not configure Forge daemon endpoint `{server_url}`: {error}")
+        })?;
+    client
+        .register(RegisterProjectRequest {
+            folder: folder.to_owned(),
+            slug: slug.to_owned(),
+        })
+        .await
+        .map_err(|error| format!("could not register Project through Forge daemon: {error}"))
+}
+
+/// Renders a successful Project registration.
+#[must_use]
+pub fn render_project_registered(project: &RegisterProjectResponse) -> String {
+    format!(
+        "Registered Project `{}` at `{}`. Run `forge here` to confirm it.",
+        project.slug, project.registered_folder
     )
 }
 
@@ -68,7 +105,8 @@ pub fn render_json_status(status: &SystemStatusResponse) -> String {
 mod tests {
     use forge_app::Application;
     use forge_rpc::SystemStatusResponse;
-    use forge_server::{Daemon, router};
+    use forge_server::{Daemon, GitInspector, router};
+    use forge_store::SqliteProjectRepository;
 
     use super::{
         DEFAULT_SERVER_URL, REQUEST_TIMEOUT, render_human_status, render_json_status,
@@ -108,9 +146,15 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            axum::serve(listener, router(Daemon::new(Application::new())))
-                .await
-                .unwrap();
+            axum::serve(
+                listener,
+                router(Daemon::new(Application::new(
+                    Box::new(SqliteProjectRepository::in_memory().unwrap()),
+                    Box::new(GitInspector),
+                ))),
+            )
+            .await
+            .unwrap();
         });
 
         let status = request_status(&format!("http://{address}/rpc"))
