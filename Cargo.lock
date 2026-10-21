@@ -399,12 +399,21 @@ name = "forge-app"
 version = "0.1.0"
 
 [[package]]
+name = "forge-build-info"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "forge-cli"
 version = "0.1.0"
 dependencies = [
  "axum",
  "clap",
  "forge-app",
+ "forge-build-info",
  "forge-rpc",
  "forge-server",
  "forge-store",
@@ -429,10 +438,12 @@ dependencies = [
  "askama",
  "axum",
  "forge-app",
+ "forge-build-info",
  "forge-rpc",
  "forge-store",
  "jsonrpsee",
  "rusqlite",
+ "serde_json",
  "tokio",
  "tower",
  "tracing",

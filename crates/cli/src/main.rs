@@ -140,6 +140,9 @@ struct OpenRecordArgs {
 
 #[tokio::main]
 async fn main() {
+    if print_build_info_if_requested() {
+        return;
+    }
     let cli = Cli::parse();
     let exit_code = match cli.command {
         Command::Status { server_url, json } => status(server_url.as_deref(), json).await,
@@ -219,6 +222,22 @@ async fn main() {
     };
     std::process::exit(exit_code);
 }
+fn print_build_info_if_requested() -> bool {
+    let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    if arguments.len() == 2
+        && arguments.iter().any(|argument| argument == "--build-info")
+        && arguments.iter().any(|argument| argument == "--json")
+    {
+        println!(
+            "{}",
+            serde_json::to_string(&forge_build_info::current()).expect("BuildInfo must serialize")
+        );
+        true
+    } else {
+        false
+    }
+}
+
 async fn status(flag: Option<&str>, json: bool) -> i32 {
     match request_status(&server_url_from_process(flag)).await {
         Ok(response) => {
@@ -360,6 +379,13 @@ async fn open_record(args: OpenRecordArgs) -> i32 {
 mod tests {
     use super::{Cli, Command, RecordCommand};
     use clap::Parser;
+
+    #[test]
+    fn build_info_is_shared_json_without_parsing_a_daemon_command() {
+        let json = serde_json::to_value(forge_build_info::current()).unwrap();
+        assert!(json["commit"].is_string());
+        assert!(json["management_protocol_revision"].is_u64());
+    }
 
     #[test]
     fn record_list_accepts_one_project_and_a_public_status_name() {

@@ -1,8 +1,8 @@
 # Forge
 
 Forge is a daemon-first Rust application foundation. One running `forge-server`
-daemon exposes the same read-only status through a Rust CLI, JSON-RPC, and a
-server-rendered browser page.
+daemon exposes status and supported Project and Record operations through a Rust
+CLI and JSON-RPC; its browser page currently exposes read-only status.
 
 ## Prerequisites
 
@@ -83,6 +83,55 @@ or conflicting Project slug or Registered Folder identities.
 The daemon persists registrations in SQLite. By default it uses `forge.sqlite3`
 in its working directory; set `FORGE_STORE_PATH` to choose another path.
 
+## Manage generic Records
+
+A Record is a generic work item with a required, non-blank Markdown body and an
+opaque numeric ID. Its Project Scope is selected explicitly when it is opened:
+pass one or more registered Project slugs with repeatable `--project`, or pass
+`--no-projects` to deliberately create an unscoped Record. Scope is immutable.
+
+```sh
+cargo run -p forge-cli --bin forge -- record open \
+  --body 'Investigate the migration' --project alpha
+cargo run -p forge-cli --bin forge -- record open \
+  --body 'General research' --no-projects
+cargo run -p forge-cli --bin forge -- record show 1
+cargo run -p forge-cli --bin forge -- record edit 1 --body 'Revised Markdown body'
+```
+
+Records begin `open` and advance only through `in-progress` to `done`:
+
+```sh
+cargo run -p forge-cli --bin forge -- record start 1
+cargo run -p forge-cli --bin forge -- record done 1 --resolution 'completed'
+```
+
+A completed Record's body and optional completion resolution cannot change.
+Records are retained rather than deleted; complete mistaken Records with an
+explanatory resolution.
+
+Use `child-of` relationships to make a hierarchy. A child has at most one
+parent; parent and child must have identical Project Scopes. Hierarchies may be
+nested and cannot contain cycles. A parent cannot be completed while any child
+is not done, although relationships can be corrected after completion.
+
+```sh
+cargo run -p forge-cli --bin forge -- record relate 2 --kind child-of --to 1
+cargo run -p forge-cli --bin forge -- record unrelate 2 --kind child-of --to 1
+```
+
+Discovery is intentionally limited to optional Project Scope membership and
+status filters, which combine with AND. Results are newest first. There is no
+full-text search, type-specific workflow, deletion, scope editing, comments, or
+history yet.
+
+```sh
+cargo run -p forge-cli --bin forge -- record list --project alpha --status open
+```
+
+Record commands support `--json`; use `--server-url` or `FORGE_SERVER_URL` to
+target a non-default daemon as described above.
+
 ## Browser and RPC access
 
 Open <http://127.0.0.1:45003/> in a browser. The page is server-rendered and
@@ -93,13 +142,13 @@ selects **Refresh status**. The fragment route is
 ## Security and scope
 
 This initial foundation deliberately uses plaintext HTTP and binds to loopback
-by default. It is a read-only, unauthenticated status interface. Explicit
-trusted Tailscale/private-network use is the only intended remote exposure.
+by default. The daemon is unauthenticated and exposes mutating Project and
+Record RPC operations, so do not expose it beyond a trusted local environment.
+Any remote use requires an explicitly trusted private network and a redesigned
+security boundary.
 
 Authentication, authorization, TLS termination, browser mutations, CSRF
-handling, CORS access, persistence, CI, and service management are deferred.
-The exposure boundary must be redesigned before adding mutations or broader
-network access.
+handling, CORS access, CI, and service management are deferred.
 
 ## Verify the workspace
 

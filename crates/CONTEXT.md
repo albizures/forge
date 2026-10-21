@@ -4,6 +4,62 @@ The Forge Runtime context is the product domain implemented by Forge's Rust comp
 
 ## Language
 
+**Forge Revision**:
+An installed Forge build identified primarily by its source commit ID and optionally labelled with its release version.
+_Avoid_: version, binary
+
+**Active Forge Revision**:
+The one user-wide selected Forge Revision that Forgeup has selected for use.
+_Avoid_: current version, default version
+
+**Forgeup**:
+The independent `forgeup` program that registers Forge Revisions and selects the Active Forge Revision; it is not a Forge command-line interface.
+_Avoid_: forgevm, forge launcher, forge CLI
+
+**Revision Installation**:
+An immutable Forgeup-owned snapshot and manifest for one Forge Revision that locates its CLI and daemon executables, endpoint, and isolated state.
+_Avoid_: binary path, installation
+
+**Source Label**:
+An explicit immutable name that identifies the source of Forge Revisions and distinguishes independently built forks; its URL is descriptive metadata only.
+_Avoid_: remote URL, source identity
+
+**Revision Selector**:
+A human reference to a Forge Revision, canonically its Source Label and full commit ID; a local-build label may be a unique alias.
+_Avoid_: version, release version
+
+**Revision State**:
+The isolated persistent database, runtime information, and diagnostic logs associated with one Forge Revision. It outlives that Revision’s Installation unless explicitly purged.
+_Avoid_: installation, global state
+
+**Replacement Registration**:
+An explicit Forgeup operation that replaces one Revision Installation under the same Revision Selector while retaining its Revision State unless the user requests a purge.
+_Avoid_: update, ordinary registration
+
+**Managed Daemon**:
+The daemon process Forgeup owns for the Active Forge Revision. Manually launched daemons are not Managed Daemons.
+_Avoid_: Forge daemon, server
+
+**Manual Daemon**:
+A Forge daemon launched outside Forgeup’s lifecycle and addressed only through an explicit endpoint override.
+_Avoid_: alternate daemon, unmanaged server
+
+**Endpoint Override**:
+An explicit Forge CLI endpoint selection that bypasses the Active Forge Revision and its Managed Daemon.
+_Avoid_: daemon selection, server configuration
+
+**Revision Identity**:
+The immutable build facts that attest a Forge Revision: full commit ID, clean or dirty state, Management Protocol, and build metadata. A Source Label is Forgeup registry metadata, not a build fact.
+_Avoid_: source label, version, package version
+
+**Management Protocol**:
+The versioned Forge interface that lets Forgeup attest and control a Managed Daemon. It uses monotonic integer revisions: compatible additions retain a revision; incompatible changes introduce a new one. Revisions without a supported Management Protocol may only run manually.
+_Avoid_: daemon API, server protocol
+
+**Daemon Instance**:
+One launch of a Managed Daemon, identified by a Forgeup-generated random instance ID that the daemon reports for ownership verification.
+_Avoid_: revision, daemon version
+
 **Project**:
 A Forge-owned unit that is bound to exactly one Repository, has one Registered Folder that is a main Worktree, and to which Specs will belong. A Project is referenced by its immutable Slug.
 _Avoid_: repo
