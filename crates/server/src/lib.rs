@@ -42,15 +42,62 @@ use tracing::{info, warn};
 /// Loopback address used when neither supported configuration source is set.
 pub const DEFAULT_BIND_ADDR: &str = "127.0.0.1:45003";
 
+/// Explicit inputs supplied by Forgeup when it launches a Managed Daemon.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ManagedLaunchInputs {
+    pub bind_addr: String,
+    pub store_path: String,
+    pub runtime_record_path: String,
+    pub lifecycle_control_endpoint: String,
+    pub lifecycle_credential: String,
+    pub daemon_instance_id: String,
+}
+
+/// Managed-only configuration retained at the server composition boundary.
+#[derive(Clone, Eq, PartialEq)]
+pub struct ManagedDaemonConfig {
+    pub runtime_record_path: PathBuf,
+    pub lifecycle_control_endpoint: PathBuf,
+    lifecycle_credential: String,
+    pub daemon_instance_id: String,
+}
+
+impl std::fmt::Debug for ManagedDaemonConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ManagedDaemonConfig")
+            .field("runtime_record_path", &self.runtime_record_path)
+            .field(
+                "lifecycle_control_endpoint",
+                &self.lifecycle_control_endpoint,
+            )
+            .field("lifecycle_credential", &"[redacted]")
+            .field("daemon_instance_id", &self.daemon_instance_id)
+            .finish()
+    }
+}
+
+impl ManagedDaemonConfig {
+    /// Credential used only by the per-instance lifecycle listener.
+    #[must_use]
+    pub fn lifecycle_credential(&self) -> &str {
+        &self.lifecycle_credential
+    }
+}
+
 /// Daemon startup configuration resolved before the listener is opened.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DaemonConfig {
     /// Address owned by the one daemon listener.
     pub bind_addr: SocketAddr,
+    /// Database path selected for this daemon instance.
+    pub store_path: PathBuf,
+    /// Present only when Forgeup explicitly owns this daemon launch.
+    pub managed: Option<ManagedDaemonConfig>,
 }
 
 impl DaemonConfig {
-    /// Resolves configuration with an explicit flag taking precedence over the environment.
+    /// Resolves manual-launch configuration with an explicit flag taking precedence over the environment.
     ///
     /// # Errors
     ///
@@ -62,18 +109,68 @@ impl DaemonConfig {
         let value = flag_bind_addr
             .or(env_bind_addr)
             .unwrap_or(DEFAULT_BIND_ADDR);
-        SocketAddr::from_str(value)
-            .map(|bind_addr| Self { bind_addr })
-            .map_err(|error| format!("invalid daemon bind address `{value}`: {error}"))
+        let bind_addr = SocketAddr::from_str(value)
+            .map_err(|error| format!("invalid daemon bind address `{value}`: {error}"))?;
+        Ok(Self {
+            bind_addr,
+            store_path: env::var_os("FORGE_STORE_PATH")
+                .map_or_else(|| PathBuf::from("forge.sqlite3"), PathBuf::from),
+            managed: None,
+        })
     }
 
-    /// Resolves process configuration, including `FORGE_BIND_ADDR`.
+    /// Resolves the explicit Managed Daemon configuration without consulting ambient settings.
     ///
     /// # Errors
     ///
-    /// Returns an error when the selected address is not a socket address.
-    pub fn from_process(flag_bind_addr: Option<&str>) -> Result<Self, String> {
-        Self::resolve(flag_bind_addr, env::var("FORGE_BIND_ADDR").ok().as_deref())
+    /// Returns an error when any managed input is empty or its bind address is malformed.
+    pub fn managed(inputs: ManagedLaunchInputs) -> Result<Self, String> {
+        let bind_addr = SocketAddr::from_str(&inputs.bind_addr).map_err(|error| {
+            format!(
+                "invalid managed daemon bind address `{}`: {error}",
+                inputs.bind_addr
+            )
+        })?;
+        let required = [
+            ("store path", &inputs.store_path),
+            ("runtime-record path", &inputs.runtime_record_path),
+            (
+                "lifecycle-control endpoint",
+                &inputs.lifecycle_control_endpoint,
+            ),
+            ("lifecycle credential", &inputs.lifecycle_credential),
+            ("daemon-instance ID", &inputs.daemon_instance_id),
+        ];
+        if let Some((name, _)) = required.iter().find(|(_, value)| value.trim().is_empty()) {
+            return Err(format!("managed daemon {name} must not be empty"));
+        }
+        Ok(Self {
+            bind_addr,
+            store_path: PathBuf::from(inputs.store_path),
+            managed: Some(ManagedDaemonConfig {
+                runtime_record_path: PathBuf::from(inputs.runtime_record_path),
+                lifecycle_control_endpoint: PathBuf::from(inputs.lifecycle_control_endpoint),
+                lifecycle_credential: inputs.lifecycle_credential,
+                daemon_instance_id: inputs.daemon_instance_id,
+            }),
+        })
+    }
+
+    /// Resolves process configuration, preserving manual environment compatibility.
+    ///
+    /// Managed inputs are explicit and therefore take precedence over all ambient settings.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the selected configuration is invalid.
+    pub fn from_process(
+        flag_bind_addr: Option<&str>,
+        managed: Option<ManagedLaunchInputs>,
+    ) -> Result<Self, String> {
+        match managed {
+            Some(inputs) => Self::managed(inputs),
+            None => Self::resolve(flag_bind_addr, env::var("FORGE_BIND_ADDR").ok().as_deref()),
+        }
     }
 }
 
@@ -81,14 +178,28 @@ impl DaemonConfig {
 #[derive(Clone)]
 pub struct Daemon {
     application: Arc<Application>,
+    management: ManagementStatus,
 }
 
 impl Daemon {
-    /// Creates a daemon around the shared application boundary.
+    /// Creates a manual daemon around the shared application boundary.
     #[must_use]
     pub fn new(application: Application) -> Self {
+        Self::with_daemon_instance_id(application, None)
+    }
+
+    /// Creates a daemon that reports the supplied managed-launch ownership ID.
+    #[must_use]
+    pub fn with_daemon_instance_id(
+        application: Application,
+        daemon_instance_id: Option<String>,
+    ) -> Self {
         Self {
             application: Arc::new(application),
+            management: ManagementStatus::new(
+                RevisionIdentity::from(forge_build_info::current()),
+                daemon_instance_id,
+            ),
         }
     }
 }
@@ -184,20 +295,17 @@ fn resolve_git_path(root: &Path, value: &str) -> PathBuf {
     .unwrap_or_else(|_| root.join(path))
 }
 
-fn application_from_process() -> Result<Application, String> {
-    let path = env::var_os("FORGE_STORE_PATH")
-        .map_or_else(|| PathBuf::from("forge.sqlite3"), PathBuf::from);
-    let store = SqliteProjectRepository::open(&path).map_err(|error| error.message)?;
+fn application_from_config(config: &DaemonConfig) -> Result<Application, String> {
+    let store = SqliteProjectRepository::open(&config.store_path).map_err(|error| error.message)?;
     Ok(Application::new(Box::new(store), Box::new(GitInspector)))
 }
 
 #[async_trait]
 impl SystemApiServer for Daemon {
     async fn status(&self) -> RpcResult<SystemStatusResponse> {
-        let revision_identity = RevisionIdentity::from(forge_build_info::current());
         Ok(SystemStatusResponse::new(
             &self.application.status(),
-            ManagementStatus::new(revision_identity, None),
+            self.management.clone(),
         ))
     }
 }
@@ -458,10 +566,20 @@ pub async fn serve(config: DaemonConfig) -> Result<(), std::io::Error> {
     }
     info!(%address, "Forge daemon listening");
 
-    let application = application_from_process().map_err(std::io::Error::other)?;
-    axum::serve(listener, router(Daemon::new(application)))
-        .with_graceful_shutdown(shutdown_signal())
-        .await
+    let application = application_from_config(&config).map_err(std::io::Error::other)?;
+    let daemon_instance_id = config
+        .managed
+        .as_ref()
+        .map(|managed| managed.daemon_instance_id.clone());
+    axum::serve(
+        listener,
+        router(Daemon::with_daemon_instance_id(
+            application,
+            daemon_instance_id,
+        )),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
 }
 
 async fn shutdown_signal() {
@@ -503,13 +621,13 @@ mod tests {
     use forge_rpc::{
         DoneRecordRequest, EditRecordRequest, ListRecordsRequest, OpenRecordRequest,
         ProjectApiClient, ProjectHereRequest, ProjectScopeRequest, RecordApiClient,
-        RecordIdRequest, RegisterProjectRequest, SystemApiClient,
+        RecordIdRequest, RegisterProjectRequest, SystemApiClient, SystemApiServer,
     };
     use forge_store::SqliteProjectRepository;
     use jsonrpsee::http_client::HttpClientBuilder;
     use tower::ServiceExt;
 
-    use super::{DEFAULT_BIND_ADDR, Daemon, DaemonConfig, router};
+    use super::{DEFAULT_BIND_ADDR, Daemon, DaemonConfig, ManagedLaunchInputs, router};
 
     struct TestInspector;
 
@@ -550,6 +668,62 @@ mod tests {
                 .bind_addr
                 .to_string(),
             DEFAULT_BIND_ADDR
+        );
+    }
+
+    #[test]
+    fn managed_configuration_is_explicit_and_rejects_invalid_inputs() {
+        let inputs = ManagedLaunchInputs {
+            bind_addr: "127.0.0.1:45004".into(),
+            store_path: "managed.sqlite3".into(),
+            runtime_record_path: "runtime.json".into(),
+            lifecycle_control_endpoint: "control.sock".into(),
+            lifecycle_credential: "credential".into(),
+            daemon_instance_id: "instance-123".into(),
+        };
+        let config =
+            DaemonConfig::from_process(Some("127.0.0.1:45005"), Some(inputs.clone())).unwrap();
+        assert_eq!(config.bind_addr.to_string(), "127.0.0.1:45004");
+        assert_eq!(config.store_path, PathBuf::from("managed.sqlite3"));
+        let managed = config.managed.unwrap();
+        assert_eq!(managed.daemon_instance_id, "instance-123");
+        assert_eq!(managed.lifecycle_credential(), "credential");
+
+        let error = DaemonConfig::managed(ManagedLaunchInputs {
+            bind_addr: "not-an-address".into(),
+            store_path: "managed.sqlite3".into(),
+            runtime_record_path: "runtime.json".into(),
+            lifecycle_control_endpoint: "control.sock".into(),
+            lifecycle_credential: "credential".into(),
+            daemon_instance_id: "instance-123".into(),
+        })
+        .unwrap_err();
+        assert!(error.contains("invalid managed daemon bind address"));
+
+        let error = DaemonConfig::managed(ManagedLaunchInputs {
+            bind_addr: "127.0.0.1:45004".into(),
+            store_path: String::new(),
+            runtime_record_path: "runtime.json".into(),
+            lifecycle_control_endpoint: "control.sock".into(),
+            lifecycle_credential: "credential".into(),
+            daemon_instance_id: "instance-123".into(),
+        })
+        .unwrap_err();
+        assert_eq!(error, "managed daemon store path must not be empty");
+    }
+
+    #[tokio::test]
+    async fn managed_daemon_status_reports_the_launch_instance_id() {
+        let daemon =
+            Daemon::with_daemon_instance_id(test_application(), Some("instance-123".into()));
+        let status = daemon.status().await.unwrap();
+        assert_eq!(
+            status.management.daemon_instance_id.as_deref(),
+            Some("instance-123")
+        );
+        assert_eq!(
+            status.management.revision_identity,
+            forge_rpc::RevisionIdentity::from(forge_build_info::current())
         );
     }
 
