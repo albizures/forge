@@ -23,8 +23,9 @@ use axum::{
 };
 use forge_app::{Application, ApplicationStatus, Project, RegistrationError, RepositoryInspector};
 use forge_rpc::{
-    ProjectApiServer, ProjectHereRequest, ProjectHereResponse, RegisterProjectRequest,
-    RegisterProjectResponse, SystemApiServer, SystemStatusResponse,
+    OpenRecordRequest, ProjectApiServer, ProjectHereRequest, ProjectHereResponse, RecordApiServer,
+    RecordResponse, RegisterProjectRequest, RegisterProjectResponse, SystemApiServer,
+    SystemStatusResponse,
 };
 use forge_store::SqliteProjectRepository;
 use jsonrpsee::{
@@ -194,6 +195,16 @@ impl SystemApiServer for Daemon {
 }
 
 #[async_trait]
+impl RecordApiServer for Daemon {
+    async fn open(&self, request: OpenRecordRequest) -> RpcResult<RecordResponse> {
+        self.application
+            .open_record(&request.body, request.project_scope.project_slugs)
+            .map(Into::into)
+            .map_err(rpc_error)
+    }
+}
+
+#[async_trait]
 impl ProjectApiServer for Daemon {
     async fn register(
         &self,
@@ -227,7 +238,10 @@ pub fn router(daemon: Daemon) -> Router {
     let status_daemon = daemon.clone();
     let mut methods = SystemApiServer::into_rpc(daemon.clone());
     methods
-        .merge(ProjectApiServer::into_rpc(daemon))
+        .merge(ProjectApiServer::into_rpc(daemon.clone()))
+        .expect("RPC method names must not overlap");
+    methods
+        .merge(RecordApiServer::into_rpc(daemon))
         .expect("RPC method names must not overlap");
     let service_builder = Server::builder().to_service_builder();
     let (stop_handle, server_handle) = stop_channel();
@@ -402,7 +416,8 @@ mod tests {
     };
     use forge_app::{Application, Project, RegistrationError, RepositoryInspector};
     use forge_rpc::{
-        ProjectApiClient, ProjectHereRequest, RegisterProjectRequest, SystemApiClient,
+        OpenRecordRequest, ProjectApiClient, ProjectHereRequest, ProjectScopeRequest,
+        RecordApiClient, RegisterProjectRequest, SystemApiClient,
     };
     use forge_store::SqliteProjectRepository;
     use jsonrpsee::http_client::HttpClientBuilder;
@@ -566,6 +581,33 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(here, project);
+
+        let record = client
+            .open(OpenRecordRequest {
+                body: "A daemon-backed Record".into(),
+                project_scope: ProjectScopeRequest {
+                    project_slugs: vec!["server-test-project".into()],
+                },
+            })
+            .await
+            .unwrap();
+        assert_eq!(record.id, 1);
+        assert_eq!(record.status, "open");
+        assert_eq!(record.project_scope.project_slugs, ["server-test-project"]);
+        assert_eq!(
+            client
+                .open(OpenRecordRequest {
+                    body: "Unscoped".into(),
+                    project_scope: ProjectScopeRequest {
+                        project_slugs: vec![],
+                    },
+                })
+                .await
+                .unwrap()
+                .project_scope
+                .project_slugs,
+            Vec::<String>::new()
+        );
 
         server.abort();
     }

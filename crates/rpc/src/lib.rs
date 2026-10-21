@@ -1,29 +1,31 @@
 //! Shared JSON-RPC wire contract ownership boundary.
 
-use forge_app::{ApplicationStatus, Project, RegistrationError};
+use forge_app::{ApplicationStatus, Project, Record, RecordStatus, RegistrationError};
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
 use serde::{Deserialize, Serialize};
 
 pub const SYSTEM_STATUS_METHOD: &str = "system.status";
 pub const PROJECT_REGISTER_METHOD: &str = "project.register";
 pub const PROJECT_HERE_METHOD: &str = "project.here";
+pub const RECORD_OPEN_METHOD: &str = "record.open";
 
 #[rpc(client, server, namespace = "system")]
 pub trait SystemApi {
     #[method(name = "status")]
     async fn status(&self) -> RpcResult<SystemStatusResponse>;
 }
-
 #[rpc(client, server, namespace = "project")]
 pub trait ProjectApi {
-    /// Registers the supplied folder under its immutable slug.
     #[method(name = "register")]
     async fn register(&self, request: RegisterProjectRequest)
     -> RpcResult<RegisterProjectResponse>;
-
-    /// Resolves the Project containing the supplied current folder.
     #[method(name = "here")]
     async fn here(&self, request: ProjectHereRequest) -> RpcResult<ProjectHereResponse>;
+}
+#[rpc(client, server, namespace = "record")]
+pub trait RecordApi {
+    #[method(name = "open")]
+    async fn open(&self, request: OpenRecordRequest) -> RpcResult<RecordResponse>;
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -32,7 +34,6 @@ pub struct SystemStatusResponse {
     pub version: String,
     pub ready: bool,
 }
-
 impl From<ApplicationStatus> for SystemStatusResponse {
     fn from(status: ApplicationStatus) -> Self {
         Self {
@@ -48,23 +49,17 @@ pub struct RegisterProjectRequest {
     pub folder: String,
     pub slug: String,
 }
-
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RegisterProjectResponse {
     pub slug: String,
     pub registered_folder: String,
     pub origin_url: String,
 }
-
-/// The client process current folder to resolve.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProjectHereRequest {
     pub folder: String,
 }
-
-/// The retained registration identity for the current Project.
 pub type ProjectHereResponse = RegisterProjectResponse;
-
 impl From<Project> for RegisterProjectResponse {
     fn from(project: Project) -> Self {
         Self {
@@ -75,12 +70,44 @@ impl From<Project> for RegisterProjectResponse {
     }
 }
 
+/// Opens a Record. An empty `project_slugs` explicitly represents no Projects.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct OpenRecordRequest {
+    pub body: String,
+    pub project_scope: ProjectScopeRequest,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProjectScopeRequest {
+    pub project_slugs: Vec<String>,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RecordResponse {
+    pub id: u64,
+    pub body: String,
+    pub project_scope: ProjectScopeRequest,
+    pub status: String,
+}
+impl From<Record> for RecordResponse {
+    fn from(record: Record) -> Self {
+        Self {
+            id: record.id,
+            body: record.body,
+            project_scope: ProjectScopeRequest {
+                project_slugs: record.project_slugs,
+            },
+            status: match record.status {
+                RecordStatus::Open => "open",
+            }
+            .into(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RegistrationErrorResponse {
     pub code: String,
     pub message: String,
 }
-
 impl From<RegistrationError> for RegistrationErrorResponse {
     fn from(error: RegistrationError) -> Self {
         Self {

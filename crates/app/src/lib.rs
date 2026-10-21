@@ -13,6 +13,32 @@ pub struct Project {
     pub origin_url: String,
 }
 
+/// The initial lifecycle status of a Record.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecordStatus {
+    Open,
+}
+
+/// A generic, project-scoped unit of work.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Record {
+    /// Opaque, positive identity assigned by persistence.
+    pub id: u64,
+    /// Required Markdown content, separate from its structured metadata.
+    pub body: String,
+    /// Immutable, lexically ordered Project Scope selected at opening.
+    pub project_slugs: Vec<String>,
+    /// The initial status assigned at opening.
+    pub status: RecordStatus,
+}
+
+/// A Record before persistence assigns its identity and initial status.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NewRecord {
+    pub body: String,
+    pub project_slugs: Vec<String>,
+}
+
 /// A domain error which can safely be shown to a user.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RegistrationError {
@@ -48,9 +74,8 @@ pub trait ProjectRepository: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns a user-facing error when persistence or identity validation fails.
+    /// Returns a user-facing validation or storage failure.
     fn register(&self, project: &Project) -> Result<Project, RegistrationError>;
-
     /// Finds the Project whose Registered Folder contains `folder`.
     ///
     /// # Errors
@@ -59,9 +84,19 @@ pub trait ProjectRepository: Send + Sync {
     fn find_containing(&self, folder: &Path) -> Result<Project, RegistrationError>;
 }
 
+/// Persistence operations for generic Records.
+pub trait RecordRepository: ProjectRepository {
+    /// Opens a Record after validating that all selected Projects exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-facing validation or storage failure.
+    fn open_record(&self, record: &NewRecord) -> Result<Record, RegistrationError>;
+}
+
 /// The application boundary for operations shared by all transports.
 pub struct Application {
-    projects: Box<dyn ProjectRepository>,
+    records: Box<dyn RecordRepository>,
     inspector: Box<dyn RepositoryInspector>,
 }
 
@@ -69,13 +104,10 @@ impl Application {
     /// Creates an application from its infrastructure boundaries.
     #[must_use]
     pub fn new(
-        projects: Box<dyn ProjectRepository>,
+        records: Box<dyn RecordRepository>,
         inspector: Box<dyn RepositoryInspector>,
     ) -> Self {
-        Self {
-            projects,
-            inspector,
-        }
+        Self { records, inspector }
     }
 
     /// Registers an eligible Git main Worktree as a Project.
@@ -96,7 +128,7 @@ impl Application {
         }
         let mut project = self.inspector.inspect(folder)?;
         slug.clone_into(&mut project.slug);
-        self.projects.register(&project)
+        self.records.register(&project)
     }
 
     /// Finds the Project containing the supplied current folder.
@@ -111,7 +143,37 @@ impl Application {
                 format!("`{}` is not an existing folder", folder.display()),
             )
         })?;
-        self.projects.find_containing(&folder)
+        self.records.find_containing(&folder)
+    }
+
+    /// Opens a generic Record with a required body and explicit Project Scope.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-facing error for blank bodies, duplicate or unknown Projects, or storage failures.
+    pub fn open_record(
+        &self,
+        body: &str,
+        project_slugs: Vec<String>,
+    ) -> Result<Record, RegistrationError> {
+        if body.trim().is_empty() {
+            return Err(RegistrationError::new(
+                "invalid-body",
+                "record body must not be blank",
+            ));
+        }
+        let mut project_slugs = project_slugs;
+        project_slugs.sort();
+        if project_slugs.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(RegistrationError::new(
+                "duplicate-project",
+                "record Project Scope must not contain duplicate Project slugs",
+            ));
+        }
+        self.records.open_record(&NewRecord {
+            body: body.to_owned(),
+            project_slugs,
+        })
     }
 
     /// Returns readiness information for this application instance.
@@ -131,4 +193,79 @@ pub struct ApplicationStatus {
     pub name: &'static str,
     pub version: &'static str,
     pub ready: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    struct Repository {
+        records: Mutex<Vec<Record>>,
+    }
+    impl ProjectRepository for Repository {
+        fn register(&self, project: &Project) -> Result<Project, RegistrationError> {
+            Ok(project.clone())
+        }
+        fn find_containing(&self, _: &Path) -> Result<Project, RegistrationError> {
+            unreachable!()
+        }
+    }
+    impl RecordRepository for Repository {
+        fn open_record(&self, record: &NewRecord) -> Result<Record, RegistrationError> {
+            let mut records = self.records.lock().unwrap();
+            let record = Record {
+                id: (records.len() + 1) as u64,
+                body: record.body.clone(),
+                project_slugs: record.project_slugs.clone(),
+                status: RecordStatus::Open,
+            };
+            records.push(record.clone());
+            Ok(record)
+        }
+    }
+    struct Inspector;
+    impl RepositoryInspector for Inspector {
+        fn inspect(&self, _: &Path) -> Result<Project, RegistrationError> {
+            unreachable!()
+        }
+    }
+    fn application() -> Application {
+        Application::new(
+            Box::new(Repository {
+                records: Mutex::new(vec![]),
+            }),
+            Box::new(Inspector),
+        )
+    }
+
+    #[test]
+    fn opening_requires_a_non_blank_body_and_a_distinct_scope() {
+        assert_eq!(
+            application().open_record(" \n", vec![]).unwrap_err().code,
+            "invalid-body"
+        );
+        assert_eq!(
+            application()
+                .open_record("body", vec!["alpha".into(), "alpha".into()])
+                .unwrap_err()
+                .code,
+            "duplicate-project"
+        );
+    }
+
+    #[test]
+    fn opening_assigns_open_status_and_sorts_scope() {
+        assert_eq!(
+            application()
+                .open_record("body", vec!["zeta".into(), "alpha".into()])
+                .unwrap(),
+            Record {
+                id: 1,
+                body: "body".into(),
+                project_slugs: vec!["alpha".into(), "zeta".into()],
+                status: RecordStatus::Open
+            }
+        );
+    }
 }
