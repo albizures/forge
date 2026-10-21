@@ -55,6 +55,34 @@ FORGE_SERVER_URL=http://127.0.0.1:45004/rpc cargo run -p forge-cli --bin forge -
 If no daemon is reachable, `forge status` reports the problem on stderr and
 exits nonzero after at most the 10-second request timeout.
 
+## Register and confirm a Project
+
+A Forge Project is a local Git repository's **main worktree**, identified by an
+immutable slug. It must have an `origin` remote. With the daemon running,
+register it through the CLI:
+
+```sh
+cargo run -p forge-cli --bin forge -- add project /repos/alpha alpha
+```
+
+Forge confirms the registration and prompts you to run `forge here`. From the
+registered folder or any subfolder, confirm the Project that contains the
+current directory:
+
+```sh
+cd /repos/alpha/src/module
+cargo run -p forge-cli --bin forge -- here
+# Project `alpha` is registered at `/repos/alpha` (origin: `...`).
+```
+
+`forge here` exits nonzero with an actionable error when the current folder is
+outside every registered Project. Registration also exits nonzero for a
+non-Git folder, a linked (non-main) worktree, a repository without `origin`,
+or conflicting Project slug or Registered Folder identities.
+
+The daemon persists registrations in SQLite. By default it uses `forge.sqlite3`
+in its working directory; set `FORGE_STORE_PATH` to choose another path.
+
 ## Browser and RPC access
 
 Open <http://127.0.0.1:45003/> in a browser. The page is server-rendered and
