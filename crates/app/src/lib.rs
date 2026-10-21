@@ -17,6 +17,8 @@ pub struct Project {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RecordStatus {
     Open,
+    InProgress,
+    Done,
 }
 
 /// A generic, project-scoped unit of work.
@@ -28,8 +30,10 @@ pub struct Record {
     pub body: String,
     /// Immutable, lexically ordered Project Scope selected at opening.
     pub project_slugs: Vec<String>,
-    /// The initial status assigned at opening.
+    /// The Record's lifecycle status.
     pub status: RecordStatus,
+    /// Immutable optional explanation recorded when the Record was completed.
+    pub completion_resolution: Option<String>,
 }
 
 /// A Record before persistence assigns its identity and initial status.
@@ -92,6 +96,34 @@ pub trait RecordRepository: ProjectRepository {
     ///
     /// Returns a user-facing validation or storage failure.
     fn open_record(&self, record: &NewRecord) -> Result<Record, RegistrationError>;
+    /// Returns the Record identified by `id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-facing error when the Record is absent or storage fails.
+    fn show_record(&self, id: u64) -> Result<Record, RegistrationError>;
+    /// Persists a non-Done Record Body.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-facing error when the Record is Done, absent, or storage fails.
+    fn edit_record(&self, id: u64, body: &str) -> Result<Record, RegistrationError>;
+    /// Advances a Record from Open to In Progress.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-facing error for an invalid transition, absent Record, or storage failure.
+    fn start_record(&self, id: u64) -> Result<Record, RegistrationError>;
+    /// Advances a Record from In Progress to Done.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-facing error for an invalid transition, absent Record, or storage failure.
+    fn done_record(
+        &self,
+        id: u64,
+        completion_resolution: Option<&str>,
+    ) -> Result<Record, RegistrationError>;
 }
 
 /// The application boundary for operations shared by all transports.
@@ -176,6 +208,58 @@ impl Application {
         })
     }
 
+    /// Returns a Record by its opaque identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-facing error if the Record is absent.
+    pub fn show_record(&self, id: u64) -> Result<Record, RegistrationError> {
+        self.records.show_record(id)
+    }
+
+    /// Edits a Record Body before it is Done.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-facing error for blank Bodies or completed Records.
+    pub fn edit_record(&self, id: u64, body: &str) -> Result<Record, RegistrationError> {
+        if body.trim().is_empty() {
+            return Err(RegistrationError::new(
+                "invalid-body",
+                "record body must not be blank",
+            ));
+        }
+        self.records.edit_record(id, body)
+    }
+
+    /// Advances a Record from Open to In Progress.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-facing error when the transition is invalid.
+    pub fn start_record(&self, id: u64) -> Result<Record, RegistrationError> {
+        self.records.start_record(id)
+    }
+
+    /// Completes an in-progress Record with an optional Resolution.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-facing error for an invalid transition or blank Resolution.
+    pub fn done_record(
+        &self,
+        id: u64,
+        completion_resolution: Option<&str>,
+    ) -> Result<Record, RegistrationError> {
+        if completion_resolution.is_some_and(|resolution| resolution.trim().is_empty()) {
+            return Err(RegistrationError::new(
+                "invalid-resolution",
+                "completion resolution must not be blank",
+            ));
+        }
+        self.records.done_record(id, completion_resolution)
+    }
+
     /// Returns readiness information for this application instance.
     #[must_use]
     pub fn status(&self) -> ApplicationStatus {
@@ -219,9 +303,75 @@ mod tests {
                 body: record.body.clone(),
                 project_slugs: record.project_slugs.clone(),
                 status: RecordStatus::Open,
+                completion_resolution: None,
             };
             records.push(record.clone());
             Ok(record)
+        }
+        fn show_record(&self, id: u64) -> Result<Record, RegistrationError> {
+            self.records
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|record| record.id == id)
+                .cloned()
+                .ok_or_else(|| RegistrationError::new("record-not-found", "Record does not exist"))
+        }
+        fn edit_record(&self, id: u64, body: &str) -> Result<Record, RegistrationError> {
+            let mut records = self.records.lock().unwrap();
+            let record = records
+                .iter_mut()
+                .find(|record| record.id == id)
+                .ok_or_else(|| {
+                    RegistrationError::new("record-not-found", "Record does not exist")
+                })?;
+            if record.status == RecordStatus::Done {
+                return Err(RegistrationError::new(
+                    "invalid-status-transition",
+                    "Record is Done",
+                ));
+            }
+            record.body = body.into();
+            Ok(record.clone())
+        }
+        fn start_record(&self, id: u64) -> Result<Record, RegistrationError> {
+            let mut records = self.records.lock().unwrap();
+            let record = records
+                .iter_mut()
+                .find(|record| record.id == id)
+                .ok_or_else(|| {
+                    RegistrationError::new("record-not-found", "Record does not exist")
+                })?;
+            if record.status != RecordStatus::Open {
+                return Err(RegistrationError::new(
+                    "invalid-status-transition",
+                    "invalid transition",
+                ));
+            }
+            record.status = RecordStatus::InProgress;
+            Ok(record.clone())
+        }
+        fn done_record(
+            &self,
+            id: u64,
+            completion_resolution: Option<&str>,
+        ) -> Result<Record, RegistrationError> {
+            let mut records = self.records.lock().unwrap();
+            let record = records
+                .iter_mut()
+                .find(|record| record.id == id)
+                .ok_or_else(|| {
+                    RegistrationError::new("record-not-found", "Record does not exist")
+                })?;
+            if record.status != RecordStatus::InProgress {
+                return Err(RegistrationError::new(
+                    "invalid-status-transition",
+                    "invalid transition",
+                ));
+            }
+            record.status = RecordStatus::Done;
+            record.completion_resolution = completion_resolution.map(str::to_owned);
+            Ok(record.clone())
         }
     }
     struct Inspector;
@@ -255,6 +405,39 @@ mod tests {
     }
 
     #[test]
+    fn record_content_and_lifecycle_advance_once_and_completion_is_immutable() {
+        let app = application();
+        let record = app.open_record("original", vec![]).unwrap();
+        assert_eq!(
+            app.edit_record(record.id, "revised").unwrap().body,
+            "revised"
+        );
+        assert_eq!(
+            app.done_record(record.id, None).unwrap_err().code,
+            "invalid-status-transition"
+        );
+        assert_eq!(
+            app.start_record(record.id).unwrap().status,
+            RecordStatus::InProgress
+        );
+        let done = app.done_record(record.id, Some("completed")).unwrap();
+        assert_eq!(done.status, RecordStatus::Done);
+        assert_eq!(done.completion_resolution.as_deref(), Some("completed"));
+        assert_eq!(
+            app.edit_record(record.id, "later").unwrap_err().code,
+            "invalid-status-transition"
+        );
+        assert_eq!(
+            app.done_record(record.id, Some("other")).unwrap_err().code,
+            "invalid-status-transition"
+        );
+        assert_eq!(
+            app.done_record(record.id, Some(" ")).unwrap_err().code,
+            "invalid-resolution"
+        );
+    }
+
+    #[test]
     fn opening_assigns_open_status_and_sorts_scope() {
         assert_eq!(
             application()
@@ -264,7 +447,8 @@ mod tests {
                 id: 1,
                 body: "body".into(),
                 project_slugs: vec!["alpha".into(), "zeta".into()],
-                status: RecordStatus::Open
+                status: RecordStatus::Open,
+                completion_resolution: None,
             }
         );
     }

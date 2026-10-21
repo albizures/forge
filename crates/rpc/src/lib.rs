@@ -8,6 +8,10 @@ pub const SYSTEM_STATUS_METHOD: &str = "system.status";
 pub const PROJECT_REGISTER_METHOD: &str = "project.register";
 pub const PROJECT_HERE_METHOD: &str = "project.here";
 pub const RECORD_OPEN_METHOD: &str = "record.open";
+pub const RECORD_SHOW_METHOD: &str = "record.show";
+pub const RECORD_EDIT_METHOD: &str = "record.edit";
+pub const RECORD_START_METHOD: &str = "record.start";
+pub const RECORD_DONE_METHOD: &str = "record.done";
 
 #[rpc(client, server, namespace = "system")]
 pub trait SystemApi {
@@ -26,6 +30,14 @@ pub trait ProjectApi {
 pub trait RecordApi {
     #[method(name = "open")]
     async fn open(&self, request: OpenRecordRequest) -> RpcResult<RecordResponse>;
+    #[method(name = "show")]
+    async fn show(&self, request: RecordIdRequest) -> RpcResult<RecordResponse>;
+    #[method(name = "edit")]
+    async fn edit(&self, request: EditRecordRequest) -> RpcResult<RecordResponse>;
+    #[method(name = "start")]
+    async fn start(&self, request: RecordIdRequest) -> RpcResult<RecordResponse>;
+    #[method(name = "done")]
+    async fn done(&self, request: DoneRecordRequest) -> RpcResult<RecordResponse>;
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -81,11 +93,26 @@ pub struct ProjectScopeRequest {
     pub project_slugs: Vec<String>,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RecordIdRequest {
+    pub id: u64,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct EditRecordRequest {
+    pub id: u64,
+    pub body: String,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DoneRecordRequest {
+    pub id: u64,
+    pub completion_resolution: Option<String>,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RecordResponse {
     pub id: u64,
     pub body: String,
     pub project_scope: ProjectScopeRequest,
     pub status: String,
+    pub completion_resolution: Option<String>,
 }
 impl From<Record> for RecordResponse {
     fn from(record: Record) -> Self {
@@ -97,8 +124,11 @@ impl From<Record> for RecordResponse {
             },
             status: match record.status {
                 RecordStatus::Open => "open",
+                RecordStatus::InProgress => "in_progress",
+                RecordStatus::Done => "done",
             }
             .into(),
+            completion_resolution: record.completion_resolution,
         }
     }
 }

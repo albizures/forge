@@ -1,9 +1,9 @@
 //! Command-line adapter that calls the running Forge daemon.
 
 use forge_rpc::{
-    OpenRecordRequest, ProjectApiClient, ProjectHereRequest, ProjectHereResponse,
-    ProjectScopeRequest, RecordApiClient, RecordResponse, RegisterProjectRequest,
-    RegisterProjectResponse, SystemApiClient, SystemStatusResponse,
+    DoneRecordRequest, EditRecordRequest, OpenRecordRequest, ProjectApiClient, ProjectHereRequest,
+    ProjectHereResponse, ProjectScopeRequest, RecordApiClient, RecordIdRequest, RecordResponse,
+    RegisterProjectRequest, RegisterProjectResponse, SystemApiClient, SystemStatusResponse,
 };
 use jsonrpsee::http_client::HttpClientBuilder;
 use std::{env, time::Duration};
@@ -94,6 +94,65 @@ pub async fn request_open_record(
 pub fn render_record_opened(record: &RecordResponse) -> String {
     format!("Opened Record {} ({})", record.id, record.status)
 }
+
+/// Requests a Record lifecycle operation through the daemon.
+///
+/// # Errors
+///
+/// Returns an endpoint or daemon validation error.
+pub async fn request_show_record(url: &str, id: u64) -> Result<RecordResponse, String> {
+    client(url)?
+        .show(RecordIdRequest { id })
+        .await
+        .map_err(record_error("show"))
+}
+/// # Errors
+///
+/// Returns an endpoint or daemon validation error.
+pub async fn request_edit_record(url: &str, id: u64, body: &str) -> Result<RecordResponse, String> {
+    client(url)?
+        .edit(EditRecordRequest {
+            id,
+            body: body.into(),
+        })
+        .await
+        .map_err(record_error("edit"))
+}
+/// # Errors
+///
+/// Returns an endpoint or daemon validation error.
+pub async fn request_start_record(url: &str, id: u64) -> Result<RecordResponse, String> {
+    client(url)?
+        .start(RecordIdRequest { id })
+        .await
+        .map_err(record_error("start"))
+}
+/// # Errors
+///
+/// Returns an endpoint or daemon validation error.
+pub async fn request_done_record(
+    url: &str,
+    id: u64,
+    completion_resolution: Option<String>,
+) -> Result<RecordResponse, String> {
+    client(url)?
+        .done(DoneRecordRequest {
+            id,
+            completion_resolution,
+        })
+        .await
+        .map_err(record_error("done"))
+}
+fn record_error(operation: &'static str) -> impl FnOnce(jsonrpsee::core::client::Error) -> String {
+    move |error| format!("could not {operation} Record through Forge daemon: {error}")
+}
+#[must_use]
+pub fn render_record(record: &RecordResponse) -> String {
+    format!(
+        "Record {} ({})\n\n{}",
+        record.id, record.status, record.body
+    )
+}
 /// Requests daemon status.
 ///
 /// # Errors
@@ -148,7 +207,8 @@ mod tests {
                 project_scope: ProjectScopeRequest {
                     project_slugs: vec![]
                 },
-                status: "open".into()
+                status: "open".into(),
+                completion_resolution: None,
             }),
             "Opened Record 4 (open)"
         );

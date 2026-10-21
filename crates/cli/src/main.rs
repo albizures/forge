@@ -1,8 +1,9 @@
 use clap::{Args, Parser, Subcommand};
 use forge_cli::{
     render_human_status, render_json_status, render_project_here, render_project_registered,
-    render_record_opened, request_open_record, request_project_here, request_register_project,
-    request_status, server_url_from_process,
+    render_record, render_record_opened, request_done_record, request_edit_record,
+    request_open_record, request_project_here, request_register_project, request_show_record,
+    request_start_record, request_status, server_url_from_process,
 };
 use std::io::Read;
 
@@ -50,6 +51,42 @@ enum AddCommand {
 enum RecordCommand {
     /// Open a Record with an explicit Project Scope. Use --no-projects for an empty scope.
     Open(OpenRecordArgs),
+    /// Show a Record.
+    Show(RecordIdArgs),
+    /// Edit a non-Done Record Body.
+    Edit(EditRecordArgs),
+    /// Advance an open Record to in-progress.
+    Start(RecordIdArgs),
+    /// Complete an in-progress Record.
+    Done(DoneRecordArgs),
+}
+#[derive(Args, Debug)]
+struct RecordIdArgs {
+    id: u64,
+    #[arg(long, value_name = "URL")]
+    server_url: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Args, Debug)]
+struct EditRecordArgs {
+    id: u64,
+    #[arg(long)]
+    body: String,
+    #[arg(long, value_name = "URL")]
+    server_url: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Args, Debug)]
+struct DoneRecordArgs {
+    id: u64,
+    #[arg(long)]
+    resolution: Option<String>,
+    #[arg(long, value_name = "URL")]
+    server_url: Option<String>,
+    #[arg(long)]
+    json: bool,
 }
 #[derive(Args, Debug)]
 #[command(group(clap::ArgGroup::new("scope").required(true).args(["project", "no_projects"])))]
@@ -83,9 +120,47 @@ async fn main() {
                 },
         } => add_project(&folder, &slug, server_url.as_deref()).await,
         Command::Here { server_url } => here(server_url.as_deref()).await,
-        Command::Record {
-            command: RecordCommand::Open(args),
-        } => open_record(args).await,
+        Command::Record { command } => match command {
+            RecordCommand::Open(args) => open_record(args).await,
+            RecordCommand::Show(args) => record_result(
+                "show",
+                args.json,
+                request_show_record(
+                    &server_url_from_process(args.server_url.as_deref()),
+                    args.id,
+                )
+                .await,
+            ),
+            RecordCommand::Edit(args) => record_result(
+                "edit",
+                args.json,
+                request_edit_record(
+                    &server_url_from_process(args.server_url.as_deref()),
+                    args.id,
+                    &args.body,
+                )
+                .await,
+            ),
+            RecordCommand::Start(args) => record_result(
+                "start",
+                args.json,
+                request_start_record(
+                    &server_url_from_process(args.server_url.as_deref()),
+                    args.id,
+                )
+                .await,
+            ),
+            RecordCommand::Done(args) => record_result(
+                "done",
+                args.json,
+                request_done_record(
+                    &server_url_from_process(args.server_url.as_deref()),
+                    args.id,
+                    args.resolution,
+                )
+                .await,
+            ),
+        },
     };
     std::process::exit(exit_code);
 }
@@ -139,6 +214,30 @@ async fn add_project(folder: &str, slug: &str, flag: Option<&str>) -> i32 {
         }
     }
 }
+fn record_result(
+    operation: &str,
+    json: bool,
+    result: Result<forge_rpc::RecordResponse, String>,
+) -> i32 {
+    match result {
+        Ok(record) => {
+            println!(
+                "{}",
+                if json {
+                    serde_json::to_string(&record).expect("RecordResponse must serialize")
+                } else {
+                    render_record(&record)
+                }
+            );
+            0
+        }
+        Err(error) => {
+            eprintln!("forge record {operation}: {error}");
+            1
+        }
+    }
+}
+
 async fn open_record(args: OpenRecordArgs) -> i32 {
     let body = if args.body == "-" {
         let mut body = String::new();

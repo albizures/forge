@@ -44,7 +44,8 @@ impl SqliteProjectRepository {
             CREATE TABLE IF NOT EXISTS records (
                 id INTEGER PRIMARY KEY NOT NULL,
                 body TEXT NOT NULL,
-                status TEXT NOT NULL CHECK (status = 'open')
+                status TEXT NOT NULL CHECK (status IN ('open', 'in_progress', 'done')),
+                completion_resolution TEXT
             );
             CREATE TABLE IF NOT EXISTS record_projects (
                 record_id INTEGER NOT NULL REFERENCES records(id),
@@ -53,6 +54,7 @@ impl SqliteProjectRepository {
             );",
             )
             .map_err(storage_error)?;
+        migrate_record_status_schema(&connection)?;
         Ok(Self {
             connection: Mutex::new(connection),
         })
@@ -196,8 +198,163 @@ impl RecordRepository for SqliteProjectRepository {
             body: record.body.clone(),
             project_slugs: record.project_slugs.clone(),
             status: RecordStatus::Open,
+            completion_resolution: None,
         })
     }
+
+    fn show_record(&self, id: u64) -> Result<Record, RegistrationError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        load_record(&connection, id)
+    }
+
+    fn edit_record(&self, id: u64, body: &str) -> Result<Record, RegistrationError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        let updated = connection
+            .execute(
+                "UPDATE records SET body = ?1 WHERE id = ?2 AND status != 'done'",
+                params![body, id.cast_signed()],
+            )
+            .map_err(storage_error)?;
+        if updated == 0 {
+            return record_or_transition_error(&connection, id);
+        }
+        load_record(&connection, id)
+    }
+
+    fn start_record(&self, id: u64) -> Result<Record, RegistrationError> {
+        transition_record(&self.connection, id, "open", "in_progress", None)
+    }
+
+    fn done_record(
+        &self,
+        id: u64,
+        completion_resolution: Option<&str>,
+    ) -> Result<Record, RegistrationError> {
+        transition_record(
+            &self.connection,
+            id,
+            "in_progress",
+            "done",
+            completion_resolution,
+        )
+    }
+}
+
+fn transition_record(
+    connection: &Mutex<Connection>,
+    id: u64,
+    from: &str,
+    to: &str,
+    completion_resolution: Option<&str>,
+) -> Result<Record, RegistrationError> {
+    let connection = connection
+        .lock()
+        .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+    let updated = connection
+        .execute(
+            "UPDATE records SET status = ?1, completion_resolution = ?2 WHERE id = ?3 AND status = ?4",
+            params![to, completion_resolution, id.cast_signed(), from],
+        )
+        .map_err(storage_error)?;
+    if updated == 0 {
+        return record_or_transition_error(&connection, id);
+    }
+    load_record(&connection, id)
+}
+
+fn record_or_transition_error(
+    connection: &Connection,
+    id: u64,
+) -> Result<Record, RegistrationError> {
+    match load_record(connection, id) {
+        Ok(_) => Err(RegistrationError::new(
+            "invalid-status-transition",
+            "record status can only advance from open to in-progress to done",
+        )),
+        Err(error) => Err(error),
+    }
+}
+
+fn load_record(connection: &Connection, id: u64) -> Result<Record, RegistrationError> {
+    let (body, status, completion_resolution) = connection
+        .query_row(
+            "SELECT body, status, completion_resolution FROM records WHERE id = ?1",
+            [id.cast_signed()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get(2)?,
+                ))
+            },
+        )
+        .map_err(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => {
+                RegistrationError::new("record-not-found", format!("Record {id} does not exist"))
+            }
+            error => storage_error(error),
+        })?;
+    let project_slugs = connection
+        .prepare(
+            "SELECT project_slug FROM record_projects WHERE record_id = ?1 ORDER BY project_slug",
+        )
+        .map_err(storage_error)?
+        .query_map([id.cast_signed()], |row| row.get(0))
+        .map_err(storage_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(storage_error)?;
+    let status = match status.as_str() {
+        "open" => RecordStatus::Open,
+        "in_progress" => RecordStatus::InProgress,
+        "done" => RecordStatus::Done,
+        _ => {
+            return Err(RegistrationError::new(
+                "storage",
+                "stored Record has an invalid status",
+            ));
+        }
+    };
+    Ok(Record {
+        id,
+        body,
+        project_slugs,
+        status,
+        completion_resolution,
+    })
+}
+
+fn migrate_record_status_schema(connection: &Connection) -> Result<(), RegistrationError> {
+    let schema: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'records'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(storage_error)?;
+    if schema.contains("status = 'open'") {
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys = OFF;
+                CREATE TABLE records_new (
+                    id INTEGER PRIMARY KEY NOT NULL,
+                    body TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK (status IN ('open', 'in_progress', 'done')),
+                    completion_resolution TEXT
+                );
+                INSERT INTO records_new (id, body, status) SELECT id, body, status FROM records;
+                DROP TABLE records;
+                ALTER TABLE records_new RENAME TO records;
+                PRAGMA foreign_keys = ON;",
+            )
+            .map_err(storage_error)?;
+    }
+    Ok(())
 }
 
 fn folders_overlap(left: &Path, right: &Path) -> bool {
@@ -273,6 +430,36 @@ mod tests {
             "folder-overlap"
         );
     }
+    #[test]
+    fn persists_content_changes_and_strict_lifecycle() {
+        let store = SqliteProjectRepository::in_memory().unwrap();
+        let record = store
+            .open_record(&NewRecord {
+                body: "original".into(),
+                project_slugs: vec![],
+            })
+            .unwrap();
+        assert_eq!(
+            store.edit_record(record.id, "revised").unwrap().body,
+            "revised"
+        );
+        assert_eq!(
+            store.done_record(record.id, None).unwrap_err().code,
+            "invalid-status-transition"
+        );
+        assert_eq!(
+            store.start_record(record.id).unwrap().status,
+            RecordStatus::InProgress
+        );
+        let done = store.done_record(record.id, Some("finished")).unwrap();
+        assert_eq!(done.completion_resolution.as_deref(), Some("finished"));
+        assert_eq!(store.show_record(record.id).unwrap(), done);
+        assert_eq!(
+            store.edit_record(record.id, "later").unwrap_err().code,
+            "invalid-status-transition"
+        );
+    }
+
     #[test]
     fn persists_scoped_and_unscoped_open_records() {
         let store = SqliteProjectRepository::in_memory().unwrap();
