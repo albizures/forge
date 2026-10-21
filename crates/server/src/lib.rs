@@ -26,9 +26,10 @@ use forge_app::{
 };
 use forge_rpc::{
     DoneRecordRequest, EditRecordRequest, ListRecordsRequest, ListRecordsResponse,
-    OpenRecordRequest, ProjectApiServer, ProjectHereRequest, ProjectHereResponse, RecordApiServer,
-    RecordIdRequest, RecordResponse, RegisterProjectRequest, RegisterProjectResponse,
-    RelateRecordRequest, SystemApiServer, SystemStatusResponse,
+    ManagementStatus, OpenRecordRequest, ProjectApiServer, ProjectHereRequest, ProjectHereResponse,
+    RecordApiServer, RecordIdRequest, RecordResponse, RegisterProjectRequest,
+    RegisterProjectResponse, RelateRecordRequest, RevisionIdentity, SystemApiServer,
+    SystemStatusResponse,
 };
 use forge_store::SqliteProjectRepository;
 use jsonrpsee::{
@@ -193,7 +194,11 @@ fn application_from_process() -> Result<Application, String> {
 #[async_trait]
 impl SystemApiServer for Daemon {
     async fn status(&self) -> RpcResult<SystemStatusResponse> {
-        Ok(self.application.status().into())
+        let revision_identity = RevisionIdentity::from(forge_build_info::current());
+        Ok(SystemStatusResponse::new(
+            &self.application.status(),
+            ManagementStatus::new(revision_identity, None),
+        ))
     }
 }
 

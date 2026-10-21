@@ -51,18 +51,99 @@ pub trait RecordApi {
     async fn unrelate(&self, request: RelateRecordRequest) -> RpcResult<RecordResponse>;
 }
 
+/// Immutable daemon build facts reported through the management protocol.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RevisionIdentity {
+    pub commit: String,
+    pub dirty: bool,
+    pub management_protocol_revision: u32,
+    pub version: String,
+}
+
+impl From<forge_build_info::BuildInfo> for RevisionIdentity {
+    fn from(build_info: forge_build_info::BuildInfo) -> Self {
+        Self {
+            commit: build_info.commit.to_owned(),
+            dirty: build_info.dirty,
+            management_protocol_revision: build_info.management_protocol_revision,
+            version: build_info.version.to_owned(),
+        }
+    }
+}
+
+/// Management facts added to `system.status` without changing its legacy fields.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ManagementStatus {
+    pub management_protocol_revision: u32,
+    pub revision_identity: RevisionIdentity,
+    pub daemon_instance_id: Option<String>,
+}
+
+impl ManagementStatus {
+    #[must_use]
+    pub fn new(revision_identity: RevisionIdentity, daemon_instance_id: Option<String>) -> Self {
+        Self {
+            management_protocol_revision: revision_identity.management_protocol_revision,
+            revision_identity,
+            daemon_instance_id,
+        }
+    }
+
+    /// Validates this status against revisions declared by the consumer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an explicit error rather than allowing a consumer to infer compatibility.
+    pub fn validate_supported_by(
+        &self,
+        supported_revisions: &[u32],
+    ) -> Result<(), UnsupportedManagementProtocolRevision> {
+        if supported_revisions.contains(&self.management_protocol_revision) {
+            Ok(())
+        } else {
+            Err(UnsupportedManagementProtocolRevision {
+                reported: self.management_protocol_revision,
+                supported: supported_revisions.to_vec(),
+            })
+        }
+    }
+}
+
+/// A consumer does not implement the daemon's reported protocol revision.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UnsupportedManagementProtocolRevision {
+    pub reported: u32,
+    pub supported: Vec<u32>,
+}
+
+impl std::fmt::Display for UnsupportedManagementProtocolRevision {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "unsupported management protocol revision {}; supported revisions: {:?}",
+            self.reported, self.supported
+        )
+    }
+}
+
+impl std::error::Error for UnsupportedManagementProtocolRevision {}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SystemStatusResponse {
     pub name: String,
     pub version: String,
     pub ready: bool,
+    pub management: ManagementStatus,
 }
-impl From<ApplicationStatus> for SystemStatusResponse {
-    fn from(status: ApplicationStatus) -> Self {
+
+impl SystemStatusResponse {
+    #[must_use]
+    pub fn new(status: &ApplicationStatus, management: ManagementStatus) -> Self {
         Self {
             name: status.name.to_owned(),
             version: status.version.to_owned(),
             ready: status.ready,
+            management,
         }
     }
 }
@@ -191,5 +272,69 @@ impl From<RegistrationError> for RegistrationErrorResponse {
             code: error.code.into(),
             message: error.message,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn revision_identity(revision: u32) -> RevisionIdentity {
+        RevisionIdentity {
+            commit: "0123456789abcdef".into(),
+            dirty: false,
+            management_protocol_revision: revision,
+            version: "1.2.3".into(),
+        }
+    }
+
+    #[test]
+    fn status_serialization_retains_legacy_fields_and_adds_management() {
+        let response = SystemStatusResponse {
+            name: "forge".into(),
+            version: "1.2.3".into(),
+            ready: true,
+            management: ManagementStatus::new(revision_identity(1), None),
+        };
+
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["name"], "forge");
+        assert_eq!(json["version"], "1.2.3");
+        assert_eq!(json["ready"], true);
+        assert_eq!(json["management"]["management_protocol_revision"], 1);
+        assert_eq!(
+            json["management"]["revision_identity"]["commit"],
+            "0123456789abcdef"
+        );
+        assert!(json["management"]["daemon_instance_id"].is_null());
+
+        assert_eq!(
+            serde_json::from_value::<SystemStatusResponse>(json).unwrap(),
+            response
+        );
+    }
+
+    #[test]
+    fn managed_status_includes_its_daemon_instance_id() {
+        let management = ManagementStatus::new(revision_identity(1), Some("instance-123".into()));
+
+        assert_eq!(
+            management.daemon_instance_id.as_deref(),
+            Some("instance-123")
+        );
+    }
+
+    #[test]
+    fn validation_rejects_unsupported_management_protocol_revisions() {
+        let error = ManagementStatus::new(revision_identity(2), None)
+            .validate_supported_by(&[1])
+            .unwrap_err();
+
+        assert_eq!(error.reported, 2);
+        assert_eq!(error.supported, vec![1]);
+        assert_eq!(
+            error.to_string(),
+            "unsupported management protocol revision 2; supported revisions: [1]"
+        );
     }
 }

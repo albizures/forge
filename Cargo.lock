@@ -427,8 +427,10 @@ name = "forge-rpc"
 version = "0.1.0"
 dependencies = [
  "forge-app",
+ "forge-build-info",
  "jsonrpsee",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
