@@ -23,8 +23,8 @@ use axum::{
 };
 use forge_app::{Application, ApplicationStatus, Project, RegistrationError, RepositoryInspector};
 use forge_rpc::{
-    ProjectApiServer, RegisterProjectRequest, RegisterProjectResponse, SystemApiServer,
-    SystemStatusResponse,
+    ProjectApiServer, ProjectHereRequest, ProjectHereResponse, RegisterProjectRequest,
+    RegisterProjectResponse, SystemApiServer, SystemStatusResponse,
 };
 use forge_store::SqliteProjectRepository;
 use jsonrpsee::{
@@ -202,10 +202,19 @@ impl ProjectApiServer for Daemon {
         self.application
             .register_project(Path::new(&request.folder), &request.slug)
             .map(Into::into)
-            .map_err(|error| {
-                jsonrpsee::types::ErrorObjectOwned::owned(-32001, error.message, Some(error.code))
-            })
+            .map_err(rpc_error)
     }
+
+    async fn here(&self, request: ProjectHereRequest) -> RpcResult<ProjectHereResponse> {
+        self.application
+            .project_here(Path::new(&request.folder))
+            .map(Into::into)
+            .map_err(rpc_error)
+    }
+}
+
+fn rpc_error(error: RegistrationError) -> jsonrpsee::types::ErrorObjectOwned {
+    jsonrpsee::types::ErrorObjectOwned::owned(-32001, error.message, Some(error.code))
 }
 
 /// Builds the single listener's router, including the browser and typed RPC services.
@@ -392,7 +401,9 @@ mod tests {
         http::{Request, header},
     };
     use forge_app::{Application, Project, RegistrationError, RepositoryInspector};
-    use forge_rpc::{ProjectApiClient, RegisterProjectRequest, SystemApiClient};
+    use forge_rpc::{
+        ProjectApiClient, ProjectHereRequest, RegisterProjectRequest, SystemApiClient,
+    };
     use forge_store::SqliteProjectRepository;
     use jsonrpsee::http_client::HttpClientBuilder;
     use tower::ServiceExt;
@@ -535,18 +546,26 @@ mod tests {
         let status = client.status().await.unwrap();
         assert_eq!(status.name, "forge");
         assert!(status.ready);
+        let folder = std::fs::canonicalize(format!("{}/../..", env!("CARGO_MANIFEST_DIR")))
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
         let project = client
             .register(RegisterProjectRequest {
-                folder: format!("{}/../..", env!("CARGO_MANIFEST_DIR")),
+                folder: folder.clone(),
                 slug: "server-test-project".into(),
             })
             .await
             .unwrap();
         assert_eq!(project.slug, "server-test-project");
-        assert_eq!(
-            project.registered_folder,
-            format!("{}/../..", env!("CARGO_MANIFEST_DIR"))
-        );
+        assert_eq!(project.registered_folder, folder);
+        let here = client
+            .here(ProjectHereRequest {
+                folder: format!("{folder}/crates"),
+            })
+            .await
+            .unwrap();
+        assert_eq!(here, project);
 
         server.abort();
     }

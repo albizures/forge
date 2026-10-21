@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 pub const SYSTEM_STATUS_METHOD: &str = "system.status";
 pub const PROJECT_REGISTER_METHOD: &str = "project.register";
+pub const PROJECT_HERE_METHOD: &str = "project.here";
 
 #[rpc(client, server, namespace = "system")]
 pub trait SystemApi {
@@ -19,6 +20,10 @@ pub trait ProjectApi {
     #[method(name = "register")]
     async fn register(&self, request: RegisterProjectRequest)
     -> RpcResult<RegisterProjectResponse>;
+
+    /// Resolves the Project containing the supplied current folder.
+    #[method(name = "here")]
+    async fn here(&self, request: ProjectHereRequest) -> RpcResult<ProjectHereResponse>;
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -50,6 +55,15 @@ pub struct RegisterProjectResponse {
     pub registered_folder: String,
     pub origin_url: String,
 }
+
+/// The client process current folder to resolve.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProjectHereRequest {
+    pub folder: String,
+}
+
+/// The retained registration identity for the current Project.
+pub type ProjectHereResponse = RegisterProjectResponse;
 
 impl From<Project> for RegisterProjectResponse {
     fn from(project: Project) -> Self {

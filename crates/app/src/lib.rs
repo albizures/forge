@@ -50,6 +50,13 @@ pub trait ProjectRepository: Send + Sync {
     ///
     /// Returns a user-facing error when persistence or identity validation fails.
     fn register(&self, project: &Project) -> Result<Project, RegistrationError>;
+
+    /// Finds the Project whose Registered Folder contains `folder`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-facing error when no Project contains the folder.
+    fn find_containing(&self, folder: &Path) -> Result<Project, RegistrationError>;
 }
 
 /// The application boundary for operations shared by all transports.
@@ -90,6 +97,21 @@ impl Application {
         let mut project = self.inspector.inspect(folder)?;
         slug.clone_into(&mut project.slug);
         self.projects.register(&project)
+    }
+
+    /// Finds the Project containing the supplied current folder.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-facing error when the folder is outside every Project.
+    pub fn project_here(&self, folder: &Path) -> Result<Project, RegistrationError> {
+        let folder = std::fs::canonicalize(folder).map_err(|_| {
+            RegistrationError::new(
+                "invalid-folder",
+                format!("`{}` is not an existing folder", folder.display()),
+            )
+        })?;
+        self.projects.find_containing(&folder)
     }
 
     /// Returns readiness information for this application instance.

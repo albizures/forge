@@ -3,8 +3,8 @@
 use std::{env, time::Duration};
 
 use forge_rpc::{
-    ProjectApiClient, RegisterProjectRequest, RegisterProjectResponse, SystemApiClient,
-    SystemStatusResponse,
+    ProjectApiClient, ProjectHereRequest, ProjectHereResponse, RegisterProjectRequest,
+    RegisterProjectResponse, SystemApiClient, SystemStatusResponse,
 };
 use jsonrpsee::http_client::HttpClientBuilder;
 
@@ -65,6 +65,38 @@ pub fn render_project_registered(project: &RegisterProjectResponse) -> String {
     )
 }
 
+/// Requests the Project containing the client process current folder.
+///
+/// # Errors
+///
+/// Returns an error when the endpoint is unavailable or no Project contains `folder`.
+pub async fn request_project_here(
+    server_url: &str,
+    folder: &str,
+) -> Result<ProjectHereResponse, String> {
+    let client = HttpClientBuilder::default()
+        .request_timeout(REQUEST_TIMEOUT)
+        .build(server_url)
+        .map_err(|error| {
+            format!("could not configure Forge daemon endpoint `{server_url}`: {error}")
+        })?;
+    client
+        .here(ProjectHereRequest {
+            folder: folder.to_owned(),
+        })
+        .await
+        .map_err(|error| format!("could not find Project through Forge daemon: {error}"))
+}
+
+/// Renders the retained registration identity of the current Project.
+#[must_use]
+pub fn render_project_here(project: &ProjectHereResponse) -> String {
+    format!(
+        "Project `{}` is registered at `{}` (origin: `{}`).",
+        project.slug, project.registered_folder, project.origin_url
+    )
+}
+
 /// Requests the shared status result through the daemon's JSON-RPC endpoint.
 ///
 /// # Errors
@@ -110,7 +142,7 @@ mod tests {
 
     use super::{
         DEFAULT_SERVER_URL, REQUEST_TIMEOUT, render_human_status, render_json_status,
-        request_status, server_url,
+        render_project_here, request_status, server_url,
     };
 
     #[test]
@@ -124,6 +156,19 @@ mod tests {
             "http://environment/rpc"
         );
         assert_eq!(server_url(None, None), DEFAULT_SERVER_URL);
+    }
+
+    #[test]
+    fn project_here_output_includes_the_registration_identity() {
+        let project = forge_rpc::ProjectHereResponse {
+            slug: "alpha".into(),
+            registered_folder: "/repos/alpha".into(),
+            origin_url: "https://example.test/alpha.git".into(),
+        };
+        assert_eq!(
+            render_project_here(&project),
+            "Project `alpha` is registered at `/repos/alpha` (origin: `https://example.test/alpha.git`)."
+        );
     }
 
     #[test]

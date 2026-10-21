@@ -111,6 +111,38 @@ impl ProjectRepository for SqliteProjectRepository {
             Err(error) => Err(storage_error(error)),
         }
     }
+
+    fn find_containing(&self, folder: &Path) -> Result<Project, RegistrationError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        let projects = connection
+            .prepare("SELECT slug, registered_folder, origin_url FROM projects")
+            .map_err(storage_error)?
+            .query_map([], |row| {
+                Ok(Project {
+                    slug: row.get(0)?,
+                    registered_folder: std::path::PathBuf::from(row.get::<_, String>(1)?),
+                    origin_url: row.get(2)?,
+                })
+            })
+            .map_err(storage_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(storage_error)?;
+        projects
+            .into_iter()
+            .find(|project| folder.starts_with(&project.registered_folder))
+            .ok_or_else(|| {
+                RegistrationError::new(
+                    "project-not-found",
+                    format!(
+                        "`{}` is not a Project or within a registered Project",
+                        folder.display()
+                    ),
+                )
+            })
+    }
 }
 
 fn folders_overlap(left: &Path, right: &Path) -> bool {
@@ -129,7 +161,7 @@ fn storage_error(error: rusqlite::Error) -> RegistrationError {
 mod tests {
     use super::SqliteProjectRepository;
     use forge_app::{Project, ProjectRepository};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     fn project(slug: &str, folder: &str) -> Project {
         Project {
@@ -137,6 +169,32 @@ mod tests {
             registered_folder: PathBuf::from(folder),
             origin_url: "https://example.test/repo.git".into(),
         }
+    }
+
+    #[test]
+    fn finds_a_project_from_its_registered_folder_or_descendant() {
+        let store = SqliteProjectRepository::in_memory().unwrap();
+        let alpha = project("alpha", "/repos/alpha");
+        store.register(&alpha).unwrap();
+
+        assert_eq!(
+            store.find_containing(Path::new("/repos/alpha")).unwrap(),
+            alpha
+        );
+        assert_eq!(
+            store
+                .find_containing(Path::new("/repos/alpha/src/module"))
+                .unwrap()
+                .slug,
+            "alpha"
+        );
+        assert_eq!(
+            store
+                .find_containing(Path::new("/repos/outside"))
+                .unwrap_err()
+                .code,
+            "project-not-found"
+        );
     }
 
     #[test]
