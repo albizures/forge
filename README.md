@@ -4,6 +4,9 @@ Forge is a daemon-first Rust application foundation. One running `forge-server`
 daemon exposes status and supported Project and Record operations through a Rust
 CLI and JSON-RPC; its browser page currently exposes read-only status.
 
+For the released Forgeup-facing management interface, see
+[`crates/docs/management-protocol.md`](crates/docs/management-protocol.md).
+
 ## Prerequisites
 
 - Rust 1.98.0 or newer (the repository selects its toolchain with
