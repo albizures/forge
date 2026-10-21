@@ -4,13 +4,15 @@
 //! exposes an unauthenticated service, so use that only on a trusted private network.
 
 use std::{
-    env, fs,
+    env, fs, io,
     net::SocketAddr,
     path::{Path, PathBuf},
     process::Command,
     str::FromStr,
     sync::Arc,
 };
+
+use tokio::io::AsyncReadExt;
 
 use askama::Template;
 use axum::{
@@ -571,6 +573,10 @@ pub async fn serve(config: DaemonConfig) -> Result<(), std::io::Error> {
         .managed
         .as_ref()
         .map(|managed| managed.daemon_instance_id.clone());
+    let lifecycle_shutdown = match config.managed.as_ref() {
+        Some(managed) => Some(bind_lifecycle_control(managed)?),
+        None => None,
+    };
     axum::serve(
         listener,
         router(Daemon::with_daemon_instance_id(
@@ -578,8 +584,143 @@ pub async fn serve(config: DaemonConfig) -> Result<(), std::io::Error> {
             daemon_instance_id,
         )),
     )
-    .with_graceful_shutdown(shutdown_signal())
+    .with_graceful_shutdown(wait_for_shutdown(lifecycle_shutdown))
     .await
+}
+
+async fn wait_for_shutdown(lifecycle_shutdown: Option<LifecycleControl>) {
+    match lifecycle_shutdown {
+        Some(control) => tokio::select! {
+            () = shutdown_signal() => {},
+            result = control.wait_for_authenticated_shutdown() => match result {
+                Ok(()) => info!("authenticated lifecycle shutdown received; shutting down Forge daemon"),
+                Err(error) => warn!(%error, "lifecycle control endpoint failed; shutting down Forge daemon"),
+            },
+        },
+        None => shutdown_signal().await,
+    }
+}
+
+/// A per-managed-daemon local lifecycle listener. It is deliberately separate
+/// from the public HTTP/JSON-RPC listener.
+enum LifecycleControl {
+    #[cfg(unix)]
+    Unix {
+        listener: tokio::net::UnixListener,
+        endpoint: PathBuf,
+        credential: String,
+    },
+    #[cfg(windows)]
+    Windows {
+        endpoint: String,
+        credential: String,
+    },
+}
+
+impl LifecycleControl {
+    async fn wait_for_authenticated_shutdown(self) -> io::Result<()> {
+        match self {
+            #[cfg(unix)]
+            Self::Unix {
+                listener,
+                endpoint,
+                credential,
+            } => {
+                struct Cleanup(PathBuf);
+                impl Drop for Cleanup {
+                    fn drop(&mut self) {
+                        if let Err(error) = fs::remove_file(&self.0)
+                            && error.kind() != io::ErrorKind::NotFound
+                        {
+                            warn!(%error, endpoint = %self.0.display(), "failed to remove lifecycle control endpoint");
+                        }
+                    }
+                }
+                let _cleanup = Cleanup(endpoint);
+                loop {
+                    let (mut stream, _) = listener.accept().await?;
+                    if credential_matches(&mut stream, &credential).await? {
+                        return Ok(());
+                    }
+                    warn!("rejected lifecycle shutdown request with invalid credential");
+                }
+            }
+            #[cfg(windows)]
+            Self::Windows {
+                endpoint,
+                credential,
+            } => {
+                use tokio::net::windows::named_pipe::ServerOptions;
+                loop {
+                    let mut pipe = ServerOptions::new().create(&endpoint)?;
+                    pipe.connect().await?;
+                    if credential_matches(&mut pipe, &credential).await? {
+                        return Ok(());
+                    }
+                    warn!("rejected lifecycle shutdown request with invalid credential");
+                }
+            }
+        }
+    }
+}
+
+async fn credential_matches<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut R,
+    credential: &str,
+) -> io::Result<bool> {
+    let mut request = Vec::with_capacity(credential.len() + 1);
+    loop {
+        let mut byte = [0_u8; 1];
+        if reader.read(&mut byte).await? == 0 {
+            return Ok(false);
+        }
+        if byte[0] == b'\n' {
+            break;
+        }
+        if request.len() >= 4096 {
+            return Ok(false);
+        }
+        request.push(byte[0]);
+    }
+    Ok(request == credential.as_bytes())
+}
+
+fn bind_lifecycle_control(managed: &ManagedDaemonConfig) -> io::Result<LifecycleControl> {
+    #[cfg(unix)]
+    {
+        let listener = tokio::net::UnixListener::bind(&managed.lifecycle_control_endpoint)?;
+        info!(endpoint = %managed.lifecycle_control_endpoint.display(), "Forge lifecycle control listening");
+        Ok(LifecycleControl::Unix {
+            listener,
+            endpoint: managed.lifecycle_control_endpoint.clone(),
+            credential: managed.lifecycle_credential.clone(),
+        })
+    }
+    #[cfg(windows)]
+    {
+        let endpoint = managed
+            .lifecycle_control_endpoint
+            .to_string_lossy()
+            .into_owned();
+        if endpoint.trim().is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "lifecycle control endpoint must not be empty",
+            ));
+        }
+        Ok(LifecycleControl::Windows {
+            endpoint,
+            credential: managed.lifecycle_credential.clone(),
+        })
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = managed;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "local lifecycle control is unsupported on this platform",
+        ))
+    }
 }
 
 async fn shutdown_signal() {
@@ -611,7 +752,11 @@ mod tests {
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
         path::{Path, PathBuf},
+        time::{Duration, SystemTime, UNIX_EPOCH},
     };
+
+    #[cfg(unix)]
+    use tokio::io::AsyncWriteExt;
 
     use axum::{
         body::{Body, to_bytes},
@@ -627,7 +772,7 @@ mod tests {
     use jsonrpsee::http_client::HttpClientBuilder;
     use tower::ServiceExt;
 
-    use super::{DEFAULT_BIND_ADDR, Daemon, DaemonConfig, ManagedLaunchInputs, router};
+    use super::{DEFAULT_BIND_ADDR, Daemon, DaemonConfig, ManagedLaunchInputs, router, serve};
 
     struct TestInspector;
 
@@ -710,6 +855,62 @@ mod tests {
         })
         .unwrap_err();
         assert_eq!(error, "managed daemon store path must not be empty");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn lifecycle_control_rejects_wrong_credentials_then_gracefully_stops_and_cleans_up() {
+        let unique = format!(
+            "forge-lifecycle-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let directory = std::env::temp_dir().join(unique);
+        std::fs::create_dir(&directory).unwrap();
+        let endpoint = directory.join("control.sock");
+        let config = DaemonConfig::managed(ManagedLaunchInputs {
+            bind_addr: "127.0.0.1:0".into(),
+            store_path: directory
+                .join("forge.sqlite3")
+                .to_string_lossy()
+                .into_owned(),
+            runtime_record_path: directory
+                .join("runtime.json")
+                .to_string_lossy()
+                .into_owned(),
+            lifecycle_control_endpoint: endpoint.to_string_lossy().into_owned(),
+            lifecycle_credential: "expected-credential".into(),
+            daemon_instance_id: "instance-123".into(),
+        })
+        .unwrap();
+        let mut server = tokio::spawn(serve(config));
+
+        for _ in 0..100 {
+            if endpoint.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(endpoint.exists(), "lifecycle endpoint was not created");
+        let mut wrong = tokio::net::UnixStream::connect(&endpoint).await.unwrap();
+        wrong.write_all(b"wrong-credential\n").await.unwrap();
+        drop(wrong);
+        assert!(endpoint.exists());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut server)
+                .await
+                .is_err()
+        );
+
+        let mut accepted = tokio::net::UnixStream::connect(&endpoint).await.unwrap();
+        accepted.write_all(b"expected-credential\n").await.unwrap();
+        drop(accepted);
+        server.await.unwrap().unwrap();
+        assert!(!endpoint.exists());
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[tokio::test]
