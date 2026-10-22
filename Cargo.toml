@@ -6,6 +6,7 @@ members = [
     "crates/rpc",
     "crates/server",
     "crates/store",
+    "crates/forgeup",
 ]
 resolver = "3"
 
