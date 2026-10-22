@@ -394,7 +394,7 @@ impl Application {
         body: &str,
         spec_id: u64,
     ) -> Result<Record, RegistrationError> {
-        self.require_body(body)?;
+        Self::require_body(body)?;
         self.records.open_task_under_spec(body, spec_id)
     }
 
@@ -510,7 +510,7 @@ impl Application {
         self.records.unrelate_records(child_id, parent_id)
     }
 
-    fn require_body(&self, body: &str) -> Result<(), RegistrationError> {
+    fn require_body(body: &str) -> Result<(), RegistrationError> {
         if body.trim().is_empty() {
             return Err(RegistrationError::new(
                 "invalid-body",
@@ -526,7 +526,7 @@ impl Application {
         body: &str,
         project_slugs: Vec<String>,
     ) -> Result<Record, RegistrationError> {
-        self.require_body(body)?;
+        Self::require_body(body)?;
         self.records.open_typed_record(&NewTypedRecord {
             record_type,
             body: body.to_owned(),
