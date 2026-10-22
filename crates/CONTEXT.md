@@ -85,12 +85,24 @@ An immutable, human-referenceable identifier for a Project. No two Projects shar
 _Avoid_: project name
 
 **Record**:
-Forge’s generic primary entity for representing work across multiple workflows. Its common capabilities form the foundation from which more specific Record types, such as Specs, Tasks, and Epics, may later impose additional constraints.
-_Avoid_: v1 entity, type
+Forge’s generic primary entity for representing work across multiple workflows. Its common capabilities form the foundation from which more specific Record types, such as Specs, Tasks, and Epics, impose additional constraints.
+_Avoid_: v1 entity
+
+**Record Type**:
+The immutable kind selected when a Record opens. Generic Record, Spec, and Task are the initial Record Types.
+_Avoid_: category, label
 
 **Record Identifier**:
 An opaque positive numeric identity that uniquely references a Record across Forge interfaces.
 _Avoid_: record slug, record name
+
+**Spec**:
+A Record type that defines planned work for exactly one Project and may parent Tasks.
+_Avoid_: specification, issue
+
+**Task**:
+A Record type that represents a unit of work with zero or one Project Scope. It may be opened under one Spec, from which it receives its Project Scope, or opened without a parent; its membership and scope are immutable after opening, and it may not parent another Record.
+_Avoid_: subtask, to-do
 
 **Comment**:
 A non-blank free-text entry on a Record, optionally attributed to a free-text author. Its content cannot be edited, any Forge client may delete it, and it may be added even after its Record is Done.
@@ -125,7 +137,7 @@ The required, non-blank free-text, usually Markdown, content describing the work
 _Avoid_: description
 
 **Record Relationship**:
-A typed association between two Records that may be changed at any time. Parent/child is the initial Relationship kind; future kinds may be introduced.
+A typed association between two Records. Parent/child is the initial Relationship kind; its permitted changes and participant types are constrained by Record Type, and future kinds may be introduced.
 _Avoid_: link
 
 **Completion Resolution**:

@@ -35,11 +35,21 @@ pub struct RecordRelationship {
     pub child_id: u64,
 }
 
-/// A generic, project-scoped unit of work.
+/// The immutable kind selected when a Record opens.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RecordType {
+    Generic,
+    Spec,
+    Task,
+}
+
+/// A unit of work whose immutable type governs its scope and hierarchy.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Record {
     /// Opaque, positive identity assigned by persistence.
     pub id: u64,
+    /// Immutable type selected at opening.
+    pub record_type: RecordType,
     /// Required Markdown content, separate from its structured metadata.
     pub body: String,
     /// Immutable, lexically ordered Project Scope selected at opening.
@@ -55,6 +65,14 @@ pub struct Record {
 /// A Record before persistence assigns its identity and initial status.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NewRecord {
+    pub body: String,
+    pub project_slugs: Vec<String>,
+}
+
+/// A non-generic Record before persistence assigns its identity and initial status.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NewTypedRecord {
+    pub record_type: RecordType,
     pub body: String,
     pub project_slugs: Vec<String>,
 }
@@ -168,6 +186,18 @@ pub trait RecordRepository: ProjectRepository {
     ///
     /// Returns a user-facing validation or storage failure.
     fn open_record(&self, record: &NewRecord) -> Result<Record, RegistrationError>;
+    /// Opens a non-generic Record after validating its type-specific invariants.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-facing validation or storage failure.
+    fn open_typed_record(&self, record: &NewTypedRecord) -> Result<Record, RegistrationError>;
+    /// Opens a Task beneath a Spec, assigning the Spec's scope and membership atomically.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-facing error when the parent is not a Spec or storage fails.
+    fn open_task_under_spec(&self, body: &str, spec_id: u64) -> Result<Record, RegistrationError>;
     /// Lists Records matching Project Scope membership and lifecycle status.
     ///
     /// # Errors
@@ -331,6 +361,42 @@ impl Application {
         })
     }
 
+    /// Opens a Spec for exactly one Project.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-facing error for a blank body or storage failure.
+    pub fn open_spec(&self, body: &str, project_slug: String) -> Result<Record, RegistrationError> {
+        self.open_typed_record(RecordType::Spec, body, vec![project_slug])
+    }
+
+    /// Opens a standalone Task with zero or one Project Scope.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-facing error for a blank body or storage failure.
+    pub fn open_task(
+        &self,
+        body: &str,
+        project_slug: Option<String>,
+    ) -> Result<Record, RegistrationError> {
+        self.open_typed_record(RecordType::Task, body, project_slug.into_iter().collect())
+    }
+
+    /// Opens a Task under `spec_id`, inheriting its scope and membership atomically.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-facing error for a blank body, invalid parent, or storage failure.
+    pub fn open_task_under_spec(
+        &self,
+        body: &str,
+        spec_id: u64,
+    ) -> Result<Record, RegistrationError> {
+        self.require_body(body)?;
+        self.records.open_task_under_spec(body, spec_id)
+    }
+
     /// Lists Records matching the supplied optional discovery filters.
     ///
     /// # Errors
@@ -409,6 +475,14 @@ impl Application {
         child_id: u64,
         parent_id: u64,
     ) -> Result<Record, RegistrationError> {
+        let child = self.records.show_record(child_id)?;
+        let parent = self.records.show_record(parent_id)?;
+        if child.record_type != RecordType::Generic || parent.record_type != RecordType::Generic {
+            return Err(RegistrationError::new(
+                "invalid-relationship",
+                "only Generic Records may be related after opening",
+            ));
+        }
         self.records.relate_records(child_id, parent_id)
     }
 
@@ -422,7 +496,39 @@ impl Application {
         child_id: u64,
         parent_id: u64,
     ) -> Result<Record, RegistrationError> {
+        let child = self.records.show_record(child_id)?;
+        let parent = self.records.show_record(parent_id)?;
+        if child.record_type != RecordType::Generic || parent.record_type != RecordType::Generic {
+            return Err(RegistrationError::new(
+                "invalid-relationship",
+                "only Generic Record Relationships may be removed",
+            ));
+        }
         self.records.unrelate_records(child_id, parent_id)
+    }
+
+    fn require_body(&self, body: &str) -> Result<(), RegistrationError> {
+        if body.trim().is_empty() {
+            return Err(RegistrationError::new(
+                "invalid-body",
+                "record body must not be blank",
+            ));
+        }
+        Ok(())
+    }
+
+    fn open_typed_record(
+        &self,
+        record_type: RecordType,
+        body: &str,
+        project_slugs: Vec<String>,
+    ) -> Result<Record, RegistrationError> {
+        self.require_body(body)?;
+        self.records.open_typed_record(&NewTypedRecord {
+            record_type,
+            body: body.to_owned(),
+            project_slugs,
+        })
     }
 
     /// Lists a Record's Forge-authored Update Log newest first.
@@ -520,6 +626,7 @@ mod tests {
             let mut records = self.records.lock().unwrap();
             let record = Record {
                 id: (records.len() + 1) as u64,
+                record_type: RecordType::Generic,
                 body: record.body.clone(),
                 project_slugs: record.project_slugs.clone(),
                 status: RecordStatus::Open,
@@ -528,6 +635,56 @@ mod tests {
             };
             records.push(record.clone());
             Ok(record)
+        }
+        fn open_typed_record(&self, record: &NewTypedRecord) -> Result<Record, RegistrationError> {
+            let mut records = self.records.lock().unwrap();
+            let record = Record {
+                id: (records.len() + 1) as u64,
+                record_type: record.record_type,
+                body: record.body.clone(),
+                project_slugs: record.project_slugs.clone(),
+                status: RecordStatus::Open,
+                completion_resolution: None,
+                relationships: vec![],
+            };
+            records.push(record.clone());
+            Ok(record)
+        }
+        fn open_task_under_spec(
+            &self,
+            body: &str,
+            spec_id: u64,
+        ) -> Result<Record, RegistrationError> {
+            let spec = self.show_record(spec_id)?;
+            if spec.record_type != RecordType::Spec {
+                return Err(RegistrationError::new(
+                    "invalid-parent-type",
+                    "a Task may be opened under a Spec only",
+                ));
+            }
+            let mut records = self.records.lock().unwrap();
+            let task_id = (records.len() + 1) as u64;
+            let relationship = RecordRelationship {
+                kind: RecordRelationshipKind::ParentChild,
+                parent_id: spec_id,
+                child_id: task_id,
+            };
+            let task = Record {
+                id: task_id,
+                record_type: RecordType::Task,
+                body: body.to_owned(),
+                project_slugs: spec.project_slugs,
+                status: RecordStatus::Open,
+                completion_resolution: None,
+                relationships: vec![relationship.clone()],
+            };
+            let parent = records
+                .iter_mut()
+                .find(|record| record.id == spec_id)
+                .expect("shown Spec must remain present while the repository lock is held");
+            parent.relationships.push(relationship);
+            records.push(task.clone());
+            Ok(task)
         }
         fn list_records(
             &self,
@@ -808,6 +965,42 @@ mod tests {
     }
 
     #[test]
+    fn typed_records_have_immutable_opening_rules_and_hierarchy() {
+        let app = application();
+        let spec = app.open_spec("spec", "alpha".into()).unwrap();
+        assert_eq!(spec.record_type, RecordType::Spec);
+        assert_eq!(spec.project_slugs, ["alpha"]);
+
+        let standalone = app.open_task("standalone", None).unwrap();
+        assert_eq!(standalone.record_type, RecordType::Task);
+        assert!(standalone.project_slugs.is_empty());
+        let task = app.open_task_under_spec("child", spec.id).unwrap();
+        assert_eq!(task.record_type, RecordType::Task);
+        assert_eq!(task.project_slugs, ["alpha"]);
+        assert_eq!(task.relationships[0].parent_id, spec.id);
+        assert_eq!(
+            app.open_task_under_spec("invalid", standalone.id)
+                .unwrap_err()
+                .code,
+            "invalid-parent-type"
+        );
+        assert_eq!(
+            app.relate_records(task.id, spec.id).unwrap_err().code,
+            "invalid-relationship"
+        );
+        assert_eq!(
+            app.unrelate_records(task.id, spec.id).unwrap_err().code,
+            "invalid-relationship"
+        );
+
+        app.start_record(spec.id).unwrap();
+        assert_eq!(
+            app.done_record(spec.id, None).unwrap_err().code,
+            "children-not-done"
+        );
+    }
+
+    #[test]
     fn lists_records_by_scope_membership_and_status_newest_first() {
         let app = application();
         let alpha = app.open_record("alpha", vec!["alpha".into()]).unwrap();
@@ -945,6 +1138,7 @@ mod tests {
                 .unwrap(),
             Record {
                 id: 1,
+                record_type: RecordType::Generic,
                 body: "body".into(),
                 project_slugs: vec!["alpha".into(), "zeta".into()],
                 status: RecordStatus::Open,

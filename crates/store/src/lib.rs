@@ -7,9 +7,9 @@ use std::{
 };
 
 use forge_app::{
-    NewRecord, Project, ProjectRepository, Record, RecordComment, RecordCommentId,
+    NewRecord, NewTypedRecord, Project, ProjectRepository, Record, RecordComment, RecordCommentId,
     RecordListFilter, RecordRelationship, RecordRelationshipKind, RecordRepository, RecordStatus,
-    RecordUpdate, RecordUpdateId, RecordUpdateKind, RegistrationError,
+    RecordType, RecordUpdate, RecordUpdateId, RecordUpdateKind, RegistrationError,
 };
 use rusqlite::{Connection, ErrorCode, OptionalExtension, params};
 
@@ -225,12 +225,27 @@ impl RecordRepository for SqliteProjectRepository {
         transaction.commit().map_err(storage_error)?;
         Ok(Record {
             id,
+            record_type: RecordType::Generic,
             body: record.body.clone(),
             project_slugs: record.project_slugs.clone(),
             status: RecordStatus::Open,
             completion_resolution: None,
             relationships: vec![],
         })
+    }
+
+    fn open_typed_record(&self, _: &NewTypedRecord) -> Result<Record, RegistrationError> {
+        Err(RegistrationError::new(
+            "unsupported-record-type",
+            "typed Record persistence has not been migrated",
+        ))
+    }
+
+    fn open_task_under_spec(&self, _: &str, _: u64) -> Result<Record, RegistrationError> {
+        Err(RegistrationError::new(
+            "unsupported-record-type",
+            "typed Record persistence has not been migrated",
+        ))
     }
 
     fn list_records(&self, filter: &RecordListFilter) -> Result<Vec<Record>, RegistrationError> {
@@ -703,6 +718,7 @@ fn load_record(connection: &Connection, id: u64) -> Result<Record, RegistrationE
         .collect::<Result<Vec<_>, RegistrationError>>()?;
     Ok(Record {
         id,
+        record_type: RecordType::Generic,
         body,
         project_slugs,
         status,
