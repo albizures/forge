@@ -417,8 +417,10 @@ dependencies = [
  "forge-rpc",
  "forge-server",
  "forge-store",
+ "forgeup",
  "jsonrpsee",
  "serde_json",
+ "sha2",
  "tokio",
 ]
 

@@ -4,7 +4,7 @@ use forge_cli::{
     render_record, render_record_list, render_record_opened, request_done_record,
     request_edit_record, request_list_records, request_open_record, request_project_here,
     request_register_project, request_relate_record, request_show_record, request_start_record,
-    request_status, request_unrelate_record, resolve_endpoint,
+    request_status, request_unrelate_record, resolve_endpoint as resolve_managed_endpoint,
 };
 use std::io::Read;
 
@@ -216,6 +216,16 @@ async fn main() {
     };
     std::process::exit(exit_code);
 }
+async fn resolve_endpoint(flag: Option<&str>) -> String {
+    match resolve_managed_endpoint(flag).await {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            eprintln!("forge: {error}");
+            std::process::exit(1);
+        }
+    }
+}
+
 fn print_build_info_if_requested() -> bool {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
     if arguments.len() == 2

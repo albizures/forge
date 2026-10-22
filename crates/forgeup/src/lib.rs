@@ -206,6 +206,48 @@ impl RegistryStore {
         })?;
         Ok(Self { paths, _lock: lock })
     }
+    fn open_read_only(paths: ForgeupPaths) -> Result<Option<Self>, ForgeupError> {
+        if !paths.registry().exists() {
+            return Ok(None);
+        }
+        verify_private_permissions(&paths.config)?;
+        let lock_path = paths.lock();
+        let lock = File::open(&lock_path).map_err(|source| ForgeupError::Io {
+            path: lock_path.clone(),
+            source,
+        })?;
+        verify_private_permissions(&lock_path)?;
+        lock.lock_shared().map_err(|source| ForgeupError::Io {
+            path: lock_path,
+            source,
+        })?;
+        Ok(Some(Self { paths, _lock: lock }))
+    }
+    /// Reads the registry without migration or any filesystem writes.
+    pub fn load_read_only(&self) -> Result<Registry, ForgeupError> {
+        let path = self.paths.registry();
+        if !path.exists() {
+            return Ok(Registry::empty());
+        }
+        verify_private_permissions(&path)?;
+        let contents = fs::read_to_string(&path).map_err(|source| ForgeupError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        let registry = toml::from_str::<Registry>(&contents).map_err(|source| {
+            ForgeupError::InvalidRegistry {
+                path: path.clone(),
+                message: source.to_string(),
+            }
+        })?;
+        match registry.schema_version {
+            REGISTRY_SCHEMA_VERSION => Ok(registry),
+            version if version > REGISTRY_SCHEMA_VERSION => {
+                Err(ForgeupError::FutureSchema(version))
+            }
+            version => Err(ForgeupError::UnsupportedSchema(version)),
+        }
+    }
     pub fn load(&self) -> Result<Registry, ForgeupError> {
         let path = self.paths.registry();
         if !path.exists() {
@@ -430,6 +472,31 @@ fn snapshot_installation(
             message: source.to_string(),
         })?;
     atomic_write(&destination.join("manifest.toml"), manifest.as_bytes())?;
+    Ok(installation)
+}
+
+/// Reads and validates the active Revision Installation without changing it or
+/// starting its daemon.
+pub fn active_installation() -> Result<Installation, ForgeupError> {
+    let paths = ForgeupPaths::from_environment()?;
+    let Some(store) = RegistryStore::open_read_only(paths)? else {
+        return Err(ForgeupError::NoActiveRevision);
+    };
+    let registry = store.load_read_only()?;
+    let selector = registry
+        .active_selector
+        .as_deref()
+        .ok_or(ForgeupError::NoActiveRevision)?;
+    let installation = resolve_in_registry(&registry, selector)?;
+    validate_installation(&installation)?;
+    Ok(installation)
+}
+
+/// Ensures the active Revision's managed daemon is running and returns its
+/// persisted Installation facts.
+pub fn ensure_active_daemon() -> Result<Installation, ForgeupError> {
+    let installation = active_installation()?;
+    daemon_start()?;
     Ok(installation)
 }
 

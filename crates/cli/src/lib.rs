@@ -7,7 +7,8 @@ use forge_rpc::{
     RegisterProjectResponse, RelateRecordRequest, SystemApiClient, SystemStatusResponse,
 };
 use jsonrpsee::http_client::HttpClientBuilder;
-use std::{env, time::Duration};
+use sha2::{Digest, Sha256};
+use std::{env, fs, time::Duration};
 pub const DEFAULT_SERVER_URL: &str = "http://127.0.0.1:45003/rpc";
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -20,11 +21,55 @@ pub fn server_url(flag: Option<&str>, environment: Option<&str>) -> String {
 /// Resolves the endpoint for one ordinary CLI command.
 ///
 /// An explicit flag or environment value is an Endpoint Override. It returns
-/// immediately, so managed endpoint resolution added here must remain entirely
+/// immediately, so managed endpoint resolution added here remains entirely
 /// below the no-override branch.
-#[allow(clippy::unused_async)] // Managed resolution is asynchronous in the next branch.
-pub async fn resolve_endpoint(flag: Option<&str>) -> String {
-    server_url(flag, env::var("FORGE_SERVER_URL").ok().as_deref())
+///
+/// # Errors
+///
+/// Returns an actionable error when the active Revision cannot be read,
+/// attested, or started.
+#[allow(clippy::unused_async)] // Kept async for uniform command endpoint resolution.
+pub async fn resolve_endpoint(flag: Option<&str>) -> Result<String, String> {
+    if let Some(endpoint) = flag.or(env::var("FORGE_SERVER_URL").ok().as_deref()) {
+        return Ok(endpoint.to_owned());
+    }
+
+    let installation = forgeup::active_installation().map_err(|error| managed_error(&error))?;
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("could not identify this Forge CLI executable: {error}"))?;
+    let hash = sha256(&executable)?;
+    let identity = forge_build_info::current();
+    if hash != installation.cli_sha256
+        || identity.commit != installation.identity.commit
+        || identity.dirty != installation.identity.dirty
+        || identity.management_protocol_revision
+            != installation.identity.management_protocol_revision
+        || identity.version != installation.identity.version
+    {
+        return Err(format!(
+            "this Forge CLI is not the active Revision `{}`; run `forgeup use {}` or provide --server-url / FORGE_SERVER_URL",
+            installation.selector, installation.selector
+        ));
+    }
+
+    forgeup::ensure_active_daemon().map_err(|error| managed_error(&error))?;
+    Ok(format!("http://{}/rpc", installation.endpoint))
+}
+
+fn sha256(path: &std::path::Path) -> Result<String, String> {
+    let contents = fs::read(path).map_err(|error| {
+        format!(
+            "could not hash Forge CLI executable `{}`: {error}",
+            path.display()
+        )
+    })?;
+    Ok(format!("{:x}", Sha256::digest(contents)))
+}
+
+fn managed_error(error: &forgeup::ForgeupError) -> String {
+    format!(
+        "could not resolve the active Forge Revision: {error}. Run `forgeup use <selector>` or provide --server-url / FORGE_SERVER_URL"
+    )
 }
 fn client(url: &str) -> Result<jsonrpsee::http_client::HttpClient, String> {
     HttpClientBuilder::default()
@@ -275,7 +320,9 @@ mod tests {
     #[tokio::test]
     async fn endpoint_override_resolves_without_managed_endpoint_work() {
         assert_eq!(
-            resolve_endpoint(Some("http://manual-daemon/rpc")).await,
+            resolve_endpoint(Some("http://manual-daemon/rpc"))
+                .await
+                .unwrap(),
             "http://manual-daemon/rpc"
         );
     }
