@@ -27,9 +27,10 @@ use forge_app::{
     Application, ApplicationStatus, Project, RecordStatus, RegistrationError, RepositoryInspector,
 };
 use forge_rpc::{
-    DoneRecordRequest, EditRecordRequest, ListRecordUpdatesResponse, ListRecordsRequest,
-    ListRecordsResponse, ManagementStatus, OpenRecordRequest, ProjectApiServer, ProjectHereRequest,
-    ProjectHereResponse, RecordApiServer, RecordIdRequest, RecordResponse, RegisterProjectRequest,
+    AddRecordCommentRequest, DeleteRecordCommentRequest, DoneRecordRequest, EditRecordRequest,
+    ListRecordCommentsResponse, ListRecordUpdatesResponse, ListRecordsRequest, ListRecordsResponse,
+    ManagementStatus, OpenRecordRequest, ProjectApiServer, ProjectHereRequest, ProjectHereResponse,
+    RecordApiServer, RecordIdRequest, RecordResponse, RegisterProjectRequest,
     RegisterProjectResponse, RelateRecordRequest, RevisionIdentity, SystemApiServer,
     SystemStatusResponse,
 };
@@ -381,6 +382,31 @@ impl RecordApiServer for Daemon {
             .map(|updates| ListRecordUpdatesResponse {
                 updates: updates.into_iter().map(Into::into).collect(),
             })
+            .map_err(rpc_error)
+    }
+
+    async fn comment(
+        &self,
+        request: AddRecordCommentRequest,
+    ) -> RpcResult<forge_rpc::RecordCommentResponse> {
+        self.application
+            .add_record_comment(request.record_id, &request.body, request.author.as_deref())
+            .map(Into::into)
+            .map_err(rpc_error)
+    }
+
+    async fn comments(&self, request: RecordIdRequest) -> RpcResult<ListRecordCommentsResponse> {
+        self.application
+            .list_record_comments(request.id)
+            .map(|comments| ListRecordCommentsResponse {
+                comments: comments.into_iter().map(Into::into).collect(),
+            })
+            .map_err(rpc_error)
+    }
+
+    async fn comment_delete(&self, request: DeleteRecordCommentRequest) -> RpcResult<()> {
+        self.application
+            .delete_record_comment(request.record_id, request.comment_id)
             .map_err(rpc_error)
     }
 }

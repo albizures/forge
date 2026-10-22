@@ -7,9 +7,9 @@ use std::{
 };
 
 use forge_app::{
-    NewRecord, Project, ProjectRepository, Record, RecordListFilter, RecordRelationship,
-    RecordRelationshipKind, RecordRepository, RecordStatus, RecordUpdate, RecordUpdateId,
-    RecordUpdateKind, RegistrationError,
+    NewRecord, Project, ProjectRepository, Record, RecordComment, RecordCommentId,
+    RecordListFilter, RecordRelationship, RecordRelationshipKind, RecordRepository, RecordStatus,
+    RecordUpdate, RecordUpdateId, RecordUpdateKind, RegistrationError,
 };
 use rusqlite::{Connection, ErrorCode, OptionalExtension, params};
 
@@ -70,11 +70,20 @@ impl SqliteProjectRepository {
                 kind TEXT NOT NULL CHECK (kind IN ('created', 'body-edited', 'status-transition', 'relationship-added', 'relationship-removed')),
                 from_status TEXT,
                 to_status TEXT,
-                related_record_id INTEGER REFERENCES records(id)
+                related_record_id INTEGER REFERENCES records(id),
+                comment_id INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS record_comments (
+                id INTEGER PRIMARY KEY NOT NULL,
+                record_id INTEGER NOT NULL REFERENCES records(id),
+                created_at_millis INTEGER NOT NULL,
+                author TEXT,
+                body TEXT NOT NULL
             );",
             )
             .map_err(storage_error)?;
         migrate_record_status_schema(&connection)?;
+        migrate_record_updates_schema(&connection)?;
         Ok(Self {
             connection: Mutex::new(connection),
         })
@@ -387,13 +396,83 @@ impl RecordRepository for SqliteProjectRepository {
         Ok(record)
     }
 
+    fn add_record_comment(
+        &self,
+        id: u64,
+        body: &str,
+        author: Option<&str>,
+    ) -> Result<RecordComment, RegistrationError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        let transaction = connection.transaction().map_err(storage_error)?;
+        load_record(&transaction, id)?;
+        let created_at_millis = now_millis()?;
+        transaction.execute("INSERT INTO record_comments (record_id, created_at_millis, author, body) VALUES (?1, ?2, ?3, ?4)", params![id.cast_signed(), created_at_millis, author, body]).map_err(storage_error)?;
+        let comment = RecordComment {
+            id: RecordCommentId(transaction.last_insert_rowid().cast_unsigned()),
+            created_at_millis: created_at_millis.cast_unsigned(),
+            author: author.map(str::to_owned),
+            body: body.to_owned(),
+        };
+        insert_update(
+            &transaction,
+            id,
+            RecordUpdateKind::CommentAdded {
+                comment_id: comment.id,
+            },
+        )?;
+        transaction.commit().map_err(storage_error)?;
+        Ok(comment)
+    }
+
+    fn list_record_comments(&self, id: u64) -> Result<Vec<RecordComment>, RegistrationError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        load_record(&connection, id)?;
+        connection.prepare("SELECT id, created_at_millis, author, body FROM record_comments WHERE record_id = ?1 ORDER BY created_at_millis DESC, id DESC").map_err(storage_error)?.query_map([id.cast_signed()], |row| Ok(RecordComment { id: RecordCommentId(row.get::<_, i64>(0)?.cast_unsigned()), created_at_millis: row.get::<_, i64>(1)?.cast_unsigned(), author: row.get(2)?, body: row.get(3)? })).map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)
+    }
+
+    fn delete_record_comment(
+        &self,
+        id: u64,
+        comment_id: RecordCommentId,
+    ) -> Result<(), RegistrationError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        let transaction = connection.transaction().map_err(storage_error)?;
+        let deleted = transaction
+            .execute(
+                "DELETE FROM record_comments WHERE id = ?1 AND record_id = ?2",
+                params![comment_id.0.cast_signed(), id.cast_signed()],
+            )
+            .map_err(storage_error)?;
+        if deleted == 0 {
+            return Err(RegistrationError::new(
+                "comment-not-found",
+                "Comment does not exist",
+            ));
+        }
+        insert_update(
+            &transaction,
+            id,
+            RecordUpdateKind::CommentDeleted { comment_id },
+        )?;
+        transaction.commit().map_err(storage_error)
+    }
+
     fn list_record_updates(&self, id: u64) -> Result<Vec<RecordUpdate>, RegistrationError> {
         let connection = self
             .connection
             .lock()
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
         load_record(&connection, id)?;
-        connection.prepare("SELECT id, created_at_millis, kind, from_status, to_status, related_record_id FROM record_updates WHERE record_id = ?1 ORDER BY created_at_millis DESC, id DESC")
+        connection.prepare("SELECT id, created_at_millis, kind, from_status, to_status, related_record_id, comment_id FROM record_updates WHERE record_id = ?1 ORDER BY created_at_millis DESC, id DESC")
             .map_err(storage_error)?
             .query_map([id.cast_signed()], update_from_row)
             .map_err(storage_error)?
@@ -416,13 +495,14 @@ fn insert_update(
     record_id: u64,
     kind: RecordUpdateKind,
 ) -> Result<(), RegistrationError> {
-    let (kind, from_status, to_status, related_record_id) = match kind {
-        RecordUpdateKind::Created => ("created", None, None, None),
-        RecordUpdateKind::BodyEdited => ("body-edited", None, None, None),
+    let (kind, from_status, to_status, related_record_id, comment_id) = match kind {
+        RecordUpdateKind::Created => ("created", None, None, None, None),
+        RecordUpdateKind::BodyEdited => ("body-edited", None, None, None, None),
         RecordUpdateKind::StatusTransition { from, to } => (
             "status-transition",
             Some(status_name(from)),
             Some(status_name(to)),
+            None,
             None,
         ),
         RecordUpdateKind::RelationshipAdded { related_record_id } => (
@@ -430,24 +510,35 @@ fn insert_update(
             None,
             None,
             Some(related_record_id.cast_signed()),
+            None,
         ),
         RecordUpdateKind::RelationshipRemoved { related_record_id } => (
             "relationship-removed",
             None,
             None,
             Some(related_record_id.cast_signed()),
+            None,
+        ),
+        RecordUpdateKind::CommentAdded { comment_id } => (
+            "comment-added",
+            None,
+            None,
+            None,
+            Some(comment_id.0.cast_signed()),
+        ),
+        RecordUpdateKind::CommentDeleted { comment_id } => (
+            "comment-deleted",
+            None,
+            None,
+            None,
+            Some(comment_id.0.cast_signed()),
         ),
     };
-    let created_at_millis: i64 = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| RegistrationError::new("storage", "system clock is before Unix epoch"))?
-        .as_millis()
-        .try_into()
-        .map_err(|_| RegistrationError::new("storage", "system clock is out of range"))?;
+    let created_at_millis = now_millis()?;
     connection
         .execute(
-            "INSERT INTO record_updates (record_id, created_at_millis, kind, from_status, to_status, related_record_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![record_id.cast_signed(), created_at_millis, kind, from_status, to_status, related_record_id],
+            "INSERT INTO record_updates (record_id, created_at_millis, kind, from_status, to_status, related_record_id, comment_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![record_id.cast_signed(), created_at_millis, kind, from_status, to_status, related_record_id, comment_id],
         )
         .map_err(storage_error)?;
     Ok(())
@@ -458,6 +549,7 @@ fn update_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RecordUpdate> {
     let from_status: Option<String> = row.get(3)?;
     let to_status: Option<String> = row.get(4)?;
     let related_record_id: Option<i64> = row.get(5)?;
+    let comment_id: Option<i64> = row.get(6)?;
     let status = |value: String| match value.as_str() {
         "open" => Ok(RecordStatus::Open),
         "in_progress" => Ok(RecordStatus::InProgress),
@@ -480,6 +572,20 @@ fn update_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RecordUpdate> {
             related_record_id: related_record_id
                 .ok_or(rusqlite::Error::InvalidQuery)?
                 .cast_unsigned(),
+        },
+        "comment-added" => RecordUpdateKind::CommentAdded {
+            comment_id: RecordCommentId(
+                comment_id
+                    .ok_or(rusqlite::Error::InvalidQuery)?
+                    .cast_unsigned(),
+            ),
+        },
+        "comment-deleted" => RecordUpdateKind::CommentDeleted {
+            comment_id: RecordCommentId(
+                comment_id
+                    .ok_or(rusqlite::Error::InvalidQuery)?
+                    .cast_unsigned(),
+            ),
         },
         _ => return Err(rusqlite::Error::InvalidQuery),
     };
@@ -603,6 +709,29 @@ fn load_record(connection: &Connection, id: u64) -> Result<Record, RegistrationE
         completion_resolution,
         relationships,
     })
+}
+
+fn now_millis() -> Result<i64, RegistrationError> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| RegistrationError::new("storage", "system clock is before Unix epoch"))?
+        .as_millis()
+        .try_into()
+        .map_err(|_| RegistrationError::new("storage", "system clock is out of range"))
+}
+
+fn migrate_record_updates_schema(connection: &Connection) -> Result<(), RegistrationError> {
+    let schema: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'record_updates'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(storage_error)?;
+    if !schema.contains("comment-added") {
+        connection.execute_batch("PRAGMA foreign_keys = OFF; CREATE TABLE record_updates_new (id INTEGER PRIMARY KEY NOT NULL, record_id INTEGER NOT NULL REFERENCES records(id), created_at_millis INTEGER NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('created', 'body-edited', 'status-transition', 'relationship-added', 'relationship-removed', 'comment-added', 'comment-deleted')), from_status TEXT, to_status TEXT, related_record_id INTEGER REFERENCES records(id), comment_id INTEGER); INSERT INTO record_updates_new (id, record_id, created_at_millis, kind, from_status, to_status, related_record_id) SELECT id, record_id, created_at_millis, kind, from_status, to_status, related_record_id FROM record_updates; DROP TABLE record_updates; ALTER TABLE record_updates_new RENAME TO record_updates; PRAGMA foreign_keys = ON;").map_err(storage_error)?;
+    }
+    Ok(())
 }
 
 fn migrate_record_status_schema(connection: &Connection) -> Result<(), RegistrationError> {
@@ -907,6 +1036,53 @@ mod tests {
         assert_eq!(
             store.list_record_updates(999).unwrap_err().code,
             "record-not-found"
+        );
+    }
+
+    #[test]
+    fn comments_are_immutable_newest_first_and_record_minimal_updates() {
+        let store = SqliteProjectRepository::in_memory().unwrap();
+        let record = store
+            .open_record(&NewRecord {
+                body: "record".into(),
+                project_slugs: vec![],
+            })
+            .unwrap();
+        let first = store.add_record_comment(record.id, "first", None).unwrap();
+        let second = store
+            .add_record_comment(record.id, "second", Some("agent"))
+            .unwrap();
+        assert_eq!(
+            store.list_record_comments(record.id).unwrap(),
+            vec![second.clone(), first.clone()]
+        );
+        store.start_record(record.id).unwrap();
+        store.done_record(record.id, None).unwrap();
+        let after_done = store.add_record_comment(record.id, "after", None).unwrap();
+        store.delete_record_comment(record.id, second.id).unwrap();
+        assert_eq!(
+            store.list_record_comments(record.id).unwrap(),
+            vec![after_done.clone(), first]
+        );
+        assert_eq!(
+            store
+                .delete_record_comment(record.id, second.id)
+                .unwrap_err()
+                .code,
+            "comment-not-found"
+        );
+        let updates = store.list_record_updates(record.id).unwrap();
+        assert!(
+            matches!(updates[0].kind, RecordUpdateKind::CommentDeleted { comment_id } if comment_id == second.id)
+        );
+        assert!(
+            matches!(updates[1].kind, RecordUpdateKind::CommentAdded { comment_id } if comment_id == after_done.id)
+        );
+        assert!(
+            matches!(updates[4].kind, RecordUpdateKind::CommentAdded { comment_id } if comment_id == second.id)
+        );
+        assert!(
+            matches!(updates[5].kind, RecordUpdateKind::CommentAdded { comment_id } if comment_id.0 == 1)
         );
     }
 

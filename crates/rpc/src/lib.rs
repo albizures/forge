@@ -1,8 +1,8 @@
 //! Shared JSON-RPC wire contract ownership boundary.
 
 use forge_app::{
-    ApplicationStatus, Project, Record, RecordRelationshipKind, RecordStatus, RecordUpdate,
-    RecordUpdateKind, RegistrationError,
+    ApplicationStatus, Project, Record, RecordComment, RecordRelationshipKind, RecordStatus,
+    RecordUpdate, RecordUpdateKind, RegistrationError,
 };
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
 use serde::{Deserialize, Serialize};
@@ -19,6 +19,9 @@ pub const RECORD_DONE_METHOD: &str = "record.done";
 pub const RECORD_RELATE_METHOD: &str = "record.relate";
 pub const RECORD_UNRELATE_METHOD: &str = "record.unrelate";
 pub const RECORD_UPDATES_METHOD: &str = "record.updates";
+pub const RECORD_COMMENT_METHOD: &str = "record.comment";
+pub const RECORD_COMMENTS_METHOD: &str = "record.comments";
+pub const RECORD_COMMENT_DELETE_METHOD: &str = "record.commentDelete";
 
 #[rpc(client, server, namespace = "system")]
 pub trait SystemApi {
@@ -53,6 +56,12 @@ pub trait RecordApi {
     async fn unrelate(&self, request: RelateRecordRequest) -> RpcResult<RecordResponse>;
     #[method(name = "updates")]
     async fn updates(&self, request: RecordIdRequest) -> RpcResult<ListRecordUpdatesResponse>;
+    #[method(name = "comment")]
+    async fn comment(&self, request: AddRecordCommentRequest) -> RpcResult<RecordCommentResponse>;
+    #[method(name = "comments")]
+    async fn comments(&self, request: RecordIdRequest) -> RpcResult<ListRecordCommentsResponse>;
+    #[method(name = "commentDelete")]
+    async fn comment_delete(&self, request: DeleteRecordCommentRequest) -> RpcResult<()>;
 }
 
 /// Immutable daemon build facts reported through the management protocol.
@@ -208,6 +217,38 @@ pub struct ListRecordUpdatesResponse {
     pub updates: Vec<RecordUpdateResponse>,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AddRecordCommentRequest {
+    pub record_id: u64,
+    pub body: String,
+    pub author: Option<String>,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DeleteRecordCommentRequest {
+    pub record_id: u64,
+    pub comment_id: u64,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ListRecordCommentsResponse {
+    pub comments: Vec<RecordCommentResponse>,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RecordCommentResponse {
+    pub id: u64,
+    pub created_at_millis: u64,
+    pub author: Option<String>,
+    pub body: String,
+}
+impl From<RecordComment> for RecordCommentResponse {
+    fn from(comment: RecordComment) -> Self {
+        Self {
+            id: comment.id.0,
+            created_at_millis: comment.created_at_millis,
+            author: comment.author,
+            body: comment.body,
+        }
+    }
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RecordUpdateResponse {
     pub id: u64,
     pub created_at_millis: u64,
@@ -215,23 +256,39 @@ pub struct RecordUpdateResponse {
     pub from_status: Option<String>,
     pub to_status: Option<String>,
     pub related_record_id: Option<u64>,
+    pub comment_id: Option<u64>,
 }
 impl From<RecordUpdate> for RecordUpdateResponse {
     fn from(update: RecordUpdate) -> Self {
-        let (kind, from_status, to_status, related_record_id) = match update.kind {
-            RecordUpdateKind::Created => ("created", None, None, None),
-            RecordUpdateKind::BodyEdited => ("body-edited", None, None, None),
+        let (kind, from_status, to_status, related_record_id, comment_id) = match update.kind {
+            RecordUpdateKind::Created => ("created", None, None, None, None),
+            RecordUpdateKind::BodyEdited => ("body-edited", None, None, None, None),
             RecordUpdateKind::StatusTransition { from, to } => (
                 "status-transition",
                 Some(record_status_name(from)),
                 Some(record_status_name(to)),
                 None,
+                None,
             ),
-            RecordUpdateKind::RelationshipAdded { related_record_id } => {
-                ("relationship-added", None, None, Some(related_record_id))
+            RecordUpdateKind::RelationshipAdded { related_record_id } => (
+                "relationship-added",
+                None,
+                None,
+                Some(related_record_id),
+                None,
+            ),
+            RecordUpdateKind::RelationshipRemoved { related_record_id } => (
+                "relationship-removed",
+                None,
+                None,
+                Some(related_record_id),
+                None,
+            ),
+            RecordUpdateKind::CommentAdded { comment_id } => {
+                ("comment-added", None, None, None, Some(comment_id.0))
             }
-            RecordUpdateKind::RelationshipRemoved { related_record_id } => {
-                ("relationship-removed", None, None, Some(related_record_id))
+            RecordUpdateKind::CommentDeleted { comment_id } => {
+                ("comment-deleted", None, None, None, Some(comment_id.0))
             }
         };
         Self {
@@ -241,6 +298,7 @@ impl From<RecordUpdate> for RecordUpdateResponse {
             from_status,
             to_status,
             related_record_id,
+            comment_id,
         }
     }
 }

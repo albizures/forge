@@ -79,6 +79,19 @@ pub struct RecordUpdate {
     pub kind: RecordUpdateKind,
 }
 
+/// Opaque stable identity assigned to a Record Comment.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct RecordCommentId(pub u64);
+
+/// Immutable free-text discussion attached to a Record.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecordComment {
+    pub id: RecordCommentId,
+    pub created_at_millis: u64,
+    pub author: Option<String>,
+    pub body: String,
+}
+
 /// The change represented by a Record Update. Deliberately excludes content snapshots.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RecordUpdateKind {
@@ -93,6 +106,12 @@ pub enum RecordUpdateKind {
     },
     RelationshipRemoved {
         related_record_id: u64,
+    },
+    CommentAdded {
+        comment_id: RecordCommentId,
+    },
+    CommentDeleted {
+        comment_id: RecordCommentId,
     },
 }
 
@@ -201,6 +220,33 @@ pub trait RecordRepository: ProjectRepository {
     ///
     /// Returns a user-facing error if the Record is absent or storage fails.
     fn list_record_updates(&self, id: u64) -> Result<Vec<RecordUpdate>, RegistrationError>;
+    /// Adds an immutable Comment, including to a Done Record.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-facing error when the Record is absent or storage fails.
+    fn add_record_comment(
+        &self,
+        id: u64,
+        body: &str,
+        author: Option<&str>,
+    ) -> Result<RecordComment, RegistrationError>;
+    /// Lists current (not deleted) Comments newest first.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-facing error when the Record is absent or storage fails.
+    fn list_record_comments(&self, id: u64) -> Result<Vec<RecordComment>, RegistrationError>;
+    /// Deletes a Comment without retaining its content.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-facing error when the Comment is absent or storage fails.
+    fn delete_record_comment(
+        &self,
+        id: u64,
+        comment_id: RecordCommentId,
+    ) -> Result<(), RegistrationError>;
 }
 
 /// The application boundary for operations shared by all transports.
@@ -388,6 +434,51 @@ impl Application {
         self.records.list_record_updates(id)
     }
 
+    /// Adds a non-blank immutable Comment to a Record.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation, Record lookup, or storage error.
+    pub fn add_record_comment(
+        &self,
+        id: u64,
+        body: &str,
+        author: Option<&str>,
+    ) -> Result<RecordComment, RegistrationError> {
+        if body.trim().is_empty() {
+            return Err(RegistrationError::new(
+                "invalid-comment",
+                "comment must not be blank",
+            ));
+        }
+        if author.is_some_and(|author| author.trim().is_empty()) {
+            return Err(RegistrationError::new(
+                "invalid-comment-author",
+                "comment author must not be blank",
+            ));
+        }
+        self.records.add_record_comment(id, body, author)
+    }
+
+    /// Lists current Comments newest first.
+    ///
+    /// # Errors
+    ///
+    /// Returns a Record lookup or storage error.
+    pub fn list_record_comments(&self, id: u64) -> Result<Vec<RecordComment>, RegistrationError> {
+        self.records.list_record_comments(id)
+    }
+
+    /// Deletes a Comment from a Record.
+    ///
+    /// # Errors
+    ///
+    /// Returns a Record/Comment lookup or storage error.
+    pub fn delete_record_comment(&self, id: u64, comment_id: u64) -> Result<(), RegistrationError> {
+        self.records
+            .delete_record_comment(id, RecordCommentId(comment_id))
+    }
+
     /// Returns readiness information for this application instance.
     #[must_use]
     pub fn status(&self) -> ApplicationStatus {
@@ -414,6 +505,7 @@ mod tests {
 
     struct Repository {
         records: Mutex<Vec<Record>>,
+        comments: Mutex<Vec<RecordComment>>,
     }
     impl ProjectRepository for Repository {
         fn register(&self, project: &Project) -> Result<Project, RegistrationError> {
@@ -638,6 +730,51 @@ mod tests {
             self.show_record(id)?;
             Ok(vec![])
         }
+        fn add_record_comment(
+            &self,
+            id: u64,
+            body: &str,
+            author: Option<&str>,
+        ) -> Result<RecordComment, RegistrationError> {
+            self.show_record(id)?;
+            let mut comments = self.comments.lock().unwrap();
+            let comment = RecordComment {
+                id: RecordCommentId((comments.len() + 1) as u64),
+                created_at_millis: 0,
+                author: author.map(str::to_owned),
+                body: body.to_owned(),
+            };
+            comments.push(comment.clone());
+            Ok(comment)
+        }
+        fn list_record_comments(&self, id: u64) -> Result<Vec<RecordComment>, RegistrationError> {
+            self.show_record(id)?;
+            Ok(self
+                .comments
+                .lock()
+                .unwrap()
+                .iter()
+                .cloned()
+                .rev()
+                .collect())
+        }
+        fn delete_record_comment(
+            &self,
+            id: u64,
+            comment_id: RecordCommentId,
+        ) -> Result<(), RegistrationError> {
+            self.show_record(id)?;
+            let mut comments = self.comments.lock().unwrap();
+            let before = comments.len();
+            comments.retain(|comment| comment.id != comment_id);
+            if comments.len() == before {
+                return Err(RegistrationError::new(
+                    "comment-not-found",
+                    "Comment does not exist",
+                ));
+            }
+            Ok(())
+        }
     }
     struct Inspector;
     impl RepositoryInspector for Inspector {
@@ -649,6 +786,7 @@ mod tests {
         Application::new(
             Box::new(Repository {
                 records: Mutex::new(vec![]),
+                comments: Mutex::new(vec![]),
             }),
             Box::new(Inspector),
         )
@@ -770,6 +908,33 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn comments_require_meaningful_content_and_are_immutable() {
+        let app = application();
+        let record = app.open_record("record", vec![]).unwrap();
+        assert_eq!(
+            app.add_record_comment(record.id, " ", None)
+                .unwrap_err()
+                .code,
+            "invalid-comment"
+        );
+        assert_eq!(
+            app.add_record_comment(record.id, "text", Some(" "))
+                .unwrap_err()
+                .code,
+            "invalid-comment-author"
+        );
+        let comment = app
+            .add_record_comment(record.id, "text", Some("agent"))
+            .unwrap();
+        assert_eq!(
+            app.list_record_comments(record.id).unwrap(),
+            vec![comment.clone()]
+        );
+        app.delete_record_comment(record.id, comment.id.0).unwrap();
+        assert!(app.list_record_comments(record.id).unwrap().is_empty());
     }
 
     #[test]

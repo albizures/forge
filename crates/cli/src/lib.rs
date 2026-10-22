@@ -1,11 +1,11 @@
 //! Command-line adapter that calls the running Forge daemon.
 
 use forge_rpc::{
-    DoneRecordRequest, EditRecordRequest, ListRecordUpdatesResponse, ListRecordsRequest,
-    ListRecordsResponse, OpenRecordRequest, ProjectApiClient, ProjectHereRequest,
-    ProjectHereResponse, ProjectScopeRequest, RecordApiClient, RecordIdRequest, RecordResponse,
-    RegisterProjectRequest, RegisterProjectResponse, RelateRecordRequest, SystemApiClient,
-    SystemStatusResponse,
+    AddRecordCommentRequest, DeleteRecordCommentRequest, DoneRecordRequest, EditRecordRequest,
+    ListRecordCommentsResponse, ListRecordUpdatesResponse, ListRecordsRequest, ListRecordsResponse,
+    OpenRecordRequest, ProjectApiClient, ProjectHereRequest, ProjectHereResponse,
+    ProjectScopeRequest, RecordApiClient, RecordIdRequest, RecordResponse, RegisterProjectRequest,
+    RegisterProjectResponse, RelateRecordRequest, SystemApiClient, SystemStatusResponse,
 };
 use jsonrpsee::http_client::HttpClientBuilder;
 use sha2::{Digest, Sha256};
@@ -259,6 +259,49 @@ pub async fn request_unrelate_record(
 /// # Errors
 ///
 /// Returns an endpoint or daemon validation error.
+pub async fn request_add_record_comment(
+    url: &str,
+    record_id: u64,
+    body: &str,
+    author: Option<String>,
+) -> Result<forge_rpc::RecordCommentResponse, String> {
+    client(url)?
+        .comment(AddRecordCommentRequest {
+            record_id,
+            body: body.into(),
+            author,
+        })
+        .await
+        .map_err(record_error("comment"))
+}
+/// # Errors
+/// Returns an endpoint or daemon validation error.
+pub async fn request_record_comments(
+    url: &str,
+    id: u64,
+) -> Result<ListRecordCommentsResponse, String> {
+    client(url)?
+        .comments(RecordIdRequest { id })
+        .await
+        .map_err(record_error("comments"))
+}
+/// # Errors
+/// Returns an endpoint or daemon validation error.
+pub async fn request_delete_record_comment(
+    url: &str,
+    record_id: u64,
+    comment_id: u64,
+) -> Result<(), String> {
+    client(url)?
+        .comment_delete(DeleteRecordCommentRequest {
+            record_id,
+            comment_id,
+        })
+        .await
+        .map_err(record_error("comment delete"))
+}
+/// # Errors
+/// Returns an endpoint or daemon validation error.
 pub async fn request_record_updates(
     url: &str,
     id: u64,
@@ -288,6 +331,26 @@ pub fn render_record_list(records: &ListRecordsResponse) -> String {
         .join("\n\n")
 }
 #[must_use]
+pub fn render_record_comments(comments: &ListRecordCommentsResponse) -> String {
+    comments
+        .comments
+        .iter()
+        .map(|comment| {
+            format!(
+                "Comment {} {}{}\n{}",
+                comment.id,
+                comment.created_at_millis,
+                comment
+                    .author
+                    .as_deref()
+                    .map_or(String::new(), |author| format!(" {author}")),
+                comment.body
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+#[must_use]
 pub fn render_record_updates(updates: &ListRecordUpdatesResponse) -> String {
     updates
         .updates
@@ -296,7 +359,7 @@ pub fn render_record_updates(updates: &ListRecordUpdatesResponse) -> String {
             let detail = match (
                 &update.from_status,
                 &update.to_status,
-                update.related_record_id,
+                update.related_record_id.or(update.comment_id),
             ) {
                 (Some(from), Some(to), _) => format!(" {from} -> {to}"),
                 (_, _, Some(id)) => format!(" Record {id}"),
@@ -393,6 +456,7 @@ mod tests {
                     from_status: Some("open".into()),
                     to_status: Some("in_progress".into()),
                     related_record_id: None,
+                    comment_id: None,
                 }],
             }),
             "Update 7 42 status-transition open -> in_progress"

@@ -1,11 +1,12 @@
 use clap::{Args, Parser, Subcommand};
 use forge_cli::{
     render_human_status, render_json_status, render_project_here, render_project_registered,
-    render_record, render_record_list, render_record_opened, render_record_updates,
+    render_record, render_record_comments, render_record_list, render_record_opened,
+    render_record_updates, request_add_record_comment, request_delete_record_comment,
     request_done_record, request_edit_record, request_list_records, request_open_record,
-    request_project_here, request_record_updates, request_register_project, request_relate_record,
-    request_show_record, request_start_record, request_status, request_unrelate_record,
-    resolve_endpoint as resolve_managed_endpoint,
+    request_project_here, request_record_comments, request_record_updates,
+    request_register_project, request_relate_record, request_show_record, request_start_record,
+    request_status, request_unrelate_record, resolve_endpoint as resolve_managed_endpoint,
 };
 use std::io::Read;
 
@@ -67,6 +68,12 @@ enum RecordCommand {
     Relate(RelationshipArgs),
     /// Remove a child Record's link to a parent with `--kind child-of`.
     Unrelate(RelationshipArgs),
+    /// Add an immutable Comment to a Record.
+    Comment(AddRecordCommentArgs),
+    #[command(hide = true)]
+    CommentDelete(DeleteRecordCommentArgs),
+    /// List current Record Comments newest first.
+    Comments(RecordIdArgs),
     /// List a Record's Forge-authored Update Log newest first.
     Updates(RecordIdArgs),
 }
@@ -90,6 +97,25 @@ struct RecordIdArgs {
     server_url: Option<String>,
     #[arg(long)]
     json: bool,
+}
+#[derive(Args, Debug)]
+struct AddRecordCommentArgs {
+    id: u64,
+    #[arg(long)]
+    message: String,
+    #[arg(long)]
+    author: Option<String>,
+    #[arg(long, value_name = "URL")]
+    server_url: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Args, Debug)]
+struct DeleteRecordCommentArgs {
+    record_id: u64,
+    comment_id: u64,
+    #[arg(long, value_name = "URL")]
+    server_url: Option<String>,
 }
 #[derive(Args, Debug)]
 struct EditRecordArgs {
@@ -146,7 +172,7 @@ async fn main() {
     if print_build_info_if_requested() {
         return;
     }
-    let cli = Cli::parse();
+    let cli = Cli::parse_from(normalize_comment_delete(std::env::args()));
     let exit_code = match cli.command {
         Command::Status { server_url, json } => status(server_url.as_deref(), json).await,
         Command::Add {
@@ -215,6 +241,9 @@ async fn main() {
                 )
                 .await,
             ),
+            RecordCommand::Comment(args) => record_comment(args).await,
+            RecordCommand::CommentDelete(args) => delete_record_comment(args).await,
+            RecordCommand::Comments(args) => record_comments(args).await,
             RecordCommand::Updates(args) => record_updates(args).await,
         },
     };
@@ -323,6 +352,88 @@ async fn list_records(args: ListRecordsArgs) -> i32 {
     }
 }
 
+async fn record_comment(args: AddRecordCommentArgs) -> i32 {
+    match request_add_record_comment(
+        &resolve_endpoint(args.server_url.as_deref()).await,
+        args.id,
+        &args.message,
+        args.author,
+    )
+    .await
+    {
+        Ok(comment) => {
+            println!(
+                "{}",
+                if args.json {
+                    serde_json::to_string(&comment).expect("RecordCommentResponse must serialize")
+                } else {
+                    format!("Added Comment {}", comment.id)
+                }
+            );
+            0
+        }
+        Err(error) => {
+            eprintln!("forge record comment: {error}");
+            1
+        }
+    }
+}
+async fn delete_record_comment(args: DeleteRecordCommentArgs) -> i32 {
+    match request_delete_record_comment(
+        &resolve_endpoint(args.server_url.as_deref()).await,
+        args.record_id,
+        args.comment_id,
+    )
+    .await
+    {
+        Ok(()) => {
+            println!("Deleted Comment {}", args.comment_id);
+            0
+        }
+        Err(error) => {
+            eprintln!("forge record comment delete: {error}");
+            1
+        }
+    }
+}
+fn normalize_comment_delete(arguments: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut arguments = arguments.into_iter().collect::<Vec<_>>();
+    if arguments
+        .windows(3)
+        .any(|window| window == ["record", "comment", "delete"])
+    {
+        for index in 0..arguments.len() - 2 {
+            if arguments[index..index + 3] == ["record", "comment", "delete"] {
+                arguments[index + 1] = "comment-delete".into();
+                arguments.remove(index + 2);
+                break;
+            }
+        }
+    }
+    arguments
+}
+async fn record_comments(args: RecordIdArgs) -> i32 {
+    match request_record_comments(&resolve_endpoint(args.server_url.as_deref()).await, args.id)
+        .await
+    {
+        Ok(comments) => {
+            println!(
+                "{}",
+                if args.json {
+                    serde_json::to_string(&comments)
+                        .expect("ListRecordCommentsResponse must serialize")
+                } else {
+                    render_record_comments(&comments)
+                }
+            );
+            0
+        }
+        Err(error) => {
+            eprintln!("forge record comments: {error}");
+            1
+        }
+    }
+}
 async fn record_updates(args: RecordIdArgs) -> i32 {
     match request_record_updates(&resolve_endpoint(args.server_url.as_deref()).await, args.id).await
     {
