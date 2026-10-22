@@ -5,16 +5,22 @@
 use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
+#[cfg(not(unix))]
+use std::time::UNIX_EPOCH;
 use std::{
     env,
     ffi::OsString,
     fmt,
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
-    net::TcpListener,
+    net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     sync::atomic::{AtomicU64, Ordering},
+    thread,
+    time::{Duration, SystemTime},
 };
 
 const REGISTRY_SCHEMA_VERSION: u32 = 1;
@@ -23,6 +29,8 @@ const REGISTRY_FILE: &str = "registry.toml";
 const LOCK_FILE: &str = "registry.lock";
 const STATE_LOG_LIMIT: u64 = 64 * 1024;
 const STATE_LOG_RETAINED_FILES: usize = 3;
+const DAEMON_RECORD_FILE: &str = "managed-daemon.toml";
+const DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(5);
 static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// All user-owned locations used by Forgeup.
@@ -625,6 +633,405 @@ fn remove_manager_path(path: &Path) -> Result<(), ForgeupError> {
     }
 }
 
+/// Protected facts required to correlate a managed process with a Forgeup launch.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ManagedDaemonRecord {
+    selector: String,
+    endpoint: String,
+    pid: u32,
+    daemon_instance_id: String,
+    lifecycle_credential: String,
+    lifecycle_endpoint: PathBuf,
+    stdout: PathBuf,
+    stderr: PathBuf,
+}
+
+/// Captured standard output and error paths for the active managed daemon.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DaemonLogs {
+    pub stdout: PathBuf,
+    pub stderr: PathBuf,
+}
+
+fn daemon_record_path(paths: &ForgeupPaths, selector: &str) -> PathBuf {
+    paths.state(selector).runtime.join(DAEMON_RECORD_FILE)
+}
+
+/// Starts exactly one managed daemon for the active Revision.
+#[allow(clippy::too_many_lines)]
+pub fn daemon_start() -> Result<String, ForgeupError> {
+    let paths = ForgeupPaths::from_environment()?;
+    let store = RegistryStore::open(paths.clone())?;
+    let registry = store.load()?;
+    reconcile_active_path(&paths, &registry)?;
+    let selector = registry
+        .active_selector
+        .clone()
+        .ok_or(ForgeupError::NoActiveRevision)?;
+    let installation = resolve_in_registry(&registry, &selector)?;
+    validate_installation(&installation)?;
+    let state = paths.state(&selector);
+    ensure_state(&state)?;
+    let record_path = daemon_record_path(&paths, &selector);
+    if record_path.exists() {
+        let record = read_daemon_record(&record_path)?;
+        match proved_owned(&record, &installation) {
+            Ownership::Owned => return Ok("running".into()),
+            Ownership::Stale => {
+                fs::remove_file(&record_path).map_err(|source| ForgeupError::Io {
+                    path: record_path.clone(),
+                    source,
+                })?;
+            }
+            Ownership::Ambiguous => return Err(ForgeupError::AmbiguousDaemonState(record_path)),
+        }
+    }
+    let instance_id = secret()?;
+    let credential = secret()?;
+    // Unix-domain socket paths have a small platform limit; keep the random endpoint short.
+    let lifecycle_endpoint = env::temp_dir().join(format!("forgeup-{}.sock", &instance_id[..16]));
+    let logs = DaemonLogs {
+        stdout: state.logs.join("daemon.stdout.log"),
+        stderr: state.logs.join("daemon.stderr.log"),
+    };
+    let stdout = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&logs.stdout)
+        .map_err(|source| ForgeupError::Io {
+            path: logs.stdout.clone(),
+            source,
+        })?;
+    let stderr = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&logs.stderr)
+        .map_err(|source| ForgeupError::Io {
+            path: logs.stderr.clone(),
+            source,
+        })?;
+    set_private_permissions(&logs.stdout)?;
+    set_private_permissions(&logs.stderr)?;
+    let mut command = Command::new(&installation.daemon_path);
+    for (key, _) in env::vars_os().filter(|(key, _)| key.to_string_lossy().starts_with("FORGE_")) {
+        command.env_remove(key);
+    }
+    let child = command
+        .args([
+            "--managed",
+            "--bind-addr",
+            &installation.endpoint,
+            "--store-path",
+        ])
+        .arg(&state.database)
+        .args(["--runtime-record-path"])
+        .arg(&record_path)
+        .args(["--lifecycle-control-endpoint"])
+        .arg(&lifecycle_endpoint)
+        .args([
+            "--lifecycle-credential",
+            &credential,
+            "--daemon-instance-id",
+            &instance_id,
+        ])
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .map_err(|source| ForgeupError::Io {
+            path: installation.daemon_path.clone(),
+            source,
+        })?;
+    let record = ManagedDaemonRecord {
+        selector,
+        endpoint: installation.endpoint.clone(),
+        pid: child.id(),
+        daemon_instance_id: instance_id,
+        lifecycle_credential: credential,
+        lifecycle_endpoint,
+        stdout: logs.stdout,
+        stderr: logs.stderr,
+    };
+    write_daemon_record(&record_path, &record)?;
+    let deadline = SystemTime::now() + DAEMON_READY_TIMEOUT;
+    loop {
+        if matches!(proved_owned(&record, &installation), Ownership::Owned) {
+            append_diagnostic(&state, "managed daemon started and ownership validated")?;
+            return Ok("started".into());
+        }
+        if SystemTime::now() >= deadline {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    Err(ForgeupError::DaemonNotReady(record_path))
+}
+
+/// Reports an active managed daemon, or an explicitly selected manual endpoint.
+pub fn daemon_status(endpoint: Option<&str>) -> Result<String, ForgeupError> {
+    if let Some(endpoint) = endpoint {
+        let status = status_at(endpoint)?;
+        return Ok(format!(
+            "manual\t{}",
+            status
+                .management
+                .daemon_instance_id
+                .unwrap_or_else(|| "external".into())
+        ));
+    }
+    let paths = ForgeupPaths::from_environment()?;
+    let store = RegistryStore::open(paths.clone())?;
+    let registry = store.load()?;
+    reconcile_active_path(&paths, &registry)?;
+    let selector = registry
+        .active_selector
+        .clone()
+        .ok_or(ForgeupError::NoActiveRevision)?;
+    let installation = resolve_in_registry(&registry, &selector)?;
+    let record_path = daemon_record_path(&paths, &selector);
+    if !record_path.exists() {
+        return Ok("stopped".into());
+    }
+    let record = read_daemon_record(&record_path)?;
+    match proved_owned(&record, &installation) {
+        Ownership::Owned => Ok("running".into()),
+        Ownership::Stale => {
+            fs::remove_file(&record_path).map_err(|source| ForgeupError::Io {
+                path: record_path,
+                source,
+            })?;
+            Ok("stale record removed".into())
+        }
+        Ownership::Ambiguous => Ok("ambiguous".into()),
+    }
+}
+
+/// Gracefully stops only a process whose endpoint, identity, instance ID, and OS facts agree.
+pub fn daemon_stop() -> Result<String, ForgeupError> {
+    let paths = ForgeupPaths::from_environment()?;
+    let store = RegistryStore::open(paths.clone())?;
+    let registry = store.load()?;
+    let selector = registry
+        .active_selector
+        .clone()
+        .ok_or(ForgeupError::NoActiveRevision)?;
+    let installation = resolve_in_registry(&registry, &selector)?;
+    let state = paths.state(&selector);
+    let record_path = daemon_record_path(&paths, &selector);
+    if !record_path.exists() {
+        return Ok("stopped".into());
+    }
+    let record = read_daemon_record(&record_path)?;
+    match proved_owned(&record, &installation) {
+        Ownership::Stale => {
+            fs::remove_file(&record_path).map_err(|source| ForgeupError::Io {
+                path: record_path,
+                source,
+            })?;
+            return Ok("stale record removed".into());
+        }
+        Ownership::Ambiguous => return Err(ForgeupError::AmbiguousDaemonState(record_path)),
+        Ownership::Owned => {}
+    }
+    request_shutdown(&record)?;
+    let deadline = SystemTime::now() + DAEMON_READY_TIMEOUT;
+    while SystemTime::now() < deadline {
+        if matches!(proved_owned(&record, &installation), Ownership::Stale) {
+            fs::remove_file(&record_path).map_err(|source| ForgeupError::Io {
+                path: record_path.clone(),
+                source,
+            })?;
+            append_diagnostic(&state, "managed daemon gracefully stopped")?;
+            return Ok("stopped".into());
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    Err(ForgeupError::DaemonNotReady(record_path))
+}
+
+/// Returns captured output locations without exposing lifecycle credentials.
+pub fn logs() -> Result<DaemonLogs, ForgeupError> {
+    let paths = ForgeupPaths::from_environment()?;
+    let store = RegistryStore::open(paths.clone())?;
+    let registry = store.load()?;
+    let selector = registry
+        .active_selector
+        .clone()
+        .ok_or(ForgeupError::NoActiveRevision)?;
+    let state = paths.state(&selector);
+    Ok(DaemonLogs {
+        stdout: state.logs.join("daemon.stdout.log"),
+        stderr: state.logs.join("daemon.stderr.log"),
+    })
+}
+
+#[derive(Deserialize)]
+struct StatusResponse {
+    result: StatusResult,
+}
+#[derive(Deserialize)]
+struct StatusResult {
+    management: StatusManagement,
+}
+#[derive(Deserialize)]
+struct StatusManagement {
+    management_protocol_revision: u32,
+    revision_identity: RevisionIdentity,
+    daemon_instance_id: Option<String>,
+}
+
+enum Ownership {
+    Owned,
+    Stale,
+    Ambiguous,
+}
+fn proved_owned(record: &ManagedDaemonRecord, installation: &Installation) -> Ownership {
+    if !process_exists(record.pid) {
+        return Ownership::Stale;
+    }
+    if !process_matches(record) {
+        return Ownership::Ambiguous;
+    }
+    let Ok(status) = status_at(&record.endpoint) else {
+        return Ownership::Ambiguous;
+    };
+    if status.management.management_protocol_revision != SUPPORTED_MANAGEMENT_PROTOCOL_REVISION
+        || status.management.revision_identity != installation.identity
+        || status.management.daemon_instance_id.as_deref() != Some(&record.daemon_instance_id)
+    {
+        return Ownership::Ambiguous;
+    }
+    Ownership::Owned
+}
+fn status_at(endpoint: &str) -> Result<StatusResult, ForgeupError> {
+    let mut stream = TcpStream::connect_timeout(
+        &endpoint
+            .parse()
+            .map_err(|_| ForgeupError::InvalidEndpoint(endpoint.into()))?,
+        Duration::from_secs(1),
+    )
+    .map_err(|source| ForgeupError::Io {
+        path: PathBuf::from(endpoint),
+        source,
+    })?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .map_err(|source| ForgeupError::Io {
+            path: PathBuf::from(endpoint),
+            source,
+        })?;
+    let body = r#"{"jsonrpc":"2.0","id":1,"method":"system_status","params":[]}"#;
+    write!(stream, "POST /rpc HTTP/1.1\r\nHost: {endpoint}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).map_err(|source| ForgeupError::Io { path: PathBuf::from(endpoint), source })?;
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .map_err(|source| ForgeupError::Io {
+            path: PathBuf::from(endpoint),
+            source,
+        })?;
+    let json = response
+        .split("\r\n\r\n")
+        .nth(1)
+        .ok_or_else(|| ForgeupError::InvalidDaemonResponse(endpoint.into()))?;
+    serde_json::from_str::<StatusResponse>(json)
+        .map(|response| response.result)
+        .map_err(|_| ForgeupError::InvalidDaemonResponse(endpoint.into()))
+}
+fn write_daemon_record(path: &Path, record: &ManagedDaemonRecord) -> Result<(), ForgeupError> {
+    let contents =
+        toml::to_string_pretty(record).map_err(|source| ForgeupError::InvalidRegistry {
+            path: path.to_path_buf(),
+            message: source.to_string(),
+        })?;
+    atomic_write(path, contents.as_bytes())
+}
+fn read_daemon_record(path: &Path) -> Result<ManagedDaemonRecord, ForgeupError> {
+    verify_private_permissions(path)?;
+    toml::from_str(
+        &fs::read_to_string(path).map_err(|source| ForgeupError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?,
+    )
+    .map_err(|source| ForgeupError::InvalidRegistry {
+        path: path.to_path_buf(),
+        message: source.to_string(),
+    })
+}
+#[cfg(unix)]
+fn request_shutdown(record: &ManagedDaemonRecord) -> Result<(), ForgeupError> {
+    let mut stream =
+        UnixStream::connect(&record.lifecycle_endpoint).map_err(|source| ForgeupError::Io {
+            path: record.lifecycle_endpoint.clone(),
+            source,
+        })?;
+    stream
+        .write_all(format!("{}\n", record.lifecycle_credential).as_bytes())
+        .map_err(|source| ForgeupError::Io {
+            path: record.lifecycle_endpoint.clone(),
+            source,
+        })
+}
+#[cfg(not(unix))]
+fn request_shutdown(record: &ManagedDaemonRecord) -> Result<(), ForgeupError> {
+    Err(ForgeupError::UnsupportedDaemonPlatform(
+        record.lifecycle_endpoint.clone(),
+    ))
+}
+#[cfg(target_os = "linux")]
+fn process_exists(pid: u32) -> bool {
+    Path::new("/proc").join(pid.to_string()).exists()
+}
+#[cfg(not(target_os = "linux"))]
+fn process_exists(_pid: u32) -> bool {
+    true
+}
+#[cfg(target_os = "linux")]
+fn process_matches(record: &ManagedDaemonRecord) -> bool {
+    fs::read(
+        Path::new("/proc")
+            .join(record.pid.to_string())
+            .join("cmdline"),
+    )
+    .is_ok_and(|cmdline| {
+        cmdline
+            .windows(record.daemon_instance_id.len())
+            .any(|part| part == record.daemon_instance_id.as_bytes())
+    })
+}
+#[cfg(not(target_os = "linux"))]
+fn process_matches(_record: &ManagedDaemonRecord) -> bool {
+    false
+}
+fn secret() -> Result<String, ForgeupError> {
+    use std::fmt::Write as _;
+    let mut bytes = [0_u8; 32];
+    #[cfg(unix)]
+    {
+        File::open("/dev/urandom")
+            .and_then(|mut file| file.read_exact(&mut bytes))
+            .map_err(|source| ForgeupError::Io {
+                path: PathBuf::from("/dev/urandom"),
+                source,
+            })?;
+    }
+    #[cfg(not(unix))]
+    {
+        bytes[..16].copy_from_slice(
+            &SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time after epoch")
+                .as_nanos()
+                .to_le_bytes(),
+        );
+    }
+    let mut value = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(value, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    Ok(value)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DoctorReport {
     pub paths: ForgeupPaths,
@@ -664,6 +1071,12 @@ pub enum ForgeupError {
     StateUnavailable(String),
     ActiveRemoval(String),
     InvalidInstallation(String),
+    NoActiveRevision,
+    InvalidEndpoint(String),
+    InvalidDaemonResponse(String),
+    AmbiguousDaemonState(PathBuf),
+    DaemonNotReady(PathBuf),
+    UnsupportedDaemonPlatform(PathBuf),
 }
 impl fmt::Display for ForgeupError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -719,6 +1132,26 @@ impl fmt::Display for ForgeupError {
                     "registered Forge Revision `{selector}` has invalid artifacts"
                 )
             }
+            Self::NoActiveRevision => write!(f, "no active Forge Revision is selected"),
+            Self::InvalidEndpoint(endpoint) => write!(f, "invalid daemon endpoint `{endpoint}`"),
+            Self::InvalidDaemonResponse(endpoint) => {
+                write!(f, "invalid daemon status response from `{endpoint}`")
+            }
+            Self::AmbiguousDaemonState(path) => write!(
+                f,
+                "managed daemon state at {} is ambiguous; inspect logs and resolve it manually",
+                path.display()
+            ),
+            Self::DaemonNotReady(path) => write!(
+                f,
+                "managed daemon did not prove readiness; state retained at {}",
+                path.display()
+            ),
+            Self::UnsupportedDaemonPlatform(path) => write!(
+                f,
+                "managed lifecycle control is unsupported for {}",
+                path.display()
+            ),
         }
     }
 }

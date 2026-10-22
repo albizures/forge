@@ -44,8 +44,28 @@ enum Command {
     Use { selector: String },
     /// Clear the active Revision and remove the manager-owned `forge` path.
     Deactivate,
-    /// Check Forgeup's private locations and registry schema.
+    /// Operate only the active Forge Revision's managed daemon.
+    Daemon {
+        #[command(subcommand)]
+        command: DaemonCommand,
+    },
+    /// Print paths to captured managed-daemon output for the active Revision.
+    Logs,
+    /// Check Forgeup's private locations, registry schema, and managed state.
     Doctor,
+}
+
+#[derive(Debug, Subcommand)]
+enum DaemonCommand {
+    /// Report managed ownership for the active Revision, or inspect an explicit manual endpoint.
+    Status {
+        #[arg(long)]
+        endpoint: Option<String>,
+    },
+    /// Start the active Revision's managed daemon.
+    Start,
+    /// Gracefully stop the active Revision's proved-owned managed daemon.
+    Stop,
 }
 
 fn main() {
@@ -75,6 +95,8 @@ fn main() {
         Command::Current { selector } => current(&selector),
         Command::Use { selector } => use_revision(&selector),
         Command::Deactivate => deactivate(),
+        Command::Daemon { command } => daemon(command),
+        Command::Logs => logs(),
         Command::Doctor => doctor(),
     });
 }
@@ -165,6 +187,36 @@ fn deactivate() -> i32 {
         Ok(()) => 0,
         Err(error) => {
             eprintln!("forgeup deactivate: {error}");
+            1
+        }
+    }
+}
+fn daemon(command: DaemonCommand) -> i32 {
+    let result = match command {
+        DaemonCommand::Status { endpoint } => forgeup::daemon_status(endpoint.as_deref()),
+        DaemonCommand::Start => forgeup::daemon_start(),
+        DaemonCommand::Stop => forgeup::daemon_stop(),
+    };
+    match result {
+        Ok(status) => {
+            println!("{status}");
+            0
+        }
+        Err(error) => {
+            eprintln!("forgeup daemon: {error}");
+            1
+        }
+    }
+}
+fn logs() -> i32 {
+    match forgeup::logs() {
+        Ok(paths) => {
+            println!("stdout\t{}", paths.stdout.display());
+            println!("stderr\t{}", paths.stderr.display());
+            0
+        }
+        Err(error) => {
+            eprintln!("forgeup logs: {error}");
             1
         }
     }
