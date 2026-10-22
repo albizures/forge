@@ -1629,7 +1629,7 @@ mod tests {
         assert_eq!(fs::read_to_string(&state.database).unwrap(), "preserved");
         remove_at(&paths, &replacement.selector, false).unwrap();
         assert!(state.database.exists());
-        assert!(matches!(
+        assert!(
             register_at(
                 &paths,
                 "local",
@@ -1640,9 +1640,9 @@ mod tests {
                     reuse_state: Some(&replacement.selector),
                     ..RegistrationOptions::default()
                 }
-            ),
-            Ok(_)
-        ));
+            )
+            .is_ok()
+        );
         {
             let store = RegistryStore::open(paths.clone()).unwrap();
             let mut registry = store.load().unwrap();

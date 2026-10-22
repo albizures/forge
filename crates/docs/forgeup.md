@@ -149,11 +149,20 @@ it can prove the recorded PID is absent.
 ## Boundary and follow-on work
 
 Forgeup manages Revision registration, selection, isolated state, and the
-Managed Daemon lifecycle. Direct/manual daemon operation remains supported:
-start `forge-server` yourself and point `forge` at it with `--server-url` or
-`FORGE_SERVER_URL`; Forgeup does not modify that daemon.
+Managed Daemon lifecycle. Ordinary commands issued by the selected `forge`
+CLI use the Active Forge Revision: they attest the running CLI to the active
+installation, ensure its daemon, and target its registered endpoint.
 
-The selected `forge` path is an activation convenience, not managed-CLI
-orchestration. Automatic routing of ordinary Forge CLI commands through
-Forgeup, including any daemon-start policy, is deliberately separate follow-on
-work and is not part of this release.
+Direct/manual daemon operation remains supported. Start `forge-server` yourself
+and point `forge` at it with `--server-url` or `FORGE_SERVER_URL`; the flag
+wins. Either Endpoint Override bypasses Forgeup lookup and lifecycle work, so
+Forgeup does not inspect or modify that daemon. `forgeup daemon status
+--endpoint HOST:PORT` is likewise inspection-only.
+
+If managed resolution fails, do not expect a legacy-endpoint fallback. For no
+selection, register and select a Revision with `forgeup register` and `forgeup
+use`. For a stale CLI, invoke the manager-owned selected CLI or select the
+matching Revision again. For registry, permissions, or daemon ownership
+failures, run `forgeup doctor`; inspect `forgeup logs` for lifecycle failures.
+Do not edit Forgeup's registry or runtime records by hand. An explicit Endpoint
+Override is an available temporary manual recovery path.

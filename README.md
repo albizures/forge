@@ -25,7 +25,10 @@ cargo run -p forge-server --bin forge-server
 
 It listens on `127.0.0.1:45003` by default. The daemon serves its browser
 routes and JSON-RPC endpoint from that one listener. Stop it with Ctrl-C;
-SIGTERM also triggers graceful shutdown where the platform supports it.
+SIGTERM also triggers graceful shutdown where the platform supports it. This is
+a manual daemon: pass `--server-url http://127.0.0.1:45003/rpc` (or export
+`FORGE_SERVER_URL` with that value) for the direct `cargo run ... forge`
+examples below, unless you have selected a managed Revision.
 
 To select a bind address, use `--bind-addr` or `FORGE_BIND_ADDR`. The flag
 wins when both are supplied:
@@ -38,27 +41,33 @@ FORGE_BIND_ADDR=127.0.0.1:45004 cargo run -p forge-server --bin forge-server
 A non-loopback bind is unauthenticated. Use it only for an explicitly trusted
 private network such as Tailscale; startup logging warns about this boundary.
 
-## Read status
+## CLI endpoint modes
 
-With the daemon running, use the CLI:
+Ordinary `forge` commands use the selected **Active Forge Revision** by
+default. The CLI reads the active Forgeup installation, attests that its own
+hash and Revision Identity match it, ensures that Revision's managed daemon,
+and uses its registered endpoint. Select a Revision first with `forgeup use
+<selector>`; see [`crates/docs/forgeup.md`](crates/docs/forgeup.md) for
+registration and recovery.
 
-```sh
-cargo run -p forge-cli --bin forge -- status
-cargo run -p forge-cli --bin forge -- status --json
-```
-
-The CLI always calls `system.status` through daemon JSON-RPC/HTTP; it never
-starts or bypasses the daemon. Its default endpoint is
-`http://127.0.0.1:45003/rpc`. Point it at another daemon with `--server-url`
-or `FORGE_SERVER_URL`; the flag wins:
+An explicit endpoint is **Manual Daemon** operation. `--server-url` takes
+precedence over `FORGE_SERVER_URL`; either bypasses Forgeup lookup, attestation,
+and daemon lifecycle work completely:
 
 ```sh
 cargo run -p forge-cli --bin forge -- status --server-url http://127.0.0.1:45004/rpc
 FORGE_SERVER_URL=http://127.0.0.1:45004/rpc cargo run -p forge-cli --bin forge -- status
 ```
 
-If no daemon is reachable, `forge status` reports the problem on stderr and
-exits nonzero after at most the 10-second request timeout.
+Use this mode for a daemon you started yourself. If neither override is set,
+there is no active Revision, the CLI is stale, the registry is invalid, or
+Forgeup cannot ensure the daemon, `forge` fails closed with recovery guidance;
+it never falls back to `http://127.0.0.1:45003/rpc`. `--build-info --json` is
+the sole offline command and remains available without Forgeup or a daemon.
+
+With a reachable endpoint, status calls `system.status` through daemon
+JSON-RPC/HTTP and reports failures on stderr after at most the 10-second
+request timeout.
 
 ## Register and confirm a Project
 
