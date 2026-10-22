@@ -1,22 +1,24 @@
-//! Durable local foundations for the independent Forgeup executable.
-//!
-//! This crate owns Forgeup's private filesystem layout and schema-versioned
-//! registry. Higher-level registration and daemon operations build on this
-//! boundary rather than writing files directly.
+//! Forgeup's private registry and immutable Forge Revision installations.
+
+#![allow(clippy::missing_errors_doc)]
 
 use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     env,
     ffi::OsString,
     fmt,
     fs::{self, File, OpenOptions},
-    io::{self, Write},
+    io::{self, Read, Write},
+    net::TcpListener,
     path::{Path, PathBuf},
+    process::Command,
     sync::atomic::{AtomicU64, Ordering},
 };
 
 const REGISTRY_SCHEMA_VERSION: u32 = 1;
+const SUPPORTED_MANAGEMENT_PROTOCOL_REVISION: u32 = 1;
 const REGISTRY_FILE: &str = "registry.toml";
 const LOCK_FILE: &str = "registry.lock";
 static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -24,22 +26,14 @@ static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// All user-owned locations used by Forgeup.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ForgeupPaths {
-    /// Persistent configuration, including the registry.
     pub config: PathBuf,
-    /// Immutable revision installations and durable revision state.
     pub data: PathBuf,
-    /// Ephemeral protected process records.
     pub runtime: PathBuf,
-    /// Directory containing the manager-owned `forge` path entry.
     pub bin: PathBuf,
 }
 
 impl ForgeupPaths {
     /// Resolves the Forgeup layout from `FORGEUP_HOME` or platform conventions.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when a required home or platform location is unavailable.
     pub fn from_environment() -> Result<Self, ForgeupError> {
         if let Some(home) = env::var_os("FORGEUP_HOME") {
             let home = PathBuf::from(home);
@@ -53,7 +47,6 @@ impl ForgeupPaths {
                 bin: home.join("bin"),
             });
         }
-
         let home = home_dir()?;
         #[cfg(target_os = "windows")]
         {
@@ -62,8 +55,8 @@ impl ForgeupPaths {
             return Ok(Self {
                 config: roaming.join("Forgeup"),
                 data: local.join("Forgeup"),
-                runtime: local.join("Forgeup").join("runtime"),
-                bin: local.join("Forgeup").join("bin"),
+                runtime: local.join("Forgeup/runtime"),
+                bin: local.join("Forgeup/bin"),
             });
         }
         #[cfg(target_os = "macos")]
@@ -90,11 +83,6 @@ impl ForgeupPaths {
         }
     }
 
-    /// Creates and verifies the private directory layout.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if locations cannot be created or are accessible by other users.
     pub fn ensure_private(&self) -> Result<(), ForgeupError> {
         for path in [&self.config, &self.data, &self.runtime, &self.bin] {
             fs::create_dir_all(path).map_err(|source| ForgeupError::Io {
@@ -106,30 +94,57 @@ impl ForgeupPaths {
         }
         Ok(())
     }
-
-    /// Returns the registry path.
     #[must_use]
     pub fn registry(&self) -> PathBuf {
         self.config.join(REGISTRY_FILE)
     }
-
+    #[must_use]
+    pub fn installations(&self) -> PathBuf {
+        self.data.join("installations")
+    }
     fn lock(&self) -> PathBuf {
         self.config.join(LOCK_FILE)
     }
 }
 
-/// A strictly validated persisted Forgeup registry.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+/// Immutable facts reported by a Forge executable.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Registry {
-    /// On-disk schema revision.
-    pub schema_version: u32,
+pub struct RevisionIdentity {
+    pub commit: String,
+    pub dirty: bool,
+    pub management_protocol_revision: u32,
+    pub version: String,
 }
 
+/// One immutable snapshot in the registry.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Installation {
+    pub source_label: String,
+    pub selector: String,
+    pub local_build_alias: Option<String>,
+    pub identity: RevisionIdentity,
+    pub cli_path: PathBuf,
+    pub daemon_path: PathBuf,
+    pub cli_sha256: String,
+    pub daemon_sha256: String,
+    pub endpoint: String,
+}
+
+/// A strictly validated persisted Forgeup registry.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Registry {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub installations: Vec<Installation>,
+}
 impl Registry {
     fn empty() -> Self {
         Self {
             schema_version: REGISTRY_SCHEMA_VERSION,
+            installations: Vec::new(),
         }
     }
 }
@@ -139,13 +154,7 @@ pub struct RegistryStore {
     paths: ForgeupPaths,
     _lock: File,
 }
-
 impl RegistryStore {
-    /// Opens the registry and obtains its exclusive cross-process lock.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for unsafe filesystem permissions or an unavailable lock.
     pub fn open(paths: ForgeupPaths) -> Result<Self, ForgeupError> {
         paths.ensure_private()?;
         let lock_path = paths.lock();
@@ -167,12 +176,6 @@ impl RegistryStore {
         })?;
         Ok(Self { paths, _lock: lock })
     }
-
-    /// Loads the registry, migrating older supported schemas transactionally.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for malformed, unsupported, or unreadable registry data.
     pub fn load(&self) -> Result<Registry, ForgeupError> {
         let path = self.paths.registry();
         if !path.exists() {
@@ -197,12 +200,6 @@ impl RegistryStore {
             version => self.migrate(version, &contents),
         }
     }
-
-    /// Atomically replaces the registry while the caller holds the lock.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when serialization or filesystem replacement fails.
     pub fn save(&self, registry: &Registry) -> Result<(), ForgeupError> {
         if registry.schema_version != REGISTRY_SCHEMA_VERSION {
             return Err(ForgeupError::UnsupportedSchema(registry.schema_version));
@@ -214,33 +211,139 @@ impl RegistryStore {
             })?;
         atomic_write(&self.paths.registry(), contents.as_bytes())
     }
-
-    fn migrate(&self, version: u32, old_contents: &str) -> Result<Registry, ForgeupError> {
+    fn migrate(&self, version: u32, old: &str) -> Result<Registry, ForgeupError> {
         if version != 0 {
             return Err(ForgeupError::UnsupportedSchema(version));
         }
-        let backup = self.paths.registry().with_extension("toml.bak");
-        atomic_write(&backup, old_contents.as_bytes())?;
+        atomic_write(
+            &self.paths.registry().with_extension("toml.bak"),
+            old.as_bytes(),
+        )?;
         let registry = Registry::empty();
         self.save(&registry)?;
         Ok(registry)
     }
 }
 
-/// A public, non-mutating diagnosis of Forgeup's foundational storage.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DoctorReport {
-    /// Resolved user-owned locations.
-    pub paths: ForgeupPaths,
-    /// The registry schema currently usable by this Forgeup build.
-    pub schema_version: u32,
+/// Registers a verified executable pair as an immutable Revision Installation.
+pub fn register(
+    source_label: &str,
+    cli: &Path,
+    daemon: &Path,
+    local_build_alias: Option<&str>,
+) -> Result<Installation, ForgeupError> {
+    register_at(
+        &ForgeupPaths::from_environment()?,
+        source_label,
+        cli,
+        daemon,
+        local_build_alias,
+    )
 }
 
-/// Verifies the private layout and registry without implementing daemon control.
-///
-/// # Errors
-///
-/// Returns an error that identifies unsafe or unreadable foundational state.
+fn register_at(
+    paths: &ForgeupPaths,
+    source_label: &str,
+    cli: &Path,
+    daemon: &Path,
+    local_build_alias: Option<&str>,
+) -> Result<Installation, ForgeupError> {
+    validate_label(source_label)?;
+    if let Some(alias) = local_build_alias {
+        validate_label(alias)?;
+    }
+    let cli_identity = inspect_identity(cli)?;
+    let daemon_identity = inspect_identity(daemon)?;
+    if cli_identity != daemon_identity {
+        return Err(ForgeupError::IdentityMismatch);
+    }
+    validate_identity(&cli_identity)?;
+    let selector = format!("{source_label}@{}", cli_identity.commit);
+    let cli_hash = sha256(cli)?;
+    let daemon_hash = sha256(daemon)?;
+    let store = RegistryStore::open(paths.clone())?;
+    let mut registry = store.load()?;
+    if let Some(existing) = registry
+        .installations
+        .iter()
+        .find(|item| item.selector == selector)
+    {
+        if existing.cli_sha256 == cli_hash && existing.daemon_sha256 == daemon_hash {
+            return Ok(existing.clone());
+        }
+        return Err(ForgeupError::RegistrationConflict(selector));
+    }
+    if registry.installations.iter().any(|item| {
+        item.source_label == source_label && item.identity.commit == cli_identity.commit
+    }) {
+        return Err(ForgeupError::RegistrationConflict(selector));
+    }
+    if let Some(alias) = local_build_alias
+        && registry
+            .installations
+            .iter()
+            .any(|item| item.local_build_alias.as_deref() == Some(alias))
+    {
+        return Err(ForgeupError::AliasConflict(alias.to_owned()));
+    }
+    let destination = paths.installations().join(&selector);
+    fs::create_dir_all(&destination).map_err(|source| ForgeupError::Io {
+        path: destination.clone(),
+        source,
+    })?;
+    set_private_permissions(&destination)?;
+    let cli_path = destination.join("forge");
+    let daemon_path = destination.join("forge-server");
+    copy_executable(cli, &cli_path)?;
+    copy_executable(daemon, &daemon_path)?;
+    let endpoint = allocate_endpoint()?;
+    let installation = Installation {
+        source_label: source_label.to_owned(),
+        selector: selector.clone(),
+        local_build_alias: local_build_alias.map(str::to_owned),
+        identity: cli_identity,
+        cli_path,
+        daemon_path,
+        cli_sha256: cli_hash,
+        daemon_sha256: daemon_hash,
+        endpoint,
+    };
+    let manifest =
+        toml::to_string_pretty(&installation).map_err(|source| ForgeupError::InvalidRegistry {
+            path: destination.join("manifest.toml"),
+            message: source.to_string(),
+        })?;
+    atomic_write(&destination.join("manifest.toml"), manifest.as_bytes())?;
+    registry.installations.push(installation.clone());
+    store.save(&registry)?;
+    Ok(installation)
+}
+
+/// Returns registered Revision Installations.
+pub fn list() -> Result<Vec<Installation>, ForgeupError> {
+    let paths = ForgeupPaths::from_environment()?;
+    Ok(RegistryStore::open(paths)?.load()?.installations)
+}
+/// Resolves the only accepted canonical selector or a unique local-build alias.
+pub fn current(selector: &str) -> Result<Installation, ForgeupError> {
+    let matches = list()?
+        .into_iter()
+        .filter(|item| {
+            item.selector == selector || item.local_build_alias.as_deref() == Some(selector)
+        })
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [item] => Ok(item.clone()),
+        [] => Err(ForgeupError::UnknownSelector(selector.to_owned())),
+        _ => Err(ForgeupError::AmbiguousSelector(selector.to_owned())),
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DoctorReport {
+    pub paths: ForgeupPaths,
+    pub schema_version: u32,
+}
 pub fn doctor() -> Result<DoctorReport, ForgeupError> {
     let paths = ForgeupPaths::from_environment()?;
     let registry = RegistryStore::open(paths.clone())?.load()?;
@@ -250,64 +353,155 @@ pub fn doctor() -> Result<DoctorReport, ForgeupError> {
     })
 }
 
-/// Errors from Forgeup's local persistence boundary.
 #[derive(Debug)]
 pub enum ForgeupError {
-    /// A required environment-derived location was absent or invalid.
     InvalidLocation(&'static str),
-    /// An I/O operation failed at a specific path.
     Io { path: PathBuf, source: io::Error },
-    /// A directory or secret-bearing file is not private to its owner.
     UnsafePermissions(PathBuf),
-    /// TOML was malformed or violated the strict schema.
     InvalidRegistry { path: PathBuf, message: String },
-    /// The registry was written by a newer Forgeup.
     FutureSchema(u32),
-    /// An older registry schema has no declared migration.
     UnsupportedSchema(u32),
+    InvalidLabel(String),
+    InvalidIdentity(String),
+    UnsupportedManagementProtocol(u32),
+    IdentityMismatch,
+    CommandFailed(PathBuf, String),
+    RegistrationConflict(String),
+    AliasConflict(String),
+    UnknownSelector(String),
+    AmbiguousSelector(String),
 }
-
 impl fmt::Display for ForgeupError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidLocation(message) => {
-                write!(formatter, "invalid Forgeup location: {message}")
-            }
-            Self::Io { path, source } => write!(formatter, "{}: {source}", path.display()),
+            Self::InvalidLocation(m) => write!(f, "invalid Forgeup location: {m}"),
+            Self::Io { path, source } => write!(f, "{}: {source}", path.display()),
             Self::UnsafePermissions(path) => {
-                write!(formatter, "{} must be private to its owner", path.display())
+                write!(f, "{} must be private to its owner", path.display())
             }
             Self::InvalidRegistry { path, message } => {
-                write!(formatter, "invalid registry {}: {message}", path.display())
+                write!(f, "invalid registry {}: {message}", path.display())
             }
-            Self::FutureSchema(version) => write!(
-                formatter,
-                "registry schema {version} is newer than this Forgeup"
+            Self::FutureSchema(v) => write!(f, "registry schema {v} is newer than this Forgeup"),
+            Self::UnsupportedSchema(v) => write!(f, "registry schema {v} is unsupported"),
+            Self::InvalidLabel(v) => write!(f, "invalid source label or alias `{v}`"),
+            Self::InvalidIdentity(v) => write!(f, "invalid Revision Identity: {v}"),
+            Self::UnsupportedManagementProtocol(v) => {
+                write!(f, "Management Protocol revision {v} is unsupported")
+            }
+            Self::IdentityMismatch => write!(f, "CLI and daemon Revision Identities do not match"),
+            Self::CommandFailed(path, message) => {
+                write!(f, "could not inspect {}: {message}", path.display())
+            }
+            Self::RegistrationConflict(s) => write!(
+                f,
+                "Revision Installation `{s}` already has different artifacts"
             ),
-            Self::UnsupportedSchema(version) => {
-                write!(formatter, "registry schema {version} is unsupported")
-            }
+            Self::AliasConflict(a) => write!(f, "local-build alias `{a}` is already in use"),
+            Self::UnknownSelector(s) => write!(f, "unknown Revision Selector `{s}`"),
+            Self::AmbiguousSelector(s) => write!(f, "ambiguous Revision Selector `{s}`"),
         }
     }
 }
-
 impl std::error::Error for ForgeupError {}
 
+fn inspect_identity(path: &Path) -> Result<RevisionIdentity, ForgeupError> {
+    let output = Command::new(path)
+        .args(["--build-info", "--json"])
+        .output()
+        .map_err(|source| ForgeupError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    if !output.status.success() {
+        return Err(ForgeupError::CommandFailed(
+            path.to_path_buf(),
+            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        ));
+    }
+    serde_json::from_slice(&output.stdout)
+        .map_err(|error| ForgeupError::CommandFailed(path.to_path_buf(), error.to_string()))
+}
+fn validate_identity(identity: &RevisionIdentity) -> Result<(), ForgeupError> {
+    if identity.commit.len() != 40 || !identity.commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(ForgeupError::InvalidIdentity(
+            "commit must be a full 40-character hexadecimal Git ID".into(),
+        ));
+    }
+    if identity.version.trim().is_empty() {
+        return Err(ForgeupError::InvalidIdentity("version is blank".into()));
+    }
+    if identity.management_protocol_revision != SUPPORTED_MANAGEMENT_PROTOCOL_REVISION {
+        return Err(ForgeupError::UnsupportedManagementProtocol(
+            identity.management_protocol_revision,
+        ));
+    }
+    Ok(())
+}
+fn validate_label(label: &str) -> Result<(), ForgeupError> {
+    if label.is_empty()
+        || !label
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        Err(ForgeupError::InvalidLabel(label.to_owned()))
+    } else {
+        Ok(())
+    }
+}
+fn sha256(path: &Path) -> Result<String, ForgeupError> {
+    let mut file = File::open(path).map_err(|source| ForgeupError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut hash = Sha256::new();
+    let mut buffer = [0; 8192];
+    loop {
+        let count = file.read(&mut buffer).map_err(|source| ForgeupError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        if count == 0 {
+            break;
+        }
+        hash.update(&buffer[..count]);
+    }
+    Ok(format!("{:x}", hash.finalize()))
+}
+fn copy_executable(source: &Path, destination: &Path) -> Result<(), ForgeupError> {
+    fs::copy(source, destination).map_err(|source_error| ForgeupError::Io {
+        path: destination.to_path_buf(),
+        source: source_error,
+    })?;
+    set_private_permissions(destination)
+}
+fn allocate_endpoint() -> Result<String, ForgeupError> {
+    let listener = TcpListener::bind("127.0.0.1:0").map_err(|source| ForgeupError::Io {
+        path: PathBuf::from("loopback endpoint"),
+        source,
+    })?;
+    let endpoint = listener
+        .local_addr()
+        .map_err(|source| ForgeupError::Io {
+            path: PathBuf::from("loopback endpoint"),
+            source,
+        })?
+        .to_string();
+    Ok(endpoint)
+}
 fn home_dir() -> Result<PathBuf, ForgeupError> {
     env_path("HOME").ok_or(ForgeupError::InvalidLocation("HOME is not set"))
 }
-
 #[cfg(target_os = "windows")]
 fn variable_path(name: &'static str) -> Result<PathBuf, ForgeupError> {
     env_path(name).ok_or(ForgeupError::InvalidLocation(name))
 }
-
 fn env_path(name: &str) -> Option<PathBuf> {
     env::var_os(name)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
 }
-
 fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), ForgeupError> {
     let parent = path
         .parent()
@@ -347,11 +541,9 @@ fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), ForgeupError> {
             source,
         })
 }
-
 fn file_name(path: &Path) -> OsString {
     path.file_name().unwrap_or_default().to_os_string()
 }
-
 #[cfg(unix)]
 fn set_private_permissions(path: &Path) -> Result<(), ForgeupError> {
     use std::os::unix::fs::PermissionsExt;
@@ -362,12 +554,10 @@ fn set_private_permissions(path: &Path) -> Result<(), ForgeupError> {
         }
     })
 }
-
 #[cfg(not(unix))]
 fn set_private_permissions(_path: &Path) -> Result<(), ForgeupError> {
     Ok(())
 }
-
 #[cfg(unix)]
 fn verify_private_permissions(path: &Path) -> Result<(), ForgeupError> {
     use std::os::unix::fs::PermissionsExt;
@@ -379,11 +569,11 @@ fn verify_private_permissions(path: &Path) -> Result<(), ForgeupError> {
         .permissions()
         .mode();
     if mode & 0o077 != 0 {
-        return Err(ForgeupError::UnsafePermissions(path.to_path_buf()));
+        Err(ForgeupError::UnsafePermissions(path.to_path_buf()))
+    } else {
+        Ok(())
     }
-    Ok(())
 }
-
 #[cfg(not(unix))]
 fn verify_private_permissions(_path: &Path) -> Result<(), ForgeupError> {
     Ok(())
@@ -392,80 +582,77 @@ fn verify_private_permissions(_path: &Path) -> Result<(), ForgeupError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{sync::Arc, thread};
-
-    fn paths(name: &str) -> ForgeupPaths {
-        let root = env::temp_dir().join(format!("forgeup-test-{name}-{}", std::process::id()));
-        ForgeupPaths {
-            config: root.join("config"),
-            data: root.join("data"),
-            runtime: root.join("runtime"),
-            bin: root.join("bin"),
-        }
-    }
-
-    #[test]
-    fn isolated_layout_is_private_and_registry_round_trips() {
-        let paths = paths("round-trip");
-        let store = RegistryStore::open(paths.clone()).unwrap();
-        let registry = store.load().unwrap();
-        assert_eq!(registry, Registry::empty());
-        store.save(&registry).unwrap();
-        drop(store);
-        assert_eq!(
-            RegistryStore::open(paths).unwrap().load().unwrap(),
-            registry
-        );
-    }
-
-    #[test]
-    fn future_schema_is_rejected_without_writing() {
-        let paths = paths("future");
-        paths.ensure_private().unwrap();
-        fs::write(paths.registry(), "schema_version = 2\n").unwrap();
-        set_private_permissions(&paths.registry()).unwrap();
-        assert!(matches!(
-            RegistryStore::open(paths).unwrap().load(),
-            Err(ForgeupError::FutureSchema(2))
-        ));
-    }
-
-    #[test]
-    fn schema_zero_is_backed_up_before_migration() {
-        let paths = paths("migration");
-        paths.ensure_private().unwrap();
-        fs::write(paths.registry(), "schema_version = 0\n").unwrap();
-        set_private_permissions(&paths.registry()).unwrap();
-        let registry = RegistryStore::open(paths.clone()).unwrap().load().unwrap();
-        assert_eq!(registry, Registry::empty());
-        assert_eq!(
-            fs::read_to_string(paths.registry().with_extension("toml.bak")).unwrap(),
-            "schema_version = 0\n"
-        );
-    }
-
-    #[test]
-    fn exclusive_lock_serializes_registry_access() {
-        let paths = Arc::new(paths("lock"));
-        let held = RegistryStore::open((*paths).clone()).unwrap();
-        let other_paths = Arc::clone(&paths);
-        let waiting = thread::spawn(move || RegistryStore::open((*other_paths).clone()).unwrap());
-        thread::sleep(std::time::Duration::from_millis(30));
-        drop(held);
-        drop(waiting.join().unwrap());
+    #[cfg(unix)]
+    fn executable(path: &Path, identity: &str, payload: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::write(
+            path,
+            format!("#!/bin/sh\nif [ \"$1\" = \"--build-info\" ]; then echo '{identity}'; exit 0; fi\necho {payload}\n"),
+        )
+        .unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
     }
 
     #[cfg(unix)]
     #[test]
-    fn group_readable_registry_is_rejected() {
-        use std::os::unix::fs::PermissionsExt;
-        let paths = paths("permissions");
-        paths.ensure_private().unwrap();
-        fs::write(paths.registry(), "schema_version = 1\n").unwrap();
-        fs::set_permissions(paths.registry(), fs::Permissions::from_mode(0o644)).unwrap();
+    fn registration_snapshots_matching_artifacts_and_resolves_aliases() {
+        let root = env::temp_dir().join(format!("forgeup-registration-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let cli = root.join("candidate-forge");
+        let daemon = root.join("candidate-forge-server");
+        fs::create_dir_all(&root).unwrap();
+        let identity = r#"{"commit":"0123456789012345678901234567890123456789","dirty":false,"management_protocol_revision":1,"version":"test"}"#;
+        executable(&cli, identity, "original-cli");
+        executable(&daemon, identity, "original-daemon");
+        let paths = ForgeupPaths {
+            config: root.join("home/config"),
+            data: root.join("home/data"),
+            runtime: root.join("home/runtime"),
+            bin: root.join("home/bin"),
+        };
+        let installation = register_at(&paths, "local", &cli, &daemon, Some("dev")).unwrap();
+        assert!(installation.cli_path.exists());
+        let registry = RegistryStore::open(paths.clone()).unwrap().load().unwrap();
+        assert_eq!(registry.installations, vec![installation.clone()]);
+        assert_eq!(
+            registry.installations[0].local_build_alias.as_deref(),
+            Some("dev")
+        );
+        executable(&cli, identity, "changed-cli");
         assert!(matches!(
-            RegistryStore::open(paths).unwrap().load(),
-            Err(ForgeupError::UnsafePermissions(_))
+            register_at(&paths, "local", &cli, &daemon, Some("dev")),
+            Err(ForgeupError::RegistrationConflict(_))
+        ));
+        assert_ne!(
+            fs::read(&installation.cli_path).unwrap(),
+            fs::read(&cli).unwrap()
+        );
+        let mismatched = r#"{"commit":"0123456789012345678901234567890123456789","dirty":false,"management_protocol_revision":1,"version":"other"}"#;
+        executable(&cli, mismatched, "mismatched-cli");
+        assert!(matches!(
+            register_at(&paths, "other", &cli, &daemon, None),
+            Err(ForgeupError::IdentityMismatch)
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejects_incomplete_and_unsupported_identities() {
+        let mut identity = RevisionIdentity {
+            commit: "bad".into(),
+            dirty: false,
+            management_protocol_revision: 1,
+            version: "test".into(),
+        };
+        assert!(matches!(
+            validate_identity(&identity),
+            Err(ForgeupError::InvalidIdentity(_))
+        ));
+        identity.commit = "0123456789012345678901234567890123456789".into();
+        identity.management_protocol_revision = 2;
+        assert!(matches!(
+            validate_identity(&identity),
+            Err(ForgeupError::UnsupportedManagementProtocol(2))
         ));
     }
 }
