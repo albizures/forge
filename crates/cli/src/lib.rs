@@ -17,8 +17,13 @@ pub fn server_url(flag: Option<&str>, environment: Option<&str>) -> String {
         .unwrap_or(DEFAULT_SERVER_URL)
         .to_owned()
 }
-#[must_use]
-pub fn server_url_from_process(flag: Option<&str>) -> String {
+/// Resolves the endpoint for one ordinary CLI command.
+///
+/// An explicit flag or environment value is an Endpoint Override. It returns
+/// immediately, so managed endpoint resolution added here must remain entirely
+/// below the no-override branch.
+#[allow(clippy::unused_async)] // Managed resolution is asynchronous in the next branch.
+pub async fn resolve_endpoint(flag: Option<&str>) -> String {
     server_url(flag, env::var("FORGE_SERVER_URL").ok().as_deref())
 }
 fn client(url: &str) -> Result<jsonrpsee::http_client::HttpClient, String> {
@@ -267,6 +272,14 @@ mod tests {
         );
         assert_eq!(server_url(None, None), DEFAULT_SERVER_URL);
     }
+    #[tokio::test]
+    async fn endpoint_override_resolves_without_managed_endpoint_work() {
+        assert_eq!(
+            resolve_endpoint(Some("http://manual-daemon/rpc")).await,
+            "http://manual-daemon/rpc"
+        );
+    }
+
     #[test]
     fn record_list_renders_records_in_response_order() {
         let records = ListRecordsResponse {

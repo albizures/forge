@@ -4,7 +4,7 @@ use forge_cli::{
     render_record, render_record_list, render_record_opened, request_done_record,
     request_edit_record, request_list_records, request_open_record, request_project_here,
     request_register_project, request_relate_record, request_show_record, request_start_record,
-    request_status, request_unrelate_record, server_url_from_process,
+    request_status, request_unrelate_record, resolve_endpoint,
 };
 use std::io::Read;
 
@@ -160,18 +160,15 @@ async fn main() {
             RecordCommand::Show(args) => record_result(
                 "show",
                 args.json,
-                request_show_record(
-                    &server_url_from_process(args.server_url.as_deref()),
-                    args.id,
-                )
-                .await,
+                request_show_record(&resolve_endpoint(args.server_url.as_deref()).await, args.id)
+                    .await,
             ),
             RecordCommand::List(args) => list_records(args).await,
             RecordCommand::Edit(args) => record_result(
                 "edit",
                 args.json,
                 request_edit_record(
-                    &server_url_from_process(args.server_url.as_deref()),
+                    &resolve_endpoint(args.server_url.as_deref()).await,
                     args.id,
                     &args.body,
                 )
@@ -180,17 +177,14 @@ async fn main() {
             RecordCommand::Start(args) => record_result(
                 "start",
                 args.json,
-                request_start_record(
-                    &server_url_from_process(args.server_url.as_deref()),
-                    args.id,
-                )
-                .await,
+                request_start_record(&resolve_endpoint(args.server_url.as_deref()).await, args.id)
+                    .await,
             ),
             RecordCommand::Done(args) => record_result(
                 "done",
                 args.json,
                 request_done_record(
-                    &server_url_from_process(args.server_url.as_deref()),
+                    &resolve_endpoint(args.server_url.as_deref()).await,
                     args.id,
                     args.resolution,
                 )
@@ -200,7 +194,7 @@ async fn main() {
                 "relate",
                 args.json,
                 request_relate_record(
-                    &server_url_from_process(args.server_url.as_deref()),
+                    &resolve_endpoint(args.server_url.as_deref()).await,
                     args.child_id,
                     args.parent_id,
                     args.kind,
@@ -211,7 +205,7 @@ async fn main() {
                 "unrelate",
                 args.json,
                 request_unrelate_record(
-                    &server_url_from_process(args.server_url.as_deref()),
+                    &resolve_endpoint(args.server_url.as_deref()).await,
                     args.child_id,
                     args.parent_id,
                     args.kind,
@@ -239,7 +233,7 @@ fn print_build_info_if_requested() -> bool {
 }
 
 async fn status(flag: Option<&str>, json: bool) -> i32 {
-    match request_status(&server_url_from_process(flag)).await {
+    match request_status(&resolve_endpoint(flag).await).await {
         Ok(response) => {
             println!(
                 "{}",
@@ -265,7 +259,7 @@ async fn here(flag: Option<&str>) -> i32 {
             return 1;
         }
     };
-    match request_project_here(&server_url_from_process(flag), &folder.to_string_lossy()).await {
+    match request_project_here(&resolve_endpoint(flag).await, &folder.to_string_lossy()).await {
         Ok(project) => {
             println!("{}", render_project_here(&project));
             0
@@ -277,7 +271,7 @@ async fn here(flag: Option<&str>) -> i32 {
     }
 }
 async fn add_project(folder: &str, slug: &str, flag: Option<&str>) -> i32 {
-    match request_register_project(&server_url_from_process(flag), folder, slug).await {
+    match request_register_project(&resolve_endpoint(flag).await, folder, slug).await {
         Ok(project) => {
             println!("{}", render_project_registered(&project));
             0
@@ -291,7 +285,7 @@ async fn add_project(folder: &str, slug: &str, flag: Option<&str>) -> i32 {
 async fn list_records(args: ListRecordsArgs) -> i32 {
     let status = args.status.map(|status| status.replace('-', "_"));
     match request_list_records(
-        &server_url_from_process(args.server_url.as_deref()),
+        &resolve_endpoint(args.server_url.as_deref()).await,
         args.project,
         status,
     )
@@ -351,7 +345,7 @@ async fn open_record(args: OpenRecordArgs) -> i32 {
         args.body
     };
     match request_open_record(
-        &server_url_from_process(args.server_url.as_deref()),
+        &resolve_endpoint(args.server_url.as_deref()).await,
         &body,
         args.project,
     )
