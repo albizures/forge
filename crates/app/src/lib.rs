@@ -66,6 +66,36 @@ pub struct RecordListFilter {
     pub status: Option<RecordStatus>,
 }
 
+/// Opaque stable identity assigned to a Forge-authored Record Update.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct RecordUpdateId(pub u64);
+
+/// The minimal fact recorded for a successful Record mutation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecordUpdate {
+    pub id: RecordUpdateId,
+    /// Unix milliseconds when Forge committed this update.
+    pub created_at_millis: u64,
+    pub kind: RecordUpdateKind,
+}
+
+/// The change represented by a Record Update. Deliberately excludes content snapshots.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RecordUpdateKind {
+    Created,
+    BodyEdited,
+    StatusTransition {
+        from: RecordStatus,
+        to: RecordStatus,
+    },
+    RelationshipAdded {
+        related_record_id: u64,
+    },
+    RelationshipRemoved {
+        related_record_id: u64,
+    },
+}
+
 /// A domain error which can safely be shown to a user.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RegistrationError {
@@ -165,6 +195,12 @@ pub trait RecordRepository: ProjectRepository {
     ///
     /// Returns a user-facing error when the requested Relationship is absent.
     fn unrelate_records(&self, child_id: u64, parent_id: u64) -> Result<Record, RegistrationError>;
+    /// Lists the Record's updates newest first, using identity to break timestamp ties.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-facing error if the Record is absent or storage fails.
+    fn list_record_updates(&self, id: u64) -> Result<Vec<RecordUpdate>, RegistrationError>;
 }
 
 /// The application boundary for operations shared by all transports.
@@ -341,6 +377,15 @@ impl Application {
         parent_id: u64,
     ) -> Result<Record, RegistrationError> {
         self.records.unrelate_records(child_id, parent_id)
+    }
+
+    /// Lists a Record's Forge-authored Update Log newest first.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-facing error if the Record is absent or storage fails.
+    pub fn list_record_updates(&self, id: u64) -> Result<Vec<RecordUpdate>, RegistrationError> {
+        self.records.list_record_updates(id)
     }
 
     /// Returns readiness information for this application instance.
@@ -588,6 +633,10 @@ mod tests {
                 });
             }
             Ok(records[child].clone())
+        }
+        fn list_record_updates(&self, id: u64) -> Result<Vec<RecordUpdate>, RegistrationError> {
+            self.show_record(id)?;
+            Ok(vec![])
         }
     }
     struct Inspector;

@@ -1,10 +1,15 @@
 //! SQLite implementation of the application persistence boundary.
 
-use std::{path::Path, sync::Mutex};
+use std::{
+    path::Path,
+    sync::Mutex,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use forge_app::{
     NewRecord, Project, ProjectRepository, Record, RecordListFilter, RecordRelationship,
-    RecordRelationshipKind, RecordRepository, RecordStatus, RegistrationError,
+    RecordRelationshipKind, RecordRepository, RecordStatus, RecordUpdate, RecordUpdateId,
+    RecordUpdateKind, RegistrationError,
 };
 use rusqlite::{Connection, ErrorCode, OptionalExtension, params};
 
@@ -57,6 +62,15 @@ impl SqliteProjectRepository {
                 child_id INTEGER NOT NULL REFERENCES records(id) UNIQUE,
                 kind TEXT NOT NULL CHECK (kind IN ('parent-child')),
                 PRIMARY KEY (parent_id, child_id)
+            );
+            CREATE TABLE IF NOT EXISTS record_updates (
+                id INTEGER PRIMARY KEY NOT NULL,
+                record_id INTEGER NOT NULL REFERENCES records(id),
+                created_at_millis INTEGER NOT NULL,
+                kind TEXT NOT NULL CHECK (kind IN ('created', 'body-edited', 'status-transition', 'relationship-added', 'relationship-removed')),
+                from_status TEXT,
+                to_status TEXT,
+                related_record_id INTEGER REFERENCES records(id)
             );",
             )
             .map_err(storage_error)?;
@@ -198,6 +212,7 @@ impl RecordRepository for SqliteProjectRepository {
                 )
                 .map_err(storage_error)?;
         }
+        insert_update(&transaction, id, RecordUpdateKind::Created)?;
         transaction.commit().map_err(storage_error)?;
         Ok(Record {
             id,
@@ -234,20 +249,24 @@ impl RecordRepository for SqliteProjectRepository {
     }
 
     fn edit_record(&self, id: u64, body: &str) -> Result<Record, RegistrationError> {
-        let connection = self
+        let mut connection = self
             .connection
             .lock()
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
-        let updated = connection
+        let transaction = connection.transaction().map_err(storage_error)?;
+        let updated = transaction
             .execute(
                 "UPDATE records SET body = ?1 WHERE id = ?2 AND status != 'done'",
                 params![body, id.cast_signed()],
             )
             .map_err(storage_error)?;
         if updated == 0 {
-            return record_or_transition_error(&connection, id);
+            return record_or_transition_error(&transaction, id);
         }
-        load_record(&connection, id)
+        insert_update(&transaction, id, RecordUpdateKind::BodyEdited)?;
+        let record = load_record(&transaction, id)?;
+        transaction.commit().map_err(storage_error)?;
+        Ok(record)
     }
 
     fn start_record(&self, id: u64) -> Result<Record, RegistrationError> {
@@ -278,6 +297,14 @@ impl RecordRepository for SqliteProjectRepository {
         if updated == 0 {
             return record_or_transition_error(&transaction, id);
         }
+        insert_update(
+            &transaction,
+            id,
+            RecordUpdateKind::StatusTransition {
+                from: RecordStatus::InProgress,
+                to: RecordStatus::Done,
+            },
+        )?;
         let record = load_record(&transaction, id)?;
         transaction.commit().map_err(storage_error)?;
         Ok(record)
@@ -318,17 +345,25 @@ impl RecordRepository for SqliteProjectRepository {
             Err(error) if matches!(error.sqlite_error_code(), Some(ErrorCode::ConstraintViolation)) => return Err(RegistrationError::new("child-already-related", "a child Record can have only one parent")),
             Err(error) => return Err(storage_error(error)),
         }
+        insert_update(
+            &transaction,
+            child_id,
+            RecordUpdateKind::RelationshipAdded {
+                related_record_id: parent_id,
+            },
+        )?;
         let record = load_record(&transaction, child_id)?;
         transaction.commit().map_err(storage_error)?;
         Ok(record)
     }
 
     fn unrelate_records(&self, child_id: u64, parent_id: u64) -> Result<Record, RegistrationError> {
-        let connection = self
+        let mut connection = self
             .connection
             .lock()
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
-        let deleted = connection
+        let transaction = connection.transaction().map_err(storage_error)?;
+        let deleted = transaction
             .execute(
                 "DELETE FROM record_relationships WHERE parent_id = ?1 AND child_id = ?2",
                 params![parent_id.cast_signed(), child_id.cast_signed()],
@@ -340,7 +375,30 @@ impl RecordRepository for SqliteProjectRepository {
                 "parent/child Relationship does not exist",
             ));
         }
-        load_record(&connection, child_id)
+        insert_update(
+            &transaction,
+            child_id,
+            RecordUpdateKind::RelationshipRemoved {
+                related_record_id: parent_id,
+            },
+        )?;
+        let record = load_record(&transaction, child_id)?;
+        transaction.commit().map_err(storage_error)?;
+        Ok(record)
+    }
+
+    fn list_record_updates(&self, id: u64) -> Result<Vec<RecordUpdate>, RegistrationError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        load_record(&connection, id)?;
+        connection.prepare("SELECT id, created_at_millis, kind, from_status, to_status, related_record_id FROM record_updates WHERE record_id = ?1 ORDER BY created_at_millis DESC, id DESC")
+            .map_err(storage_error)?
+            .query_map([id.cast_signed()], update_from_row)
+            .map_err(storage_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(storage_error)
     }
 }
 
@@ -352,6 +410,86 @@ fn status_name(status: RecordStatus) -> &'static str {
     }
 }
 
+#[allow(clippy::needless_pass_by_value)]
+fn insert_update(
+    connection: &Connection,
+    record_id: u64,
+    kind: RecordUpdateKind,
+) -> Result<(), RegistrationError> {
+    let (kind, from_status, to_status, related_record_id) = match kind {
+        RecordUpdateKind::Created => ("created", None, None, None),
+        RecordUpdateKind::BodyEdited => ("body-edited", None, None, None),
+        RecordUpdateKind::StatusTransition { from, to } => (
+            "status-transition",
+            Some(status_name(from)),
+            Some(status_name(to)),
+            None,
+        ),
+        RecordUpdateKind::RelationshipAdded { related_record_id } => (
+            "relationship-added",
+            None,
+            None,
+            Some(related_record_id.cast_signed()),
+        ),
+        RecordUpdateKind::RelationshipRemoved { related_record_id } => (
+            "relationship-removed",
+            None,
+            None,
+            Some(related_record_id.cast_signed()),
+        ),
+    };
+    let created_at_millis: i64 = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| RegistrationError::new("storage", "system clock is before Unix epoch"))?
+        .as_millis()
+        .try_into()
+        .map_err(|_| RegistrationError::new("storage", "system clock is out of range"))?;
+    connection
+        .execute(
+            "INSERT INTO record_updates (record_id, created_at_millis, kind, from_status, to_status, related_record_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![record_id.cast_signed(), created_at_millis, kind, from_status, to_status, related_record_id],
+        )
+        .map_err(storage_error)?;
+    Ok(())
+}
+
+fn update_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RecordUpdate> {
+    let kind: String = row.get(2)?;
+    let from_status: Option<String> = row.get(3)?;
+    let to_status: Option<String> = row.get(4)?;
+    let related_record_id: Option<i64> = row.get(5)?;
+    let status = |value: String| match value.as_str() {
+        "open" => Ok(RecordStatus::Open),
+        "in_progress" => Ok(RecordStatus::InProgress),
+        "done" => Ok(RecordStatus::Done),
+        _ => Err(rusqlite::Error::InvalidQuery),
+    };
+    let kind = match kind.as_str() {
+        "created" => RecordUpdateKind::Created,
+        "body-edited" => RecordUpdateKind::BodyEdited,
+        "status-transition" => RecordUpdateKind::StatusTransition {
+            from: status(from_status.ok_or(rusqlite::Error::InvalidQuery)?)?,
+            to: status(to_status.ok_or(rusqlite::Error::InvalidQuery)?)?,
+        },
+        "relationship-added" => RecordUpdateKind::RelationshipAdded {
+            related_record_id: related_record_id
+                .ok_or(rusqlite::Error::InvalidQuery)?
+                .cast_unsigned(),
+        },
+        "relationship-removed" => RecordUpdateKind::RelationshipRemoved {
+            related_record_id: related_record_id
+                .ok_or(rusqlite::Error::InvalidQuery)?
+                .cast_unsigned(),
+        },
+        _ => return Err(rusqlite::Error::InvalidQuery),
+    };
+    Ok(RecordUpdate {
+        id: RecordUpdateId(row.get::<_, i64>(0)?.cast_unsigned()),
+        created_at_millis: row.get::<_, i64>(1)?.cast_unsigned(),
+        kind,
+    })
+}
+
 fn transition_record(
     connection: &Mutex<Connection>,
     id: u64,
@@ -359,19 +497,37 @@ fn transition_record(
     to: &str,
     completion_resolution: Option<&str>,
 ) -> Result<Record, RegistrationError> {
-    let connection = connection
+    let mut connection = connection
         .lock()
         .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
-    let updated = connection
+    let transaction = connection.transaction().map_err(storage_error)?;
+    let updated = transaction
         .execute(
             "UPDATE records SET status = ?1, completion_resolution = ?2 WHERE id = ?3 AND status = ?4",
             params![to, completion_resolution, id.cast_signed(), from],
         )
         .map_err(storage_error)?;
     if updated == 0 {
-        return record_or_transition_error(&connection, id);
+        return record_or_transition_error(&transaction, id);
     }
-    load_record(&connection, id)
+    let from = if from == "open" {
+        RecordStatus::Open
+    } else {
+        RecordStatus::InProgress
+    };
+    let to = if to == "in_progress" {
+        RecordStatus::InProgress
+    } else {
+        RecordStatus::Done
+    };
+    insert_update(
+        &transaction,
+        id,
+        RecordUpdateKind::StatusTransition { from, to },
+    )?;
+    let record = load_record(&transaction, id)?;
+    transaction.commit().map_err(storage_error)?;
+    Ok(record)
 }
 
 fn record_or_transition_error(
@@ -490,6 +646,7 @@ mod tests {
     use super::SqliteProjectRepository;
     use forge_app::{
         NewRecord, Project, ProjectRepository, RecordListFilter, RecordRepository, RecordStatus,
+        RecordUpdateKind,
     };
     use std::path::{Path, PathBuf};
     fn project(slug: &str, folder: &str) -> Project {
@@ -690,6 +847,66 @@ mod tests {
                 .relationships
                 .len(),
             1
+        );
+    }
+
+    #[test]
+    fn records_minimal_updates_for_each_successful_record_change() {
+        let store = SqliteProjectRepository::in_memory().unwrap();
+        let parent = store
+            .open_record(&NewRecord {
+                body: "parent".into(),
+                project_slugs: vec![],
+            })
+            .unwrap();
+        let child = store
+            .open_record(&NewRecord {
+                body: "child".into(),
+                project_slugs: vec![],
+            })
+            .unwrap();
+        assert_eq!(
+            store.done_record(child.id, None).unwrap_err().code,
+            "invalid-status-transition"
+        );
+        assert_eq!(store.list_record_updates(child.id).unwrap().len(), 1);
+        store.edit_record(child.id, "edited").unwrap();
+        store.start_record(child.id).unwrap();
+        store.done_record(child.id, None).unwrap();
+        store.relate_records(child.id, parent.id).unwrap();
+        store.unrelate_records(child.id, parent.id).unwrap();
+
+        let updates = store.list_record_updates(child.id).unwrap();
+        assert_eq!(updates.len(), 6);
+        assert!(
+            updates.windows(2).all(|pair| pair[0].id > pair[1].id
+                || pair[0].created_at_millis > pair[1].created_at_millis)
+        );
+        assert!(
+            matches!(updates[0].kind, RecordUpdateKind::RelationshipRemoved { related_record_id } if related_record_id == parent.id)
+        );
+        assert!(
+            matches!(updates[1].kind, RecordUpdateKind::RelationshipAdded { related_record_id } if related_record_id == parent.id)
+        );
+        assert!(matches!(
+            updates[2].kind,
+            RecordUpdateKind::StatusTransition {
+                from: RecordStatus::InProgress,
+                to: RecordStatus::Done
+            }
+        ));
+        assert!(matches!(
+            updates[3].kind,
+            RecordUpdateKind::StatusTransition {
+                from: RecordStatus::Open,
+                to: RecordStatus::InProgress
+            }
+        ));
+        assert!(matches!(updates[4].kind, RecordUpdateKind::BodyEdited));
+        assert!(matches!(updates[5].kind, RecordUpdateKind::Created));
+        assert_eq!(
+            store.list_record_updates(999).unwrap_err().code,
+            "record-not-found"
         );
     }
 

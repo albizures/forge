@@ -92,6 +92,26 @@ _Avoid_: v1 entity, type
 An opaque positive numeric identity that uniquely references a Record across Forge interfaces.
 _Avoid_: record slug, record name
 
+**Comment**:
+A non-blank free-text entry on a Record, optionally attributed to a free-text author. Its content cannot be edited, any Forge client may delete it, and it may be added even after its Record is Done.
+_Avoid_: note, message
+
+**Comment Identifier**:
+An opaque stable numeric identity that uniquely references a Comment across Forge interfaces.
+_Avoid_: comment number
+
+**Record Update**:
+A Forge-authored entry recorded atomically with one successful change to a Record, including Record opening, Body edits, lifecycle transitions, Relationship changes, and Comment additions or deletions. It has a timestamp, a type, and only the type-specific references needed to identify the changed entity.
+_Avoid_: event, activity
+
+**Record Update Identifier**:
+An opaque stable numeric identity that determines the order of Record Updates when timestamps are equal.
+_Avoid_: update number
+
+**Update Log**:
+The ordered collection of Record Updates for one Record.
+_Avoid_: history, audit log
+
 **Record Status**:
 A Record’s lifecycle state: Open, In Progress, or Done. A Record opens as Open and in the initial model advances only from Open to In Progress to Done; future Record types may add constraints.
 _Avoid_: state

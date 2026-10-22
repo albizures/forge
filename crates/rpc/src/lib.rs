@@ -1,7 +1,8 @@
 //! Shared JSON-RPC wire contract ownership boundary.
 
 use forge_app::{
-    ApplicationStatus, Project, Record, RecordRelationshipKind, RecordStatus, RegistrationError,
+    ApplicationStatus, Project, Record, RecordRelationshipKind, RecordStatus, RecordUpdate,
+    RecordUpdateKind, RegistrationError,
 };
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
 use serde::{Deserialize, Serialize};
@@ -17,6 +18,7 @@ pub const RECORD_START_METHOD: &str = "record.start";
 pub const RECORD_DONE_METHOD: &str = "record.done";
 pub const RECORD_RELATE_METHOD: &str = "record.relate";
 pub const RECORD_UNRELATE_METHOD: &str = "record.unrelate";
+pub const RECORD_UPDATES_METHOD: &str = "record.updates";
 
 #[rpc(client, server, namespace = "system")]
 pub trait SystemApi {
@@ -49,6 +51,8 @@ pub trait RecordApi {
     async fn relate(&self, request: RelateRecordRequest) -> RpcResult<RecordResponse>;
     #[method(name = "unrelate")]
     async fn unrelate(&self, request: RelateRecordRequest) -> RpcResult<RecordResponse>;
+    #[method(name = "updates")]
+    async fn updates(&self, request: RecordIdRequest) -> RpcResult<ListRecordUpdatesResponse>;
 }
 
 /// Immutable daemon build facts reported through the management protocol.
@@ -198,6 +202,56 @@ pub struct ListRecordsRequest {
 pub struct ListRecordsResponse {
     pub records: Vec<RecordResponse>,
 }
+/// Record Update Log response ordered newest first.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ListRecordUpdatesResponse {
+    pub updates: Vec<RecordUpdateResponse>,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RecordUpdateResponse {
+    pub id: u64,
+    pub created_at_millis: u64,
+    pub kind: String,
+    pub from_status: Option<String>,
+    pub to_status: Option<String>,
+    pub related_record_id: Option<u64>,
+}
+impl From<RecordUpdate> for RecordUpdateResponse {
+    fn from(update: RecordUpdate) -> Self {
+        let (kind, from_status, to_status, related_record_id) = match update.kind {
+            RecordUpdateKind::Created => ("created", None, None, None),
+            RecordUpdateKind::BodyEdited => ("body-edited", None, None, None),
+            RecordUpdateKind::StatusTransition { from, to } => (
+                "status-transition",
+                Some(record_status_name(from)),
+                Some(record_status_name(to)),
+                None,
+            ),
+            RecordUpdateKind::RelationshipAdded { related_record_id } => {
+                ("relationship-added", None, None, Some(related_record_id))
+            }
+            RecordUpdateKind::RelationshipRemoved { related_record_id } => {
+                ("relationship-removed", None, None, Some(related_record_id))
+            }
+        };
+        Self {
+            id: update.id.0,
+            created_at_millis: update.created_at_millis,
+            kind: kind.into(),
+            from_status,
+            to_status,
+            related_record_id,
+        }
+    }
+}
+fn record_status_name(status: RecordStatus) -> String {
+    match status {
+        RecordStatus::Open => "open",
+        RecordStatus::InProgress => "in_progress",
+        RecordStatus::Done => "done",
+    }
+    .into()
+}
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct EditRecordRequest {
     pub id: u64,
@@ -238,12 +292,7 @@ impl From<Record> for RecordResponse {
             project_scope: ProjectScopeRequest {
                 project_slugs: record.project_slugs,
             },
-            status: match record.status {
-                RecordStatus::Open => "open",
-                RecordStatus::InProgress => "in_progress",
-                RecordStatus::Done => "done",
-            }
-            .into(),
+            status: record_status_name(record.status),
             completion_resolution: record.completion_resolution,
             relationships: record
                 .relationships

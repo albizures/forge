@@ -1,10 +1,11 @@
 //! Command-line adapter that calls the running Forge daemon.
 
 use forge_rpc::{
-    DoneRecordRequest, EditRecordRequest, ListRecordsRequest, ListRecordsResponse,
-    OpenRecordRequest, ProjectApiClient, ProjectHereRequest, ProjectHereResponse,
-    ProjectScopeRequest, RecordApiClient, RecordIdRequest, RecordResponse, RegisterProjectRequest,
-    RegisterProjectResponse, RelateRecordRequest, SystemApiClient, SystemStatusResponse,
+    DoneRecordRequest, EditRecordRequest, ListRecordUpdatesResponse, ListRecordsRequest,
+    ListRecordsResponse, OpenRecordRequest, ProjectApiClient, ProjectHereRequest,
+    ProjectHereResponse, ProjectScopeRequest, RecordApiClient, RecordIdRequest, RecordResponse,
+    RegisterProjectRequest, RegisterProjectResponse, RelateRecordRequest, SystemApiClient,
+    SystemStatusResponse,
 };
 use jsonrpsee::http_client::HttpClientBuilder;
 use sha2::{Digest, Sha256};
@@ -253,6 +254,20 @@ pub async fn request_unrelate_record(
         .await
         .map_err(record_error("unrelate"))
 }
+/// Requests a Record's Forge-authored Update Log through the daemon.
+///
+/// # Errors
+///
+/// Returns an endpoint or daemon validation error.
+pub async fn request_record_updates(
+    url: &str,
+    id: u64,
+) -> Result<ListRecordUpdatesResponse, String> {
+    client(url)?
+        .updates(RecordIdRequest { id })
+        .await
+        .map_err(record_error("updates"))
+}
 fn record_error(operation: &'static str) -> impl FnOnce(jsonrpsee::core::client::Error) -> String {
     move |error| format!("could not {operation} Record through Forge daemon: {error}")
 }
@@ -271,6 +286,29 @@ pub fn render_record_list(records: &ListRecordsResponse) -> String {
         .map(render_record)
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+#[must_use]
+pub fn render_record_updates(updates: &ListRecordUpdatesResponse) -> String {
+    updates
+        .updates
+        .iter()
+        .map(|update| {
+            let detail = match (
+                &update.from_status,
+                &update.to_status,
+                update.related_record_id,
+            ) {
+                (Some(from), Some(to), _) => format!(" {from} -> {to}"),
+                (_, _, Some(id)) => format!(" Record {id}"),
+                _ => String::new(),
+            };
+            format!(
+                "Update {} {} {}{}",
+                update.id, update.created_at_millis, update.kind, detail
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 /// Requests daemon status.
 ///
@@ -304,7 +342,7 @@ pub fn render_json_status(status: &SystemStatusResponse) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use forge_rpc::RecordResponse;
+    use forge_rpc::{ListRecordUpdatesResponse, RecordResponse, RecordUpdateResponse};
     #[test]
     fn endpoint_configuration_prioritizes_flag_then_environment_then_default() {
         assert_eq!(
@@ -342,6 +380,23 @@ mod tests {
             }],
         };
         assert_eq!(render_record_list(&records), "Record 4 (open)\n\nbody");
+    }
+
+    #[test]
+    fn update_log_rendering_keeps_response_order_and_omits_content() {
+        assert_eq!(
+            render_record_updates(&ListRecordUpdatesResponse {
+                updates: vec![RecordUpdateResponse {
+                    id: 7,
+                    created_at_millis: 42,
+                    kind: "status-transition".into(),
+                    from_status: Some("open".into()),
+                    to_status: Some("in_progress".into()),
+                    related_record_id: None,
+                }],
+            }),
+            "Update 7 42 status-transition open -> in_progress"
+        );
     }
 
     #[test]

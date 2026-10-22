@@ -27,9 +27,9 @@ use forge_app::{
     Application, ApplicationStatus, Project, RecordStatus, RegistrationError, RepositoryInspector,
 };
 use forge_rpc::{
-    DoneRecordRequest, EditRecordRequest, ListRecordsRequest, ListRecordsResponse,
-    ManagementStatus, OpenRecordRequest, ProjectApiServer, ProjectHereRequest, ProjectHereResponse,
-    RecordApiServer, RecordIdRequest, RecordResponse, RegisterProjectRequest,
+    DoneRecordRequest, EditRecordRequest, ListRecordUpdatesResponse, ListRecordsRequest,
+    ListRecordsResponse, ManagementStatus, OpenRecordRequest, ProjectApiServer, ProjectHereRequest,
+    ProjectHereResponse, RecordApiServer, RecordIdRequest, RecordResponse, RegisterProjectRequest,
     RegisterProjectResponse, RelateRecordRequest, RevisionIdentity, SystemApiServer,
     SystemStatusResponse,
 };
@@ -372,6 +372,15 @@ impl RecordApiServer for Daemon {
         self.application
             .unrelate_records(request.child_id, request.parent_id)
             .map(Into::into)
+            .map_err(rpc_error)
+    }
+
+    async fn updates(&self, request: RecordIdRequest) -> RpcResult<ListRecordUpdatesResponse> {
+        self.application
+            .list_record_updates(request.id)
+            .map(|updates| ListRecordUpdatesResponse {
+                updates: updates.into_iter().map(Into::into).collect(),
+            })
             .map_err(rpc_error)
     }
 }
@@ -1007,6 +1016,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn typed_rpc_client_round_trips_through_the_listener() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -1055,6 +1065,12 @@ mod tests {
         assert_eq!(record.id, 1);
         assert_eq!(record.status, "open");
         assert_eq!(record.project_scope.project_slugs, ["server-test-project"]);
+        let updates = client
+            .updates(RecordIdRequest { id: record.id })
+            .await
+            .unwrap();
+        assert_eq!(updates.updates.len(), 1);
+        assert_eq!(updates.updates[0].kind, "created");
         assert_eq!(
             client
                 .list(ListRecordsRequest {

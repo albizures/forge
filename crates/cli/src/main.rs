@@ -1,10 +1,11 @@
 use clap::{Args, Parser, Subcommand};
 use forge_cli::{
     render_human_status, render_json_status, render_project_here, render_project_registered,
-    render_record, render_record_list, render_record_opened, request_done_record,
-    request_edit_record, request_list_records, request_open_record, request_project_here,
-    request_register_project, request_relate_record, request_show_record, request_start_record,
-    request_status, request_unrelate_record, resolve_endpoint as resolve_managed_endpoint,
+    render_record, render_record_list, render_record_opened, render_record_updates,
+    request_done_record, request_edit_record, request_list_records, request_open_record,
+    request_project_here, request_record_updates, request_register_project, request_relate_record,
+    request_show_record, request_start_record, request_status, request_unrelate_record,
+    resolve_endpoint as resolve_managed_endpoint,
 };
 use std::io::Read;
 
@@ -66,6 +67,8 @@ enum RecordCommand {
     Relate(RelationshipArgs),
     /// Remove a child Record's link to a parent with `--kind child-of`.
     Unrelate(RelationshipArgs),
+    /// List a Record's Forge-authored Update Log newest first.
+    Updates(RecordIdArgs),
 }
 #[derive(Args, Debug)]
 struct ListRecordsArgs {
@@ -212,6 +215,7 @@ async fn main() {
                 )
                 .await,
             ),
+            RecordCommand::Updates(args) => record_updates(args).await,
         },
     };
     std::process::exit(exit_code);
@@ -319,6 +323,28 @@ async fn list_records(args: ListRecordsArgs) -> i32 {
     }
 }
 
+async fn record_updates(args: RecordIdArgs) -> i32 {
+    match request_record_updates(&resolve_endpoint(args.server_url.as_deref()).await, args.id).await
+    {
+        Ok(updates) => {
+            println!(
+                "{}",
+                if args.json {
+                    serde_json::to_string(&updates)
+                        .expect("ListRecordUpdatesResponse must serialize")
+                } else {
+                    render_record_updates(&updates)
+                }
+            );
+            0
+        }
+        Err(error) => {
+            eprintln!("forge record updates: {error}");
+            1
+        }
+    }
+}
+
 fn record_result(
     operation: &str,
     json: bool,
@@ -389,6 +415,19 @@ mod tests {
         let json = serde_json::to_value(forge_build_info::current()).unwrap();
         assert!(json["commit"].is_string());
         assert!(json["management_protocol_revision"].is_u64());
+    }
+
+    #[test]
+    fn record_updates_accepts_json_output() {
+        let cli = Cli::try_parse_from(["forge", "record", "updates", "42", "--json"]).unwrap();
+        let Command::Record {
+            command: RecordCommand::Updates(args),
+        } = cli.command
+        else {
+            panic!("expected record updates command");
+        };
+        assert_eq!(args.id, 42);
+        assert!(args.json);
     }
 
     #[test]
