@@ -40,6 +40,10 @@ enum Command {
     List,
     /// Show the Revision Installation resolved by a selector or local-build alias.
     Current { selector: String },
+    /// Select a Revision Installation without starting its daemon.
+    Use { selector: String },
+    /// Clear the active Revision and remove the manager-owned `forge` path.
+    Deactivate,
     /// Check Forgeup's private locations and registry schema.
     Doctor,
 }
@@ -69,6 +73,8 @@ fn main() {
         } => remove(&selector, purge_state),
         Command::List => list(),
         Command::Current { selector } => current(&selector),
+        Command::Use { selector } => use_revision(&selector),
+        Command::Deactivate => deactivate(),
         Command::Doctor => doctor(),
     });
 }
@@ -138,6 +144,27 @@ fn current(selector: &str) -> i32 {
         }
         Err(error) => {
             eprintln!("forgeup current: {error}");
+            1
+        }
+    }
+}
+fn use_revision(selector: &str) -> i32 {
+    match forgeup::use_revision(selector) {
+        Ok(item) => {
+            println!("{}", item.selector);
+            0
+        }
+        Err(error) => {
+            eprintln!("forgeup use: {error}");
+            1
+        }
+    }
+}
+fn deactivate() -> i32 {
+    match forgeup::deactivate() {
+        Ok(()) => 0,
+        Err(error) => {
+            eprintln!("forgeup deactivate: {error}");
             1
         }
     }

@@ -157,7 +157,7 @@ pub struct Registry {
     pub schema_version: u32,
     #[serde(default)]
     pub installations: Vec<Installation>,
-    /// Kept here for lifecycle operations; activation is managed by a later Forgeup command.
+    /// The authoritative desired active Revision; its manager path is reconciled on every command.
     #[serde(default)]
     pub active_selector: Option<String>,
 }
@@ -301,6 +301,7 @@ fn register_at(
         attest_registration(source_label, cli, daemon, local_build_alias)?;
     let store = RegistryStore::open(paths.clone())?;
     let mut registry = store.load()?;
+    reconcile_active_path(paths, &registry)?;
     let existing_index = registry
         .installations
         .iter()
@@ -427,13 +428,51 @@ fn snapshot_installation(
 /// Returns registered Revision Installations.
 pub fn list() -> Result<Vec<Installation>, ForgeupError> {
     let paths = ForgeupPaths::from_environment()?;
-    Ok(RegistryStore::open(paths)?.load()?.installations)
+    let store = RegistryStore::open(paths.clone())?;
+    let registry = store.load()?;
+    reconcile_active_path(&paths, &registry)?;
+    Ok(registry.installations)
 }
 /// Resolves the only accepted canonical selector or a unique local-build alias.
 pub fn current(selector: &str) -> Result<Installation, ForgeupError> {
     let paths = ForgeupPaths::from_environment()?;
-    let registry = RegistryStore::open(paths)?.load()?;
+    let store = RegistryStore::open(paths.clone())?;
+    let registry = store.load()?;
+    reconcile_active_path(&paths, &registry)?;
     resolve_in_registry(&registry, selector)
+}
+
+/// Selects a registered Revision without starting its daemon.
+pub fn use_revision(selector: &str) -> Result<Installation, ForgeupError> {
+    let paths = ForgeupPaths::from_environment()?;
+    use_revision_at(&paths, selector)
+}
+
+fn use_revision_at(paths: &ForgeupPaths, selector: &str) -> Result<Installation, ForgeupError> {
+    let store = RegistryStore::open(paths.clone())?;
+    let mut registry = store.load()?;
+    reconcile_active_path(paths, &registry)?;
+    let installation = resolve_in_registry(&registry, selector)?;
+    validate_installation(&installation)?;
+    // Persist desired state first: if the path update is interrupted, a later command repairs it.
+    registry.active_selector = Some(installation.selector.clone());
+    store.save(&registry)?;
+    reconcile_active_path(paths, &registry)?;
+    Ok(installation)
+}
+
+/// Clears the active Revision and removes its manager-owned command path.
+pub fn deactivate() -> Result<(), ForgeupError> {
+    deactivate_at(&ForgeupPaths::from_environment()?)
+}
+
+fn deactivate_at(paths: &ForgeupPaths) -> Result<(), ForgeupError> {
+    let store = RegistryStore::open(paths.clone())?;
+    let mut registry = store.load()?;
+    reconcile_active_path(paths, &registry)?;
+    registry.active_selector = None;
+    store.save(&registry)?;
+    reconcile_active_path(paths, &registry)
 }
 
 /// Removes an Installation but preserves its Revision State unless explicitly purged.
@@ -445,6 +484,7 @@ pub fn remove(selector: &str, purge: bool) -> Result<(), ForgeupError> {
 fn remove_at(paths: &ForgeupPaths, selector: &str, purge: bool) -> Result<(), ForgeupError> {
     let store = RegistryStore::open(paths.clone())?;
     let mut registry = store.load()?;
+    reconcile_active_path(paths, &registry)?;
     let installation = resolve_in_registry(&registry, selector)?;
     if registry.active_selector.as_deref() == Some(&installation.selector) {
         return Err(ForgeupError::ActiveRemoval(installation.selector));
@@ -483,6 +523,108 @@ fn resolve_in_registry(registry: &Registry, selector: &str) -> Result<Installati
     }
 }
 
+fn active_path(paths: &ForgeupPaths) -> PathBuf {
+    paths.bin.join("forge")
+}
+
+fn validate_installation(installation: &Installation) -> Result<(), ForgeupError> {
+    if !installation.cli_path.is_file()
+        || !installation.daemon_path.is_file()
+        || sha256(&installation.cli_path)? != installation.cli_sha256
+        || sha256(&installation.daemon_path)? != installation.daemon_sha256
+    {
+        return Err(ForgeupError::InvalidInstallation(
+            installation.selector.clone(),
+        ));
+    }
+    Ok(())
+}
+
+/// Makes the manager command path match the registry's authoritative desired state.
+fn reconcile_active_path(paths: &ForgeupPaths, registry: &Registry) -> Result<(), ForgeupError> {
+    let destination = active_path(paths);
+    match registry.active_selector.as_deref() {
+        Some(selector) => {
+            let installation = resolve_in_registry(registry, selector)?;
+            validate_installation(&installation)?;
+            replace_manager_path(&installation.cli_path, &destination)
+        }
+        None => remove_manager_path(&destination),
+    }
+}
+
+#[cfg(unix)]
+fn replace_manager_path(target: &Path, destination: &Path) -> Result<(), ForgeupError> {
+    use std::os::unix::fs::symlink;
+    let parent = destination
+        .parent()
+        .ok_or(ForgeupError::InvalidLocation("manager path has no parent"))?;
+    let temporary = parent.join(format!(
+        ".{}.tmp-{}-{}",
+        file_name(destination).to_string_lossy(),
+        std::process::id(),
+        TEMPORARY_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = fs::remove_file(&temporary);
+    symlink(target, &temporary).map_err(|source| ForgeupError::Io {
+        path: temporary.clone(),
+        source,
+    })?;
+    fs::rename(&temporary, destination).map_err(|source| ForgeupError::Io {
+        path: destination.to_path_buf(),
+        source,
+    })?;
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|source| ForgeupError::Io {
+            path: parent.to_path_buf(),
+            source,
+        })
+}
+
+#[cfg(windows)]
+fn replace_manager_path(target: &Path, destination: &Path) -> Result<(), ForgeupError> {
+    let temporary = destination.with_extension(format!("tmp-{}", std::process::id()));
+    let _ = fs::remove_file(&temporary);
+    fs::hard_link(target, &temporary)
+        .or_else(|_| fs::copy(target, &temporary).map(|_| ()))
+        .map_err(|source| ForgeupError::Io {
+            path: temporary.clone(),
+            source,
+        })?;
+    if destination.exists() {
+        fs::remove_file(destination).map_err(|source| ForgeupError::Io {
+            path: destination.to_path_buf(),
+            source,
+        })?;
+    }
+    fs::rename(&temporary, destination).map_err(|source| ForgeupError::Io {
+        path: destination.to_path_buf(),
+        source,
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn replace_manager_path(target: &Path, destination: &Path) -> Result<(), ForgeupError> {
+    fs::copy(target, destination)
+        .map(|_| ())
+        .map_err(|source| ForgeupError::Io {
+            path: destination.to_path_buf(),
+            source,
+        })
+}
+
+fn remove_manager_path(path: &Path) -> Result<(), ForgeupError> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(ForgeupError::Io {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DoctorReport {
     pub paths: ForgeupPaths,
@@ -490,7 +632,9 @@ pub struct DoctorReport {
 }
 pub fn doctor() -> Result<DoctorReport, ForgeupError> {
     let paths = ForgeupPaths::from_environment()?;
-    let registry = RegistryStore::open(paths.clone())?.load()?;
+    let store = RegistryStore::open(paths.clone())?;
+    let registry = store.load()?;
+    reconcile_active_path(&paths, &registry)?;
     Ok(DoctorReport {
         paths,
         schema_version: registry.schema_version,
@@ -519,6 +663,7 @@ pub enum ForgeupError {
     StateReuseMismatch { requested: String, selector: String },
     StateUnavailable(String),
     ActiveRemoval(String),
+    InvalidInstallation(String),
 }
 impl fmt::Display for ForgeupError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -567,6 +712,12 @@ impl fmt::Display for ForgeupError {
             ),
             Self::ActiveRemoval(selector) => {
                 write!(f, "cannot remove active Forge Revision `{selector}`")
+            }
+            Self::InvalidInstallation(selector) => {
+                write!(
+                    f,
+                    "registered Forge Revision `{selector}` has invalid artifacts"
+                )
             }
         }
     }
@@ -1028,6 +1179,64 @@ mod tests {
         }
         let logs = fs::read_dir(&state.logs).unwrap().count();
         assert_eq!(logs, STATE_LOG_RETAINED_FILES);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn activation_is_registry_authoritative_and_does_not_start_daemon() {
+        let root = env::temp_dir().join(format!("forgeup-active-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let paths = ForgeupPaths {
+            config: root.join("config"),
+            data: root.join("data"),
+            runtime: root.join("runtime"),
+            bin: root.join("bin"),
+        };
+        let cli = root.join("candidate-forge");
+        let daemon = root.join("candidate-forge-server");
+        let identity = r#"{"commit":"0123456789012345678901234567890123456789","dirty":false,"management_protocol_revision":1,"version":"test"}"#;
+        executable(&cli, identity, "cli-started");
+        executable(&daemon, identity, "daemon-started");
+        let installation = register_at(
+            &paths,
+            "local",
+            &cli,
+            &daemon,
+            Some("dev"),
+            RegistrationOptions::default(),
+        )
+        .unwrap();
+
+        let selected = use_revision_at(&paths, "dev").unwrap();
+        assert_eq!(selected.selector, installation.selector);
+        let manager_path = active_path(&paths);
+        assert_eq!(fs::read_link(&manager_path).unwrap(), installation.cli_path);
+        assert!(!root.join("daemon-started").exists());
+
+        // A broken manager path simulates an interrupted path update; registry state repairs it.
+        fs::remove_file(&manager_path).unwrap();
+        std::os::unix::fs::symlink(root.join("wrong"), &manager_path).unwrap();
+        {
+            let store = RegistryStore::open(paths.clone()).unwrap();
+            let registry = store.load().unwrap();
+            reconcile_active_path(&paths, &registry).unwrap();
+        }
+        assert_eq!(fs::read_link(&manager_path).unwrap(), installation.cli_path);
+
+        {
+            let store = RegistryStore::open(paths.clone()).unwrap();
+            let registry = store.load().unwrap();
+            assert_eq!(
+                registry.active_selector.as_deref(),
+                Some(installation.selector.as_str())
+            );
+        }
+        deactivate_at(&paths).unwrap();
+        assert!(!manager_path.exists());
+        let store = RegistryStore::open(paths.clone()).unwrap();
+        assert!(store.load().unwrap().active_selector.is_none());
         fs::remove_dir_all(root).unwrap();
     }
 
