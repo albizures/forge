@@ -161,6 +161,7 @@ pub async fn request_list_records(
         .list(ListRecordsRequest {
             project_slug,
             status,
+            record_type: None,
         })
         .await
         .map_err(record_error("list"))
@@ -433,6 +434,7 @@ mod tests {
         let records = ListRecordsResponse {
             records: vec![RecordResponse {
                 id: 4,
+                record_type: "generic".into(),
                 body: "body".into(),
                 project_scope: ProjectScopeRequest {
                     project_slugs: vec![],
@@ -468,6 +470,7 @@ mod tests {
         assert_eq!(
             render_record_opened(&RecordResponse {
                 id: 4,
+                record_type: "generic".into(),
                 body: "body".into(),
                 project_scope: ProjectScopeRequest {
                     project_slugs: vec![]

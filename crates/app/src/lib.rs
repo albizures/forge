@@ -407,11 +407,12 @@ impl Application {
         &self,
         project_slug: Option<String>,
         status: Option<RecordStatus>,
+        record_type: Option<RecordType>,
     ) -> Result<Vec<Record>, RegistrationError> {
         self.records.list_records(&RecordListFilter {
             project_slug,
             status,
-            record_type: None,
+            record_type,
         })
     }
 
@@ -1016,7 +1017,7 @@ mod tests {
         app.start_record(beta.id).unwrap();
 
         assert_eq!(
-            app.list_records(Some("alpha".into()), None)
+            app.list_records(Some("alpha".into()), None, None)
                 .unwrap()
                 .into_iter()
                 .map(|record| record.id)
@@ -1024,7 +1025,7 @@ mod tests {
             vec![beta.id, alpha.id]
         );
         assert_eq!(
-            app.list_records(None, Some(RecordStatus::Open))
+            app.list_records(None, Some(RecordStatus::Open), None)
                 .unwrap()
                 .into_iter()
                 .map(|record| record.id)

@@ -24,12 +24,14 @@ use axum::{
     routing::{get, post},
 };
 use forge_app::{
-    Application, ApplicationStatus, Project, RecordStatus, RegistrationError, RepositoryInspector,
+    Application, ApplicationStatus, Project, RecordStatus, RecordType, RegistrationError,
+    RepositoryInspector,
 };
 use forge_rpc::{
     AddRecordCommentRequest, DeleteRecordCommentRequest, DoneRecordRequest, EditRecordRequest,
     ListRecordCommentsResponse, ListRecordUpdatesResponse, ListRecordsRequest, ListRecordsResponse,
-    ManagementStatus, OpenRecordRequest, ProjectApiServer, ProjectHereRequest, ProjectHereResponse,
+    ManagementStatus, OpenRecordRequest, OpenSpecRequest, OpenTaskRequest,
+    OpenTaskUnderSpecRequest, ProjectApiServer, ProjectHereRequest, ProjectHereResponse,
     RecordApiServer, RecordIdRequest, RecordResponse, RegisterProjectRequest,
     RegisterProjectResponse, RelateRecordRequest, RevisionIdentity, SystemApiServer,
     SystemStatusResponse,
@@ -322,6 +324,30 @@ impl RecordApiServer for Daemon {
             .map_err(rpc_error)
     }
 
+    async fn open_spec(&self, request: OpenSpecRequest) -> RpcResult<RecordResponse> {
+        self.application
+            .open_spec(&request.body, request.project_slug)
+            .map(Into::into)
+            .map_err(rpc_error)
+    }
+
+    async fn open_task(&self, request: OpenTaskRequest) -> RpcResult<RecordResponse> {
+        self.application
+            .open_task(&request.body, request.project_slug)
+            .map(Into::into)
+            .map_err(rpc_error)
+    }
+
+    async fn open_task_under_spec(
+        &self,
+        request: OpenTaskUnderSpecRequest,
+    ) -> RpcResult<RecordResponse> {
+        self.application
+            .open_task_under_spec(&request.body, request.spec_id)
+            .map(Into::into)
+            .map_err(rpc_error)
+    }
+
     async fn show(&self, request: RecordIdRequest) -> RpcResult<RecordResponse> {
         self.application
             .show_record(request.id)
@@ -331,8 +357,13 @@ impl RecordApiServer for Daemon {
 
     async fn list(&self, request: ListRecordsRequest) -> RpcResult<ListRecordsResponse> {
         let status = request.status.as_deref().map(record_status).transpose()?;
+        let record_type = request
+            .record_type
+            .as_deref()
+            .map(record_type)
+            .transpose()?;
         self.application
-            .list_records(request.project_slug, status)
+            .list_records(request.project_slug, status, record_type)
             .map(|records| ListRecordsResponse {
                 records: records.into_iter().map(Into::into).collect(),
             })
@@ -419,6 +450,18 @@ fn record_status(status: &str) -> RpcResult<RecordStatus> {
         _ => Err(rpc_error(RegistrationError::new(
             "invalid-status",
             "Record status must be open, in_progress, or done",
+        ))),
+    }
+}
+
+fn record_type(record_type: &str) -> RpcResult<RecordType> {
+    match record_type {
+        "generic" => Ok(RecordType::Generic),
+        "spec" => Ok(RecordType::Spec),
+        "task" => Ok(RecordType::Task),
+        _ => Err(rpc_error(RegistrationError::new(
+            "invalid-record-type",
+            "Record type must be generic, spec, or task",
         ))),
     }
 }
@@ -800,8 +843,9 @@ mod tests {
     use forge_app::{Application, Project, RegistrationError, RepositoryInspector};
     use forge_rpc::{
         DoneRecordRequest, EditRecordRequest, ListRecordsRequest, OpenRecordRequest,
-        ProjectApiClient, ProjectHereRequest, ProjectScopeRequest, RecordApiClient,
-        RecordIdRequest, RegisterProjectRequest, SystemApiClient, SystemApiServer,
+        OpenSpecRequest, OpenTaskRequest, OpenTaskUnderSpecRequest, ProjectApiClient,
+        ProjectHereRequest, ProjectScopeRequest, RecordApiClient, RecordIdRequest,
+        RegisterProjectRequest, SystemApiClient, SystemApiServer,
     };
     use forge_store::SqliteProjectRepository;
     use jsonrpsee::http_client::HttpClientBuilder;
@@ -1102,11 +1146,71 @@ mod tests {
                 .list(ListRecordsRequest {
                     project_slug: Some("server-test-project".into()),
                     status: Some("open".into()),
+                    record_type: None,
                 })
                 .await
                 .unwrap()
                 .records,
             vec![record.clone()]
+        );
+        let spec = client
+            .open_spec(OpenSpecRequest {
+                body: "A daemon-backed Spec".into(),
+                project_slug: "server-test-project".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(spec.record_type, "spec");
+        let task = client
+            .open_task_under_spec(OpenTaskUnderSpecRequest {
+                body: "A daemon-backed Task".into(),
+                spec_id: spec.id,
+            })
+            .await
+            .unwrap();
+        assert_eq!(task.record_type, "task");
+        assert_eq!(task.project_scope, spec.project_scope);
+        assert_eq!(task.relationships[0].parent_id, spec.id);
+        assert_eq!(
+            client
+                .open_task(OpenTaskRequest {
+                    body: "Standalone daemon-backed Task".into(),
+                    project_slug: None,
+                })
+                .await
+                .unwrap()
+                .record_type,
+            "task"
+        );
+        let specs = client
+            .list(ListRecordsRequest {
+                project_slug: None,
+                status: None,
+                record_type: Some("spec".into()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(specs.records.len(), 1);
+        assert_eq!(specs.records[0].id, spec.id);
+        assert_eq!(specs.records[0].record_type, "spec");
+        assert!(
+            client
+                .open_task_under_spec(OpenTaskUnderSpecRequest {
+                    body: "Invalid child".into(),
+                    spec_id: record.id,
+                })
+                .await
+                .is_err()
+        );
+        assert!(
+            client
+                .list(ListRecordsRequest {
+                    project_slug: None,
+                    status: None,
+                    record_type: Some("invalid".into()),
+                })
+                .await
+                .is_err()
         );
         let edited = client
             .edit(EditRecordRequest {

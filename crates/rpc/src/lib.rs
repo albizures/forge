@@ -40,6 +40,15 @@ pub trait ProjectApi {
 pub trait RecordApi {
     #[method(name = "open")]
     async fn open(&self, request: OpenRecordRequest) -> RpcResult<RecordResponse>;
+    #[method(name = "openSpec")]
+    async fn open_spec(&self, request: OpenSpecRequest) -> RpcResult<RecordResponse>;
+    #[method(name = "openTask")]
+    async fn open_task(&self, request: OpenTaskRequest) -> RpcResult<RecordResponse>;
+    #[method(name = "openTaskUnderSpec")]
+    async fn open_task_under_spec(
+        &self,
+        request: OpenTaskUnderSpecRequest,
+    ) -> RpcResult<RecordResponse>;
     #[method(name = "show")]
     async fn show(&self, request: RecordIdRequest) -> RpcResult<RecordResponse>;
     #[method(name = "list")]
@@ -193,6 +202,24 @@ pub struct OpenRecordRequest {
     pub body: String,
     pub project_scope: ProjectScopeRequest,
 }
+/// Opens a Spec with its required single-Project scope.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct OpenSpecRequest {
+    pub body: String,
+    pub project_slug: String,
+}
+/// Opens a standalone Task with an optional single-Project scope.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct OpenTaskRequest {
+    pub body: String,
+    pub project_slug: Option<String>,
+}
+/// Opens a Task under a Spec, inheriting its scope atomically.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct OpenTaskUnderSpecRequest {
+    pub body: String,
+    pub spec_id: u64,
+}
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProjectScopeRequest {
     pub project_slugs: Vec<String>,
@@ -206,6 +233,7 @@ pub struct RecordIdRequest {
 pub struct ListRecordsRequest {
     pub project_slug: Option<String>,
     pub status: Option<String>,
+    pub record_type: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ListRecordsResponse {
@@ -302,6 +330,14 @@ impl From<RecordUpdate> for RecordUpdateResponse {
         }
     }
 }
+fn record_type_name(record_type: forge_app::RecordType) -> String {
+    match record_type {
+        forge_app::RecordType::Generic => "generic",
+        forge_app::RecordType::Spec => "spec",
+        forge_app::RecordType::Task => "task",
+    }
+    .into()
+}
 fn record_status_name(status: RecordStatus) -> String {
     match status {
         RecordStatus::Open => "open",
@@ -336,6 +372,7 @@ pub struct RecordRelationshipResponse {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RecordResponse {
     pub id: u64,
+    pub record_type: String,
     pub body: String,
     pub project_scope: ProjectScopeRequest,
     pub status: String,
@@ -346,6 +383,7 @@ impl From<Record> for RecordResponse {
     fn from(record: Record) -> Self {
         Self {
             id: record.id,
+            record_type: record_type_name(record.record_type),
             body: record.body,
             project_scope: ProjectScopeRequest {
                 project_slugs: record.project_slugs,
