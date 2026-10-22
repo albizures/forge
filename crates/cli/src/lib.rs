@@ -3,8 +3,9 @@
 use forge_rpc::{
     AddRecordCommentRequest, DeleteRecordCommentRequest, DoneRecordRequest, EditRecordRequest,
     ListRecordCommentsResponse, ListRecordUpdatesResponse, ListRecordsRequest, ListRecordsResponse,
-    OpenRecordRequest, ProjectApiClient, ProjectHereRequest, ProjectHereResponse,
-    ProjectScopeRequest, RecordApiClient, RecordIdRequest, RecordResponse, RegisterProjectRequest,
+    OpenRecordRequest, OpenSpecRequest, OpenTaskRequest, OpenTaskUnderSpecRequest,
+    ProjectApiClient, ProjectHereRequest, ProjectHereResponse, ProjectScopeRequest,
+    RecordApiClient, RecordIdRequest, RecordResponse, RegisterProjectRequest,
     RegisterProjectResponse, RelateRecordRequest, SystemApiClient, SystemStatusResponse,
 };
 use jsonrpsee::http_client::HttpClientBuilder;
@@ -144,10 +145,70 @@ pub async fn request_open_record(
 }
 #[must_use]
 pub fn render_record_opened(record: &RecordResponse) -> String {
-    format!("Opened Record {} ({})", record.id, record.status)
+    format!(
+        "Opened {} {} ({})",
+        record.record_type, record.id, record.status
+    )
 }
 
-/// Lists Records through the daemon using optional scope and status filters.
+/// Opens a Spec through the daemon.
+///
+/// # Errors
+///
+/// Returns an endpoint or daemon validation error.
+pub async fn request_open_spec(
+    url: &str,
+    body: &str,
+    project_slug: String,
+) -> Result<RecordResponse, String> {
+    client(url)?
+        .open_spec(OpenSpecRequest {
+            body: body.into(),
+            project_slug,
+        })
+        .await
+        .map_err(record_error("open Spec"))
+}
+
+/// Opens a standalone Task through the daemon.
+///
+/// # Errors
+///
+/// Returns an endpoint or daemon validation error.
+pub async fn request_open_task(
+    url: &str,
+    body: &str,
+    project_slug: Option<String>,
+) -> Result<RecordResponse, String> {
+    client(url)?
+        .open_task(OpenTaskRequest {
+            body: body.into(),
+            project_slug,
+        })
+        .await
+        .map_err(record_error("open Task"))
+}
+
+/// Opens a Task under a Spec through the daemon.
+///
+/// # Errors
+///
+/// Returns an endpoint or daemon validation error.
+pub async fn request_open_task_under_spec(
+    url: &str,
+    body: &str,
+    spec_id: u64,
+) -> Result<RecordResponse, String> {
+    client(url)?
+        .open_task_under_spec(OpenTaskUnderSpecRequest {
+            body: body.into(),
+            spec_id,
+        })
+        .await
+        .map_err(record_error("open Task under Spec"))
+}
+
+/// Lists Records through the daemon using optional scope, status, and type filters.
 ///
 /// # Errors
 ///
@@ -156,12 +217,13 @@ pub async fn request_list_records(
     url: &str,
     project_slug: Option<String>,
     status: Option<String>,
+    record_type: Option<String>,
 ) -> Result<ListRecordsResponse, String> {
     client(url)?
         .list(ListRecordsRequest {
             project_slug,
             status,
-            record_type: None,
+            record_type,
         })
         .await
         .map_err(record_error("list"))
@@ -318,8 +380,8 @@ fn record_error(operation: &'static str) -> impl FnOnce(jsonrpsee::core::client:
 #[must_use]
 pub fn render_record(record: &RecordResponse) -> String {
     format!(
-        "Record {} ({})\n\n{}",
-        record.id, record.status, record.body
+        "{} {} ({})\n\n{}",
+        record.record_type, record.id, record.status, record.body
     )
 }
 #[must_use]
@@ -406,7 +468,30 @@ pub fn render_json_status(status: &SystemStatusResponse) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use forge_app::{Application, Project, RegistrationError, RepositoryInspector};
     use forge_rpc::{ListRecordUpdatesResponse, RecordResponse, RecordUpdateResponse};
+    use forge_server::{Daemon, router};
+    use forge_store::SqliteProjectRepository;
+    use std::path::{Path, PathBuf};
+
+    struct TestInspector;
+
+    impl RepositoryInspector for TestInspector {
+        fn inspect(&self, folder: &Path) -> Result<Project, RegistrationError> {
+            Ok(Project {
+                slug: String::new(),
+                registered_folder: PathBuf::from(folder),
+                origin_url: "https://example.test/origin.git".into(),
+            })
+        }
+    }
+
+    fn test_application() -> Application {
+        Application::new(
+            Box::new(SqliteProjectRepository::in_memory().unwrap()),
+            Box::new(TestInspector),
+        )
+    }
     #[test]
     fn endpoint_configuration_prioritizes_flag_then_environment_then_default() {
         assert_eq!(
@@ -429,6 +514,57 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn typed_cli_requests_round_trip_through_the_daemon() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router(Daemon::new(test_application())))
+                .await
+                .unwrap();
+        });
+        let url = format!("http://{address}/rpc");
+        let folder = std::env::current_dir()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        request_register_project(&url, &folder, "cli-test-project")
+            .await
+            .unwrap();
+
+        let spec = request_open_spec(&url, "Spec body", "cli-test-project".into())
+            .await
+            .unwrap();
+        assert_eq!(spec.record_type, "spec");
+        assert_eq!(spec.project_scope.project_slugs, ["cli-test-project"]);
+        let standalone = request_open_task(&url, "Standalone Task", None)
+            .await
+            .unwrap();
+        assert_eq!(standalone.record_type, "task");
+        assert!(standalone.project_scope.project_slugs.is_empty());
+        let child = request_open_task_under_spec(&url, "Child Task", spec.id)
+            .await
+            .unwrap();
+        assert_eq!(child.record_type, "task");
+        assert_eq!(child.project_scope, spec.project_scope);
+        assert_eq!(child.relationships[0].parent_id, spec.id);
+
+        let listed = request_list_records(&url, None, None, Some("task".into()))
+            .await
+            .unwrap();
+        assert_eq!(listed.records.len(), 2);
+        assert!(
+            listed
+                .records
+                .iter()
+                .all(|record| record.record_type == "task")
+        );
+        assert_eq!(render_record(&spec), "spec 1 (open)\n\nSpec body");
+        assert_eq!(render_record_opened(&child), "Opened task 3 (open)");
+
+        server.abort();
+    }
+
     #[test]
     fn record_list_renders_records_in_response_order() {
         let records = ListRecordsResponse {
@@ -444,7 +580,7 @@ mod tests {
                 relationships: vec![],
             }],
         };
-        assert_eq!(render_record_list(&records), "Record 4 (open)\n\nbody");
+        assert_eq!(render_record_list(&records), "generic 4 (open)\n\nbody");
     }
 
     #[test]
@@ -479,7 +615,7 @@ mod tests {
                 completion_resolution: None,
                 relationships: vec![],
             }),
-            "Opened Record 4 (open)"
+            "Opened generic 4 (open)"
         );
     }
 }

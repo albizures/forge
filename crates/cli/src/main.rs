@@ -4,9 +4,10 @@ use forge_cli::{
     render_record, render_record_comments, render_record_list, render_record_opened,
     render_record_updates, request_add_record_comment, request_delete_record_comment,
     request_done_record, request_edit_record, request_list_records, request_open_record,
-    request_project_here, request_record_comments, request_record_updates,
-    request_register_project, request_relate_record, request_show_record, request_start_record,
-    request_status, request_unrelate_record, resolve_endpoint as resolve_managed_endpoint,
+    request_open_spec, request_open_task, request_open_task_under_spec, request_project_here,
+    request_record_comments, request_record_updates, request_register_project,
+    request_relate_record, request_show_record, request_start_record, request_status,
+    request_unrelate_record, resolve_endpoint as resolve_managed_endpoint,
 };
 use std::io::Read;
 
@@ -40,6 +41,16 @@ enum Command {
         #[command(subcommand)]
         command: RecordCommand,
     },
+    /// Manage Specs.
+    Spec {
+        #[command(subcommand)]
+        command: SpecCommand,
+    },
+    /// Manage Tasks.
+    Task {
+        #[command(subcommand)]
+        command: TaskCommand,
+    },
 }
 #[derive(Debug, Subcommand)]
 enum AddCommand {
@@ -49,6 +60,18 @@ enum AddCommand {
         #[arg(long, value_name = "URL")]
         server_url: Option<String>,
     },
+}
+#[derive(Debug, Subcommand)]
+enum SpecCommand {
+    /// Open a Spec with exactly one Project.
+    Open(OpenSpecArgs),
+}
+#[derive(Debug, Subcommand)]
+enum TaskCommand {
+    /// Open a standalone Task with zero or one Project.
+    Open(OpenTaskArgs),
+    /// Open a Task beneath a Spec, inheriting the Spec's Project Scope.
+    UnderSpec(OpenTaskUnderSpecArgs),
 }
 #[derive(Debug, Subcommand)]
 enum RecordCommand {
@@ -85,6 +108,9 @@ struct ListRecordsArgs {
     /// Restrict results to open, in-progress, or done Records.
     #[arg(long, value_parser = ["open", "in-progress", "done"])]
     status: Option<String>,
+    /// Restrict results to generic, spec, or task Records.
+    #[arg(long = "type", value_parser = ["generic", "spec", "task"])]
+    record_type: Option<String>,
     #[arg(long, value_name = "URL")]
     server_url: Option<String>,
     #[arg(long)]
@@ -144,6 +170,45 @@ struct RelationshipArgs {
     kind: String,
     #[arg(long = "to")]
     parent_id: u64,
+    #[arg(long, value_name = "URL")]
+    server_url: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Args, Debug)]
+struct OpenSpecArgs {
+    /// Markdown body, or - to read it from standard input.
+    #[arg(long)]
+    body: String,
+    /// The Spec's required Project.
+    #[arg(long, value_name = "SLUG")]
+    project: String,
+    #[arg(long, value_name = "URL")]
+    server_url: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Args, Debug)]
+struct OpenTaskArgs {
+    /// Markdown body, or - to read it from standard input.
+    #[arg(long)]
+    body: String,
+    /// The standalone Task's optional Project.
+    #[arg(long, value_name = "SLUG")]
+    project: Option<String>,
+    #[arg(long, value_name = "URL")]
+    server_url: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Args, Debug)]
+struct OpenTaskUnderSpecArgs {
+    /// Markdown body, or - to read it from standard input.
+    #[arg(long)]
+    body: String,
+    /// The parent Spec's ID.
+    #[arg(long)]
+    spec: u64,
     #[arg(long, value_name = "URL")]
     server_url: Option<String>,
     #[arg(long)]
@@ -246,6 +311,13 @@ async fn main() {
             RecordCommand::Comments(args) => record_comments(args).await,
             RecordCommand::Updates(args) => record_updates(args).await,
         },
+        Command::Spec { command } => match command {
+            SpecCommand::Open(args) => open_spec(args).await,
+        },
+        Command::Task { command } => match command {
+            TaskCommand::Open(args) => open_task(args).await,
+            TaskCommand::UnderSpec(args) => open_task_under_spec(args).await,
+        },
     };
     std::process::exit(exit_code);
 }
@@ -331,6 +403,7 @@ async fn list_records(args: ListRecordsArgs) -> i32 {
         &resolve_endpoint(args.server_url.as_deref()).await,
         args.project,
         status,
+        args.record_type,
     )
     .await
     {
@@ -480,16 +553,24 @@ fn record_result(
     }
 }
 
+fn read_body(body: String, operation: &str) -> Result<String, i32> {
+    if body != "-" {
+        return Ok(body);
+    }
+    let mut contents = String::new();
+    std::io::stdin()
+        .read_to_string(&mut contents)
+        .map_err(|error| {
+            eprintln!("forge {operation}: could not read body: {error}");
+            1
+        })?;
+    Ok(contents)
+}
+
 async fn open_record(args: OpenRecordArgs) -> i32 {
-    let body = if args.body == "-" {
-        let mut body = String::new();
-        if let Err(error) = std::io::stdin().read_to_string(&mut body) {
-            eprintln!("forge record open: could not read body: {error}");
-            return 1;
-        }
-        body
-    } else {
-        args.body
+    let body = match read_body(args.body, "record open") {
+        Ok(body) => body,
+        Err(exit_code) => return exit_code,
     };
     match request_open_record(
         &resolve_endpoint(args.server_url.as_deref()).await,
@@ -516,9 +597,84 @@ async fn open_record(args: OpenRecordArgs) -> i32 {
     }
 }
 
+async fn open_spec(args: OpenSpecArgs) -> i32 {
+    let body = match read_body(args.body, "spec open") {
+        Ok(body) => body,
+        Err(exit_code) => return exit_code,
+    };
+    open_typed_result(
+        "spec open",
+        args.json,
+        request_open_spec(
+            &resolve_endpoint(args.server_url.as_deref()).await,
+            &body,
+            args.project,
+        )
+        .await,
+    )
+}
+
+async fn open_task(args: OpenTaskArgs) -> i32 {
+    let body = match read_body(args.body, "task open") {
+        Ok(body) => body,
+        Err(exit_code) => return exit_code,
+    };
+    open_typed_result(
+        "task open",
+        args.json,
+        request_open_task(
+            &resolve_endpoint(args.server_url.as_deref()).await,
+            &body,
+            args.project,
+        )
+        .await,
+    )
+}
+
+async fn open_task_under_spec(args: OpenTaskUnderSpecArgs) -> i32 {
+    let body = match read_body(args.body, "task under-spec") {
+        Ok(body) => body,
+        Err(exit_code) => return exit_code,
+    };
+    open_typed_result(
+        "task under-spec",
+        args.json,
+        request_open_task_under_spec(
+            &resolve_endpoint(args.server_url.as_deref()).await,
+            &body,
+            args.spec,
+        )
+        .await,
+    )
+}
+
+fn open_typed_result(
+    operation: &str,
+    json: bool,
+    result: Result<forge_rpc::RecordResponse, String>,
+) -> i32 {
+    match result {
+        Ok(record) => {
+            println!(
+                "{}",
+                if json {
+                    serde_json::to_string(&record).expect("RecordResponse must serialize")
+                } else {
+                    render_record_opened(&record)
+                }
+            );
+            0
+        }
+        Err(error) => {
+            eprintln!("forge {operation}: {error}");
+            1
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Command, RecordCommand};
+    use super::{Cli, Command, RecordCommand, SpecCommand, TaskCommand};
     use clap::Parser;
 
     #[test]
@@ -542,6 +698,69 @@ mod tests {
     }
 
     #[test]
+    fn typed_open_commands_require_their_valid_scope_or_parent_arguments() {
+        let cli = Cli::try_parse_from([
+            "forge",
+            "spec",
+            "open",
+            "--body",
+            "Spec",
+            "--project",
+            "alpha",
+        ])
+        .unwrap();
+        let Command::Spec {
+            command: SpecCommand::Open(args),
+        } = cli.command
+        else {
+            panic!("expected spec open command");
+        };
+        assert_eq!(args.project, "alpha");
+
+        let cli = Cli::try_parse_from(["forge", "task", "open", "--body", "Task"]).unwrap();
+        let Command::Task {
+            command: TaskCommand::Open(args),
+        } = cli.command
+        else {
+            panic!("expected task open command");
+        };
+        assert!(args.project.is_none());
+        assert!(
+            Cli::try_parse_from([
+                "forge",
+                "task",
+                "open",
+                "--body",
+                "Task",
+                "--project",
+                "alpha",
+                "--project",
+                "beta",
+            ])
+            .is_err()
+        );
+
+        let cli = Cli::try_parse_from([
+            "forge",
+            "task",
+            "under-spec",
+            "--body",
+            "Child",
+            "--spec",
+            "42",
+        ])
+        .unwrap();
+        let Command::Task {
+            command: TaskCommand::UnderSpec(args),
+        } = cli.command
+        else {
+            panic!("expected task under-spec command");
+        };
+        assert_eq!(args.spec, 42);
+        assert!(Cli::try_parse_from(["forge", "task", "under-spec", "--body", "Child"]).is_err());
+    }
+
+    #[test]
     fn record_list_accepts_one_project_and_a_public_status_name() {
         let cli = Cli::try_parse_from([
             "forge",
@@ -551,6 +770,8 @@ mod tests {
             "alpha",
             "--status",
             "in-progress",
+            "--type",
+            "spec",
             "--json",
         ])
         .unwrap();
@@ -562,6 +783,8 @@ mod tests {
         };
         assert_eq!(args.project.as_deref(), Some("alpha"));
         assert_eq!(args.status.as_deref(), Some("in-progress"));
+        assert_eq!(args.record_type.as_deref(), Some("spec"));
         assert!(args.json);
+        assert!(Cli::try_parse_from(["forge", "record", "list", "--type", "invalid"]).is_err());
     }
 }

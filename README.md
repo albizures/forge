@@ -124,7 +124,27 @@ A completed Record's body and optional completion resolution cannot change.
 Records are retained rather than deleted; complete mistaken Records with an
 explanatory resolution.
 
-Use `child-of` relationships to make a hierarchy. A child has at most one
+## Manage Specs and Tasks
+
+Specs and Tasks have dedicated, valid-by-construction commands. A Spec always
+has exactly one Project. A standalone Task may have zero or one Project, while
+a Task opened beneath a Spec atomically inherits that Spec's Project Scope and
+parent relationship.
+
+```sh
+cargo run -p forge-cli --bin forge -- spec open \
+  --body 'Deliver the migration' --project alpha
+cargo run -p forge-cli --bin forge -- task open --body 'Investigate options'
+cargo run -p forge-cli --bin forge -- task open \
+  --body 'Project-specific handoff' --project alpha
+cargo run -p forge-cli --bin forge -- task under-spec \
+  --body 'Implement the migration' --spec 1
+```
+
+Human-readable open, show, and list output identifies each Record's type;
+`--json` returns the type supplied by the daemon.
+
+Use `child-of` relationships to make a generic Record hierarchy. A child has at most one
 parent; parent and child must have identical Project Scopes. Hierarchies may be
 nested and cannot contain cycles. A parent cannot be completed while any child
 is not done, although relationships can be corrected after completion.
@@ -134,13 +154,12 @@ cargo run -p forge-cli --bin forge -- record relate 2 --kind child-of --to 1
 cargo run -p forge-cli --bin forge -- record unrelate 2 --kind child-of --to 1
 ```
 
-Discovery is intentionally limited to optional Project Scope membership and
-status filters, which combine with AND. Results are newest first. There is no
-full-text search, type-specific workflow, deletion, scope editing, comments, or
-history yet.
+Discovery is intentionally limited to optional Project Scope membership, status,
+and Record Type filters, which combine with AND. Results are newest first. There
+is no full-text search, deletion, or scope editing.
 
 ```sh
-cargo run -p forge-cli --bin forge -- record list --project alpha --status open
+cargo run -p forge-cli --bin forge -- record list --project alpha --status open --type spec
 ```
 
 Record commands support `--json`; use `--server-url` or `FORGE_SERVER_URL` to
