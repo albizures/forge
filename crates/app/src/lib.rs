@@ -82,6 +82,7 @@ pub struct NewTypedRecord {
 pub struct RecordListFilter {
     pub project_slug: Option<String>,
     pub status: Option<RecordStatus>,
+    pub record_type: Option<RecordType>,
 }
 
 /// Opaque stable identity assigned to a Forge-authored Record Update.
@@ -410,6 +411,7 @@ impl Application {
         self.records.list_records(&RecordListFilter {
             project_slug,
             status,
+            record_type: None,
         })
     }
 
@@ -701,6 +703,9 @@ mod tests {
                         .as_ref()
                         .is_none_or(|slug| record.project_slugs.contains(slug))
                         && filter.status.is_none_or(|status| record.status == status)
+                        && filter
+                            .record_type
+                            .is_none_or(|record_type| record.record_type == record_type)
                 })
                 .cloned()
                 .rev()

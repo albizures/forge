@@ -48,6 +48,7 @@ impl SqliteProjectRepository {
             );
             CREATE TABLE IF NOT EXISTS records (
                 id INTEGER PRIMARY KEY NOT NULL,
+                record_type TEXT NOT NULL CHECK (record_type IN ('generic', 'spec', 'task')),
                 body TEXT NOT NULL,
                 status TEXT NOT NULL CHECK (status IN ('open', 'in_progress', 'done')),
                 completion_resolution TEXT
@@ -83,6 +84,7 @@ impl SqliteProjectRepository {
             )
             .map_err(storage_error)?;
         migrate_record_status_schema(&connection)?;
+        migrate_record_type_schema(&connection)?;
         migrate_record_updates_schema(&connection)?;
         Ok(Self {
             connection: Mutex::new(connection),
@@ -207,7 +209,7 @@ impl RecordRepository for SqliteProjectRepository {
         }
         transaction
             .execute(
-                "INSERT INTO records (body, status) VALUES (?1, 'open')",
+                "INSERT INTO records (record_type, body, status) VALUES ('generic', ?1, 'open')",
                 [&record.body],
             )
             .map_err(storage_error)?;
@@ -234,18 +236,78 @@ impl RecordRepository for SqliteProjectRepository {
         })
     }
 
-    fn open_typed_record(&self, _: &NewTypedRecord) -> Result<Record, RegistrationError> {
-        Err(RegistrationError::new(
-            "unsupported-record-type",
-            "typed Record persistence has not been migrated",
-        ))
+    fn open_typed_record(&self, record: &NewTypedRecord) -> Result<Record, RegistrationError> {
+        validate_typed_record(record)?;
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        let transaction = connection.transaction().map_err(storage_error)?;
+        validate_projects(&transaction, &record.project_slugs)?;
+        transaction
+            .execute(
+                "INSERT INTO records (record_type, body, status) VALUES (?1, ?2, 'open')",
+                params![record_type_name(record.record_type), record.body],
+            )
+            .map_err(storage_error)?;
+        let id = transaction.last_insert_rowid().cast_unsigned();
+        for slug in &record.project_slugs {
+            transaction
+                .execute(
+                    "INSERT INTO record_projects (record_id, project_slug) VALUES (?1, ?2)",
+                    params![id.cast_signed(), slug],
+                )
+                .map_err(storage_error)?;
+        }
+        insert_update(&transaction, id, RecordUpdateKind::Created)?;
+        let opened = load_record(&transaction, id)?;
+        transaction.commit().map_err(storage_error)?;
+        Ok(opened)
     }
 
-    fn open_task_under_spec(&self, _: &str, _: u64) -> Result<Record, RegistrationError> {
-        Err(RegistrationError::new(
-            "unsupported-record-type",
-            "typed Record persistence has not been migrated",
-        ))
+    fn open_task_under_spec(&self, body: &str, spec_id: u64) -> Result<Record, RegistrationError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        let transaction = connection.transaction().map_err(storage_error)?;
+        let spec = load_record(&transaction, spec_id)?;
+        if spec.record_type != RecordType::Spec {
+            return Err(RegistrationError::new(
+                "invalid-parent-type",
+                "a Task may be opened under a Spec only",
+            ));
+        }
+        transaction
+            .execute(
+                "INSERT INTO records (record_type, body, status) VALUES ('task', ?1, 'open')",
+                [body],
+            )
+            .map_err(storage_error)?;
+        let task_id = transaction.last_insert_rowid().cast_unsigned();
+        transaction
+            .execute(
+                "INSERT INTO record_projects (record_id, project_slug) SELECT ?1, project_slug FROM record_projects WHERE record_id = ?2",
+                params![task_id.cast_signed(), spec_id.cast_signed()],
+            )
+            .map_err(storage_error)?;
+        transaction
+            .execute(
+                "INSERT INTO record_relationships (parent_id, child_id, kind) VALUES (?1, ?2, 'parent-child')",
+                params![spec_id.cast_signed(), task_id.cast_signed()],
+            )
+            .map_err(storage_error)?;
+        insert_update(&transaction, task_id, RecordUpdateKind::Created)?;
+        insert_update(
+            &transaction,
+            task_id,
+            RecordUpdateKind::RelationshipAdded {
+                related_record_id: spec_id,
+            },
+        )?;
+        let task = load_record(&transaction, task_id)?;
+        transaction.commit().map_err(storage_error)?;
+        Ok(task)
     }
 
     fn list_records(&self, filter: &RecordListFilter) -> Result<Vec<Record>, RegistrationError> {
@@ -259,9 +321,18 @@ impl RecordRepository for SqliteProjectRepository {
             (None, Some(status)) => connection.prepare("SELECT id FROM records WHERE status = ?1 ORDER BY id DESC").map_err(storage_error)?.query_map([status_name(status)], |row| row.get(0)).map_err(storage_error)?.collect::<Result<Vec<i64>, _>>().map_err(storage_error)?,
             (None, None) => connection.prepare("SELECT id FROM records ORDER BY id DESC").map_err(storage_error)?.query_map([], |row| row.get(0)).map_err(storage_error)?.collect::<Result<Vec<i64>, _>>().map_err(storage_error)?,
         };
-        ids.into_iter()
+        let records = ids
+            .into_iter()
             .map(|id| load_record(&connection, id.cast_unsigned()))
-            .collect()
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(records
+            .into_iter()
+            .filter(|record| {
+                filter
+                    .record_type
+                    .is_none_or(|record_type| record.record_type == record_type)
+            })
+            .collect())
     }
 
     fn show_record(&self, id: u64) -> Result<Record, RegistrationError> {
@@ -348,6 +419,12 @@ impl RecordRepository for SqliteProjectRepository {
         let transaction = connection.transaction().map_err(storage_error)?;
         let child = load_record(&transaction, child_id)?;
         let parent = load_record(&transaction, parent_id)?;
+        if child.record_type != RecordType::Generic || parent.record_type != RecordType::Generic {
+            return Err(RegistrationError::new(
+                "invalid-relationship",
+                "only Generic Records may be related after opening",
+            ));
+        }
         if child.project_slugs != parent.project_slugs {
             return Err(RegistrationError::new(
                 "scope-mismatch",
@@ -387,6 +464,14 @@ impl RecordRepository for SqliteProjectRepository {
             .lock()
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
         let transaction = connection.transaction().map_err(storage_error)?;
+        let child = load_record(&transaction, child_id)?;
+        let parent = load_record(&transaction, parent_id)?;
+        if child.record_type != RecordType::Generic || parent.record_type != RecordType::Generic {
+            return Err(RegistrationError::new(
+                "invalid-relationship",
+                "only Generic Record Relationships may be removed",
+            ));
+        }
         let deleted = transaction
             .execute(
                 "DELETE FROM record_relationships WHERE parent_id = ?1 AND child_id = ?2",
@@ -664,16 +749,77 @@ fn record_or_transition_error(
     }
 }
 
+fn validate_projects(
+    connection: &Connection,
+    project_slugs: &[String],
+) -> Result<(), RegistrationError> {
+    for slug in project_slugs {
+        let exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM projects WHERE slug = ?1)",
+                [slug],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        if !exists {
+            return Err(RegistrationError::new(
+                "project-not-found",
+                format!("Project `{slug}` is not registered"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_typed_record(record: &NewTypedRecord) -> Result<(), RegistrationError> {
+    match record.record_type {
+        RecordType::Generic => Err(RegistrationError::new(
+            "invalid-record-type",
+            "typed Record opening requires a non-Generic type",
+        )),
+        RecordType::Spec if record.project_slugs.len() != 1 => Err(RegistrationError::new(
+            "invalid-project-scope",
+            "a Spec must have exactly one Project in its scope",
+        )),
+        RecordType::Task if record.project_slugs.len() > 1 => Err(RegistrationError::new(
+            "invalid-project-scope",
+            "a standalone Task may have at most one Project in its scope",
+        )),
+        RecordType::Spec | RecordType::Task => Ok(()),
+    }
+}
+
+fn record_type_name(record_type: RecordType) -> &'static str {
+    match record_type {
+        RecordType::Generic => "generic",
+        RecordType::Spec => "spec",
+        RecordType::Task => "task",
+    }
+}
+
+fn record_type(value: &str) -> Result<RecordType, RegistrationError> {
+    match value {
+        "generic" => Ok(RecordType::Generic),
+        "spec" => Ok(RecordType::Spec),
+        "task" => Ok(RecordType::Task),
+        _ => Err(RegistrationError::new(
+            "storage",
+            "stored Record has an invalid type",
+        )),
+    }
+}
+
 fn load_record(connection: &Connection, id: u64) -> Result<Record, RegistrationError> {
-    let (body, status, completion_resolution) = connection
+    let (stored_record_type, body, status, completion_resolution) = connection
         .query_row(
-            "SELECT body, status, completion_resolution FROM records WHERE id = ?1",
+            "SELECT record_type, body, status, completion_resolution FROM records WHERE id = ?1",
             [id.cast_signed()],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get(2)?,
+                    row.get::<_, String>(2)?,
+                    row.get(3)?,
                 ))
             },
         )
@@ -718,7 +864,7 @@ fn load_record(connection: &Connection, id: u64) -> Result<Record, RegistrationE
         .collect::<Result<Vec<_>, RegistrationError>>()?;
     Ok(Record {
         id,
-        record_type: RecordType::Generic,
+        record_type: record_type(&stored_record_type)?,
         body,
         project_slugs,
         status,
@@ -734,6 +880,26 @@ fn now_millis() -> Result<i64, RegistrationError> {
         .as_millis()
         .try_into()
         .map_err(|_| RegistrationError::new("storage", "system clock is out of range"))
+}
+
+fn migrate_record_type_schema(connection: &Connection) -> Result<(), RegistrationError> {
+    let has_record_type: bool = connection
+        .prepare("PRAGMA table_info(records)")
+        .map_err(storage_error)?
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(storage_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(storage_error)?
+        .iter()
+        .any(|column| column == "record_type");
+    if !has_record_type {
+        connection
+            .execute_batch(
+                "ALTER TABLE records ADD COLUMN record_type TEXT NOT NULL DEFAULT 'generic' CHECK (record_type IN ('generic', 'spec', 'task'));",
+            )
+            .map_err(storage_error)?;
+    }
+    Ok(())
 }
 
 fn migrate_record_updates_schema(connection: &Connection) -> Result<(), RegistrationError> {
@@ -790,10 +956,13 @@ fn storage_error(error: rusqlite::Error) -> RegistrationError {
 mod tests {
     use super::SqliteProjectRepository;
     use forge_app::{
-        NewRecord, Project, ProjectRepository, RecordListFilter, RecordRepository, RecordStatus,
-        RecordUpdateKind,
+        NewRecord, NewTypedRecord, Project, ProjectRepository, RecordListFilter, RecordRepository,
+        RecordStatus, RecordType, RecordUpdateKind,
     };
-    use std::path::{Path, PathBuf};
+    use std::{
+        path::{Path, PathBuf},
+        time::{SystemTime, UNIX_EPOCH},
+    };
     fn project(slug: &str, folder: &str) -> Project {
         Project {
             slug: slug.into(),
@@ -883,7 +1052,8 @@ mod tests {
             store
                 .list_records(&RecordListFilter {
                     project_slug: Some("alpha".into()),
-                    status: None
+                    status: None,
+                    record_type: None,
                 })
                 .unwrap()
                 .into_iter()
@@ -895,7 +1065,8 @@ mod tests {
             store
                 .list_records(&RecordListFilter {
                     project_slug: None,
-                    status: Some(RecordStatus::Open)
+                    status: Some(RecordStatus::Open),
+                    record_type: None,
                 })
                 .unwrap()
                 .into_iter()
@@ -1133,5 +1304,102 @@ mod tests {
                 .code,
             "project-not-found"
         );
+    }
+
+    #[test]
+    fn persists_typed_records_filters_them_and_opens_tasks_atomically() {
+        let store = SqliteProjectRepository::in_memory().unwrap();
+        store.register(&project("alpha", "/repos/alpha")).unwrap();
+        let spec = store
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Spec,
+                body: "spec".into(),
+                project_slugs: vec!["alpha".into()],
+            })
+            .unwrap();
+        let task = store.open_task_under_spec("task", spec.id).unwrap();
+        assert_eq!(task.record_type, RecordType::Task);
+        assert_eq!(task.project_slugs, ["alpha"]);
+        assert_eq!(task.relationships[0].parent_id, spec.id);
+        assert_eq!(
+            store
+                .list_records(&RecordListFilter {
+                    project_slug: None,
+                    status: None,
+                    record_type: Some(RecordType::Task),
+                })
+                .unwrap(),
+            vec![task.clone()]
+        );
+        assert_eq!(
+            store
+                .open_task_under_spec("nope", task.id)
+                .unwrap_err()
+                .code,
+            "invalid-parent-type"
+        );
+        assert_eq!(
+            store
+                .list_records(&RecordListFilter {
+                    project_slug: None,
+                    status: None,
+                    record_type: None
+                })
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            store.relate_records(task.id, spec.id).unwrap_err().code,
+            "invalid-relationship"
+        );
+        assert_eq!(
+            store.unrelate_records(task.id, spec.id).unwrap_err().code,
+            "invalid-relationship"
+        );
+    }
+
+    #[test]
+    fn migrates_existing_records_to_generic_without_losing_related_data() {
+        let path = std::env::temp_dir().join(format!(
+            "forge-store-migration-{}.sqlite",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection.execute_batch("PRAGMA foreign_keys = ON;
+            CREATE TABLE projects (slug TEXT PRIMARY KEY NOT NULL, registered_folder TEXT UNIQUE NOT NULL, origin_url TEXT NOT NULL);
+            CREATE TABLE records (id INTEGER PRIMARY KEY NOT NULL, body TEXT NOT NULL, status TEXT NOT NULL CHECK (status IN ('open', 'in_progress', 'done')), completion_resolution TEXT);
+            CREATE TABLE record_projects (record_id INTEGER NOT NULL REFERENCES records(id), project_slug TEXT NOT NULL REFERENCES projects(slug), PRIMARY KEY (record_id, project_slug));
+            CREATE TABLE record_relationships (parent_id INTEGER NOT NULL REFERENCES records(id), child_id INTEGER NOT NULL REFERENCES records(id) UNIQUE, kind TEXT NOT NULL CHECK (kind IN ('parent-child')), PRIMARY KEY (parent_id, child_id));
+            CREATE TABLE record_updates (id INTEGER PRIMARY KEY NOT NULL, record_id INTEGER NOT NULL REFERENCES records(id), created_at_millis INTEGER NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('created', 'body-edited', 'status-transition', 'relationship-added', 'relationship-removed')), from_status TEXT, to_status TEXT, related_record_id INTEGER REFERENCES records(id), comment_id INTEGER);
+            CREATE TABLE record_comments (id INTEGER PRIMARY KEY NOT NULL, record_id INTEGER NOT NULL REFERENCES records(id), created_at_millis INTEGER NOT NULL, author TEXT, body TEXT NOT NULL);
+            INSERT INTO projects VALUES ('alpha', '/repos/alpha', 'https://example.test/repo.git');
+            INSERT INTO records VALUES (6, 'parent', 'open', NULL);
+            INSERT INTO records VALUES (7, 'legacy', 'done', 'complete');
+            INSERT INTO record_projects VALUES (6, 'alpha');
+            INSERT INTO record_projects VALUES (7, 'alpha');
+            INSERT INTO record_relationships VALUES (6, 7, 'parent-child');
+            INSERT INTO record_updates VALUES (9, 7, 1, 'created', NULL, NULL, NULL, NULL);
+            INSERT INTO record_comments VALUES (11, 7, 2, 'agent', 'comment');").unwrap();
+        drop(connection);
+
+        let store = SqliteProjectRepository::open(&path).unwrap();
+        let record = store.show_record(7).unwrap();
+        assert_eq!(record.record_type, RecordType::Generic);
+        assert_eq!(record.body, "legacy");
+        assert_eq!(record.project_slugs, ["alpha"]);
+        assert_eq!(record.status, RecordStatus::Done);
+        assert_eq!(record.completion_resolution.as_deref(), Some("complete"));
+        assert_eq!(record.relationships[0].parent_id, 6);
+        assert_eq!(
+            store.show_record(6).unwrap().record_type,
+            RecordType::Generic
+        );
+        assert_eq!(store.list_record_updates(7).unwrap()[0].id.0, 9);
+        assert_eq!(store.list_record_comments(7).unwrap()[0].id.0, 11);
+        std::fs::remove_file(path).unwrap();
     }
 }
