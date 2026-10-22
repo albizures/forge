@@ -21,6 +21,8 @@ const REGISTRY_SCHEMA_VERSION: u32 = 1;
 const SUPPORTED_MANAGEMENT_PROTOCOL_REVISION: u32 = 1;
 const REGISTRY_FILE: &str = "registry.toml";
 const LOCK_FILE: &str = "registry.lock";
+const STATE_LOG_LIMIT: u64 = 64 * 1024;
+const STATE_LOG_RETAINED_FILES: usize = 3;
 static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// All user-owned locations used by Forgeup.
@@ -102,6 +104,14 @@ impl ForgeupPaths {
     pub fn installations(&self) -> PathBuf {
         self.data.join("installations")
     }
+    #[must_use]
+    pub fn state(&self, selector: &str) -> RevisionState {
+        RevisionState {
+            database: self.data.join("state").join(selector).join("forge.db"),
+            runtime: self.runtime.join("revisions").join(selector),
+            logs: self.data.join("state").join(selector).join("logs"),
+        }
+    }
     fn lock(&self) -> PathBuf {
         self.config.join(LOCK_FILE)
     }
@@ -132,6 +142,14 @@ pub struct Installation {
     pub endpoint: String,
 }
 
+/// Isolated persistent locations for one Forge Revision.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RevisionState {
+    pub database: PathBuf,
+    pub runtime: PathBuf,
+    pub logs: PathBuf,
+}
+
 /// A strictly validated persisted Forgeup registry.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -139,12 +157,16 @@ pub struct Registry {
     pub schema_version: u32,
     #[serde(default)]
     pub installations: Vec<Installation>,
+    /// Kept here for lifecycle operations; activation is managed by a later Forgeup command.
+    #[serde(default)]
+    pub active_selector: Option<String>,
 }
 impl Registry {
     fn empty() -> Self {
         Self {
             schema_version: REGISTRY_SCHEMA_VERSION,
             installations: Vec::new(),
+            active_selector: None,
         }
     }
 }
@@ -225,6 +247,14 @@ impl RegistryStore {
     }
 }
 
+/// Options which make registration's destructive or state-sharing behavior explicit.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RegistrationOptions<'a> {
+    pub replace: Option<&'a str>,
+    pub reuse_state: Option<&'a str>,
+    pub purge_state: bool,
+}
+
 /// Registers a verified executable pair as an immutable Revision Installation.
 pub fn register(
     source_label: &str,
@@ -232,12 +262,30 @@ pub fn register(
     daemon: &Path,
     local_build_alias: Option<&str>,
 ) -> Result<Installation, ForgeupError> {
+    register_with_options(
+        source_label,
+        cli,
+        daemon,
+        local_build_alias,
+        RegistrationOptions::default(),
+    )
+}
+
+/// Registers a Revision Installation with explicit replacement and state options.
+pub fn register_with_options(
+    source_label: &str,
+    cli: &Path,
+    daemon: &Path,
+    local_build_alias: Option<&str>,
+    options: RegistrationOptions<'_>,
+) -> Result<Installation, ForgeupError> {
     register_at(
         &ForgeupPaths::from_environment()?,
         source_label,
         cli,
         daemon,
         local_build_alias,
+        options,
     )
 }
 
@@ -247,46 +295,106 @@ fn register_at(
     cli: &Path,
     daemon: &Path,
     local_build_alias: Option<&str>,
+    options: RegistrationOptions<'_>,
 ) -> Result<Installation, ForgeupError> {
-    validate_label(source_label)?;
-    if let Some(alias) = local_build_alias {
-        validate_label(alias)?;
-    }
-    let cli_identity = inspect_identity(cli)?;
-    let daemon_identity = inspect_identity(daemon)?;
-    if cli_identity != daemon_identity {
-        return Err(ForgeupError::IdentityMismatch);
-    }
-    validate_identity(&cli_identity)?;
-    let selector = format!("{source_label}@{}", cli_identity.commit);
-    let cli_hash = sha256(cli)?;
-    let daemon_hash = sha256(daemon)?;
+    let (cli_identity, selector, cli_hash, daemon_hash) =
+        attest_registration(source_label, cli, daemon, local_build_alias)?;
     let store = RegistryStore::open(paths.clone())?;
     let mut registry = store.load()?;
-    if let Some(existing) = registry
+    let existing_index = registry
         .installations
         .iter()
-        .find(|item| item.selector == selector)
+        .position(|item| item.selector == selector);
+    let replacing = options.replace.is_some();
+    if let Some(replace) = options.replace {
+        let target = resolve_in_registry(&registry, replace)?;
+        if target.selector != selector {
+            return Err(ForgeupError::ReplacementSelectorMismatch {
+                replace: replace.to_owned(),
+                candidate: selector,
+            });
+        }
+    }
+    if options.purge_state && !replacing {
+        return Err(ForgeupError::PurgeRequiresReplacement);
+    }
+    if let Some(reuse) = options.reuse_state
+        && reuse != selector
     {
-        if existing.cli_sha256 == cli_hash && existing.daemon_sha256 == daemon_hash {
+        return Err(ForgeupError::StateReuseMismatch {
+            requested: reuse.to_owned(),
+            selector,
+        });
+    }
+    if let Some(index) = existing_index {
+        let existing = &registry.installations[index];
+        if existing.cli_sha256 == cli_hash && existing.daemon_sha256 == daemon_hash && !replacing {
             return Ok(existing.clone());
         }
-        return Err(ForgeupError::RegistrationConflict(selector));
-    }
-    if registry.installations.iter().any(|item| {
-        item.source_label == source_label && item.identity.commit == cli_identity.commit
-    }) {
-        return Err(ForgeupError::RegistrationConflict(selector));
+        if !replacing {
+            return Err(ForgeupError::RegistrationConflict(selector));
+        }
+    } else if replacing {
+        return Err(ForgeupError::UnknownSelector(
+            options.replace.unwrap_or_default().to_owned(),
+        ));
     }
     if let Some(alias) = local_build_alias
         && registry
             .installations
             .iter()
-            .any(|item| item.local_build_alias.as_deref() == Some(alias))
+            .enumerate()
+            .any(|(index, item)| {
+                Some(index) != existing_index && item.local_build_alias.as_deref() == Some(alias)
+            })
     {
         return Err(ForgeupError::AliasConflict(alias.to_owned()));
     }
+    let state = paths.state(&selector);
+    if options.purge_state {
+        purge_state(&state)?;
+    }
+    if options.reuse_state.is_some() && !state.database.parent().is_some_and(Path::exists) {
+        return Err(ForgeupError::StateUnavailable(selector));
+    }
+    ensure_state(&state)?;
+    let installation = snapshot_installation(
+        paths,
+        source_label,
+        selector.clone(),
+        local_build_alias,
+        cli_identity,
+        (cli_hash, daemon_hash),
+        (cli, daemon),
+    )?;
+    append_diagnostic(&state, "registered Revision Installation")?;
+    if let Some(index) = existing_index {
+        registry.installations[index] = installation.clone();
+    } else {
+        registry.installations.push(installation.clone());
+    }
+    store.save(&registry)?;
+    Ok(installation)
+}
+
+fn snapshot_installation(
+    paths: &ForgeupPaths,
+    source_label: &str,
+    selector: String,
+    local_build_alias: Option<&str>,
+    identity: RevisionIdentity,
+    hashes: (String, String),
+    executables: (&Path, &Path),
+) -> Result<Installation, ForgeupError> {
+    let (cli_sha256, daemon_sha256) = hashes;
+    let (cli, daemon) = executables;
     let destination = paths.installations().join(&selector);
+    if destination.exists() {
+        fs::remove_dir_all(&destination).map_err(|source| ForgeupError::Io {
+            path: destination.clone(),
+            source,
+        })?;
+    }
     fs::create_dir_all(&destination).map_err(|source| ForgeupError::Io {
         path: destination.clone(),
         source,
@@ -296,17 +404,16 @@ fn register_at(
     let daemon_path = destination.join("forge-server");
     copy_executable(cli, &cli_path)?;
     copy_executable(daemon, &daemon_path)?;
-    let endpoint = allocate_endpoint()?;
     let installation = Installation {
         source_label: source_label.to_owned(),
-        selector: selector.clone(),
+        selector,
         local_build_alias: local_build_alias.map(str::to_owned),
-        identity: cli_identity,
+        identity,
         cli_path,
         daemon_path,
-        cli_sha256: cli_hash,
-        daemon_sha256: daemon_hash,
-        endpoint,
+        cli_sha256,
+        daemon_sha256,
+        endpoint: allocate_endpoint()?,
     };
     let manifest =
         toml::to_string_pretty(&installation).map_err(|source| ForgeupError::InvalidRegistry {
@@ -314,8 +421,6 @@ fn register_at(
             message: source.to_string(),
         })?;
     atomic_write(&destination.join("manifest.toml"), manifest.as_bytes())?;
-    registry.installations.push(installation.clone());
-    store.save(&registry)?;
     Ok(installation)
 }
 
@@ -326,14 +431,53 @@ pub fn list() -> Result<Vec<Installation>, ForgeupError> {
 }
 /// Resolves the only accepted canonical selector or a unique local-build alias.
 pub fn current(selector: &str) -> Result<Installation, ForgeupError> {
-    let matches = list()?
-        .into_iter()
+    let paths = ForgeupPaths::from_environment()?;
+    let registry = RegistryStore::open(paths)?.load()?;
+    resolve_in_registry(&registry, selector)
+}
+
+/// Removes an Installation but preserves its Revision State unless explicitly purged.
+pub fn remove(selector: &str, purge: bool) -> Result<(), ForgeupError> {
+    let paths = ForgeupPaths::from_environment()?;
+    remove_at(&paths, selector, purge)
+}
+
+fn remove_at(paths: &ForgeupPaths, selector: &str, purge: bool) -> Result<(), ForgeupError> {
+    let store = RegistryStore::open(paths.clone())?;
+    let mut registry = store.load()?;
+    let installation = resolve_in_registry(&registry, selector)?;
+    if registry.active_selector.as_deref() == Some(&installation.selector) {
+        return Err(ForgeupError::ActiveRemoval(installation.selector));
+    }
+    let destination = paths.installations().join(&installation.selector);
+    if destination.exists() {
+        fs::remove_dir_all(&destination).map_err(|source| ForgeupError::Io {
+            path: destination,
+            source,
+        })?;
+    }
+    let state = paths.state(&installation.selector);
+    if purge {
+        purge_state(&state)?;
+    } else {
+        append_diagnostic(&state, "removed Revision Installation; state retained")?;
+    }
+    registry
+        .installations
+        .retain(|item| item.selector != installation.selector);
+    store.save(&registry)
+}
+
+fn resolve_in_registry(registry: &Registry, selector: &str) -> Result<Installation, ForgeupError> {
+    let matches = registry
+        .installations
+        .iter()
         .filter(|item| {
             item.selector == selector || item.local_build_alias.as_deref() == Some(selector)
         })
         .collect::<Vec<_>>();
     match matches.as_slice() {
-        [item] => Ok(item.clone()),
+        [item] => Ok((*item).clone()),
         [] => Err(ForgeupError::UnknownSelector(selector.to_owned())),
         _ => Err(ForgeupError::AmbiguousSelector(selector.to_owned())),
     }
@@ -370,6 +514,11 @@ pub enum ForgeupError {
     AliasConflict(String),
     UnknownSelector(String),
     AmbiguousSelector(String),
+    ReplacementSelectorMismatch { replace: String, candidate: String },
+    PurgeRequiresReplacement,
+    StateReuseMismatch { requested: String, selector: String },
+    StateUnavailable(String),
+    ActiveRemoval(String),
 }
 impl fmt::Display for ForgeupError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -400,10 +549,52 @@ impl fmt::Display for ForgeupError {
             Self::AliasConflict(a) => write!(f, "local-build alias `{a}` is already in use"),
             Self::UnknownSelector(s) => write!(f, "unknown Revision Selector `{s}`"),
             Self::AmbiguousSelector(s) => write!(f, "ambiguous Revision Selector `{s}`"),
+            Self::ReplacementSelectorMismatch { replace, candidate } => write!(
+                f,
+                "replacement `{replace}` does not identify candidate Revision `{candidate}`"
+            ),
+            Self::PurgeRequiresReplacement => write!(f, "--purge-state requires --replace"),
+            Self::StateReuseMismatch {
+                requested,
+                selector,
+            } => write!(
+                f,
+                "state `{requested}` cannot be reused by Revision `{selector}`"
+            ),
+            Self::StateUnavailable(selector) => write!(
+                f,
+                "Revision State for `{selector}` is not available for reuse"
+            ),
+            Self::ActiveRemoval(selector) => {
+                write!(f, "cannot remove active Forge Revision `{selector}`")
+            }
         }
     }
 }
 impl std::error::Error for ForgeupError {}
+
+fn attest_registration(
+    source_label: &str,
+    cli: &Path,
+    daemon: &Path,
+    local_build_alias: Option<&str>,
+) -> Result<(RevisionIdentity, String, String, String), ForgeupError> {
+    validate_label(source_label)?;
+    if let Some(alias) = local_build_alias {
+        validate_label(alias)?;
+    }
+    let cli_identity = inspect_identity(cli)?;
+    if cli_identity != inspect_identity(daemon)? {
+        return Err(ForgeupError::IdentityMismatch);
+    }
+    validate_identity(&cli_identity)?;
+    Ok((
+        cli_identity.clone(),
+        format!("{source_label}@{}", cli_identity.commit),
+        sha256(cli)?,
+        sha256(daemon)?,
+    ))
+}
 
 fn inspect_identity(path: &Path) -> Result<RevisionIdentity, ForgeupError> {
     let output = Command::new(path)
@@ -450,6 +641,88 @@ fn validate_label(label: &str) -> Result<(), ForgeupError> {
         Ok(())
     }
 }
+fn ensure_state(state: &RevisionState) -> Result<(), ForgeupError> {
+    for path in [
+        state.database.parent().expect("database has parent"),
+        &state.runtime,
+        &state.logs,
+    ] {
+        fs::create_dir_all(path).map_err(|source| ForgeupError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        set_private_permissions(path)?;
+    }
+    if !state.database.exists() {
+        atomic_write(&state.database, b"")?;
+    }
+    Ok(())
+}
+
+fn purge_state(state: &RevisionState) -> Result<(), ForgeupError> {
+    let root = state.database.parent().expect("database has parent");
+    if root.exists() {
+        fs::remove_dir_all(root).map_err(|source| ForgeupError::Io {
+            path: root.to_path_buf(),
+            source,
+        })?;
+    }
+    if state.runtime.exists() {
+        fs::remove_dir_all(&state.runtime).map_err(|source| ForgeupError::Io {
+            path: state.runtime.clone(),
+            source,
+        })?;
+    }
+    Ok(())
+}
+
+fn append_diagnostic(state: &RevisionState, message: &str) -> Result<(), ForgeupError> {
+    fs::create_dir_all(&state.logs).map_err(|source| ForgeupError::Io {
+        path: state.logs.clone(),
+        source,
+    })?;
+    let log = state.logs.join("forgeup.log");
+    let line = format!("{message}\n");
+    let size = fs::metadata(&log).map_or(0, |metadata| metadata.len());
+    if size + u64::try_from(line.len()).expect("line length fits u64") > STATE_LOG_LIMIT {
+        let oldest = state
+            .logs
+            .join(format!("forgeup.log.{}", STATE_LOG_RETAINED_FILES - 1));
+        if oldest.exists() {
+            fs::remove_file(&oldest).map_err(|source| ForgeupError::Io {
+                path: oldest,
+                source,
+            })?;
+        }
+        for number in (1..STATE_LOG_RETAINED_FILES - 1).rev() {
+            let from = state.logs.join(format!("forgeup.log.{number}"));
+            let to = state.logs.join(format!("forgeup.log.{}", number + 1));
+            if from.exists() {
+                fs::rename(&from, &to).map_err(|source| ForgeupError::Io { path: to, source })?;
+            }
+        }
+        if log.exists() {
+            fs::rename(&log, state.logs.join("forgeup.log.1")).map_err(|source| {
+                ForgeupError::Io {
+                    path: log.clone(),
+                    source,
+                }
+            })?;
+        }
+    }
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log)
+        .map_err(|source| ForgeupError::Io {
+            path: log.clone(),
+            source,
+        })?;
+    set_private_permissions(&log)?;
+    file.write_all(line.as_bytes())
+        .map_err(|source| ForgeupError::Io { path: log, source })
+}
+
 fn sha256(path: &Path) -> Result<String, ForgeupError> {
     let mut file = File::open(path).map_err(|source| ForgeupError::Io {
         path: path.to_path_buf(),
@@ -610,7 +883,15 @@ mod tests {
             runtime: root.join("home/runtime"),
             bin: root.join("home/bin"),
         };
-        let installation = register_at(&paths, "local", &cli, &daemon, Some("dev")).unwrap();
+        let installation = register_at(
+            &paths,
+            "local",
+            &cli,
+            &daemon,
+            Some("dev"),
+            RegistrationOptions::default(),
+        )
+        .unwrap();
         assert!(installation.cli_path.exists());
         let registry = RegistryStore::open(paths.clone()).unwrap().load().unwrap();
         assert_eq!(registry.installations, vec![installation.clone()]);
@@ -620,7 +901,14 @@ mod tests {
         );
         executable(&cli, identity, "changed-cli");
         assert!(matches!(
-            register_at(&paths, "local", &cli, &daemon, Some("dev")),
+            register_at(
+                &paths,
+                "local",
+                &cli,
+                &daemon,
+                Some("dev"),
+                RegistrationOptions::default(),
+            ),
             Err(ForgeupError::RegistrationConflict(_))
         ));
         assert_ne!(
@@ -630,9 +918,116 @@ mod tests {
         let mismatched = r#"{"commit":"0123456789012345678901234567890123456789","dirty":false,"management_protocol_revision":1,"version":"other"}"#;
         executable(&cli, mismatched, "mismatched-cli");
         assert!(matches!(
-            register_at(&paths, "other", &cli, &daemon, None),
+            register_at(
+                &paths,
+                "other",
+                &cli,
+                &daemon,
+                None,
+                RegistrationOptions::default(),
+            ),
             Err(ForgeupError::IdentityMismatch)
         ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replacement_and_removal_make_state_lifecycle_explicit() {
+        let root = env::temp_dir().join(format!("forgeup-state-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let paths = ForgeupPaths {
+            config: root.join("config"),
+            data: root.join("data"),
+            runtime: root.join("runtime"),
+            bin: root.join("bin"),
+        };
+        let cli = root.join("forge");
+        let daemon = root.join("forge-server");
+        let identity = r#"{"commit":"0123456789012345678901234567890123456789","dirty":false,"management_protocol_revision":1,"version":"test"}"#;
+        executable(&cli, identity, "first");
+        executable(&daemon, identity, "first");
+        let installation = register_at(
+            &paths,
+            "local",
+            &cli,
+            &daemon,
+            None,
+            RegistrationOptions::default(),
+        )
+        .unwrap();
+        let state = paths.state(&installation.selector);
+        assert!(state.database.exists());
+        assert!(state.runtime.exists());
+        assert!(state.logs.exists());
+        fs::write(&state.database, "preserved").unwrap();
+        executable(&cli, identity, "replacement");
+        let replacement = register_at(
+            &paths,
+            "local",
+            &cli,
+            &daemon,
+            None,
+            RegistrationOptions {
+                replace: Some(&installation.selector),
+                ..RegistrationOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(fs::read_to_string(&state.database).unwrap(), "preserved");
+        remove_at(&paths, &replacement.selector, false).unwrap();
+        assert!(state.database.exists());
+        assert!(matches!(
+            register_at(
+                &paths,
+                "local",
+                &cli,
+                &daemon,
+                None,
+                RegistrationOptions {
+                    reuse_state: Some(&replacement.selector),
+                    ..RegistrationOptions::default()
+                }
+            ),
+            Ok(_)
+        ));
+        {
+            let store = RegistryStore::open(paths.clone()).unwrap();
+            let mut registry = store.load().unwrap();
+            registry.active_selector = Some(replacement.selector.clone());
+            store.save(&registry).unwrap();
+        }
+        assert!(matches!(
+            remove_at(&paths, &replacement.selector, false),
+            Err(ForgeupError::ActiveRemoval(_))
+        ));
+        {
+            let store = RegistryStore::open(paths.clone()).unwrap();
+            let mut registry = store.load().unwrap();
+            registry.active_selector = None;
+            store.save(&registry).unwrap();
+        }
+        remove_at(&paths, &replacement.selector, true).unwrap();
+        assert!(!state.database.parent().unwrap().exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn diagnostic_logs_are_bounded() {
+        let root = env::temp_dir().join(format!("forgeup-logs-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let state = RevisionState {
+            database: root.join("state/forge.db"),
+            runtime: root.join("runtime"),
+            logs: root.join("state/logs"),
+        };
+        let message = "x".repeat(usize::try_from(STATE_LOG_LIMIT).unwrap());
+        for _ in 0..5 {
+            append_diagnostic(&state, &message).unwrap();
+        }
+        let logs = fs::read_dir(&state.logs).unwrap().count();
+        assert_eq!(logs, STATE_LOG_RETAINED_FILES);
         fs::remove_dir_all(root).unwrap();
     }
 

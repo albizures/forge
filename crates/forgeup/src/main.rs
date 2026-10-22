@@ -20,6 +20,21 @@ enum Command {
         daemon: PathBuf,
         #[arg(long)]
         local_build_alias: Option<String>,
+        /// Explicitly replace this Revision Installation (canonical selector or alias).
+        #[arg(long)]
+        replace: Option<String>,
+        /// Reattach the retained state belonging to this canonical selector.
+        #[arg(long)]
+        reuse_state: Option<String>,
+        /// Discard Revision State while replacing the Installation.
+        #[arg(long, requires = "replace")]
+        purge_state: bool,
+    },
+    /// Remove a Revision Installation, preserving its state by default.
+    Remove {
+        selector: String,
+        #[arg(long)]
+        purge_state: bool,
     },
     /// List registered Revision Installations.
     List,
@@ -36,7 +51,22 @@ fn main() {
             cli,
             daemon,
             local_build_alias,
-        } => register(&source_label, &cli, &daemon, local_build_alias.as_deref()),
+            replace,
+            reuse_state,
+            purge_state,
+        } => register(
+            &source_label,
+            &cli,
+            &daemon,
+            local_build_alias.as_deref(),
+            replace.as_deref(),
+            reuse_state.as_deref(),
+            purge_state,
+        ),
+        Command::Remove {
+            selector,
+            purge_state,
+        } => remove(&selector, purge_state),
         Command::List => list(),
         Command::Current { selector } => current(&selector),
         Command::Doctor => doctor(),
@@ -47,14 +77,36 @@ fn register(
     cli: &std::path::Path,
     daemon: &std::path::Path,
     alias: Option<&str>,
+    replace: Option<&str>,
+    reuse_state: Option<&str>,
+    purge_state: bool,
 ) -> i32 {
-    match forgeup::register(source_label, cli, daemon, alias) {
+    match forgeup::register_with_options(
+        source_label,
+        cli,
+        daemon,
+        alias,
+        forgeup::RegistrationOptions {
+            replace,
+            reuse_state,
+            purge_state,
+        },
+    ) {
         Ok(item) => {
             println!("{}", item.selector);
             0
         }
         Err(error) => {
             eprintln!("forgeup register: {error}");
+            1
+        }
+    }
+}
+fn remove(selector: &str, purge_state: bool) -> i32 {
+    match forgeup::remove(selector, purge_state) {
+        Ok(()) => 0,
+        Err(error) => {
+            eprintln!("forgeup remove: {error}");
             1
         }
     }
