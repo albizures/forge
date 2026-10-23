@@ -479,6 +479,53 @@ impl HerdrAdapter {
         }
     }
 
+    fn cleanup_request(&self, method: &str, params: Value) -> Result<(), AgentAdapterError> {
+        match self.request(method, params) {
+            Ok(_) | Err(AgentAdapterError::NotFound(_)) => Ok(()),
+            Err(AgentAdapterError::Conflict(message)) => Err(AgentAdapterError::Conflict(message)),
+            Err(error) => Err(AgentAdapterError::Cleanup(format!("{method}: {error:?}"))),
+        }
+    }
+
+    fn retire_resource(
+        resources: &dyn AgentDispatchRepository,
+        context: &AgentDispatchContext,
+        kind: &str,
+        id: &str,
+    ) -> Result<(), AgentAdapterError> {
+        resources
+            .retire_agent_assignment_resource(&context.assignment.id, kind, id)
+            .map(|_| ())
+            .map_err(|error| {
+                AgentAdapterError::Cleanup(format!(
+                    "could not retain retired {kind}: {}",
+                    error.code
+                ))
+            })
+    }
+
+    fn resource_is_active(context: &AgentDispatchContext, kind: &str) -> Option<String> {
+        Self::active(&context.resources, kind).map(str::to_owned)
+    }
+
+    fn matching_resource(
+        value: &Value,
+        wrapper: &str,
+        expected: &[(&str, &str)],
+    ) -> Result<(), AgentAdapterError> {
+        let value = value.get(wrapper).unwrap_or(value);
+        if expected
+            .iter()
+            .all(|(field, expected)| value.get(*field).and_then(Value::as_str) == Some(*expected))
+        {
+            Ok(())
+        } else {
+            Err(AgentAdapterError::Conflict(
+                "Herdr resource does not match the persisted resource tuple".into(),
+            ))
+        }
+    }
+
     /// `agent.get` is authoritative. A single list after a not-found response distinguishes
     /// an absent agent from a renamed/replaced or misplaced one without adopting anything.
     fn agent_list_fallback(
@@ -612,12 +659,101 @@ impl AgentDispatchAdapter for HerdrAdapter {
 
     fn retire(
         &self,
-        _: &AgentDispatchContext,
-        _: &dyn AgentDispatchRepository,
+        context: &AgentDispatchContext,
+        resources: &dyn AgentDispatchRepository,
     ) -> Result<(), AgentAdapterError> {
-        Err(AgentAdapterError::Cleanup(
-            "Herdr retirement is handled by the retirement adapter task".into(),
-        ))
+        let Some(workspace) = Self::resource_is_active(context, "workspace") else {
+            return Err(AgentAdapterError::Conflict(
+                "cannot retire Herdr resources without a persisted workspace ID".into(),
+            ));
+        };
+        let tab = Self::resource_is_active(context, "tab");
+        let pane = Self::resource_is_active(context, "pane");
+        let agent = Self::resource_is_active(context, "agent-name");
+
+        // Re-read every still-present resource before a destructive request. Persisted IDs,
+        // rather than labels, are the only cleanup authority.
+        let mut tab_present = false;
+        if let Some(tab) = &tab {
+            match self.request("tab.get", json!({"tab_id": tab})) {
+                Ok(found) => {
+                    Self::matching_resource(
+                        &found,
+                        "tab",
+                        &[("tab_id", tab), ("workspace_id", &workspace)],
+                    )?;
+                    tab_present = true;
+                }
+                Err(AgentAdapterError::NotFound(_)) => {
+                    Self::retire_resource(resources, context, "tab", tab)?
+                }
+                Err(error) => {
+                    return Err(AgentAdapterError::Cleanup(format!("tab.get: {error:?}")));
+                }
+            }
+        }
+        let mut pane_present = false;
+        if let Some(pane) = &pane {
+            match self.request("pane.get", json!({"pane_id": pane})) {
+                Ok(found) => {
+                    Self::matching_resource(
+                        &found,
+                        "pane",
+                        &[
+                            ("pane_id", pane),
+                            ("workspace_id", &workspace),
+                            ("tab_id", tab.as_deref().unwrap_or("")),
+                        ],
+                    )?;
+                    pane_present = true;
+                }
+                Err(AgentAdapterError::NotFound(_)) => {
+                    Self::retire_resource(resources, context, "pane", pane)?;
+                    if let Some(agent) = &agent {
+                        Self::retire_resource(resources, context, "agent-name", agent)?;
+                    }
+                }
+                Err(error) => {
+                    return Err(AgentAdapterError::Cleanup(format!("pane.get: {error:?}")));
+                }
+            }
+        }
+
+        if pane_present && !tab_present {
+            return Err(AgentAdapterError::Conflict(
+                "Herdr dedicated pane exists without its verified dedicated tab".into(),
+            ));
+        }
+
+        if let (Some(pane), Some(agent)) = (&pane, &agent)
+            && pane_present
+        {
+            match self.agent_observation(agent, (&workspace, tab.as_deref().unwrap_or(""), pane))? {
+                AgentObservation::Absent => {
+                    Self::retire_resource(resources, context, "agent-name", agent)?
+                }
+                _ => {
+                    self.cleanup_request(
+                        "pane.release_agent",
+                        json!({"pane_id": pane, "source": "forge-agent-dispatch", "agent": agent, "seq": 1}),
+                    )?;
+                    Self::retire_resource(resources, context, "agent-name", agent)?;
+                }
+            }
+        }
+        if let Some(pane) = &pane
+            && pane_present
+        {
+            self.cleanup_request("pane.close", json!({"pane_id": pane}))?;
+            Self::retire_resource(resources, context, "pane", pane)?;
+        }
+        if let Some(tab) = &tab
+            && tab_present
+        {
+            self.cleanup_request("tab.close", json!({"tab_id": tab}))?;
+            Self::retire_resource(resources, context, "tab", tab)?;
+        }
+        Ok(())
     }
 }
 
@@ -725,6 +861,136 @@ mod tests {
             forge_app::AgentObservation::Working
         );
         server.join().unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retirement_releases_and_closes_only_the_verified_dedicated_resources() {
+        use std::{
+            io::{BufRead, BufReader, Write},
+            os::unix::net::UnixListener,
+            thread,
+        };
+
+        use forge_app::{
+            AgentDispatchContext, AgentDispatchRepository, NewAgentAssignment,
+            NewAgentAssignmentResource, NewTypedRecord, Project, ProjectRepository,
+            RecordRepository, RecordType,
+        };
+        use forge_store::SqliteProjectRepository;
+
+        let repository = SqliteProjectRepository::in_memory().unwrap();
+        repository
+            .register(&Project {
+                slug: "project".into(),
+                registered_folder: "/project".into(),
+                origin_url: "https://example.test/project.git".into(),
+            })
+            .unwrap();
+        let record = repository
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Task,
+                body: "dispatch task".into(),
+                project_slugs: vec!["project".into()],
+            })
+            .unwrap();
+        let assignment = repository
+            .create_agent_assignment(&NewAgentAssignment {
+                id: "assignment".into(),
+                record_id: record.id,
+                project_slug: "project".into(),
+                profile_revision: 1,
+            })
+            .unwrap();
+        for (kind, id) in [
+            ("workspace", "workspace"),
+            ("tab", "tab"),
+            ("pane", "pane"),
+            ("agent-name", "forge-dispatch-assignment"),
+        ] {
+            repository
+                .add_agent_assignment_resource(&NewAgentAssignmentResource {
+                    assignment_id: assignment.id.clone(),
+                    resource_kind: kind.into(),
+                    resource_id: id.into(),
+                })
+                .unwrap();
+        }
+        let context = AgentDispatchContext {
+            assignment: assignment.clone(),
+            registered_project_folder: "/project".into(),
+            rendered_initial_prompt: String::new(),
+            capability_delivery: None,
+            resources: repository
+                .list_agent_assignment_resources(&assignment.id)
+                .unwrap(),
+        };
+        let path = std::env::temp_dir().join(format!(
+            "forge-herdr-retire-{}-{}.sock",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = thread::spawn(move || {
+            for (method, response) in [
+                (
+                    "tab.get",
+                    serde_json::json!({"result":{"tab":{"tab_id":"tab","workspace_id":"workspace"}}}),
+                ),
+                (
+                    "pane.get",
+                    serde_json::json!({"result":{"pane":{"pane_id":"pane","tab_id":"tab","workspace_id":"workspace"}}}),
+                ),
+                (
+                    "agent.get",
+                    serde_json::json!({"result":{"name":"forge-dispatch-assignment","workspace_id":"workspace","tab_id":"tab","pane_id":"pane","agent_status":"done"}}),
+                ),
+                ("pane.release_agent", serde_json::json!({"result":{}})),
+                ("pane.close", serde_json::json!({"result":{}})),
+                ("tab.close", serde_json::json!({"result":{}})),
+            ] {
+                let mut stream = listener.accept().unwrap().0;
+                let mut line = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(request["method"], method);
+                assert_ne!(request["method"], "workspace.close");
+                if method == "pane.release_agent" {
+                    assert_eq!(request["params"]["pane_id"], "pane");
+                    assert_eq!(request["params"]["agent"], "forge-dispatch-assignment");
+                }
+                serde_json::to_writer(&mut stream, &response).unwrap();
+                stream.write_all(b"\n").unwrap();
+            }
+        });
+        let adapter = super::HerdrAdapter {
+            socket_path: path.clone(),
+        };
+        adapter.retire(&context, &repository).unwrap();
+        server.join().unwrap();
+        let resources = repository
+            .list_agent_assignment_resources(&assignment.id)
+            .unwrap();
+        assert!(
+            resources
+                .iter()
+                .find(|resource| resource.resource_kind == "workspace")
+                .unwrap()
+                .retired_at_millis
+                .is_none()
+        );
+        assert!(
+            resources
+                .iter()
+                .filter(|resource| resource.resource_kind != "workspace")
+                .all(|resource| resource.retired_at_millis.is_some())
+        );
         std::fs::remove_file(path).unwrap();
     }
 
