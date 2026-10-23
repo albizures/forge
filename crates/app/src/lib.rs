@@ -165,6 +165,8 @@ pub trait RepositoryInspector: Send + Sync {
 
 /// Persistence boundary owned by the application.
 pub trait ProjectRepository: Send + Sync {
+    /// Returns the Project registered under `slug`.
+    fn project(&self, slug: &str) -> Result<Project, RegistrationError>;
     /// Stores `project`, or returns the matching existing Project idempotently.
     ///
     /// # Errors
@@ -356,37 +358,56 @@ pub enum AgentObservation {
     Absent,
 }
 
+/// Provider-neutral facts supplied to an adapter for one lifecycle operation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentDispatchContext {
+    pub assignment: AgentAssignment,
+    pub registered_project_folder: PathBuf,
+    pub rendered_initial_prompt: String,
+    /// Capability delivery is intentionally opaque to the provider. A later capability issuer
+    /// supplies this value without exposing its secret in assignment persistence.
+    pub capability_delivery: Option<AssignmentCapabilityDelivery>,
+    pub resources: Vec<AgentAssignmentResource>,
+}
+
+/// Opaque launch input through which an Assignment Capability is delivered to an Agent.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssignmentCapabilityDelivery {
+    pub endpoint: String,
+    pub secret_file: PathBuf,
+}
+
 /// Port implemented by a concrete agent provider; it deliberately exposes no provider semantics.
 #[allow(clippy::missing_errors_doc)]
 pub trait AgentDispatchAdapter: Send + Sync {
     fn probe(&self) -> Result<(), AgentAdapterError>;
-    fn provision(&self, assignment: &AgentAssignment) -> Result<(), AgentAdapterError>;
-    fn observe(&self, assignment: &AgentAssignment) -> Result<AgentObservation, AgentAdapterError>;
-    fn recover(&self, assignment: &AgentAssignment) -> Result<AgentObservation, AgentAdapterError>;
-    fn retire(&self, assignment: &AgentAssignment) -> Result<(), AgentAdapterError>;
+    fn provision(
+        &self,
+        context: &AgentDispatchContext,
+        resources: &dyn AgentDispatchRepository,
+    ) -> Result<(), AgentAdapterError>;
+    fn observe(
+        &self,
+        context: &AgentDispatchContext,
+    ) -> Result<AgentObservation, AgentAdapterError>;
+    fn recover(
+        &self,
+        context: &AgentDispatchContext,
+    ) -> Result<AgentObservation, AgentAdapterError>;
+    fn retire(
+        &self,
+        context: &AgentDispatchContext,
+        resources: &dyn AgentDispatchRepository,
+    ) -> Result<(), AgentAdapterError>;
 }
 
-/// Placeholder until the provider-specific Spec supplies a concrete adapter.
-struct UnavailableAgentDispatchAdapter;
-
-impl AgentDispatchAdapter for UnavailableAgentDispatchAdapter {
-    fn probe(&self) -> Result<(), AgentAdapterError> {
-        Err(AgentAdapterError::Endpoint(
-            "provider adapter unavailable".into(),
-        ))
-    }
-    fn provision(&self, _: &AgentAssignment) -> Result<(), AgentAdapterError> {
-        self.probe()
-    }
-    fn observe(&self, _: &AgentAssignment) -> Result<AgentObservation, AgentAdapterError> {
-        self.probe().and(Ok(AgentObservation::Unknown))
-    }
-    fn recover(&self, _: &AgentAssignment) -> Result<AgentObservation, AgentAdapterError> {
-        self.probe().and(Ok(AgentObservation::Unknown))
-    }
-    fn retire(&self, _: &AgentAssignment) -> Result<(), AgentAdapterError> {
-        self.probe()
-    }
+/// Selects the concrete provider adapter from immutable profile provenance.
+#[allow(clippy::missing_errors_doc)]
+pub trait AgentDispatchAdapterFactory: Send + Sync {
+    fn adapter_for(
+        &self,
+        profile: &AgentProfile,
+    ) -> Result<Box<dyn AgentDispatchAdapter>, AgentAdapterError>;
 }
 
 /// The persisted result of reconciling one already-open assignment.
@@ -414,22 +435,20 @@ pub enum AdapterRetention {
 /// A stale observer is harmless: its compare-and-set fails after another reconciliation
 /// changes or closes the attempt. Provider terminal observations never complete the Task.
 #[allow(clippy::missing_errors_doc)]
-pub fn reconcile_agent_assignment<
-    R: AgentDispatchRepository + ?Sized,
-    A: AgentDispatchAdapter + ?Sized,
->(
-    repository: &R,
+pub fn reconcile_agent_assignment<A: AgentDispatchAdapter + ?Sized>(
+    repository: &dyn AgentDispatchRepository,
     adapter: &A,
     assignment: &AgentAssignment,
 ) -> Result<AssignmentReconciliation, RegistrationError> {
+    let context = agent_dispatch_context(repository, assignment)?;
     let observed = match assignment.state {
         AgentAssignmentState::Provisioning => adapter
-            .provision(assignment)
+            .provision(&context, repository)
             .map(|()| AgentObservation::Working),
         AgentAssignmentState::Working
         | AgentAssignmentState::Idle
         | AgentAssignmentState::Blocked
-        | AgentAssignmentState::Unknown => adapter.observe(assignment),
+        | AgentAssignmentState::Unknown => adapter.observe(&context),
     };
     let observation = match observed {
         Ok(observation) => observation,
@@ -458,7 +477,7 @@ pub fn reconcile_agent_assignment<
             update_assignment_state(repository, assignment, AgentAssignmentState::Unknown)
         }
         AgentObservation::Done | AgentObservation::Absent => {
-            if let Err(error) = adapter.retire(assignment) {
+            if let Err(error) = adapter.retire(&context, repository) {
                 return Ok(AssignmentReconciliation::Retained(match error {
                     AgentAdapterError::Endpoint(_) => AdapterRetention::Endpoint,
                     AgentAdapterError::Transient(_) => AdapterRetention::Transient,
@@ -517,12 +536,9 @@ pub struct AgentDispatchScan {
 /// The caller supplies time so grace and retry behavior is deterministic in tests and durable
 /// across daemon restarts. Retry exhaustion leaves the Task in progress and records one Comment.
 #[allow(clippy::missing_errors_doc)]
-pub fn reconcile_agent_dispatch<
-    R: AgentDispatchRepository + ?Sized,
-    A: AgentDispatchAdapter + ?Sized,
->(
-    repository: &R,
-    adapter: &A,
+pub fn reconcile_agent_dispatch<F: AgentDispatchAdapterFactory + ?Sized>(
+    repository: &dyn AgentDispatchRepository,
+    factory: &F,
     daemon_id: &str,
     now_millis: u64,
     policy: AgentDispatchReconciliationPolicy,
@@ -548,10 +564,34 @@ pub fn reconcile_agent_dispatch<
         {
             continue;
         }
+        let adapter = match factory.adapter_for(&assignment.profile) {
+            Ok(adapter) => adapter,
+            Err(error) => {
+                let retry_count = assignment.retry_count.saturating_add(1);
+                let next_retry = now_millis.saturating_add(assignment.profile.retry_backoff_millis);
+                if repository.schedule_agent_assignment_retry(
+                    &assignment.id,
+                    assignment.state,
+                    next_retry,
+                    retry_count,
+                )? && retry_count == assignment.profile.retry_limit.saturating_add(1)
+                {
+                    repository.add_record_comment(
+                        assignment.record_id,
+                        "Agent dispatch reconciliation retries exhausted; Task remains In Progress for human recovery.",
+                        Some("agent-dispatch"),
+                    )?;
+                }
+                reconciled.push(AssignmentReconciliation::Retained(retention_from_error(
+                    &error,
+                )));
+                continue;
+            }
+        };
         let outcome = if assignment.state == AgentAssignmentState::Unknown {
-            reconcile_recovery(repository, adapter, &assignment)?
+            reconcile_recovery(repository, adapter.as_ref(), &assignment)?
         } else {
-            reconcile_agent_assignment(repository, adapter, &assignment)?
+            reconcile_agent_assignment(repository, adapter.as_ref(), &assignment)?
         };
         if matches!(outcome, AssignmentReconciliation::Retained(_)) {
             let retry_count = assignment.retry_count.saturating_add(1);
@@ -578,12 +618,13 @@ pub fn reconcile_agent_dispatch<
     })
 }
 
-fn reconcile_recovery<R: AgentDispatchRepository + ?Sized, A: AgentDispatchAdapter + ?Sized>(
-    repository: &R,
+fn reconcile_recovery<A: AgentDispatchAdapter + ?Sized>(
+    repository: &dyn AgentDispatchRepository,
     adapter: &A,
     assignment: &AgentAssignment,
 ) -> Result<AssignmentReconciliation, RegistrationError> {
-    match adapter.recover(assignment) {
+    let context = agent_dispatch_context(repository, assignment)?;
+    match adapter.recover(&context) {
         Ok(AgentObservation::Working) => {
             update_assignment_state(repository, assignment, AgentAssignmentState::Working)
         }
@@ -594,7 +635,7 @@ fn reconcile_recovery<R: AgentDispatchRepository + ?Sized, A: AgentDispatchAdapt
             update_assignment_state(repository, assignment, AgentAssignmentState::Blocked)
         }
         Ok(AgentObservation::Unknown | AgentObservation::Done | AgentObservation::Absent) => {
-            if let Err(error) = adapter.retire(assignment) {
+            if let Err(error) = adapter.retire(&context, repository) {
                 return Ok(AssignmentReconciliation::Retained(retention_from_error(
                     &error,
                 )));
@@ -616,6 +657,24 @@ fn reconcile_recovery<R: AgentDispatchRepository + ?Sized, A: AgentDispatchAdapt
             &error,
         ))),
     }
+}
+
+fn agent_dispatch_context(
+    repository: &dyn AgentDispatchRepository,
+    assignment: &AgentAssignment,
+) -> Result<AgentDispatchContext, RegistrationError> {
+    let project = repository.project(&assignment.project_slug)?;
+    let record = repository.show_record(assignment.record_id)?;
+    Ok(AgentDispatchContext {
+        assignment: assignment.clone(),
+        registered_project_folder: project.registered_folder,
+        rendered_initial_prompt: format!(
+            "{}\n\n{}",
+            assignment.profile.prompt_template, record.body
+        ),
+        capability_delivery: None,
+        resources: repository.list_agent_assignment_resources(&assignment.id)?,
+    })
 }
 
 fn retention_from_error(error: &AgentAdapterError) -> AdapterRetention {
@@ -761,6 +820,13 @@ pub trait AgentDispatchRepository: RecordRepository {
     fn add_agent_assignment_resource(
         &self,
         resource: &NewAgentAssignmentResource,
+    ) -> Result<AgentAssignmentResource, RegistrationError>;
+    /// Marks a retained resource as retired without deleting its recovery history.
+    fn retire_agent_assignment_resource(
+        &self,
+        assignment_id: &str,
+        resource_kind: &str,
+        resource_id: &str,
     ) -> Result<AgentAssignmentResource, RegistrationError>;
     /// Returns retained resource history for an Assignment.
     fn list_agent_assignment_resources(
@@ -930,6 +996,7 @@ fn authorize_assignment_operation<R: AgentDispatchRepository>(
 pub struct Application {
     records: Box<dyn RecordRepository>,
     dispatch: Option<Box<dyn AgentDispatchRepository>>,
+    adapter_factory: Option<Box<dyn AgentDispatchAdapterFactory>>,
     inspector: Box<dyn RepositoryInspector>,
 }
 
@@ -966,6 +1033,7 @@ impl Application {
         Self {
             records,
             dispatch: None,
+            adapter_factory: None,
             inspector,
         }
     }
@@ -975,11 +1043,13 @@ impl Application {
     pub fn with_agent_dispatch(
         records: Box<dyn RecordRepository>,
         dispatch: Box<dyn AgentDispatchRepository>,
+        adapter_factory: Box<dyn AgentDispatchAdapterFactory>,
         inspector: Box<dyn RepositoryInspector>,
     ) -> Self {
         Self {
             records,
             dispatch: Some(dispatch),
+            adapter_factory: Some(adapter_factory),
             inspector,
         }
     }
@@ -989,6 +1059,15 @@ impl Application {
             RegistrationError::new(
                 "agent-dispatch-unavailable",
                 "Agent Dispatch is not configured for this daemon",
+            )
+        })
+    }
+
+    fn adapter_factory(&self) -> Result<&dyn AgentDispatchAdapterFactory, RegistrationError> {
+        self.adapter_factory.as_deref().ok_or_else(|| {
+            RegistrationError::new(
+                "agent-dispatch-unavailable",
+                "Agent Dispatch provider is not configured for this daemon",
             )
         })
     }
@@ -1068,7 +1147,7 @@ impl Application {
     ) -> Result<AgentDispatchReconcileResult, RegistrationError> {
         let scan = reconcile_agent_dispatch(
             self.dispatch()?,
-            &UnavailableAgentDispatchAdapter,
+            self.adapter_factory()?,
             daemon_id,
             now_millis,
             AgentDispatchReconciliationPolicy {
@@ -1402,6 +1481,10 @@ mod tests {
         comments: Mutex<Vec<RecordComment>>,
     }
     impl ProjectRepository for Repository {
+        fn project(&self, _: &str) -> Result<Project, RegistrationError> {
+            unreachable!()
+        }
+
         fn register(&self, project: &Project) -> Result<Project, RegistrationError> {
             Ok(project.clone())
         }

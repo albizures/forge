@@ -25,6 +25,7 @@ use axum::{
     routing::{get, post},
 };
 use forge_app::{
+    AgentAdapterError, AgentDispatchAdapter, AgentDispatchAdapterFactory, AgentProfile,
     Application, ApplicationStatus, Project, RecordStatus, RecordType, RegistrationError,
     RepositoryInspector,
 };
@@ -361,6 +362,20 @@ pub fn write_assignment_capability_secret(
         })
 }
 
+/// Default composition until a configured provider factory is installed.
+struct UnavailableAgentDispatchAdapterFactory;
+
+impl AgentDispatchAdapterFactory for UnavailableAgentDispatchAdapterFactory {
+    fn adapter_for(
+        &self,
+        _: &AgentProfile,
+    ) -> Result<Box<dyn AgentDispatchAdapter>, AgentAdapterError> {
+        Err(AgentAdapterError::Endpoint(
+            "provider adapter unavailable".into(),
+        ))
+    }
+}
+
 fn application_from_config(config: &DaemonConfig) -> Result<Application, String> {
     let records =
         SqliteProjectRepository::open(&config.store_path).map_err(|error| error.message)?;
@@ -369,6 +384,7 @@ fn application_from_config(config: &DaemonConfig) -> Result<Application, String>
     Ok(Application::with_agent_dispatch(
         Box::new(records),
         Box::new(dispatch),
+        Box::new(UnavailableAgentDispatchAdapterFactory),
         Box::new(GitInspector),
     ))
 }

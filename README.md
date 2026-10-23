@@ -184,6 +184,59 @@ comments, and update logs. The release verification gate passed `cargo fmt
 test covering migration, typed creation, filtering, and invalid hierarchy
 rejection.
 
+## Agent Dispatch Core handoff
+
+This release provides the durable, daemon-owned **Agent Dispatch Core**. It
+stores Task-assignment provenance, enforces per-Project capacity, and exposes
+configuration and diagnostics through the daemon. It does **not** yet launch or
+control a provider agent: the current daemon reports a configured endpoint as
+`configured; provider adapter unavailable`.
+
+### Operator configuration and diagnostics
+
+Configure an absolute Herdr Unix-socket path through the daemon, then inspect
+its configuration. Relative paths are rejected:
+
+```sh
+forge agent-dispatch endpoint --socket-path /absolute/path/to/herdr.sock
+forge agent-dispatch endpoint
+```
+
+Each registered Project has an effective Task capacity of **1** unless it has
+an explicit override. Set an override from 1 through 1024, inspect the
+configured-versus-default value, or omit `--limit` to return the Project to
+the default:
+
+```sh
+forge agent-dispatch project --project alpha --limit 2
+forge agent-dispatch status --project alpha
+forge agent-dispatch project --project alpha
+```
+
+`forge agent-dispatch reconcile` requests one bounded reconciliation pass from
+the daemon. The CLI neither opens dispatch storage nor contacts Herdr directly;
+the daemon owns the reconciliation lease and durable state transitions. It is
+therefore safe to request from an external scheduler, but it cannot provide
+provider behavior until the provider adapter is installed.
+
+### Security and provider boundary
+
+An open assignment has an opaque capability. The daemon is the authorization
+gateway: a capability may read only its bounded Assignment Context and may add
+Comments to or complete only its bound Task. Closed, replaced, abandoned, or
+revoked assignments lose that authority immediately. Authorization outcomes
+are retained as redacted audit facts; neither capability secrets nor Comment
+bodies are retained in that audit history. A provider receives a capability via
+a daemon-created, permission-restricted secret file outside the Agent
+Workspace.
+
+The follow-up Herdr/Pi provider work owns all concrete provider behavior:
+protocol-22 endpoint probing, workspace/tab/pane and agent resource discovery,
+provisioning and cleanup, and delivery of the initial prompt and capability to
+the hosted Pi agent. It must implement the core's provider-neutral adapter
+contract. Do not infer any of those behaviors from a configured socket or a
+successful core reconciliation request.
+
 ## Browser and RPC access
 
 Open <http://127.0.0.1:45003/> in a browser. The page is server-rendered and

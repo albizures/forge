@@ -1,7 +1,7 @@
 //! SQLite implementation of the application persistence boundary.
 
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     sync::Mutex,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -160,6 +160,31 @@ impl SqliteProjectRepository {
 }
 
 impl ProjectRepository for SqliteProjectRepository {
+    fn project(&self, slug: &str) -> Result<Project, RegistrationError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        connection
+            .query_row(
+                "SELECT slug, registered_folder, origin_url FROM projects WHERE slug = ?1",
+                [slug],
+                |row| {
+                    Ok(Project {
+                        slug: row.get(0)?,
+                        registered_folder: PathBuf::from(row.get::<_, String>(1)?),
+                        origin_url: row.get(2)?,
+                    })
+                },
+            )
+            .map_err(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    RegistrationError::new("project-not-found", "Project does not exist")
+                }
+                error => storage_error(error),
+            })
+    }
+
     fn register(&self, project: &Project) -> Result<Project, RegistrationError> {
         let folder = project.registered_folder.to_string_lossy();
         let connection = self
@@ -1159,14 +1184,22 @@ impl AgentDispatchRepository for SqliteProjectRepository {
             ));
         }
         let created_at_millis = now_millis()?;
-        connection.execute("INSERT INTO agent_assignment_resources (assignment_id, resource_kind, resource_id, created_at_millis) VALUES (?1, ?2, ?3, ?4)", params![resource.assignment_id, resource.resource_kind, resource.resource_id, created_at_millis]).map_err(storage_error)?;
-        Ok(AgentAssignmentResource {
-            assignment_id: resource.assignment_id.clone(),
-            resource_kind: resource.resource_kind.clone(),
-            resource_id: resource.resource_id.clone(),
-            created_at_millis: created_at_millis.cast_unsigned(),
-            retired_at_millis: None,
-        })
+        connection.execute("INSERT OR IGNORE INTO agent_assignment_resources (assignment_id, resource_kind, resource_id, created_at_millis) VALUES (?1, ?2, ?3, ?4)", params![resource.assignment_id, resource.resource_kind, resource.resource_id, created_at_millis]).map_err(storage_error)?;
+        connection.query_row("SELECT assignment_id, resource_kind, resource_id, created_at_millis, retired_at_millis FROM agent_assignment_resources WHERE assignment_id = ?1 AND resource_kind = ?2 AND resource_id = ?3", params![resource.assignment_id, resource.resource_kind, resource.resource_id], |row| Ok(AgentAssignmentResource { assignment_id: row.get(0)?, resource_kind: row.get(1)?, resource_id: row.get(2)?, created_at_millis: row.get::<_, i64>(3)?.cast_unsigned(), retired_at_millis: row.get::<_, Option<i64>>(4)?.map(i64::cast_unsigned) })).map_err(storage_error)
+    }
+
+    fn retire_agent_assignment_resource(
+        &self,
+        assignment_id: &str,
+        resource_kind: &str,
+        resource_id: &str,
+    ) -> Result<AgentAssignmentResource, RegistrationError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        connection.execute("UPDATE agent_assignment_resources SET retired_at_millis = COALESCE(retired_at_millis, ?1) WHERE assignment_id = ?2 AND resource_kind = ?3 AND resource_id = ?4", params![now_millis()?, assignment_id, resource_kind, resource_id]).map_err(storage_error)?;
+        connection.query_row("SELECT assignment_id, resource_kind, resource_id, created_at_millis, retired_at_millis FROM agent_assignment_resources WHERE assignment_id = ?1 AND resource_kind = ?2 AND resource_id = ?3", params![assignment_id, resource_kind, resource_id], |row| Ok(AgentAssignmentResource { assignment_id: row.get(0)?, resource_kind: row.get(1)?, resource_id: row.get(2)?, created_at_millis: row.get::<_, i64>(3)?.cast_unsigned(), retired_at_millis: row.get::<_, Option<i64>>(4)?.map(i64::cast_unsigned) })).map_err(|error| match error { rusqlite::Error::QueryReturnedNoRows => RegistrationError::new("assignment-resource-not-found", "Agent Assignment resource does not exist"), error => storage_error(error) })
     }
 
     fn list_agent_assignment_resources(
@@ -2229,7 +2262,29 @@ mod tests {
             store
                 .list_agent_assignment_resources(&assignment.id)
                 .unwrap(),
-            vec![resource]
+            vec![resource.clone()]
+        );
+        assert_eq!(
+            store
+                .add_agent_assignment_resource(&NewAgentAssignmentResource {
+                    assignment_id: assignment.id.clone(),
+                    resource_kind: "session".into(),
+                    resource_id: "external-1".into(),
+                })
+                .unwrap(),
+            resource,
+            "recovery can retain an already-persisted resource safely"
+        );
+        let retired = store
+            .retire_agent_assignment_resource(&assignment.id, "session", "external-1")
+            .unwrap();
+        assert!(retired.retired_at_millis.is_some());
+        assert_eq!(
+            store
+                .retire_agent_assignment_resource(&assignment.id, "session", "external-1")
+                .unwrap(),
+            retired,
+            "retirement evidence is idempotent"
         );
 
         assert_eq!(
@@ -2270,6 +2325,7 @@ mod tests {
         );
     }
 
+    #[derive(Clone)]
     struct FakeAdapter {
         provision_fails: bool,
     }
@@ -2281,7 +2337,8 @@ mod tests {
 
         fn provision(
             &self,
-            _: &forge_app::AgentAssignment,
+            _: &forge_app::AgentDispatchContext,
+            _: &dyn forge_app::AgentDispatchRepository,
         ) -> Result<(), forge_app::AgentAdapterError> {
             if self.provision_fails {
                 Err(forge_app::AgentAdapterError::Transient("offline".into()))
@@ -2292,23 +2349,34 @@ mod tests {
 
         fn observe(
             &self,
-            _: &forge_app::AgentAssignment,
+            _: &forge_app::AgentDispatchContext,
         ) -> Result<forge_app::AgentObservation, forge_app::AgentAdapterError> {
             Ok(forge_app::AgentObservation::Working)
         }
 
         fn recover(
             &self,
-            _: &forge_app::AgentAssignment,
+            _: &forge_app::AgentDispatchContext,
         ) -> Result<forge_app::AgentObservation, forge_app::AgentAdapterError> {
             Ok(forge_app::AgentObservation::Absent)
         }
 
         fn retire(
             &self,
-            _: &forge_app::AgentAssignment,
+            _: &forge_app::AgentDispatchContext,
+            _: &dyn forge_app::AgentDispatchRepository,
         ) -> Result<(), forge_app::AgentAdapterError> {
             Ok(())
+        }
+    }
+
+    impl forge_app::AgentDispatchAdapterFactory for FakeAdapter {
+        fn adapter_for(
+            &self,
+            _: &forge_app::AgentProfile,
+        ) -> Result<Box<dyn forge_app::AgentDispatchAdapter>, forge_app::AgentAdapterError>
+        {
+            Ok(Box::new(self.clone()))
         }
     }
 
