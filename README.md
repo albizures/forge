@@ -184,23 +184,44 @@ comments, and update logs. The release verification gate passed `cargo fmt
 test covering migration, typed creation, filtering, and invalid hierarchy
 rejection.
 
-## Agent Dispatch Core handoff
+## Herdr/Pi dispatch provider handoff
 
-This release provides the durable, daemon-owned **Agent Dispatch Core**. It
-stores Task-assignment provenance, enforces per-Project capacity, and exposes
-configuration and diagnostics through the daemon. It does **not** yet launch or
-control a provider agent: the current daemon reports a configured endpoint as
-`configured; provider adapter unavailable`.
+This release provides a durable, daemon-owned **Herdr/Pi dispatch provider**
+behind the Agent Dispatch Core. The daemon, rather than the CLI, connects to
+Herdr and owns all assignment state transitions, reconciliation leases, and
+provider resources.
 
-### Operator configuration and diagnostics
+### Operator configuration, diagnostics, and recovery
 
 Configure an absolute Herdr Unix-socket path through the daemon, then inspect
-its configuration. Relative paths are rejected:
+its configured endpoint. Relative paths are rejected:
 
 ```sh
 forge agent-dispatch endpoint --socket-path /absolute/path/to/herdr.sock
 forge agent-dispatch endpoint
 ```
+
+`endpoint` reports configuration, not reachability: `configured; Herdr adapter
+will probe on reconciliation` means a socket path is saved. Run a bounded,
+authoritative reconciliation to probe Herdr and progress eligible assignments:
+
+```sh
+forge agent-dispatch reconcile
+```
+
+The CLI never opens dispatch storage or contacts Herdr directly. A successful
+response reports whether the daemon acquired its reconciliation lease and the
+number of assignments scanned; socket, protocol, or provider errors are
+reported by the daemon and use its durable retry policy. The daemon also keeps
+a long-lived Herdr status observer for active Forge-owned panes. It subscribes
+before snapshotting and only schedules reconciliation; events never mutate an
+assignment directly. On a socket or protocol failure it reconnects, and the
+next authoritative scan recovers state from persisted resource IDs.
+
+The adapter requires Herdr Socket API protocol **22** and schema version **1**.
+A probe rejects an incompatible snapshot or malformed endpoint. Use the daemon
+and Herdr diagnostics to correct the endpoint or upgrade the incompatible side,
+then request reconciliation again.
 
 Each registered Project has an effective Task capacity of **1** unless it has
 an explicit override. Set an override from 1 through 1024, inspect the
@@ -213,29 +234,35 @@ forge agent-dispatch status --project alpha
 forge agent-dispatch project --project alpha
 ```
 
-`forge agent-dispatch reconcile` requests one bounded reconciliation pass from
-the daemon. The CLI neither opens dispatch storage nor contacts Herdr directly;
-the daemon owns the reconciliation lease and durable state transitions. It is
-therefore safe to request from an external scheduler, but it cannot provide
-provider behavior until the provider adapter is installed.
+Use `forge agent-dispatch profile` to inspect the immutable seeded Task profile
+(the `herdr` provider, `pi` agent kind, model, and prompt template).
 
-### Security and provider boundary
+### V1 ownership and safety boundary
+
+For an eligible Task, Forge finds exactly one existing Herdr workspace matching
+the registered Project folder. It never creates, adopts by label, or closes a
+Project workspace. Within that workspace it creates one unfocused, dedicated
+assignment tab and split pane, starts a Pi agent with the immutable profile,
+and records workspace, tab, pane, and agent identifiers immediately.
+
+Recovery and retirement trust only those persisted identifiers. Retirement
+revalidates the resource tuple, releases the named agent, and closes only the
+dedicated pane and tab. Conflicting or missing resources are diagnostics, not
+permission to adopt or delete similarly named user resources.
 
 An open assignment has an opaque capability. The daemon is the authorization
 gateway: a capability may read only its bounded Assignment Context and may add
 Comments to or complete only its bound Task. Closed, replaced, abandoned, or
 revoked assignments lose that authority immediately. Authorization outcomes
 are retained as redacted audit facts; neither capability secrets nor Comment
-bodies are retained in that audit history. A provider receives a capability via
-a daemon-created, permission-restricted secret file outside the Agent
+bodies are retained in that audit history. A provider receives the capability
+through a daemon-created, permission-restricted secret file outside the Agent
 Workspace.
 
-The follow-up Herdr/Pi provider work owns all concrete provider behavior:
-protocol-22 endpoint probing, workspace/tab/pane and agent resource discovery,
-provisioning and cleanup, and delivery of the initial prompt and capability to
-the hosted Pi agent. It must implement the core's provider-neutral adapter
-contract. Do not infer any of those behaviors from a configured socket or a
-successful core reconciliation request.
+Provider state is never Task completion: Pi admission, `agentblocked`, idle,
+done, or other observed agent states only drive durable assignment
+reconciliation. Completion remains an explicit Forge Task action authorized by
+the assignment capability or a human workflow action.
 
 ## Browser and RPC access
 
