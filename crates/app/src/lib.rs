@@ -304,7 +304,300 @@ pub struct AgentAssignment {
     pub profile: AgentProfile,
     pub attempt_number: u32,
     pub claimed_at_millis: u64,
+    pub state: AgentAssignmentState,
+    /// Timestamp of the most recent normalized state observation.
+    pub state_changed_at_millis: u64,
+    /// Durable retry gate for adapter and cleanup failures.
+    pub next_retry_at_millis: u64,
+    /// Number of consecutively scheduled reconciliation retries.
+    pub retry_count: u32,
     pub closed_at_millis: Option<u64>,
+    pub closure_reason: Option<AgentAssignmentClosureReason>,
+}
+
+/// The durable lifecycle of an Agent Assignment while it retains Project capacity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentAssignmentState {
+    Provisioning,
+    Working,
+    Idle,
+    Blocked,
+    Unknown,
+}
+
+/// Why a closed Agent Assignment no longer retains Project capacity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentAssignmentClosureReason {
+    Lost,
+    Crashed,
+    Retired,
+    Replaced,
+}
+
+/// Provider-neutral outcome from an adapter call.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AgentAdapterError {
+    Endpoint(String),
+    Transient(String),
+    NotFound(String),
+    Conflict(String),
+    InvalidRequest(String),
+    Cleanup(String),
+}
+
+/// Provider-neutral observation of externally managed work.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentObservation {
+    Working,
+    Idle,
+    Blocked,
+    Done,
+    Unknown,
+    Absent,
+}
+
+/// Port implemented by a concrete agent provider; it deliberately exposes no provider semantics.
+#[allow(clippy::missing_errors_doc)]
+pub trait AgentDispatchAdapter: Send + Sync {
+    fn probe(&self) -> Result<(), AgentAdapterError>;
+    fn provision(&self, assignment: &AgentAssignment) -> Result<(), AgentAdapterError>;
+    fn observe(&self, assignment: &AgentAssignment) -> Result<AgentObservation, AgentAdapterError>;
+    fn recover(&self, assignment: &AgentAssignment) -> Result<AgentObservation, AgentAdapterError>;
+    fn retire(&self, assignment: &AgentAssignment) -> Result<(), AgentAdapterError>;
+}
+
+/// The persisted result of reconciling one already-open assignment.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AssignmentReconciliation {
+    StateUpdated(AgentAssignment),
+    Closed(AgentAssignment),
+    Stale,
+    Retained(AdapterRetention),
+}
+
+/// Why reconciliation retained an Assignment without mutating its durable state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AdapterRetention {
+    Endpoint,
+    Transient,
+    Conflict,
+    InvalidRequest,
+    Cleanup,
+    NotFound,
+}
+
+/// Reconciles one Assignment without holding persistence while the adapter runs.
+///
+/// A stale observer is harmless: its compare-and-set fails after another reconciliation
+/// changes or closes the attempt. Provider terminal observations never complete the Task.
+#[allow(clippy::missing_errors_doc)]
+pub fn reconcile_agent_assignment<R: AgentDispatchRepository, A: AgentDispatchAdapter>(
+    repository: &R,
+    adapter: &A,
+    assignment: &AgentAssignment,
+) -> Result<AssignmentReconciliation, RegistrationError> {
+    let observed = match assignment.state {
+        AgentAssignmentState::Provisioning => adapter
+            .provision(assignment)
+            .map(|()| AgentObservation::Working),
+        AgentAssignmentState::Working
+        | AgentAssignmentState::Idle
+        | AgentAssignmentState::Blocked
+        | AgentAssignmentState::Unknown => adapter.observe(assignment),
+    };
+    let observation = match observed {
+        Ok(observation) => observation,
+        Err(error) => {
+            return Ok(AssignmentReconciliation::Retained(match error {
+                AgentAdapterError::Endpoint(_) => AdapterRetention::Endpoint,
+                AgentAdapterError::Transient(_) => AdapterRetention::Transient,
+                AgentAdapterError::NotFound(_) => AdapterRetention::NotFound,
+                AgentAdapterError::Conflict(_) => AdapterRetention::Conflict,
+                AgentAdapterError::InvalidRequest(_) => AdapterRetention::InvalidRequest,
+                AgentAdapterError::Cleanup(_) => AdapterRetention::Cleanup,
+            }));
+        }
+    };
+    match observation {
+        AgentObservation::Working => {
+            update_assignment_state(repository, assignment, AgentAssignmentState::Working)
+        }
+        AgentObservation::Idle => {
+            update_assignment_state(repository, assignment, AgentAssignmentState::Idle)
+        }
+        AgentObservation::Blocked => {
+            update_assignment_state(repository, assignment, AgentAssignmentState::Blocked)
+        }
+        AgentObservation::Unknown => {
+            update_assignment_state(repository, assignment, AgentAssignmentState::Unknown)
+        }
+        AgentObservation::Done | AgentObservation::Absent => {
+            if let Err(error) = adapter.retire(assignment) {
+                return Ok(AssignmentReconciliation::Retained(match error {
+                    AgentAdapterError::Endpoint(_) => AdapterRetention::Endpoint,
+                    AgentAdapterError::Transient(_) => AdapterRetention::Transient,
+                    AgentAdapterError::NotFound(_) => AdapterRetention::NotFound,
+                    AgentAdapterError::Conflict(_) => AdapterRetention::Conflict,
+                    AgentAdapterError::InvalidRequest(_) => AdapterRetention::InvalidRequest,
+                    AgentAdapterError::Cleanup(_) => AdapterRetention::Cleanup,
+                }));
+            }
+            repository
+                .compare_and_close_agent_assignment(
+                    &assignment.id,
+                    assignment.state,
+                    AgentAssignmentClosureReason::Lost,
+                )
+                .map(|assignment| {
+                    assignment.map_or(
+                        AssignmentReconciliation::Stale,
+                        AssignmentReconciliation::Closed,
+                    )
+                })
+        }
+    }
+}
+
+fn update_assignment_state<R: AgentDispatchRepository>(
+    repository: &R,
+    assignment: &AgentAssignment,
+    next: AgentAssignmentState,
+) -> Result<AssignmentReconciliation, RegistrationError> {
+    repository
+        .compare_and_set_agent_assignment_state(&assignment.id, assignment.state, next)
+        .map(|assignment| {
+            assignment.map_or(
+                AssignmentReconciliation::Stale,
+                AssignmentReconciliation::StateUpdated,
+            )
+        })
+}
+
+/// Daemon-owned policy for one bounded reconciliation scan.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AgentDispatchReconciliationPolicy {
+    pub scan_lease_millis: u64,
+}
+
+/// Result of a daemon-owned one-shot reconciliation scan.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentDispatchScan {
+    pub acquired_lease: bool,
+    pub reconciled: Vec<AssignmentReconciliation>,
+}
+
+/// Reconciles all open Assignments without holding storage over adapter calls.
+///
+/// The caller supplies time so grace and retry behavior is deterministic in tests and durable
+/// across daemon restarts. Retry exhaustion leaves the Task in progress and records one Comment.
+#[allow(clippy::missing_errors_doc)]
+pub fn reconcile_agent_dispatch<R: AgentDispatchRepository, A: AgentDispatchAdapter>(
+    repository: &R,
+    adapter: &A,
+    daemon_id: &str,
+    now_millis: u64,
+    policy: AgentDispatchReconciliationPolicy,
+) -> Result<AgentDispatchScan, RegistrationError> {
+    if !repository.try_acquire_agent_dispatch_scan_lease(
+        daemon_id,
+        now_millis,
+        policy.scan_lease_millis,
+    )? {
+        return Ok(AgentDispatchScan {
+            acquired_lease: false,
+            reconciled: vec![],
+        });
+    }
+    let mut reconciled = Vec::new();
+    for assignment in repository.list_open_agent_assignments()? {
+        if assignment.next_retry_at_millis > now_millis {
+            continue;
+        }
+        if assignment.state == AgentAssignmentState::Unknown
+            && now_millis.saturating_sub(assignment.state_changed_at_millis)
+                < assignment.profile.unknown_state_grace_millis
+        {
+            continue;
+        }
+        let outcome = if assignment.state == AgentAssignmentState::Unknown {
+            reconcile_recovery(repository, adapter, &assignment)?
+        } else {
+            reconcile_agent_assignment(repository, adapter, &assignment)?
+        };
+        if matches!(outcome, AssignmentReconciliation::Retained(_)) {
+            let retry_count = assignment.retry_count.saturating_add(1);
+            let next_retry = now_millis.saturating_add(assignment.profile.retry_backoff_millis);
+            if repository.schedule_agent_assignment_retry(
+                &assignment.id,
+                assignment.state,
+                next_retry,
+                retry_count,
+            )? && retry_count == assignment.profile.retry_limit.saturating_add(1)
+            {
+                repository.add_record_comment(
+                    assignment.record_id,
+                    "Agent dispatch reconciliation retries exhausted; Task remains In Progress for human recovery.",
+                    Some("agent-dispatch"),
+                )?;
+            }
+        }
+        reconciled.push(outcome);
+    }
+    Ok(AgentDispatchScan {
+        acquired_lease: true,
+        reconciled,
+    })
+}
+
+fn reconcile_recovery<R: AgentDispatchRepository, A: AgentDispatchAdapter>(
+    repository: &R,
+    adapter: &A,
+    assignment: &AgentAssignment,
+) -> Result<AssignmentReconciliation, RegistrationError> {
+    match adapter.recover(assignment) {
+        Ok(AgentObservation::Working) => {
+            update_assignment_state(repository, assignment, AgentAssignmentState::Working)
+        }
+        Ok(AgentObservation::Idle) => {
+            update_assignment_state(repository, assignment, AgentAssignmentState::Idle)
+        }
+        Ok(AgentObservation::Blocked) => {
+            update_assignment_state(repository, assignment, AgentAssignmentState::Blocked)
+        }
+        Ok(AgentObservation::Unknown | AgentObservation::Done | AgentObservation::Absent) => {
+            if let Err(error) = adapter.retire(assignment) {
+                return Ok(AssignmentReconciliation::Retained(retention_from_error(
+                    &error,
+                )));
+            }
+            repository
+                .compare_and_close_agent_assignment(
+                    &assignment.id,
+                    assignment.state,
+                    AgentAssignmentClosureReason::Crashed,
+                )
+                .map(|closed| {
+                    closed.map_or(
+                        AssignmentReconciliation::Stale,
+                        AssignmentReconciliation::Closed,
+                    )
+                })
+        }
+        Err(error) => Ok(AssignmentReconciliation::Retained(retention_from_error(
+            &error,
+        ))),
+    }
+}
+
+fn retention_from_error(error: &AgentAdapterError) -> AdapterRetention {
+    match error {
+        AgentAdapterError::Endpoint(_) => AdapterRetention::Endpoint,
+        AgentAdapterError::Transient(_) => AdapterRetention::Transient,
+        AgentAdapterError::NotFound(_) => AdapterRetention::NotFound,
+        AgentAdapterError::Conflict(_) => AdapterRetention::Conflict,
+        AgentAdapterError::InvalidRequest(_) => AdapterRetention::InvalidRequest,
+        AgentAdapterError::Cleanup(_) => AdapterRetention::Cleanup,
+    }
 }
 
 /// The caller-supplied immutable identity and provenance for an Agent Assignment.
@@ -336,7 +629,7 @@ pub struct NewAgentAssignmentResource {
 
 /// Durable persistence boundary for provider-neutral dispatch foundations.
 #[allow(clippy::missing_errors_doc)]
-pub trait AgentDispatchRepository: Send + Sync {
+pub trait AgentDispatchRepository: RecordRepository {
     /// Returns an immutable seeded Agent Profile revision.
     fn agent_profile(
         &self,
@@ -353,6 +646,50 @@ pub trait AgentDispatchRepository: Send + Sync {
         &self,
         record_id: u64,
     ) -> Result<Vec<AgentAssignment>, RegistrationError>;
+    /// Lists all open Assignments for one daemon reconciliation scan.
+    fn list_open_agent_assignments(&self) -> Result<Vec<AgentAssignment>, RegistrationError>;
+    /// Acquires the short-lived daemon scan lease, returning false when another scan owns it.
+    fn try_acquire_agent_dispatch_scan_lease(
+        &self,
+        owner: &str,
+        now_millis: u64,
+        duration_millis: u64,
+    ) -> Result<bool, RegistrationError>;
+    /// Atomically claims one eligible open Task for `project_slug`, respecting its capacity.
+    /// Returns `None` when no capacity or candidate is available.
+    fn claim_next_agent_assignment(
+        &self,
+        project_slug: &str,
+        assignment_id: &str,
+    ) -> Result<Option<AgentAssignment>, RegistrationError>;
+    /// Conditionally persists a normalized observation without letting a stale observer win.
+    fn compare_and_set_agent_assignment_state(
+        &self,
+        assignment_id: &str,
+        expected: AgentAssignmentState,
+        next: AgentAssignmentState,
+    ) -> Result<Option<AgentAssignment>, RegistrationError>;
+    /// Closes an open Assignment conditionally, releasing its capacity for a later attempt.
+    fn close_agent_assignment(
+        &self,
+        assignment_id: &str,
+        reason: AgentAssignmentClosureReason,
+    ) -> Result<AgentAssignment, RegistrationError>;
+    /// Closes only the Assignment snapshot observed by this reconciler.
+    fn compare_and_close_agent_assignment(
+        &self,
+        assignment_id: &str,
+        expected: AgentAssignmentState,
+        reason: AgentAssignmentClosureReason,
+    ) -> Result<Option<AgentAssignment>, RegistrationError>;
+    /// Durably backs off a failed adapter operation, rejecting a stale observer.
+    fn schedule_agent_assignment_retry(
+        &self,
+        assignment_id: &str,
+        expected: AgentAssignmentState,
+        next_retry_at_millis: u64,
+        retry_count: u32,
+    ) -> Result<bool, RegistrationError>;
     /// Retains a provider-neutral external resource fact.
     fn add_agent_assignment_resource(
         &self,

@@ -7,11 +7,11 @@ use std::{
 };
 
 use forge_app::{
-    AgentAssignment, AgentAssignmentResource, AgentDispatchRepository, AgentProfile,
-    NewAgentAssignment, NewAgentAssignmentResource, NewRecord, NewTypedRecord, Project,
-    ProjectRepository, Record, RecordComment, RecordCommentId, RecordListFilter,
-    RecordRelationship, RecordRelationshipKind, RecordRepository, RecordStatus, RecordType,
-    RecordUpdate, RecordUpdateId, RecordUpdateKind, RegistrationError,
+    AgentAssignment, AgentAssignmentClosureReason, AgentAssignmentResource, AgentAssignmentState,
+    AgentDispatchRepository, AgentProfile, NewAgentAssignment, NewAgentAssignmentResource,
+    NewRecord, NewTypedRecord, Project, ProjectRepository, Record, RecordComment, RecordCommentId,
+    RecordListFilter, RecordRelationship, RecordRelationshipKind, RecordRepository, RecordStatus,
+    RecordType, RecordUpdate, RecordUpdateId, RecordUpdateKind, RegistrationError,
 };
 use rusqlite::{Connection, ErrorCode, OptionalExtension, params};
 
@@ -39,6 +39,7 @@ impl SqliteProjectRepository {
         Self::from_connection(Connection::open_in_memory().map_err(storage_error)?)
     }
 
+    #[allow(clippy::too_many_lines)]
     fn from_connection(connection: Connection) -> Result<Self, RegistrationError> {
         connection
             .execute_batch(
@@ -104,7 +105,12 @@ impl SqliteProjectRepository {
                 profile_revision INTEGER NOT NULL,
                 attempt_number INTEGER NOT NULL,
                 claimed_at_millis INTEGER NOT NULL,
+                state TEXT NOT NULL DEFAULT 'provisioning' CHECK (state IN ('provisioning', 'working', 'idle', 'blocked', 'unknown')),
+                state_changed_at_millis INTEGER NOT NULL DEFAULT 0,
+                next_retry_at_millis INTEGER NOT NULL DEFAULT 0,
+                retry_count INTEGER NOT NULL DEFAULT 0,
                 closed_at_millis INTEGER,
+                closure_reason TEXT CHECK (closure_reason IN ('lost', 'crashed', 'retired', 'replaced')),
                 UNIQUE (record_id, attempt_number)
             );
             CREATE UNIQUE INDEX IF NOT EXISTS one_open_agent_assignment_per_record
@@ -119,7 +125,9 @@ impl SqliteProjectRepository {
             );
             CREATE TABLE IF NOT EXISTS agent_dispatch_configuration (
                 singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-                herdr_socket_path TEXT
+                herdr_socket_path TEXT,
+                scan_lease_owner TEXT,
+                scan_lease_until_millis INTEGER
             );
             CREATE TABLE IF NOT EXISTS project_agent_dispatch_configuration (
                 project_slug TEXT PRIMARY KEY NOT NULL REFERENCES projects(slug),
@@ -130,6 +138,7 @@ impl SqliteProjectRepository {
         migrate_record_status_schema(&connection)?;
         migrate_record_type_schema(&connection)?;
         migrate_record_updates_schema(&connection)?;
+        migrate_agent_assignment_schema(&connection)?;
         seed_task_agent_profile(&connection)?;
         Ok(Self {
             connection: Mutex::new(connection),
@@ -626,6 +635,51 @@ impl RecordRepository for SqliteProjectRepository {
     }
 }
 
+fn migrate_agent_assignment_schema(connection: &Connection) -> Result<(), RegistrationError> {
+    let columns = connection
+        .prepare("PRAGMA table_info(agent_assignments)")
+        .map_err(storage_error)?
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(storage_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(storage_error)?;
+    if !columns.iter().any(|column| column == "state") {
+        connection.execute("ALTER TABLE agent_assignments ADD COLUMN state TEXT NOT NULL DEFAULT 'provisioning'", []).map_err(storage_error)?;
+    }
+    if !columns.iter().any(|column| column == "closure_reason") {
+        connection
+            .execute(
+                "ALTER TABLE agent_assignments ADD COLUMN closure_reason TEXT",
+                [],
+            )
+            .map_err(storage_error)?;
+    }
+    if !columns
+        .iter()
+        .any(|column| column == "state_changed_at_millis")
+    {
+        connection.execute("ALTER TABLE agent_assignments ADD COLUMN state_changed_at_millis INTEGER NOT NULL DEFAULT 0", []).map_err(storage_error)?;
+    }
+    if !columns
+        .iter()
+        .any(|column| column == "next_retry_at_millis")
+    {
+        connection.execute("ALTER TABLE agent_assignments ADD COLUMN next_retry_at_millis INTEGER NOT NULL DEFAULT 0", []).map_err(storage_error)?;
+    }
+    if !columns.iter().any(|column| column == "retry_count") {
+        connection
+            .execute(
+                "ALTER TABLE agent_assignments ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0",
+                [],
+            )
+            .map_err(storage_error)?;
+    }
+    connection.execute_batch("ALTER TABLE agent_dispatch_configuration ADD COLUMN scan_lease_owner TEXT; ALTER TABLE agent_dispatch_configuration ADD COLUMN scan_lease_until_millis INTEGER;").or_else(|error| {
+        if error.to_string().contains("duplicate column name") { Ok(()) } else { Err(error) }
+    }).map_err(storage_error)?;
+    Ok(())
+}
+
 fn seed_task_agent_profile(connection: &Connection) -> Result<(), RegistrationError> {
     connection.execute(
         "INSERT OR IGNORE INTO agent_profiles (record_type, revision, provider, agent_kind, model, prompt_template, retry_limit, retry_backoff_millis, startup_timeout_millis, unknown_state_grace_millis) VALUES ('task', 1, 'herdr', 'pi', 'gpt-5.6-terra', 'agent-dispatch/task/v1', 3, 1000, 30000, 60000)",
@@ -653,6 +707,116 @@ fn load_agent_profile(
             startup_timeout_millis: row.get::<_, i64>(8)?.cast_unsigned(), unknown_state_grace_millis: row.get::<_, i64>(9)?.cast_unsigned(),
         }),
     ).map_err(|error| match error { rusqlite::Error::QueryReturnedNoRows => RegistrationError::new("agent-profile-not-found", "Agent Profile revision does not exist"), error => storage_error(error) })
+}
+
+fn assignment_state_name(state: AgentAssignmentState) -> &'static str {
+    match state {
+        AgentAssignmentState::Provisioning => "provisioning",
+        AgentAssignmentState::Working => "working",
+        AgentAssignmentState::Idle => "idle",
+        AgentAssignmentState::Blocked => "blocked",
+        AgentAssignmentState::Unknown => "unknown",
+    }
+}
+
+fn assignment_state(value: &str) -> Result<AgentAssignmentState, RegistrationError> {
+    match value {
+        "provisioning" => Ok(AgentAssignmentState::Provisioning),
+        "working" => Ok(AgentAssignmentState::Working),
+        "idle" => Ok(AgentAssignmentState::Idle),
+        "blocked" => Ok(AgentAssignmentState::Blocked),
+        "unknown" => Ok(AgentAssignmentState::Unknown),
+        _ => Err(RegistrationError::new(
+            "storage",
+            "stored Assignment has an invalid state",
+        )),
+    }
+}
+
+fn closure_reason_name(reason: AgentAssignmentClosureReason) -> &'static str {
+    match reason {
+        AgentAssignmentClosureReason::Lost => "lost",
+        AgentAssignmentClosureReason::Crashed => "crashed",
+        AgentAssignmentClosureReason::Retired => "retired",
+        AgentAssignmentClosureReason::Replaced => "replaced",
+    }
+}
+
+fn closure_reason(value: &str) -> Result<AgentAssignmentClosureReason, RegistrationError> {
+    match value {
+        "lost" => Ok(AgentAssignmentClosureReason::Lost),
+        "crashed" => Ok(AgentAssignmentClosureReason::Crashed),
+        "retired" => Ok(AgentAssignmentClosureReason::Retired),
+        "replaced" => Ok(AgentAssignmentClosureReason::Replaced),
+        _ => Err(RegistrationError::new(
+            "storage",
+            "stored Assignment has an invalid closure reason",
+        )),
+    }
+}
+
+fn agent_assignment_from_row(
+    row: &rusqlite::Row<'_>,
+    connection: &Connection,
+) -> rusqlite::Result<AgentAssignment> {
+    let profile_type: String = row.get(3)?;
+    let revision: u32 = row
+        .get::<_, i64>(4)?
+        .cast_unsigned()
+        .try_into()
+        .expect("profile revision fits u32");
+    let state: String = row.get(7)?;
+    let stored_closure_reason: Option<String> = row.get(9)?;
+    let state_changed_at_millis = row.get::<_, i64>(10)?.cast_unsigned();
+    let next_retry_at_millis = row.get::<_, i64>(11)?.cast_unsigned();
+    let retry_count = row
+        .get::<_, i64>(12)?
+        .cast_unsigned()
+        .try_into()
+        .expect("retry count fits u32");
+    let profile = load_agent_profile(
+        connection,
+        record_type(&profile_type).map_err(|_| rusqlite::Error::InvalidQuery)?,
+        revision,
+    )
+    .map_err(|_| rusqlite::Error::InvalidQuery)?;
+    Ok(AgentAssignment {
+        id: row.get(0)?,
+        record_id: row.get::<_, i64>(1)?.cast_unsigned(),
+        project_slug: row.get(2)?,
+        profile,
+        attempt_number: row
+            .get::<_, i64>(5)?
+            .cast_unsigned()
+            .try_into()
+            .expect("attempt number fits u32"),
+        claimed_at_millis: row.get::<_, i64>(6)?.cast_unsigned(),
+        state: assignment_state(&state).map_err(|_| rusqlite::Error::InvalidQuery)?,
+        state_changed_at_millis,
+        next_retry_at_millis,
+        retry_count,
+        closed_at_millis: row.get::<_, Option<i64>>(8)?.map(i64::cast_unsigned),
+        closure_reason: stored_closure_reason
+            .map(|reason| closure_reason(&reason).map_err(|_| rusqlite::Error::InvalidQuery))
+            .transpose()?,
+    })
+}
+
+fn effective_limit(connection: &Connection, project_slug: &str) -> Result<u16, RegistrationError> {
+    let exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE slug = ?1)",
+            [project_slug],
+            |row| row.get(0),
+        )
+        .map_err(storage_error)?;
+    if !exists {
+        return Err(RegistrationError::new(
+            "project-not-found",
+            format!("Project `{project_slug}` is not registered"),
+        ));
+    }
+    connection.query_row("SELECT task_concurrency_limit FROM project_agent_dispatch_configuration WHERE project_slug = ?1", [project_slug], |row| row.get::<_, i64>(0).map(i64::cast_unsigned)).optional().map_err(storage_error).map(|limit| limit.unwrap_or(1).try_into().expect("database constraint bounds concurrency limit"))
 }
 
 impl AgentDispatchRepository for SqliteProjectRepository {
@@ -700,7 +864,7 @@ impl AgentDispatchRepository for SqliteProjectRepository {
         ).map_err(storage_error)?.cast_unsigned().try_into().expect("attempt number fits u32");
         let claimed_at_millis = now_millis()?;
         match transaction.execute(
-            "INSERT INTO agent_assignments (id, record_id, project_slug, profile_record_type, profile_revision, attempt_number, claimed_at_millis) VALUES (?1, ?2, ?3, 'task', ?4, ?5, ?6)",
+            "INSERT INTO agent_assignments (id, record_id, project_slug, profile_record_type, profile_revision, attempt_number, claimed_at_millis, state_changed_at_millis) VALUES (?1, ?2, ?3, 'task', ?4, ?5, ?6, ?6)",
             params![assignment.id, assignment.record_id.cast_signed(), assignment.project_slug, assignment.profile_revision, attempt_number, claimed_at_millis],
         ) {
             Ok(_) => {},
@@ -715,7 +879,12 @@ impl AgentDispatchRepository for SqliteProjectRepository {
             profile,
             attempt_number,
             claimed_at_millis: claimed_at_millis.cast_unsigned(),
+            state: AgentAssignmentState::Provisioning,
+            state_changed_at_millis: claimed_at_millis.cast_unsigned(),
+            next_retry_at_millis: 0,
+            retry_count: 0,
             closed_at_millis: None,
+            closure_reason: None,
         })
     }
 
@@ -728,37 +897,216 @@ impl AgentDispatchRepository for SqliteProjectRepository {
             .lock()
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
         load_record(&connection, record_id)?;
-        let rows = connection.prepare("SELECT id, record_id, project_slug, profile_record_type, profile_revision, attempt_number, claimed_at_millis, closed_at_millis FROM agent_assignments WHERE record_id = ?1 ORDER BY attempt_number DESC").map_err(storage_error)?
-            .query_map([record_id.cast_signed()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?.cast_unsigned(), row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, i64>(4)?.cast_unsigned(), row.get::<_, i64>(5)?.cast_unsigned(), row.get::<_, i64>(6)?.cast_unsigned(), row.get::<_, Option<i64>>(7)?.map(i64::cast_unsigned))))
+        let rows = connection.prepare("SELECT id, record_id, project_slug, profile_record_type, profile_revision, attempt_number, claimed_at_millis, state, closed_at_millis, closure_reason, state_changed_at_millis, next_retry_at_millis, retry_count FROM agent_assignments WHERE record_id = ?1 ORDER BY attempt_number DESC").map_err(storage_error)?
+            .query_map([record_id.cast_signed()], |row| agent_assignment_from_row(row, &connection))
             .map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)?;
-        rows.into_iter()
-            .map(
-                |(
-                    id,
+        Ok(rows)
+    }
+
+    fn list_open_agent_assignments(&self) -> Result<Vec<AgentAssignment>, RegistrationError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        connection.prepare("SELECT id, record_id, project_slug, profile_record_type, profile_revision, attempt_number, claimed_at_millis, state, closed_at_millis, closure_reason, state_changed_at_millis, next_retry_at_millis, retry_count FROM agent_assignments WHERE closed_at_millis IS NULL ORDER BY id")
+            .map_err(storage_error)?
+            .query_map([], |row| agent_assignment_from_row(row, &connection))
+            .map_err(storage_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(storage_error)
+    }
+
+    fn try_acquire_agent_dispatch_scan_lease(
+        &self,
+        owner: &str,
+        now_millis: u64,
+        duration_millis: u64,
+    ) -> Result<bool, RegistrationError> {
+        if owner.trim().is_empty() {
+            return Err(RegistrationError::new(
+                "invalid-scan-owner",
+                "scan lease owner must not be blank",
+            ));
+        }
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        let until = now_millis.saturating_add(duration_millis).cast_signed();
+        let changed = connection.execute(
+            "INSERT INTO agent_dispatch_configuration (singleton, scan_lease_owner, scan_lease_until_millis) VALUES (1, ?1, ?2) ON CONFLICT(singleton) DO UPDATE SET scan_lease_owner = excluded.scan_lease_owner, scan_lease_until_millis = excluded.scan_lease_until_millis WHERE agent_dispatch_configuration.scan_lease_until_millis IS NULL OR agent_dispatch_configuration.scan_lease_until_millis <= ?3 OR agent_dispatch_configuration.scan_lease_owner = ?1",
+            params![owner, until, now_millis.cast_signed()],
+        ).map_err(storage_error)?;
+        Ok(changed == 1)
+    }
+
+    fn claim_next_agent_assignment(
+        &self,
+        project_slug: &str,
+        assignment_id: &str,
+    ) -> Result<Option<AgentAssignment>, RegistrationError> {
+        if assignment_id.trim().is_empty() {
+            return Err(RegistrationError::new(
+                "invalid-assignment-id",
+                "assignment id must not be blank",
+            ));
+        }
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        connection
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(storage_error)?;
+        let result = (|| {
+            let limit = effective_limit(&connection, project_slug)?;
+            let used: u16 = connection.query_row("SELECT COUNT(*) FROM agent_assignments WHERE project_slug = ?1 AND closed_at_millis IS NULL", [project_slug], |row| row.get::<_, i64>(0)).map_err(storage_error)?.cast_unsigned().try_into().expect("assignment count fits u16");
+            if used >= limit {
+                return Ok(None);
+            }
+            let record_id = connection.query_row("SELECT record.id FROM records record JOIN record_projects scope ON scope.record_id = record.id WHERE record.record_type = 'task' AND (record.status = 'open' OR (record.status = 'in_progress' AND EXISTS (SELECT 1 FROM agent_assignments prior WHERE prior.record_id = record.id AND prior.closed_at_millis IS NOT NULL))) AND scope.project_slug = ?1 AND (SELECT COUNT(*) FROM record_projects only_scope WHERE only_scope.record_id = record.id) = 1 AND NOT EXISTS (SELECT 1 FROM agent_assignments assignment WHERE assignment.record_id = record.id AND assignment.closed_at_millis IS NULL) ORDER BY record.id LIMIT 1", [project_slug], |row| row.get::<_, i64>(0).map(i64::cast_unsigned)).optional().map_err(storage_error)?;
+            let Some(record_id) = record_id else {
+                return Ok(None);
+            };
+            let profile = load_agent_profile(&connection, RecordType::Task, 1)?;
+            let attempt: u32 = connection.query_row("SELECT COALESCE(MAX(attempt_number), 0) + 1 FROM agent_assignments WHERE record_id = ?1", [record_id.cast_signed()], |row| row.get::<_, i64>(0)).map_err(storage_error)?.cast_unsigned().try_into().expect("attempt number fits u32");
+            let claimed_at_millis = now_millis()?;
+            connection.execute("INSERT INTO agent_assignments (id, record_id, project_slug, profile_record_type, profile_revision, attempt_number, claimed_at_millis, state, state_changed_at_millis) VALUES (?1, ?2, ?3, 'task', 1, ?4, ?5, 'provisioning', ?5)", params![assignment_id, record_id.cast_signed(), project_slug, attempt, claimed_at_millis]).map_err(|error| if matches!(error.sqlite_error_code(), Some(ErrorCode::ConstraintViolation)) { RegistrationError::new("assignment-conflict", "Agent Assignment already exists or Task is assigned") } else { storage_error(error) })?;
+            let changed = connection
+                .execute(
+                    "UPDATE records SET status = 'in_progress' WHERE id = ?1 AND status = 'open'",
+                    [record_id.cast_signed()],
+                )
+                .map_err(storage_error)?;
+            if changed > 1 {
+                return Err(RegistrationError::new(
+                    "claim-conflict",
+                    "Task was no longer eligible to claim",
+                ));
+            }
+            if changed == 1 {
+                insert_update(
+                    &connection,
                     record_id,
-                    project_slug,
-                    profile_type,
-                    revision,
-                    attempt_number,
-                    claimed_at_millis,
-                    closed_at_millis,
-                )| {
-                    Ok(AgentAssignment {
-                        id,
-                        record_id,
-                        project_slug,
-                        profile: load_agent_profile(
-                            &connection,
-                            record_type(&profile_type)?,
-                            revision.try_into().expect("profile revision fits u32"),
-                        )?,
-                        attempt_number: attempt_number.try_into().expect("attempt number fits u32"),
-                        claimed_at_millis,
-                        closed_at_millis,
-                    })
-                },
+                    RecordUpdateKind::StatusTransition {
+                        from: RecordStatus::Open,
+                        to: RecordStatus::InProgress,
+                    },
+                )?;
+            }
+            Ok(Some(AgentAssignment {
+                id: assignment_id.into(),
+                record_id,
+                project_slug: project_slug.into(),
+                profile,
+                attempt_number: attempt,
+                claimed_at_millis: claimed_at_millis.cast_unsigned(),
+                state: AgentAssignmentState::Provisioning,
+                state_changed_at_millis: claimed_at_millis.cast_unsigned(),
+                next_retry_at_millis: 0,
+                retry_count: 0,
+                closed_at_millis: None,
+                closure_reason: None,
+            }))
+        })();
+        match result {
+            Ok(assignment) => {
+                connection.execute_batch("COMMIT").map_err(storage_error)?;
+                Ok(assignment)
+            }
+            Err(error) => {
+                let _ = connection.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
+    fn compare_and_set_agent_assignment_state(
+        &self,
+        assignment_id: &str,
+        expected: AgentAssignmentState,
+        next: AgentAssignmentState,
+    ) -> Result<Option<AgentAssignment>, RegistrationError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        let transaction = connection.transaction().map_err(storage_error)?;
+        let changed = transaction
+            .execute(
+                "UPDATE agent_assignments SET state = ?1, state_changed_at_millis = ?2, next_retry_at_millis = 0, retry_count = 0 WHERE id = ?3 AND state = ?4 AND closed_at_millis IS NULL",
+                params![assignment_state_name(next), now_millis()?, assignment_id, assignment_state_name(expected)],
             )
-            .collect()
+            .map_err(storage_error)?;
+        let assignment = if changed == 1 {
+            Some(transaction.query_row("SELECT id, record_id, project_slug, profile_record_type, profile_revision, attempt_number, claimed_at_millis, state, closed_at_millis, closure_reason, state_changed_at_millis, next_retry_at_millis, retry_count FROM agent_assignments WHERE id = ?1", [assignment_id], |row| agent_assignment_from_row(row, &transaction)).map_err(storage_error)?)
+        } else {
+            None
+        };
+        transaction.commit().map_err(storage_error)?;
+        Ok(assignment)
+    }
+
+    fn close_agent_assignment(
+        &self,
+        assignment_id: &str,
+        reason: AgentAssignmentClosureReason,
+    ) -> Result<AgentAssignment, RegistrationError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        let transaction = connection.transaction().map_err(storage_error)?;
+        let closed_at_millis = now_millis()?;
+        let reason_name = closure_reason_name(reason);
+        if transaction.execute("UPDATE agent_assignments SET closed_at_millis = ?1, closure_reason = ?2 WHERE id = ?3 AND closed_at_millis IS NULL", params![closed_at_millis, reason_name, assignment_id]).map_err(storage_error)? != 1 {
+            return Err(RegistrationError::new("assignment-not-open", "Agent Assignment is absent or already closed"));
+        }
+        let assignment = transaction.query_row("SELECT id, record_id, project_slug, profile_record_type, profile_revision, attempt_number, claimed_at_millis, state, closed_at_millis, closure_reason, state_changed_at_millis, next_retry_at_millis, retry_count FROM agent_assignments WHERE id = ?1", [assignment_id], |row| agent_assignment_from_row(row, &transaction)).map_err(storage_error)?;
+        transaction.commit().map_err(storage_error)?;
+        Ok(assignment)
+    }
+
+    fn compare_and_close_agent_assignment(
+        &self,
+        assignment_id: &str,
+        expected: AgentAssignmentState,
+        reason: AgentAssignmentClosureReason,
+    ) -> Result<Option<AgentAssignment>, RegistrationError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        let transaction = connection.transaction().map_err(storage_error)?;
+        let changed = transaction.execute(
+            "UPDATE agent_assignments SET closed_at_millis = ?1, closure_reason = ?2 WHERE id = ?3 AND state = ?4 AND closed_at_millis IS NULL",
+            params![now_millis()?, closure_reason_name(reason), assignment_id, assignment_state_name(expected)],
+        ).map_err(storage_error)?;
+        let assignment = if changed == 1 {
+            Some(transaction.query_row("SELECT id, record_id, project_slug, profile_record_type, profile_revision, attempt_number, claimed_at_millis, state, closed_at_millis, closure_reason, state_changed_at_millis, next_retry_at_millis, retry_count FROM agent_assignments WHERE id = ?1", [assignment_id], |row| agent_assignment_from_row(row, &transaction)).map_err(storage_error)?)
+        } else {
+            None
+        };
+        transaction.commit().map_err(storage_error)?;
+        Ok(assignment)
+    }
+
+    fn schedule_agent_assignment_retry(
+        &self,
+        assignment_id: &str,
+        expected: AgentAssignmentState,
+        next_retry_at_millis: u64,
+        retry_count: u32,
+    ) -> Result<bool, RegistrationError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        let changed = connection.execute(
+            "UPDATE agent_assignments SET next_retry_at_millis = ?1, retry_count = ?2 WHERE id = ?3 AND state = ?4 AND closed_at_millis IS NULL",
+            params![next_retry_at_millis.cast_signed(), i64::from(retry_count), assignment_id, assignment_state_name(expected)],
+        ).map_err(storage_error)?;
+        Ok(changed == 1)
     }
 
     fn add_agent_assignment_resource(
@@ -1823,5 +2171,173 @@ mod tests {
                 .code,
             "invalid-socket-path"
         );
+    }
+
+    struct FakeAdapter {
+        provision_fails: bool,
+    }
+
+    impl forge_app::AgentDispatchAdapter for FakeAdapter {
+        fn probe(&self) -> Result<(), forge_app::AgentAdapterError> {
+            Ok(())
+        }
+
+        fn provision(
+            &self,
+            _: &forge_app::AgentAssignment,
+        ) -> Result<(), forge_app::AgentAdapterError> {
+            if self.provision_fails {
+                Err(forge_app::AgentAdapterError::Transient("offline".into()))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn observe(
+            &self,
+            _: &forge_app::AgentAssignment,
+        ) -> Result<forge_app::AgentObservation, forge_app::AgentAdapterError> {
+            Ok(forge_app::AgentObservation::Working)
+        }
+
+        fn recover(
+            &self,
+            _: &forge_app::AgentAssignment,
+        ) -> Result<forge_app::AgentObservation, forge_app::AgentAdapterError> {
+            Ok(forge_app::AgentObservation::Absent)
+        }
+
+        fn retire(
+            &self,
+            _: &forge_app::AgentAssignment,
+        ) -> Result<(), forge_app::AgentAdapterError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn reconciliation_scan_uses_a_lease_and_durable_retry_exhaustion() {
+        let store = SqliteProjectRepository::in_memory().unwrap();
+        store.register(&project("alpha", "/repos/alpha")).unwrap();
+        let task = store
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Task,
+                body: "dispatch me".into(),
+                project_slugs: vec!["alpha".into()],
+            })
+            .unwrap();
+        store
+            .create_agent_assignment(&NewAgentAssignment {
+                id: "retrying".into(),
+                record_id: task.id,
+                project_slug: "alpha".into(),
+                profile_revision: 1,
+            })
+            .unwrap();
+        let policy = forge_app::AgentDispatchReconciliationPolicy {
+            scan_lease_millis: 100,
+        };
+        let failing = FakeAdapter {
+            provision_fails: true,
+        };
+        for now in [0, 1_000, 2_000, 3_000, 4_000] {
+            forge_app::reconcile_agent_dispatch(&store, &failing, "daemon-a", now, policy).unwrap();
+        }
+        let assignment = store.list_agent_assignments(task.id).unwrap().remove(0);
+        assert_eq!(assignment.retry_count, 5);
+        assert_eq!(
+            store.list_record_comments(task.id).unwrap().len(),
+            1,
+            "retry exhaustion records exactly one explanatory comment"
+        );
+        assert!(
+            !store
+                .try_acquire_agent_dispatch_scan_lease("daemon-b", 4_000, 100)
+                .unwrap(),
+            "a concurrent daemon cannot start another scan"
+        );
+        let working = FakeAdapter {
+            provision_fails: false,
+        };
+        let result =
+            forge_app::reconcile_agent_dispatch(&store, &working, "daemon-a", 5_000, policy)
+                .unwrap();
+        assert!(result.acquired_lease);
+        assert_eq!(
+            store.list_agent_assignments(task.id).unwrap()[0].state,
+            forge_app::AgentAssignmentState::Working
+        );
+    }
+
+    #[test]
+    fn atomically_claims_eligible_tasks_and_retains_capacity() {
+        let store = SqliteProjectRepository::in_memory().unwrap();
+        store.register(&project("alpha", "/repos/alpha")).unwrap();
+        let first = store
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Task,
+                body: "first".into(),
+                project_slugs: vec!["alpha".into()],
+            })
+            .unwrap();
+        store
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Task,
+                body: "second".into(),
+                project_slugs: vec!["alpha".into()],
+            })
+            .unwrap();
+
+        let assignment = store
+            .claim_next_agent_assignment("alpha", "claim-1")
+            .unwrap()
+            .expect("the first task is eligible");
+        assert_eq!(assignment.record_id, first.id);
+        assert_eq!(
+            assignment.state,
+            forge_app::AgentAssignmentState::Provisioning
+        );
+        assert_eq!(
+            store.show_record(first.id).unwrap().status,
+            RecordStatus::InProgress
+        );
+        assert_eq!(
+            store
+                .compare_and_set_agent_assignment_state(
+                    "claim-1",
+                    forge_app::AgentAssignmentState::Provisioning,
+                    forge_app::AgentAssignmentState::Working,
+                )
+                .unwrap()
+                .expect("the fresh observer wins")
+                .state,
+            forge_app::AgentAssignmentState::Working
+        );
+        assert!(
+            store
+                .compare_and_set_agent_assignment_state(
+                    "claim-1",
+                    forge_app::AgentAssignmentState::Provisioning,
+                    forge_app::AgentAssignmentState::Idle,
+                )
+                .unwrap()
+                .is_none(),
+            "a stale observer must not overwrite the fresh observation"
+        );
+        assert!(
+            store
+                .claim_next_agent_assignment("alpha", "claim-2")
+                .unwrap()
+                .is_none()
+        );
+        store
+            .close_agent_assignment("claim-1", forge_app::AgentAssignmentClosureReason::Lost)
+            .unwrap();
+        let retry = store
+            .claim_next_agent_assignment("alpha", "claim-3")
+            .unwrap()
+            .expect("a closed attempt permits a replacement");
+        assert_eq!(retry.record_id, first.id);
+        assert_eq!(retry.attempt_number, 2);
     }
 }
