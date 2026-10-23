@@ -104,6 +104,26 @@ _Avoid_: specification, issue
 A Record type that represents a unit of work with zero or one Project Scope. It may be opened under one Spec, from which it receives its Project Scope, or opened without a parent; its membership and scope are immutable after opening, and it may not parent another Record.
 _Avoid_: subtask, to-do
 
+**Agent Assignment**:
+A Forge-owned, durable association between one Record and an externally managed Agent. It records the provider-facing identity and lifecycle of one work attempt; assignments remain as history after an Agent is removed or replaced.
+_Avoid_: record agent metadata, agent link
+
+**Assignment Capability**:
+An opaque, revocable credential Forge issues for one open Agent Assignment. It grants only that Assignment's permitted agent-initiated operations through the Forge daemon, which is the sole authorization gateway; it is not protection against a hostile process running as the same OS user.
+_Avoid_: agent token, agent credential
+
+**Assignment Context**:
+The bounded Forge information an Agent Assignment may read: its Task and Records directly related to that Task, including its parent Spec, but not sibling Tasks or transitive relationship traversal.
+_Avoid_: project visibility, record graph access
+
+**Agent Profile**:
+A versioned Forge-owned configuration selected by exactly one Record Type that specifies how Forge provisions an Agent, including its adapter, model, retry policy, and initial-prompt template.
+_Avoid_: agent configuration, record profile
+
+**Agent Workspace**:
+The filesystem folder in which an Agent works for an Agent Assignment. V1 uses the scoped Project’s Registered Folder; a future revision will use a task-specific managed Worktree.
+_Avoid_: agent project, agent checkout
+
 **Comment**:
 A non-blank free-text entry on a Record, optionally attributed to a free-text author. Its content cannot be edited, any Forge client may delete it, and it may be added even after its Record is Done.
 _Avoid_: note, message

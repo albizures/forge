@@ -7,9 +7,11 @@ use std::{
 };
 
 use forge_app::{
-    NewRecord, NewTypedRecord, Project, ProjectRepository, Record, RecordComment, RecordCommentId,
-    RecordListFilter, RecordRelationship, RecordRelationshipKind, RecordRepository, RecordStatus,
-    RecordType, RecordUpdate, RecordUpdateId, RecordUpdateKind, RegistrationError,
+    AgentAssignment, AgentAssignmentResource, AgentDispatchRepository, AgentProfile,
+    NewAgentAssignment, NewAgentAssignmentResource, NewRecord, NewTypedRecord, Project,
+    ProjectRepository, Record, RecordComment, RecordCommentId, RecordListFilter,
+    RecordRelationship, RecordRelationshipKind, RecordRepository, RecordStatus, RecordType,
+    RecordUpdate, RecordUpdateId, RecordUpdateKind, RegistrationError,
 };
 use rusqlite::{Connection, ErrorCode, OptionalExtension, params};
 
@@ -80,12 +82,55 @@ impl SqliteProjectRepository {
                 created_at_millis INTEGER NOT NULL,
                 author TEXT,
                 body TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS agent_profiles (
+                record_type TEXT NOT NULL CHECK (record_type IN ('task')),
+                revision INTEGER NOT NULL CHECK (revision > 0),
+                provider TEXT NOT NULL,
+                agent_kind TEXT NOT NULL,
+                model TEXT NOT NULL,
+                prompt_template TEXT NOT NULL,
+                retry_limit INTEGER NOT NULL,
+                retry_backoff_millis INTEGER NOT NULL,
+                startup_timeout_millis INTEGER NOT NULL,
+                unknown_state_grace_millis INTEGER NOT NULL,
+                PRIMARY KEY (record_type, revision)
+            );
+            CREATE TABLE IF NOT EXISTS agent_assignments (
+                id TEXT PRIMARY KEY NOT NULL,
+                record_id INTEGER NOT NULL REFERENCES records(id),
+                project_slug TEXT NOT NULL REFERENCES projects(slug),
+                profile_record_type TEXT NOT NULL,
+                profile_revision INTEGER NOT NULL,
+                attempt_number INTEGER NOT NULL,
+                claimed_at_millis INTEGER NOT NULL,
+                closed_at_millis INTEGER,
+                UNIQUE (record_id, attempt_number)
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS one_open_agent_assignment_per_record
+                ON agent_assignments(record_id) WHERE closed_at_millis IS NULL;
+            CREATE TABLE IF NOT EXISTS agent_assignment_resources (
+                assignment_id TEXT NOT NULL REFERENCES agent_assignments(id),
+                resource_kind TEXT NOT NULL,
+                resource_id TEXT NOT NULL,
+                created_at_millis INTEGER NOT NULL,
+                retired_at_millis INTEGER,
+                PRIMARY KEY (assignment_id, resource_kind, resource_id)
+            );
+            CREATE TABLE IF NOT EXISTS agent_dispatch_configuration (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                herdr_socket_path TEXT
+            );
+            CREATE TABLE IF NOT EXISTS project_agent_dispatch_configuration (
+                project_slug TEXT PRIMARY KEY NOT NULL REFERENCES projects(slug),
+                task_concurrency_limit INTEGER NOT NULL CHECK (task_concurrency_limit BETWEEN 1 AND 1024)
             );",
             )
             .map_err(storage_error)?;
         migrate_record_status_schema(&connection)?;
         migrate_record_type_schema(&connection)?;
         migrate_record_updates_schema(&connection)?;
+        seed_task_agent_profile(&connection)?;
         Ok(Self {
             connection: Mutex::new(connection),
         })
@@ -581,6 +626,287 @@ impl RecordRepository for SqliteProjectRepository {
     }
 }
 
+fn seed_task_agent_profile(connection: &Connection) -> Result<(), RegistrationError> {
+    connection.execute(
+        "INSERT OR IGNORE INTO agent_profiles (record_type, revision, provider, agent_kind, model, prompt_template, retry_limit, retry_backoff_millis, startup_timeout_millis, unknown_state_grace_millis) VALUES ('task', 1, 'herdr', 'pi', 'gpt-5.6-terra', 'agent-dispatch/task/v1', 3, 1000, 30000, 60000)",
+        [],
+    ).map_err(storage_error)?;
+    Ok(())
+}
+
+fn load_agent_profile(
+    connection: &Connection,
+    profile_record_type: RecordType,
+    revision: u32,
+) -> Result<AgentProfile, RegistrationError> {
+    connection.query_row(
+        "SELECT record_type, revision, provider, agent_kind, model, prompt_template, retry_limit, retry_backoff_millis, startup_timeout_millis, unknown_state_grace_millis FROM agent_profiles WHERE record_type = ?1 AND revision = ?2",
+        params![record_type_name(profile_record_type), revision],
+        |row| Ok(AgentProfile {
+            record_type: match row.get::<_, String>(0)?.as_str() {
+                "task" => RecordType::Task,
+                _ => return Err(rusqlite::Error::InvalidQuery),
+            },
+            revision: row.get::<_, i64>(1)?.cast_unsigned().try_into().expect("profile revision fits u32"),
+            provider: row.get(2)?, agent_kind: row.get(3)?, model: row.get(4)?, prompt_template: row.get(5)?,
+            retry_limit: row.get::<_, i64>(6)?.cast_unsigned().try_into().expect("retry limit fits u32"), retry_backoff_millis: row.get::<_, i64>(7)?.cast_unsigned(),
+            startup_timeout_millis: row.get::<_, i64>(8)?.cast_unsigned(), unknown_state_grace_millis: row.get::<_, i64>(9)?.cast_unsigned(),
+        }),
+    ).map_err(|error| match error { rusqlite::Error::QueryReturnedNoRows => RegistrationError::new("agent-profile-not-found", "Agent Profile revision does not exist"), error => storage_error(error) })
+}
+
+impl AgentDispatchRepository for SqliteProjectRepository {
+    fn agent_profile(
+        &self,
+        record_type: RecordType,
+        revision: u32,
+    ) -> Result<AgentProfile, RegistrationError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        load_agent_profile(&connection, record_type, revision)
+    }
+
+    fn create_agent_assignment(
+        &self,
+        assignment: &NewAgentAssignment,
+    ) -> Result<AgentAssignment, RegistrationError> {
+        if assignment.id.trim().is_empty() {
+            return Err(RegistrationError::new(
+                "invalid-assignment-id",
+                "assignment id must not be blank",
+            ));
+        }
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        let transaction = connection.transaction().map_err(storage_error)?;
+        let record = load_record(&transaction, assignment.record_id)?;
+        if record.record_type != RecordType::Task
+            || record.project_slugs.as_slice() != [assignment.project_slug.as_str()]
+        {
+            return Err(RegistrationError::new(
+                "invalid-assignment-record",
+                "an Assignment requires a Task scoped to its Project",
+            ));
+        }
+        let profile =
+            load_agent_profile(&transaction, RecordType::Task, assignment.profile_revision)?;
+        let attempt_number: u32 = transaction.query_row(
+            "SELECT COALESCE(MAX(attempt_number), 0) + 1 FROM agent_assignments WHERE record_id = ?1",
+            [assignment.record_id.cast_signed()], |row| row.get::<_, i64>(0),
+        ).map_err(storage_error)?.cast_unsigned().try_into().expect("attempt number fits u32");
+        let claimed_at_millis = now_millis()?;
+        match transaction.execute(
+            "INSERT INTO agent_assignments (id, record_id, project_slug, profile_record_type, profile_revision, attempt_number, claimed_at_millis) VALUES (?1, ?2, ?3, 'task', ?4, ?5, ?6)",
+            params![assignment.id, assignment.record_id.cast_signed(), assignment.project_slug, assignment.profile_revision, attempt_number, claimed_at_millis],
+        ) {
+            Ok(_) => {},
+            Err(error) if matches!(error.sqlite_error_code(), Some(ErrorCode::ConstraintViolation)) => return Err(RegistrationError::new("open-assignment-exists", "Record already has an open Agent Assignment")),
+            Err(error) => return Err(storage_error(error)),
+        }
+        transaction.commit().map_err(storage_error)?;
+        Ok(AgentAssignment {
+            id: assignment.id.clone(),
+            record_id: assignment.record_id,
+            project_slug: assignment.project_slug.clone(),
+            profile,
+            attempt_number,
+            claimed_at_millis: claimed_at_millis.cast_unsigned(),
+            closed_at_millis: None,
+        })
+    }
+
+    fn list_agent_assignments(
+        &self,
+        record_id: u64,
+    ) -> Result<Vec<AgentAssignment>, RegistrationError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        load_record(&connection, record_id)?;
+        let rows = connection.prepare("SELECT id, record_id, project_slug, profile_record_type, profile_revision, attempt_number, claimed_at_millis, closed_at_millis FROM agent_assignments WHERE record_id = ?1 ORDER BY attempt_number DESC").map_err(storage_error)?
+            .query_map([record_id.cast_signed()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?.cast_unsigned(), row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, i64>(4)?.cast_unsigned(), row.get::<_, i64>(5)?.cast_unsigned(), row.get::<_, i64>(6)?.cast_unsigned(), row.get::<_, Option<i64>>(7)?.map(i64::cast_unsigned))))
+            .map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)?;
+        rows.into_iter()
+            .map(
+                |(
+                    id,
+                    record_id,
+                    project_slug,
+                    profile_type,
+                    revision,
+                    attempt_number,
+                    claimed_at_millis,
+                    closed_at_millis,
+                )| {
+                    Ok(AgentAssignment {
+                        id,
+                        record_id,
+                        project_slug,
+                        profile: load_agent_profile(
+                            &connection,
+                            record_type(&profile_type)?,
+                            revision.try_into().expect("profile revision fits u32"),
+                        )?,
+                        attempt_number: attempt_number.try_into().expect("attempt number fits u32"),
+                        claimed_at_millis,
+                        closed_at_millis,
+                    })
+                },
+            )
+            .collect()
+    }
+
+    fn add_agent_assignment_resource(
+        &self,
+        resource: &NewAgentAssignmentResource,
+    ) -> Result<AgentAssignmentResource, RegistrationError> {
+        if resource.resource_kind.trim().is_empty() || resource.resource_id.trim().is_empty() {
+            return Err(RegistrationError::new(
+                "invalid-assignment-resource",
+                "assignment resource kind and id must not be blank",
+            ));
+        }
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        let exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM agent_assignments WHERE id = ?1)",
+                [&resource.assignment_id],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        if !exists {
+            return Err(RegistrationError::new(
+                "assignment-not-found",
+                "Agent Assignment does not exist",
+            ));
+        }
+        let created_at_millis = now_millis()?;
+        connection.execute("INSERT INTO agent_assignment_resources (assignment_id, resource_kind, resource_id, created_at_millis) VALUES (?1, ?2, ?3, ?4)", params![resource.assignment_id, resource.resource_kind, resource.resource_id, created_at_millis]).map_err(storage_error)?;
+        Ok(AgentAssignmentResource {
+            assignment_id: resource.assignment_id.clone(),
+            resource_kind: resource.resource_kind.clone(),
+            resource_id: resource.resource_id.clone(),
+            created_at_millis: created_at_millis.cast_unsigned(),
+            retired_at_millis: None,
+        })
+    }
+
+    fn list_agent_assignment_resources(
+        &self,
+        assignment_id: &str,
+    ) -> Result<Vec<AgentAssignmentResource>, RegistrationError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        connection.prepare("SELECT assignment_id, resource_kind, resource_id, created_at_millis, retired_at_millis FROM agent_assignment_resources WHERE assignment_id = ?1 ORDER BY created_at_millis, resource_kind, resource_id").map_err(storage_error)?.query_map([assignment_id], |row| Ok(AgentAssignmentResource { assignment_id: row.get(0)?, resource_kind: row.get(1)?, resource_id: row.get(2)?, created_at_millis: row.get::<_, i64>(3)?.cast_unsigned(), retired_at_millis: row.get::<_, Option<i64>>(4)?.map(i64::cast_unsigned) })).map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)
+    }
+
+    fn set_herdr_socket_path(&self, path: Option<&Path>) -> Result<(), RegistrationError> {
+        if path.is_some_and(|path| !path.is_absolute()) {
+            return Err(RegistrationError::new(
+                "invalid-socket-path",
+                "Herdr socket path must be absolute",
+            ));
+        }
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        connection.execute("INSERT INTO agent_dispatch_configuration (singleton, herdr_socket_path) VALUES (1, ?1) ON CONFLICT(singleton) DO UPDATE SET herdr_socket_path = excluded.herdr_socket_path", [path.map(Path::to_string_lossy).as_deref()]).map_err(storage_error)?;
+        Ok(())
+    }
+
+    fn herdr_socket_path(&self) -> Result<Option<std::path::PathBuf>, RegistrationError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        connection
+            .query_row(
+                "SELECT herdr_socket_path FROM agent_dispatch_configuration WHERE singleton = 1",
+                [],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map_err(storage_error)
+            .map(|path| path.flatten().map(Into::into))
+    }
+
+    fn set_project_task_concurrency_limit(
+        &self,
+        project_slug: &str,
+        limit: Option<u16>,
+    ) -> Result<(), RegistrationError> {
+        if limit.is_some_and(|limit| !(1..=1024).contains(&limit)) {
+            return Err(RegistrationError::new(
+                "invalid-concurrency-limit",
+                "Project Task concurrency limit must be between 1 and 1024",
+            ));
+        }
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        let exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM projects WHERE slug = ?1)",
+                [project_slug],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        if !exists {
+            return Err(RegistrationError::new(
+                "project-not-found",
+                format!("Project `{project_slug}` is not registered"),
+            ));
+        }
+        if let Some(limit) = limit {
+            connection.execute("INSERT INTO project_agent_dispatch_configuration (project_slug, task_concurrency_limit) VALUES (?1, ?2) ON CONFLICT(project_slug) DO UPDATE SET task_concurrency_limit = excluded.task_concurrency_limit", params![project_slug, limit]).map_err(storage_error)?;
+        } else {
+            connection
+                .execute(
+                    "DELETE FROM project_agent_dispatch_configuration WHERE project_slug = ?1",
+                    [project_slug],
+                )
+                .map_err(storage_error)?;
+        }
+        Ok(())
+    }
+
+    fn effective_project_task_concurrency_limit(
+        &self,
+        project_slug: &str,
+    ) -> Result<u16, RegistrationError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        let exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM projects WHERE slug = ?1)",
+                [project_slug],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        if !exists {
+            return Err(RegistrationError::new(
+                "project-not-found",
+                format!("Project `{project_slug}` is not registered"),
+            ));
+        }
+        connection.query_row("SELECT task_concurrency_limit FROM project_agent_dispatch_configuration WHERE project_slug = ?1", [project_slug], |row| row.get::<_, i64>(0).map(i64::cast_unsigned)).optional().map_err(storage_error).map(|limit| limit.unwrap_or(1).try_into().expect("database constraint bounds concurrency limit"))
+    }
+}
+
 fn status_name(status: RecordStatus) -> &'static str {
     match status {
         RecordStatus::Open => "open",
@@ -956,7 +1282,8 @@ fn storage_error(error: rusqlite::Error) -> RegistrationError {
 mod tests {
     use super::SqliteProjectRepository;
     use forge_app::{
-        NewRecord, NewTypedRecord, Project, ProjectRepository, RecordListFilter, RecordRepository,
+        AgentDispatchRepository, NewAgentAssignment, NewAgentAssignmentResource, NewRecord,
+        NewTypedRecord, Project, ProjectRepository, RecordListFilter, RecordRepository,
         RecordStatus, RecordType, RecordUpdateKind,
     };
     use std::{
@@ -1401,5 +1728,100 @@ mod tests {
         assert_eq!(store.list_record_updates(7).unwrap()[0].id.0, 9);
         assert_eq!(store.list_record_comments(7).unwrap()[0].id.0, 11);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn persists_dispatch_profiles_assignments_resources_and_project_configuration() {
+        let store = SqliteProjectRepository::in_memory().unwrap();
+        store.register(&project("alpha", "/repos/alpha")).unwrap();
+        let task = store
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Task,
+                body: "task".into(),
+                project_slugs: vec!["alpha".into()],
+            })
+            .unwrap();
+
+        let profile = store.agent_profile(RecordType::Task, 1).unwrap();
+        assert_eq!(profile.provider, "herdr");
+        assert_eq!(profile.agent_kind, "pi");
+        assert_eq!(profile.model, "gpt-5.6-terra");
+        assert_eq!(store.agent_profile(RecordType::Task, 1).unwrap(), profile);
+
+        let assignment = store
+            .create_agent_assignment(&NewAgentAssignment {
+                id: "attempt-1".into(),
+                record_id: task.id,
+                project_slug: "alpha".into(),
+                profile_revision: 1,
+            })
+            .unwrap();
+        assert_eq!(assignment.record_id, task.id);
+        assert_eq!(
+            store.list_agent_assignments(task.id).unwrap(),
+            vec![assignment.clone()]
+        );
+        assert_eq!(
+            store
+                .create_agent_assignment(&NewAgentAssignment {
+                    id: "attempt-2".into(),
+                    record_id: task.id,
+                    project_slug: "alpha".into(),
+                    profile_revision: 1,
+                })
+                .unwrap_err()
+                .code,
+            "open-assignment-exists"
+        );
+        let resource = store
+            .add_agent_assignment_resource(&NewAgentAssignmentResource {
+                assignment_id: assignment.id.clone(),
+                resource_kind: "session".into(),
+                resource_id: "external-1".into(),
+            })
+            .unwrap();
+        assert_eq!(
+            store
+                .list_agent_assignment_resources(&assignment.id)
+                .unwrap(),
+            vec![resource]
+        );
+
+        assert_eq!(
+            store
+                .effective_project_task_concurrency_limit("alpha")
+                .unwrap(),
+            1
+        );
+        store
+            .set_project_task_concurrency_limit("alpha", Some(4))
+            .unwrap();
+        assert_eq!(
+            store
+                .effective_project_task_concurrency_limit("alpha")
+                .unwrap(),
+            4
+        );
+        assert_eq!(
+            store
+                .set_project_task_concurrency_limit("alpha", Some(0))
+                .unwrap_err()
+                .code,
+            "invalid-concurrency-limit"
+        );
+        store
+            .set_herdr_socket_path(Some(Path::new("/tmp/herdr.sock")))
+            .unwrap();
+        assert_eq!(
+            store.herdr_socket_path().unwrap(),
+            Some(std::path::PathBuf::from("/tmp/herdr.sock"))
+        );
+        assert_eq!(
+            store
+                .set_herdr_socket_path(Some(Path::new("relative.sock")))
+                .unwrap_err()
+                .code,
+            "invalid-socket-path"
+        );
     }
 }

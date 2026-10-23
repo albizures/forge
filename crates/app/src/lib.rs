@@ -280,6 +280,106 @@ pub trait RecordRepository: ProjectRepository {
     ) -> Result<(), RegistrationError>;
 }
 
+/// An immutable provider-neutral Agent provisioning policy.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentProfile {
+    pub record_type: RecordType,
+    pub revision: u32,
+    pub provider: String,
+    pub agent_kind: String,
+    pub model: String,
+    pub prompt_template: String,
+    pub retry_limit: u32,
+    pub retry_backoff_millis: u64,
+    pub startup_timeout_millis: u64,
+    pub unknown_state_grace_millis: u64,
+}
+
+/// A durable attempt to dispatch one Task to an external Agent.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentAssignment {
+    pub id: String,
+    pub record_id: u64,
+    pub project_slug: String,
+    pub profile: AgentProfile,
+    pub attempt_number: u32,
+    pub claimed_at_millis: u64,
+    pub closed_at_millis: Option<u64>,
+}
+
+/// The caller-supplied immutable identity and provenance for an Agent Assignment.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NewAgentAssignment {
+    pub id: String,
+    pub record_id: u64,
+    pub project_slug: String,
+    pub profile_revision: u32,
+}
+
+/// A retained provider-neutral external resource fact for an Assignment.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentAssignmentResource {
+    pub assignment_id: String,
+    pub resource_kind: String,
+    pub resource_id: String,
+    pub created_at_millis: u64,
+    pub retired_at_millis: Option<u64>,
+}
+
+/// A new retained provider-neutral external resource fact.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NewAgentAssignmentResource {
+    pub assignment_id: String,
+    pub resource_kind: String,
+    pub resource_id: String,
+}
+
+/// Durable persistence boundary for provider-neutral dispatch foundations.
+#[allow(clippy::missing_errors_doc)]
+pub trait AgentDispatchRepository: Send + Sync {
+    /// Returns an immutable seeded Agent Profile revision.
+    fn agent_profile(
+        &self,
+        record_type: RecordType,
+        revision: u32,
+    ) -> Result<AgentProfile, RegistrationError>;
+    /// Creates an Assignment with immutable profile provenance.
+    fn create_agent_assignment(
+        &self,
+        assignment: &NewAgentAssignment,
+    ) -> Result<AgentAssignment, RegistrationError>;
+    /// Returns retained Assignment history for a Record, newest attempt first.
+    fn list_agent_assignments(
+        &self,
+        record_id: u64,
+    ) -> Result<Vec<AgentAssignment>, RegistrationError>;
+    /// Retains a provider-neutral external resource fact.
+    fn add_agent_assignment_resource(
+        &self,
+        resource: &NewAgentAssignmentResource,
+    ) -> Result<AgentAssignmentResource, RegistrationError>;
+    /// Returns retained resource history for an Assignment.
+    fn list_agent_assignment_resources(
+        &self,
+        assignment_id: &str,
+    ) -> Result<Vec<AgentAssignmentResource>, RegistrationError>;
+    /// Sets or clears the daemon-wide absolute Herdr Unix socket path.
+    fn set_herdr_socket_path(&self, path: Option<&Path>) -> Result<(), RegistrationError>;
+    /// Returns the configured daemon-wide Herdr Unix socket path.
+    fn herdr_socket_path(&self) -> Result<Option<PathBuf>, RegistrationError>;
+    /// Sets or clears a Project Task concurrency override.
+    fn set_project_task_concurrency_limit(
+        &self,
+        project_slug: &str,
+        limit: Option<u16>,
+    ) -> Result<(), RegistrationError>;
+    /// Returns the configured Project limit or the V1 default of one.
+    fn effective_project_task_concurrency_limit(
+        &self,
+        project_slug: &str,
+    ) -> Result<u16, RegistrationError>;
+}
+
 /// The application boundary for operations shared by all transports.
 pub struct Application {
     records: Box<dyn RecordRepository>,

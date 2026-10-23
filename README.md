@@ -142,12 +142,20 @@ cargo run -p forge-cli --bin forge -- task under-spec \
 ```
 
 Human-readable open, show, and list output identifies each Record's type;
-`--json` returns the type supplied by the daemon.
+`--json` returns the type supplied by the daemon. Record Type and Project Scope
+membership are selected at opening and cannot change later.
 
-Use `child-of` relationships to make a generic Record hierarchy. A child has at most one
-parent; parent and child must have identical Project Scopes. Hierarchies may be
-nested and cannot contain cycles. A parent cannot be completed while any child
-is not done, although relationships can be corrected after completion.
+Typed hierarchy is also fixed at opening: a Spec may parent Tasks, and a Task
+created with `task under-spec` receives its Spec parent and exact Project Scope
+atomically. A Task cannot parent another Record. Typed Records cannot be added
+to or removed from a relationship after opening; use the dedicated commands
+rather than `record relate` or `record unrelate`.
+
+Use `child-of` relationships to make a generic Record hierarchy. Only Generic
+Records can be related this way. A child has at most one parent; parent and
+child must have identical Project Scopes. Hierarchies may be nested and cannot
+contain cycles. A parent cannot be completed while any child is not done,
+although generic relationships can be corrected after completion.
 
 ```sh
 cargo run -p forge-cli --bin forge -- record relate 2 --kind child-of --to 1
@@ -164,6 +172,17 @@ cargo run -p forge-cli --bin forge -- record list --project alpha --status open 
 
 Record commands support `--json`; use `--server-url` or `FORGE_SERVER_URL` to
 target a non-default daemon as described above.
+
+## Typed Record release notes
+
+Existing SQLite databases migrate automatically when opened by this release:
+pre-existing Records are classified as `generic`. The migration preserves their
+IDs, bodies, Project Scopes, statuses, completion resolutions, relationships,
+comments, and update logs. The release verification gate passed `cargo fmt
+--check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test
+--workspace`, and `git diff --check`, plus an isolated legacy-database smoke
+test covering migration, typed creation, filtering, and invalid hierarchy
+rejection.
 
 ## Browser and RPC access
 
