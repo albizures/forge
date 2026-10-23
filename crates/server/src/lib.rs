@@ -3,6 +3,8 @@
 //! The daemon listens on loopback by default. Binding it to a remote address
 //! exposes an unauthenticated service, so use that only on a trusted private network.
 
+mod herdr;
+
 use std::{
     env, fs, io,
     io::Write,
@@ -25,9 +27,8 @@ use axum::{
     routing::{get, post},
 };
 use forge_app::{
-    AgentAdapterError, AgentDispatchAdapter, AgentDispatchAdapterFactory, AgentProfile,
-    Application, ApplicationStatus, Project, RecordStatus, RecordType, RegistrationError,
-    RepositoryInspector,
+    AgentDispatchAdapter, AgentDispatchAdapterFactory, AgentProfile, Application,
+    ApplicationStatus, Project, RecordStatus, RecordType, RegistrationError, RepositoryInspector,
 };
 use forge_rpc::{
     AddRecordCommentRequest, AgentDispatchApiServer, AgentDispatchProfileResponse,
@@ -41,6 +42,7 @@ use forge_rpc::{
     SystemApiServer, SystemStatusResponse,
 };
 use forge_store::SqliteProjectRepository;
+use herdr::HerdrAdapterFactory;
 use jsonrpsee::{
     core::{RpcResult, async_trait},
     server::{Server, stop_channel},
@@ -362,17 +364,18 @@ pub fn write_assignment_capability_secret(
         })
 }
 
-/// Default composition until a configured provider factory is installed.
-struct UnavailableAgentDispatchAdapterFactory;
+struct ServerAgentDispatchAdapterFactory {
+    herdr: HerdrAdapterFactory,
+}
 
-impl AgentDispatchAdapterFactory for UnavailableAgentDispatchAdapterFactory {
+impl AgentDispatchAdapterFactory for ServerAgentDispatchAdapterFactory {
     fn adapter_for(
         &self,
-        _: &AgentProfile,
-    ) -> Result<Box<dyn AgentDispatchAdapter>, AgentAdapterError> {
-        Err(AgentAdapterError::Endpoint(
-            "provider adapter unavailable".into(),
-        ))
+        profile: &AgentProfile,
+    ) -> Result<Box<dyn AgentDispatchAdapter>, forge_app::AgentAdapterError> {
+        self.herdr
+            .adapter_for(profile)
+            .map(|adapter| Box::new(adapter) as Box<dyn AgentDispatchAdapter>)
     }
 }
 
@@ -384,7 +387,9 @@ fn application_from_config(config: &DaemonConfig) -> Result<Application, String>
     Ok(Application::with_agent_dispatch(
         Box::new(records),
         Box::new(dispatch),
-        Box::new(UnavailableAgentDispatchAdapterFactory),
+        Box::new(ServerAgentDispatchAdapterFactory {
+            herdr: HerdrAdapterFactory::from_configuration_store(config.store_path.clone()),
+        }),
         Box::new(GitInspector),
     ))
 }

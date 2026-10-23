@@ -1126,7 +1126,7 @@ impl Application {
             .transpose()?;
         Ok(AgentDispatchStatus {
             endpoint_diagnostic: if socket.is_some() {
-                "configured; provider adapter unavailable".into()
+                "configured; Herdr adapter will probe on reconciliation".into()
             } else {
                 "unset".into()
             },
