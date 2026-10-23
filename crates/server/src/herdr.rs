@@ -107,6 +107,12 @@ impl HerdrAdapter {
                     "not_found" | "not-found" => {
                         AgentAdapterError::NotFound(format!("Herdr {method}: {code}"))
                     }
+                    "conflict" | "already_exists" | "already-exists" => {
+                        AgentAdapterError::Conflict(format!("Herdr {method}: {code}"))
+                    }
+                    "unavailable" | "timeout" | "temporarily_unavailable" => {
+                        AgentAdapterError::Transient(format!("Herdr {method}: {code}"))
+                    }
                     "agentblocked" | "agent_blocked" => {
                         AgentAdapterError::InvalidRequest("agentblocked".into())
                     }
@@ -255,12 +261,12 @@ impl HerdrAdapter {
             })
     }
 
-    fn agent_observation(
-        &self,
-        name: &str,
+    /// Parses an authoritative AgentInfo response. Readiness and sequence fields are
+    /// deliberately not lifecycle inputs: only the protocol status is normalized.
+    fn observation_from_agent(
+        agent: &Value,
         tuple: (&str, &str, &str),
     ) -> Result<AgentObservation, AgentAdapterError> {
-        let agent = self.request("agent.get", json!({"target": name}))?;
         if agent.get("workspace_id").and_then(Value::as_str) != Some(tuple.0)
             || agent.get("tab_id").and_then(Value::as_str) != Some(tuple.1)
             || agent.get("pane_id").and_then(Value::as_str) != Some(tuple.2)
@@ -279,6 +285,49 @@ impl HerdrAdapter {
                 "Herdr agent response has an invalid status".into(),
             )),
         }
+    }
+
+    fn agent_observation(
+        &self,
+        name: &str,
+        tuple: (&str, &str, &str),
+    ) -> Result<AgentObservation, AgentAdapterError> {
+        match self.request("agent.get", json!({"target": name})) {
+            Ok(agent) => Self::observation_from_agent(&agent, tuple),
+            Err(AgentAdapterError::NotFound(_)) => self.agent_list_fallback(name, tuple),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// `agent.get` is authoritative. A single list after a not-found response distinguishes
+    /// an absent agent from a renamed/replaced or misplaced one without adopting anything.
+    fn agent_list_fallback(
+        &self,
+        name: &str,
+        tuple: (&str, &str, &str),
+    ) -> Result<AgentObservation, AgentAdapterError> {
+        let result = self.request("agent.list", json!({}))?;
+        let agents = result
+            .get("agents")
+            .and_then(Value::as_array)
+            .ok_or_else(|| AgentAdapterError::Endpoint("Herdr agent.list has no agents".into()))?;
+        let same_name = agents.iter().find(|agent| {
+            agent.get("name").and_then(Value::as_str) == Some(name)
+                || agent.get("agent_name").and_then(Value::as_str) == Some(name)
+        });
+        if let Some(agent) = same_name {
+            return Self::observation_from_agent(agent, tuple);
+        }
+        if agents.iter().any(|agent| {
+            agent.get("workspace_id").and_then(Value::as_str) == Some(tuple.0)
+                && agent.get("tab_id").and_then(Value::as_str) == Some(tuple.1)
+                && agent.get("pane_id").and_then(Value::as_str) == Some(tuple.2)
+        }) {
+            return Err(AgentAdapterError::Conflict(
+                "Herdr persisted pane is occupied by a different agent".into(),
+            ));
+        }
+        Ok(AgentObservation::Absent)
     }
 }
 
@@ -440,5 +489,73 @@ mod tests {
         adapter.probe().unwrap();
         server.join().unwrap();
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn observation_uses_one_list_fallback_after_get_not_found() {
+        use std::{
+            io::{BufRead, BufReader, Write},
+            os::unix::net::UnixListener,
+            thread,
+        };
+
+        let path = std::env::temp_dir().join(format!(
+            "forge-herdr-observe-{}-{}.sock",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = thread::spawn(move || {
+            for (method, response) in [
+                (
+                    "agent.get",
+                    serde_json::json!({"error":{"code":"not_found"}}),
+                ),
+                (
+                    "agent.list",
+                    serde_json::json!({"result":{"agents":[{
+                        "name":"forge-dispatch-a", "workspace_id":"workspace",
+                        "tab_id":"tab", "pane_id":"pane", "agent_status":"working",
+                        "interactive_ready":false, "state_change_seq":7
+                    }]}}),
+                ),
+            ] {
+                let mut stream = listener.accept().unwrap().0;
+                let mut line = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(request["method"], method);
+                serde_json::to_writer(&mut stream, &response).unwrap();
+                stream.write_all(b"\n").unwrap();
+            }
+        });
+        let adapter = super::HerdrAdapter {
+            socket_path: path.clone(),
+        };
+        assert_eq!(
+            adapter
+                .agent_observation("forge-dispatch-a", ("workspace", "tab", "pane"))
+                .unwrap(),
+            forge_app::AgentObservation::Working
+        );
+        server.join().unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn observation_rejects_a_mismatched_persisted_tuple() {
+        let agent = serde_json::json!({
+            "workspace_id":"other", "tab_id":"tab", "pane_id":"pane", "agent_status":"done"
+        });
+        assert!(matches!(
+            super::HerdrAdapter::observation_from_agent(&agent, ("workspace", "tab", "pane")),
+            Err(forge_app::AgentAdapterError::Conflict(_))
+        ));
     }
 }
