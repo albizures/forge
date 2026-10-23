@@ -8,10 +8,12 @@ use std::{
 
 use forge_app::{
     AgentAssignment, AgentAssignmentClosureReason, AgentAssignmentResource, AgentAssignmentState,
-    AgentDispatchRepository, AgentProfile, NewAgentAssignment, NewAgentAssignmentResource,
-    NewRecord, NewTypedRecord, Project, ProjectRepository, Record, RecordComment, RecordCommentId,
-    RecordListFilter, RecordRelationship, RecordRelationshipKind, RecordRepository, RecordStatus,
-    RecordType, RecordUpdate, RecordUpdateId, RecordUpdateKind, RegistrationError,
+    AgentDispatchRepository, AgentProfile, AssignmentAuthorizationAudit,
+    AssignmentAuthorizationOperation, AssignmentAuthorizationOutcome, NewAgentAssignment,
+    NewAgentAssignmentResource, NewRecord, NewTypedRecord, Project, ProjectRepository, Record,
+    RecordComment, RecordCommentId, RecordListFilter, RecordRelationship, RecordRelationshipKind,
+    RecordRepository, RecordStatus, RecordType, RecordUpdate, RecordUpdateId, RecordUpdateKind,
+    RegistrationError,
 };
 use rusqlite::{Connection, ErrorCode, OptionalExtension, params};
 
@@ -122,6 +124,17 @@ impl SqliteProjectRepository {
                 created_at_millis INTEGER NOT NULL,
                 retired_at_millis INTEGER,
                 PRIMARY KEY (assignment_id, resource_kind, resource_id)
+            );
+            CREATE TABLE IF NOT EXISTS assignment_authorization_audits (
+                id INTEGER PRIMARY KEY NOT NULL,
+                assignment_id TEXT NOT NULL REFERENCES agent_assignments(id),
+                capability_id TEXT NOT NULL,
+                created_at_millis INTEGER NOT NULL,
+                operation TEXT NOT NULL CHECK (operation IN ('read-context', 'add-comment', 'complete-task')),
+                target_record_id INTEGER NOT NULL REFERENCES records(id),
+                outcome TEXT NOT NULL CHECK (outcome IN ('allowed', 'denied')),
+                reason TEXT NOT NULL,
+                correlation_id TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS agent_dispatch_configuration (
                 singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -888,6 +901,15 @@ impl AgentDispatchRepository for SqliteProjectRepository {
         })
     }
 
+    fn agent_assignment(&self, assignment_id: &str) -> Result<AgentAssignment, RegistrationError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        connection.query_row("SELECT id, record_id, project_slug, profile_record_type, profile_revision, attempt_number, claimed_at_millis, state, closed_at_millis, closure_reason, state_changed_at_millis, next_retry_at_millis, retry_count FROM agent_assignments WHERE id = ?1", [assignment_id], |row| agent_assignment_from_row(row, &connection))
+            .map_err(|error| match error { rusqlite::Error::QueryReturnedNoRows => RegistrationError::new("assignment-not-found", "Agent Assignment does not exist"), _ => storage_error(error) })
+    }
+
     fn list_agent_assignments(
         &self,
         record_id: u64,
@@ -1156,6 +1178,48 @@ impl AgentDispatchRepository for SqliteProjectRepository {
             .lock()
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
         connection.prepare("SELECT assignment_id, resource_kind, resource_id, created_at_millis, retired_at_millis FROM agent_assignment_resources WHERE assignment_id = ?1 ORDER BY created_at_millis, resource_kind, resource_id").map_err(storage_error)?.query_map([assignment_id], |row| Ok(AgentAssignmentResource { assignment_id: row.get(0)?, resource_kind: row.get(1)?, resource_id: row.get(2)?, created_at_millis: row.get::<_, i64>(3)?.cast_unsigned(), retired_at_millis: row.get::<_, Option<i64>>(4)?.map(i64::cast_unsigned) })).map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)
+    }
+
+    fn add_assignment_authorization_audit(
+        &self,
+        audit: &AssignmentAuthorizationAudit,
+    ) -> Result<(), RegistrationError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        let created_at_millis = if audit.created_at_millis == 0 {
+            now_millis()?
+        } else {
+            audit.created_at_millis.cast_signed()
+        };
+        let operation = match audit.operation {
+            AssignmentAuthorizationOperation::ReadContext => "read-context",
+            AssignmentAuthorizationOperation::AddComment => "add-comment",
+            AssignmentAuthorizationOperation::CompleteTask => "complete-task",
+        };
+        let outcome = match audit.outcome {
+            AssignmentAuthorizationOutcome::Allowed => "allowed",
+            AssignmentAuthorizationOutcome::Denied => "denied",
+        };
+        connection.execute("INSERT INTO assignment_authorization_audits (assignment_id, capability_id, created_at_millis, operation, target_record_id, outcome, reason, correlation_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)", params![audit.assignment_id, audit.capability_id, created_at_millis, operation, audit.target_record_id.cast_signed(), outcome, audit.reason, audit.correlation_id]).map_err(storage_error)?;
+        Ok(())
+    }
+
+    fn list_assignment_authorization_audits(
+        &self,
+        assignment_id: &str,
+    ) -> Result<Vec<AssignmentAuthorizationAudit>, RegistrationError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        connection.prepare("SELECT assignment_id, capability_id, created_at_millis, operation, target_record_id, outcome, reason, correlation_id FROM assignment_authorization_audits WHERE assignment_id = ?1 ORDER BY id").map_err(storage_error)?
+            .query_map([assignment_id], |row| {
+                let operation = match row.get::<_, String>(3)?.as_str() { "read-context" => AssignmentAuthorizationOperation::ReadContext, "add-comment" => AssignmentAuthorizationOperation::AddComment, "complete-task" => AssignmentAuthorizationOperation::CompleteTask, _ => return Err(rusqlite::Error::InvalidQuery) };
+                let outcome = match row.get::<_, String>(5)?.as_str() { "allowed" => AssignmentAuthorizationOutcome::Allowed, "denied" => AssignmentAuthorizationOutcome::Denied, _ => return Err(rusqlite::Error::InvalidQuery) };
+                Ok(AssignmentAuthorizationAudit { assignment_id: row.get(0)?, capability_id: row.get(1)?, created_at_millis: row.get::<_, i64>(2)?.cast_unsigned(), operation, target_record_id: row.get::<_, i64>(4)?.cast_unsigned(), outcome, reason: row.get(6)?, correlation_id: row.get(7)? })
+            }).map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)
     }
 
     fn set_herdr_socket_path(&self, path: Option<&Path>) -> Result<(), RegistrationError> {
@@ -1632,7 +1696,8 @@ mod tests {
     use forge_app::{
         AgentDispatchRepository, NewAgentAssignment, NewAgentAssignmentResource, NewRecord,
         NewTypedRecord, Project, ProjectRepository, RecordListFilter, RecordRepository,
-        RecordStatus, RecordType, RecordUpdateKind,
+        RecordStatus, RecordType, RecordUpdateKind, assignment_add_comment,
+        assignment_complete_task, assignment_context,
     };
     use std::{
         path::{Path, PathBuf},
@@ -2339,5 +2404,73 @@ mod tests {
             .expect("a closed attempt permits a replacement");
         assert_eq!(retry.record_id, first.id);
         assert_eq!(retry.attempt_number, 2);
+    }
+
+    #[test]
+    fn capability_operations_are_bounded_and_audited_without_secrets_or_comment_bodies() {
+        let store = SqliteProjectRepository::in_memory().unwrap();
+        store.register(&project("alpha", "/repos/alpha")).unwrap();
+        let spec = store
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Spec,
+                body: "spec".into(),
+                project_slugs: vec!["alpha".into()],
+            })
+            .unwrap();
+        let task = store.open_task_under_spec("task", spec.id).unwrap();
+        let sibling = store.open_task_under_spec("sibling", spec.id).unwrap();
+        store.start_record(task.id).unwrap();
+        store
+            .create_agent_assignment(&NewAgentAssignment {
+                id: "attempt".into(),
+                record_id: task.id,
+                project_slug: "alpha".into(),
+                profile_revision: 1,
+            })
+            .unwrap();
+
+        let context = assignment_context(&store, "attempt", "cap-1", "read-1").unwrap();
+        assert_eq!(context.task.id, task.id);
+        assert_eq!(
+            context.directly_related_records,
+            vec![store.show_record(spec.id).unwrap()]
+        );
+        assert_eq!(
+            assignment_add_comment(
+                &store,
+                "attempt",
+                "cap-1",
+                "comment-1",
+                sibling.id,
+                "hidden"
+            )
+            .unwrap_err()
+            .code,
+            "assignment-capability-denied"
+        );
+        assignment_add_comment(&store, "attempt", "cap-1", "comment-2", task.id, "finished")
+            .unwrap();
+        assignment_complete_task(
+            &store,
+            "attempt",
+            "cap-1",
+            "done-1",
+            task.id,
+            Some("complete"),
+        )
+        .unwrap();
+        let audit = store
+            .list_assignment_authorization_audits("attempt")
+            .unwrap();
+        assert_eq!(audit.len(), 4);
+        assert!(
+            audit
+                .iter()
+                .all(|entry| entry.capability_id == "cap-1" && !entry.reason.contains("hidden"))
+        );
+        assert_eq!(
+            audit[1].outcome,
+            forge_app::AssignmentAuthorizationOutcome::Denied
+        );
     }
 }

@@ -627,6 +627,42 @@ pub struct NewAgentAssignmentResource {
     pub resource_id: String,
 }
 
+/// An immutable, redacted authorization decision for an Assignment Capability.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssignmentAuthorizationAudit {
+    pub assignment_id: String,
+    pub capability_id: String,
+    pub created_at_millis: u64,
+    pub operation: AssignmentAuthorizationOperation,
+    pub target_record_id: u64,
+    pub outcome: AssignmentAuthorizationOutcome,
+    pub reason: String,
+    pub correlation_id: String,
+}
+
+/// The bounded operation attempted with an Assignment Capability.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AssignmentAuthorizationOperation {
+    ReadContext,
+    AddComment,
+    CompleteTask,
+}
+
+/// The recorded decision; neither capability material nor Comment content is retained.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AssignmentAuthorizationOutcome {
+    Allowed,
+    Denied,
+}
+
+/// The records visible through a valid Assignment Capability.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssignmentContext {
+    pub assignment_id: String,
+    pub task: Record,
+    pub directly_related_records: Vec<Record>,
+}
+
 /// Durable persistence boundary for provider-neutral dispatch foundations.
 #[allow(clippy::missing_errors_doc)]
 pub trait AgentDispatchRepository: RecordRepository {
@@ -641,6 +677,8 @@ pub trait AgentDispatchRepository: RecordRepository {
         &self,
         assignment: &NewAgentAssignment,
     ) -> Result<AgentAssignment, RegistrationError>;
+    /// Returns one Assignment by opaque identifier.
+    fn agent_assignment(&self, assignment_id: &str) -> Result<AgentAssignment, RegistrationError>;
     /// Returns retained Assignment history for a Record, newest attempt first.
     fn list_agent_assignments(
         &self,
@@ -715,6 +753,143 @@ pub trait AgentDispatchRepository: RecordRepository {
         &self,
         project_slug: &str,
     ) -> Result<u16, RegistrationError>;
+    /// Appends a redacted immutable authorization decision.
+    fn add_assignment_authorization_audit(
+        &self,
+        audit: &AssignmentAuthorizationAudit,
+    ) -> Result<(), RegistrationError>;
+    /// Lists immutable authorization decisions oldest first.
+    fn list_assignment_authorization_audits(
+        &self,
+        assignment_id: &str,
+    ) -> Result<Vec<AssignmentAuthorizationAudit>, RegistrationError>;
+}
+
+/// Authorizes a capability-authenticated context read and records its decision.
+#[allow(clippy::missing_errors_doc)]
+pub fn assignment_context<R: AgentDispatchRepository>(
+    repository: &R,
+    assignment_id: &str,
+    capability_id: &str,
+    correlation_id: &str,
+) -> Result<AssignmentContext, RegistrationError> {
+    let assignment = repository.agent_assignment(assignment_id)?;
+    let task = repository.show_record(assignment.record_id)?;
+    let related = task
+        .relationships
+        .iter()
+        .filter_map(|relationship| {
+            (relationship.child_id == task.id)
+                .then_some(relationship.parent_id)
+                .or_else(|| (relationship.parent_id == task.id).then_some(relationship.child_id))
+        })
+        .map(|id| repository.show_record(id))
+        .collect::<Result<Vec<_>, _>>()?;
+    authorize_assignment_operation(
+        repository,
+        &assignment,
+        capability_id,
+        correlation_id,
+        AssignmentAuthorizationOperation::ReadContext,
+        task.id,
+        assignment.closed_at_millis.is_none(),
+    )?;
+    Ok(AssignmentContext {
+        assignment_id: assignment.id,
+        task,
+        directly_related_records: related,
+    })
+}
+
+/// Authorizes a capability-authenticated Comment on its bound Task and records its decision.
+#[allow(clippy::missing_errors_doc)]
+pub fn assignment_add_comment<R: AgentDispatchRepository>(
+    repository: &R,
+    assignment_id: &str,
+    capability_id: &str,
+    correlation_id: &str,
+    task_id: u64,
+    body: &str,
+) -> Result<RecordComment, RegistrationError> {
+    let assignment = repository.agent_assignment(assignment_id)?;
+    let allowed = assignment.closed_at_millis.is_none() && assignment.record_id == task_id;
+    authorize_assignment_operation(
+        repository,
+        &assignment,
+        capability_id,
+        correlation_id,
+        AssignmentAuthorizationOperation::AddComment,
+        task_id,
+        allowed,
+    )?;
+    if body.trim().is_empty() {
+        return Err(RegistrationError::new(
+            "invalid-comment",
+            "comment must not be blank",
+        ));
+    }
+    repository.add_record_comment(task_id, body, None)
+}
+
+/// Authorizes capability-authenticated completion of its bound Task and records its decision.
+#[allow(clippy::missing_errors_doc)]
+pub fn assignment_complete_task<R: AgentDispatchRepository>(
+    repository: &R,
+    assignment_id: &str,
+    capability_id: &str,
+    correlation_id: &str,
+    task_id: u64,
+    resolution: Option<&str>,
+) -> Result<Record, RegistrationError> {
+    let assignment = repository.agent_assignment(assignment_id)?;
+    let allowed = assignment.closed_at_millis.is_none() && assignment.record_id == task_id;
+    authorize_assignment_operation(
+        repository,
+        &assignment,
+        capability_id,
+        correlation_id,
+        AssignmentAuthorizationOperation::CompleteTask,
+        task_id,
+        allowed,
+    )?;
+    repository.done_record(task_id, resolution)
+}
+
+fn authorize_assignment_operation<R: AgentDispatchRepository>(
+    repository: &R,
+    assignment: &AgentAssignment,
+    capability_id: &str,
+    correlation_id: &str,
+    operation: AssignmentAuthorizationOperation,
+    target_record_id: u64,
+    allowed: bool,
+) -> Result<(), RegistrationError> {
+    repository.add_assignment_authorization_audit(&AssignmentAuthorizationAudit {
+        assignment_id: assignment.id.clone(),
+        capability_id: capability_id.into(),
+        created_at_millis: 0,
+        operation,
+        target_record_id,
+        outcome: if allowed {
+            AssignmentAuthorizationOutcome::Allowed
+        } else {
+            AssignmentAuthorizationOutcome::Denied
+        },
+        reason: if allowed {
+            "bound-open-assignment".into()
+        } else {
+            "outside-bound-open-assignment".into()
+        },
+        correlation_id: correlation_id.into(),
+    })?;
+    if allowed {
+        Ok(())
+    } else {
+        Err(RegistrationError::new(
+            "assignment-capability-denied",
+            "capability is not authorized for this Assignment operation",
+        ))
+    }
 }
 
 /// The application boundary for operations shared by all transports.

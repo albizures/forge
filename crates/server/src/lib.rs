@@ -5,6 +5,7 @@
 
 use std::{
     env, fs, io,
+    io::Write,
     net::SocketAddr,
     path::{Path, PathBuf},
     process::Command,
@@ -298,6 +299,64 @@ fn resolve_git_path(root: &Path, value: &str) -> PathBuf {
         root.join(path)
     })
     .unwrap_or_else(|_| root.join(path))
+}
+
+/// Writes an Assignment Capability secret outside its Agent Workspace with owner-only access.
+/// The capability is intentionally never persisted by Forge.
+///
+/// # Errors
+///
+/// Returns a validation or filesystem error without disclosing the secret.
+pub fn write_assignment_capability_secret(
+    path: &Path,
+    workspace: &Path,
+    secret: &str,
+) -> Result<(), RegistrationError> {
+    if !path.is_absolute() || path.starts_with(workspace) {
+        return Err(RegistrationError::new(
+            "invalid-capability-secret-path",
+            "capability secret file must be absolute and outside the Agent Workspace",
+        ));
+    }
+    let parent = path.parent().ok_or_else(|| {
+        RegistrationError::new(
+            "invalid-capability-secret-path",
+            "capability secret file must have a parent directory",
+        )
+    })?;
+    fs::create_dir_all(parent).map_err(|_| {
+        RegistrationError::new(
+            "capability-secret-write",
+            "could not create capability secret directory",
+        )
+    })?;
+    #[cfg(unix)]
+    let options = {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true).mode(0o600);
+        options
+    };
+    #[cfg(not(unix))]
+    let mut options = {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        options
+    };
+    let mut file = options.open(path).map_err(|_| {
+        RegistrationError::new(
+            "capability-secret-write",
+            "could not create capability secret file",
+        )
+    })?;
+    file.write_all(secret.as_bytes())
+        .and_then(|()| file.write_all(b"\n"))
+        .map_err(|_| {
+            RegistrationError::new(
+                "capability-secret-write",
+                "could not write capability secret file",
+            )
+        })
 }
 
 fn application_from_config(config: &DaemonConfig) -> Result<Application, String> {
@@ -851,7 +910,48 @@ mod tests {
     use jsonrpsee::http_client::HttpClientBuilder;
     use tower::ServiceExt;
 
-    use super::{DEFAULT_BIND_ADDR, Daemon, DaemonConfig, ManagedLaunchInputs, router, serve};
+    use super::{
+        DEFAULT_BIND_ADDR, Daemon, DaemonConfig, ManagedLaunchInputs, router, serve,
+        write_assignment_capability_secret,
+    };
+
+    #[test]
+    fn capability_secret_files_are_owner_restricted_and_outside_the_workspace() {
+        let root = std::env::temp_dir().join(format!(
+            "forge-capability-secret-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let workspace = root.join("workspace");
+        let secret_path = root.join("secrets/capability");
+        std::fs::create_dir_all(&workspace).unwrap();
+        write_assignment_capability_secret(&secret_path, &workspace, "secret-value").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&secret_path).unwrap(),
+            "secret-value\n"
+        );
+        assert_eq!(
+            write_assignment_capability_secret(&workspace.join("capability"), &workspace, "other")
+                .unwrap_err()
+                .code,
+            "invalid-capability-secret-path"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&secret_path)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     struct TestInspector;
 
