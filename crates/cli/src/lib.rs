@@ -1,12 +1,14 @@
 //! Command-line adapter that calls the running Forge daemon.
 
 use forge_rpc::{
-    AddRecordCommentRequest, DeleteRecordCommentRequest, DoneRecordRequest, EditRecordRequest,
-    ListRecordCommentsResponse, ListRecordUpdatesResponse, ListRecordsRequest, ListRecordsResponse,
-    OpenRecordRequest, OpenSpecRequest, OpenTaskRequest, OpenTaskUnderSpecRequest,
-    ProjectApiClient, ProjectHereRequest, ProjectHereResponse, ProjectScopeRequest,
-    RecordApiClient, RecordIdRequest, RecordResponse, RegisterProjectRequest,
-    RegisterProjectResponse, RelateRecordRequest, SystemApiClient, SystemStatusResponse,
+    AddRecordCommentRequest, AgentDispatchApiClient, AgentDispatchProfileResponse,
+    AgentDispatchReconcileResponse, AgentDispatchStatusRequest, AgentDispatchStatusResponse,
+    DeleteRecordCommentRequest, DoneRecordRequest, EditRecordRequest, ListRecordCommentsResponse,
+    ListRecordUpdatesResponse, ListRecordsRequest, ListRecordsResponse, OpenRecordRequest,
+    OpenSpecRequest, OpenTaskRequest, OpenTaskUnderSpecRequest, ProjectApiClient,
+    ProjectHereRequest, ProjectHereResponse, ProjectScopeRequest, RecordApiClient, RecordIdRequest,
+    RecordResponse, RegisterProjectRequest, RegisterProjectResponse, RelateRecordRequest,
+    SystemApiClient, SystemStatusResponse,
 };
 use jsonrpsee::http_client::HttpClientBuilder;
 use sha2::{Digest, Sha256};
@@ -98,6 +100,112 @@ pub async fn request_register_project(
         .await
         .map_err(|error| format!("could not register Project through Forge daemon: {error}"))
 }
+/// Requests the daemon-owned dispatch endpoint configuration.
+///
+/// # Errors
+///
+/// Returns endpoint or daemon validation failures.
+pub async fn request_agent_dispatch_endpoint(
+    url: &str,
+    socket_path: Option<String>,
+) -> Result<AgentDispatchStatusResponse, String> {
+    let client = client(url)?;
+    match socket_path {
+        Some(socket_path) => {
+            client
+                .endpoint_set(forge_rpc::SetAgentDispatchEndpointRequest {
+                    socket_path: Some(socket_path),
+                })
+                .await
+        }
+        None => client.endpoint_get().await,
+    }
+    .map_err(|error| format!("could not configure Agent Dispatch through Forge daemon: {error}"))
+}
+
+/// Requests the seeded Agent Dispatch Profile.
+///
+/// # Errors
+///
+/// Returns endpoint or daemon failures.
+pub async fn request_agent_dispatch_profile(
+    url: &str,
+) -> Result<AgentDispatchProfileResponse, String> {
+    client(url)?.profile().await.map_err(|error| {
+        format!("could not inspect Agent Dispatch profile through Forge daemon: {error}")
+    })
+}
+
+/// Configures a registered Project's dispatch capacity.
+///
+/// # Errors
+///
+/// Returns endpoint or daemon validation failures.
+pub async fn request_agent_dispatch_project(
+    url: &str,
+    project_slug: String,
+    limit: Option<u16>,
+) -> Result<AgentDispatchStatusResponse, String> {
+    client(url)?
+        .project_set(forge_rpc::SetAgentDispatchProjectRequest {
+            project_slug,
+            task_concurrency_limit: limit,
+        })
+        .await
+        .map_err(|error| {
+            format!("could not configure Agent Dispatch Project through Forge daemon: {error}")
+        })
+}
+
+/// Requests stable dispatch diagnostics.
+///
+/// # Errors
+///
+/// Returns endpoint or daemon failures.
+pub async fn request_agent_dispatch_status(
+    url: &str,
+    project_slug: Option<String>,
+) -> Result<AgentDispatchStatusResponse, String> {
+    client(url)?
+        .dispatch_status(AgentDispatchStatusRequest { project_slug })
+        .await
+        .map_err(|error| {
+            format!("could not inspect Agent Dispatch status through Forge daemon: {error}")
+        })
+}
+
+/// Requests one daemon-owned reconciliation pass.
+///
+/// # Errors
+///
+/// Returns endpoint or daemon failures.
+pub async fn request_agent_dispatch_reconcile(
+    url: &str,
+) -> Result<AgentDispatchReconcileResponse, String> {
+    client(url)?.reconcile().await.map_err(|error| {
+        format!("could not request Agent Dispatch reconciliation through Forge daemon: {error}")
+    })
+}
+
+#[must_use]
+pub fn render_agent_dispatch_status(status: &AgentDispatchStatusResponse) -> String {
+    let endpoint = status.herdr_socket_path.as_deref().unwrap_or("unset");
+    let capacity = status.project.as_ref().map_or(String::new(), |project| {
+        format!(
+            "\nProject `{}` capacity: {} ({})",
+            project.project_slug,
+            project.capacity,
+            project
+                .configured_capacity
+                .map_or("default".into(), |limit| format!("configured: {limit}"))
+        )
+    });
+    format!(
+        "Herdr socket: {endpoint}\nEndpoint: {}{capacity}",
+        status.endpoint_diagnostic
+    )
+}
+
 #[must_use]
 pub fn render_project_registered(project: &RegisterProjectResponse) -> String {
     format!(

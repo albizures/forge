@@ -1,6 +1,7 @@
 //! Shared JSON-RPC wire contract ownership boundary.
 
 use forge_app::{
+    AgentDispatchProjectStatus, AgentDispatchReconcileResult, AgentDispatchStatus, AgentProfile,
     ApplicationStatus, Project, Record, RecordComment, RecordRelationshipKind, RecordStatus,
     RecordUpdate, RecordUpdateKind, RegistrationError,
 };
@@ -22,6 +23,12 @@ pub const RECORD_UPDATES_METHOD: &str = "record.updates";
 pub const RECORD_COMMENT_METHOD: &str = "record.comment";
 pub const RECORD_COMMENTS_METHOD: &str = "record.comments";
 pub const RECORD_COMMENT_DELETE_METHOD: &str = "record.commentDelete";
+pub const AGENT_DISPATCH_ENDPOINT_GET_METHOD: &str = "agentDispatch.endpointGet";
+pub const AGENT_DISPATCH_ENDPOINT_SET_METHOD: &str = "agentDispatch.endpointSet";
+pub const AGENT_DISPATCH_PROFILE_METHOD: &str = "agentDispatch.profile";
+pub const AGENT_DISPATCH_PROJECT_SET_METHOD: &str = "agentDispatch.projectSet";
+pub const AGENT_DISPATCH_STATUS_METHOD: &str = "agentDispatch.status";
+pub const AGENT_DISPATCH_RECONCILE_METHOD: &str = "agentDispatch.reconcile";
 
 #[rpc(client, server, namespace = "system")]
 pub trait SystemApi {
@@ -36,6 +43,31 @@ pub trait ProjectApi {
     #[method(name = "here")]
     async fn here(&self, request: ProjectHereRequest) -> RpcResult<ProjectHereResponse>;
 }
+#[rpc(client, server, namespace = "agentDispatch")]
+pub trait AgentDispatchApi {
+    #[method(name = "endpointGet")]
+    async fn endpoint_get(&self) -> RpcResult<AgentDispatchStatusResponse>;
+    #[method(name = "endpointSet")]
+    async fn endpoint_set(
+        &self,
+        request: SetAgentDispatchEndpointRequest,
+    ) -> RpcResult<AgentDispatchStatusResponse>;
+    #[method(name = "profile")]
+    async fn profile(&self) -> RpcResult<AgentDispatchProfileResponse>;
+    #[method(name = "projectSet")]
+    async fn project_set(
+        &self,
+        request: SetAgentDispatchProjectRequest,
+    ) -> RpcResult<AgentDispatchStatusResponse>;
+    #[method(name = "status")]
+    async fn dispatch_status(
+        &self,
+        request: AgentDispatchStatusRequest,
+    ) -> RpcResult<AgentDispatchStatusResponse>;
+    #[method(name = "reconcile")]
+    async fn reconcile(&self) -> RpcResult<AgentDispatchReconcileResponse>;
+}
+
 #[rpc(client, server, namespace = "record")]
 pub trait RecordApi {
     #[method(name = "open")]
@@ -166,6 +198,86 @@ impl SystemStatusResponse {
             version: status.version.to_owned(),
             ready: status.ready,
             management,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SetAgentDispatchEndpointRequest {
+    pub socket_path: Option<String>,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SetAgentDispatchProjectRequest {
+    pub project_slug: String,
+    pub task_concurrency_limit: Option<u16>,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AgentDispatchStatusRequest {
+    pub project_slug: Option<String>,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AgentDispatchProjectStatusResponse {
+    pub project_slug: String,
+    pub capacity: u16,
+    pub configured_capacity: Option<u16>,
+}
+impl From<AgentDispatchProjectStatus> for AgentDispatchProjectStatusResponse {
+    fn from(value: AgentDispatchProjectStatus) -> Self {
+        Self {
+            project_slug: value.project_slug,
+            capacity: value.capacity,
+            configured_capacity: value.configured_capacity,
+        }
+    }
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AgentDispatchStatusResponse {
+    pub herdr_socket_path: Option<String>,
+    pub endpoint_diagnostic: String,
+    pub project: Option<AgentDispatchProjectStatusResponse>,
+}
+impl From<AgentDispatchStatus> for AgentDispatchStatusResponse {
+    fn from(value: AgentDispatchStatus) -> Self {
+        Self {
+            herdr_socket_path: value
+                .herdr_socket_path
+                .map(|path| path.to_string_lossy().into_owned()),
+            endpoint_diagnostic: value.endpoint_diagnostic,
+            project: value.project.map(Into::into),
+        }
+    }
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AgentDispatchProfileResponse {
+    pub record_type: String,
+    pub revision: u32,
+    pub provider: String,
+    pub agent_kind: String,
+    pub model: String,
+    pub prompt_template: String,
+}
+impl From<AgentProfile> for AgentDispatchProfileResponse {
+    fn from(value: AgentProfile) -> Self {
+        Self {
+            record_type: record_type_name(value.record_type),
+            revision: value.revision,
+            provider: value.provider,
+            agent_kind: value.agent_kind,
+            model: value.model,
+            prompt_template: value.prompt_template,
+        }
+    }
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AgentDispatchReconcileResponse {
+    pub acquired_lease: bool,
+    pub reconciled_assignments: usize,
+}
+impl From<AgentDispatchReconcileResult> for AgentDispatchReconcileResponse {
+    fn from(value: AgentDispatchReconcileResult) -> Self {
+        Self {
+            acquired_lease: value.acquired_lease,
+            reconciled_assignments: value.reconciled_assignments,
         }
     }
 }

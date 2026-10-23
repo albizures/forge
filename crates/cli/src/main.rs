@@ -1,13 +1,16 @@
 use clap::{Args, Parser, Subcommand};
 use forge_cli::{
-    render_human_status, render_json_status, render_project_here, render_project_registered,
-    render_record, render_record_comments, render_record_list, render_record_opened,
-    render_record_updates, request_add_record_comment, request_delete_record_comment,
-    request_done_record, request_edit_record, request_list_records, request_open_record,
-    request_open_spec, request_open_task, request_open_task_under_spec, request_project_here,
-    request_record_comments, request_record_updates, request_register_project,
-    request_relate_record, request_show_record, request_start_record, request_status,
-    request_unrelate_record, resolve_endpoint as resolve_managed_endpoint,
+    render_agent_dispatch_status, render_human_status, render_json_status, render_project_here,
+    render_project_registered, render_record, render_record_comments, render_record_list,
+    render_record_opened, render_record_updates, request_add_record_comment,
+    request_agent_dispatch_endpoint, request_agent_dispatch_profile,
+    request_agent_dispatch_project, request_agent_dispatch_reconcile,
+    request_agent_dispatch_status, request_delete_record_comment, request_done_record,
+    request_edit_record, request_list_records, request_open_record, request_open_spec,
+    request_open_task, request_open_task_under_spec, request_project_here, request_record_comments,
+    request_record_updates, request_register_project, request_relate_record, request_show_record,
+    request_start_record, request_status, request_unrelate_record,
+    resolve_endpoint as resolve_managed_endpoint,
 };
 use std::io::Read;
 
@@ -51,6 +54,11 @@ enum Command {
         #[command(subcommand)]
         command: TaskCommand,
     },
+    /// Configure and inspect daemon-owned Agent Dispatch.
+    AgentDispatch {
+        #[command(subcommand)]
+        command: AgentDispatchCommand,
+    },
 }
 #[derive(Debug, Subcommand)]
 enum AddCommand {
@@ -73,6 +81,53 @@ enum TaskCommand {
     /// Open a Task beneath a Spec, inheriting the Spec's Project Scope.
     UnderSpec(OpenTaskUnderSpecArgs),
 }
+#[derive(Debug, Subcommand)]
+enum AgentDispatchCommand {
+    Endpoint(AgentDispatchEndpointArgs),
+    Profile(AgentDispatchRequestArgs),
+    Project(AgentDispatchProjectArgs),
+    Status(AgentDispatchStatusArgs),
+    Reconcile(AgentDispatchRequestArgs),
+}
+#[derive(Args, Debug)]
+struct AgentDispatchEndpointArgs {
+    /// Set this absolute Unix socket path. Omit to inspect current configuration.
+    #[arg(long)]
+    socket_path: Option<String>,
+    #[arg(long, value_name = "URL")]
+    server_url: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Args, Debug)]
+struct AgentDispatchProjectArgs {
+    #[arg(long)]
+    project: String,
+    /// Set a limit from 1 through 1024; omit to clear the override.
+    #[arg(long)]
+    limit: Option<u16>,
+    #[arg(long, value_name = "URL")]
+    server_url: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Args, Debug)]
+struct AgentDispatchStatusArgs {
+    #[arg(long)]
+    project: Option<String>,
+    #[arg(long, value_name = "URL")]
+    server_url: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Args, Debug)]
+struct AgentDispatchRequestArgs {
+    #[arg(long, value_name = "URL")]
+    server_url: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
 #[derive(Debug, Subcommand)]
 enum RecordCommand {
     /// Open a Record with an explicit Project Scope. Use --no-projects for an empty scope.
@@ -318,9 +373,73 @@ async fn main() {
             TaskCommand::Open(args) => open_task(args).await,
             TaskCommand::UnderSpec(args) => open_task_under_spec(args).await,
         },
+        Command::AgentDispatch { command } => agent_dispatch(command).await,
     };
     std::process::exit(exit_code);
 }
+async fn agent_dispatch(command: AgentDispatchCommand) -> i32 {
+    let (result, json) = match command {
+        AgentDispatchCommand::Endpoint(args) => (
+            request_agent_dispatch_endpoint(
+                &resolve_endpoint(args.server_url.as_deref()).await,
+                args.socket_path,
+            )
+            .await
+            .map(|value| serde_json::to_value(value).unwrap()),
+            args.json,
+        ),
+        AgentDispatchCommand::Profile(args) => (
+            request_agent_dispatch_profile(&resolve_endpoint(args.server_url.as_deref()).await)
+                .await
+                .map(|value| serde_json::to_value(value).unwrap()),
+            args.json,
+        ),
+        AgentDispatchCommand::Project(args) => (
+            request_agent_dispatch_project(
+                &resolve_endpoint(args.server_url.as_deref()).await,
+                args.project,
+                args.limit,
+            )
+            .await
+            .map(|value| serde_json::to_value(value).unwrap()),
+            args.json,
+        ),
+        AgentDispatchCommand::Status(args) => (
+            request_agent_dispatch_status(
+                &resolve_endpoint(args.server_url.as_deref()).await,
+                args.project,
+            )
+            .await
+            .map(|value| serde_json::to_value(value).unwrap()),
+            args.json,
+        ),
+        AgentDispatchCommand::Reconcile(args) => (
+            request_agent_dispatch_reconcile(&resolve_endpoint(args.server_url.as_deref()).await)
+                .await
+                .map(|value| serde_json::to_value(value).unwrap()),
+            args.json,
+        ),
+    };
+    match result {
+        Ok(value) => {
+            if json {
+                println!("{value}");
+            } else if let Ok(status) =
+                serde_json::from_value::<forge_rpc::AgentDispatchStatusResponse>(value.clone())
+            {
+                println!("{}", render_agent_dispatch_status(&status));
+            } else {
+                println!("{value}");
+            }
+            0
+        }
+        Err(error) => {
+            eprintln!("forge agent-dispatch: {error}");
+            1
+        }
+    }
+}
+
 async fn resolve_endpoint(flag: Option<&str>) -> String {
     match resolve_managed_endpoint(flag).await {
         Ok(endpoint) => endpoint,

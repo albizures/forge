@@ -1317,6 +1317,38 @@ impl AgentDispatchRepository for SqliteProjectRepository {
         }
         connection.query_row("SELECT task_concurrency_limit FROM project_agent_dispatch_configuration WHERE project_slug = ?1", [project_slug], |row| row.get::<_, i64>(0).map(i64::cast_unsigned)).optional().map_err(storage_error).map(|limit| limit.unwrap_or(1).try_into().expect("database constraint bounds concurrency limit"))
     }
+
+    fn project_task_concurrency_limit(
+        &self,
+        project_slug: &str,
+    ) -> Result<Option<u16>, RegistrationError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        let exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM projects WHERE slug = ?1)",
+                [project_slug],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        if !exists {
+            return Err(RegistrationError::new(
+                "project-not-found",
+                format!("Project `{project_slug}` is not registered"),
+            ));
+        }
+        connection
+            .query_row(
+                "SELECT task_concurrency_limit FROM project_agent_dispatch_configuration WHERE project_slug = ?1",
+                [project_slug],
+                |row| row.get::<_, i64>(0).map(i64::cast_unsigned),
+            )
+            .optional()
+            .map_err(storage_error)
+            .map(|limit| limit.map(|value| value.try_into().expect("database constraint bounds concurrency limit")))
+    }
 }
 
 fn status_name(status: RecordStatus) -> &'static str {

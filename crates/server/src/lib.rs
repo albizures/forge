@@ -29,13 +29,15 @@ use forge_app::{
     RepositoryInspector,
 };
 use forge_rpc::{
-    AddRecordCommentRequest, DeleteRecordCommentRequest, DoneRecordRequest, EditRecordRequest,
-    ListRecordCommentsResponse, ListRecordUpdatesResponse, ListRecordsRequest, ListRecordsResponse,
-    ManagementStatus, OpenRecordRequest, OpenSpecRequest, OpenTaskRequest,
-    OpenTaskUnderSpecRequest, ProjectApiServer, ProjectHereRequest, ProjectHereResponse,
-    RecordApiServer, RecordIdRequest, RecordResponse, RegisterProjectRequest,
-    RegisterProjectResponse, RelateRecordRequest, RevisionIdentity, SystemApiServer,
-    SystemStatusResponse,
+    AddRecordCommentRequest, AgentDispatchApiServer, AgentDispatchProfileResponse,
+    AgentDispatchReconcileResponse, AgentDispatchStatusRequest, AgentDispatchStatusResponse,
+    DeleteRecordCommentRequest, DoneRecordRequest, EditRecordRequest, ListRecordCommentsResponse,
+    ListRecordUpdatesResponse, ListRecordsRequest, ListRecordsResponse, ManagementStatus,
+    OpenRecordRequest, OpenSpecRequest, OpenTaskRequest, OpenTaskUnderSpecRequest,
+    ProjectApiServer, ProjectHereRequest, ProjectHereResponse, RecordApiServer, RecordIdRequest,
+    RecordResponse, RegisterProjectRequest, RegisterProjectResponse, RelateRecordRequest,
+    RevisionIdentity, SetAgentDispatchEndpointRequest, SetAgentDispatchProjectRequest,
+    SystemApiServer, SystemStatusResponse,
 };
 use forge_store::SqliteProjectRepository;
 use jsonrpsee::{
@@ -360,8 +362,15 @@ pub fn write_assignment_capability_secret(
 }
 
 fn application_from_config(config: &DaemonConfig) -> Result<Application, String> {
-    let store = SqliteProjectRepository::open(&config.store_path).map_err(|error| error.message)?;
-    Ok(Application::new(Box::new(store), Box::new(GitInspector)))
+    let records =
+        SqliteProjectRepository::open(&config.store_path).map_err(|error| error.message)?;
+    let dispatch =
+        SqliteProjectRepository::open(&config.store_path).map_err(|error| error.message)?;
+    Ok(Application::with_agent_dispatch(
+        Box::new(records),
+        Box::new(dispatch),
+        Box::new(GitInspector),
+    ))
 }
 
 #[async_trait]
@@ -371,6 +380,79 @@ impl SystemApiServer for Daemon {
             &self.application.status(),
             self.management.clone(),
         ))
+    }
+}
+
+#[async_trait]
+impl AgentDispatchApiServer for Daemon {
+    async fn endpoint_get(&self) -> RpcResult<AgentDispatchStatusResponse> {
+        self.application
+            .agent_dispatch_status(None)
+            .map(Into::into)
+            .map_err(rpc_error)
+    }
+
+    async fn endpoint_set(
+        &self,
+        request: SetAgentDispatchEndpointRequest,
+    ) -> RpcResult<AgentDispatchStatusResponse> {
+        self.application
+            .set_herdr_socket_path(request.socket_path.as_deref().map(Path::new))
+            .and_then(|()| self.application.agent_dispatch_status(None))
+            .map(Into::into)
+            .map_err(rpc_error)
+    }
+
+    async fn profile(&self) -> RpcResult<AgentDispatchProfileResponse> {
+        self.application
+            .task_agent_profile()
+            .map(Into::into)
+            .map_err(rpc_error)
+    }
+
+    async fn project_set(
+        &self,
+        request: SetAgentDispatchProjectRequest,
+    ) -> RpcResult<AgentDispatchStatusResponse> {
+        self.application
+            .set_project_task_concurrency_limit(
+                &request.project_slug,
+                request.task_concurrency_limit,
+            )
+            .and_then(|()| {
+                self.application
+                    .agent_dispatch_status(Some(&request.project_slug))
+            })
+            .map(Into::into)
+            .map_err(rpc_error)
+    }
+
+    async fn dispatch_status(
+        &self,
+        request: AgentDispatchStatusRequest,
+    ) -> RpcResult<AgentDispatchStatusResponse> {
+        self.application
+            .agent_dispatch_status(request.project_slug.as_deref())
+            .map(Into::into)
+            .map_err(rpc_error)
+    }
+
+    async fn reconcile(&self) -> RpcResult<AgentDispatchReconcileResponse> {
+        let now_millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        let daemon_id = self
+            .management
+            .daemon_instance_id
+            .as_deref()
+            .unwrap_or("manual-daemon");
+        self.application
+            .reconcile_agent_dispatch(daemon_id, now_millis)
+            .map(Into::into)
+            .map_err(rpc_error)
     }
 }
 
@@ -571,6 +653,9 @@ pub fn router(daemon: Daemon) -> Router {
     let mut methods = SystemApiServer::into_rpc(daemon.clone());
     methods
         .merge(ProjectApiServer::into_rpc(daemon.clone()))
+        .expect("RPC method names must not overlap");
+    methods
+        .merge(AgentDispatchApiServer::into_rpc(daemon.clone()))
         .expect("RPC method names must not overlap");
     methods
         .merge(RecordApiServer::into_rpc(daemon))

@@ -366,6 +366,29 @@ pub trait AgentDispatchAdapter: Send + Sync {
     fn retire(&self, assignment: &AgentAssignment) -> Result<(), AgentAdapterError>;
 }
 
+/// Placeholder until the provider-specific Spec supplies a concrete adapter.
+struct UnavailableAgentDispatchAdapter;
+
+impl AgentDispatchAdapter for UnavailableAgentDispatchAdapter {
+    fn probe(&self) -> Result<(), AgentAdapterError> {
+        Err(AgentAdapterError::Endpoint(
+            "provider adapter unavailable".into(),
+        ))
+    }
+    fn provision(&self, _: &AgentAssignment) -> Result<(), AgentAdapterError> {
+        self.probe()
+    }
+    fn observe(&self, _: &AgentAssignment) -> Result<AgentObservation, AgentAdapterError> {
+        self.probe().and(Ok(AgentObservation::Unknown))
+    }
+    fn recover(&self, _: &AgentAssignment) -> Result<AgentObservation, AgentAdapterError> {
+        self.probe().and(Ok(AgentObservation::Unknown))
+    }
+    fn retire(&self, _: &AgentAssignment) -> Result<(), AgentAdapterError> {
+        self.probe()
+    }
+}
+
 /// The persisted result of reconciling one already-open assignment.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AssignmentReconciliation {
@@ -391,7 +414,10 @@ pub enum AdapterRetention {
 /// A stale observer is harmless: its compare-and-set fails after another reconciliation
 /// changes or closes the attempt. Provider terminal observations never complete the Task.
 #[allow(clippy::missing_errors_doc)]
-pub fn reconcile_agent_assignment<R: AgentDispatchRepository, A: AgentDispatchAdapter>(
+pub fn reconcile_agent_assignment<
+    R: AgentDispatchRepository + ?Sized,
+    A: AgentDispatchAdapter + ?Sized,
+>(
     repository: &R,
     adapter: &A,
     assignment: &AgentAssignment,
@@ -458,7 +484,7 @@ pub fn reconcile_agent_assignment<R: AgentDispatchRepository, A: AgentDispatchAd
     }
 }
 
-fn update_assignment_state<R: AgentDispatchRepository>(
+fn update_assignment_state<R: AgentDispatchRepository + ?Sized>(
     repository: &R,
     assignment: &AgentAssignment,
     next: AgentAssignmentState,
@@ -491,7 +517,10 @@ pub struct AgentDispatchScan {
 /// The caller supplies time so grace and retry behavior is deterministic in tests and durable
 /// across daemon restarts. Retry exhaustion leaves the Task in progress and records one Comment.
 #[allow(clippy::missing_errors_doc)]
-pub fn reconcile_agent_dispatch<R: AgentDispatchRepository, A: AgentDispatchAdapter>(
+pub fn reconcile_agent_dispatch<
+    R: AgentDispatchRepository + ?Sized,
+    A: AgentDispatchAdapter + ?Sized,
+>(
     repository: &R,
     adapter: &A,
     daemon_id: &str,
@@ -549,7 +578,7 @@ pub fn reconcile_agent_dispatch<R: AgentDispatchRepository, A: AgentDispatchAdap
     })
 }
 
-fn reconcile_recovery<R: AgentDispatchRepository, A: AgentDispatchAdapter>(
+fn reconcile_recovery<R: AgentDispatchRepository + ?Sized, A: AgentDispatchAdapter + ?Sized>(
     repository: &R,
     adapter: &A,
     assignment: &AgentAssignment,
@@ -753,6 +782,11 @@ pub trait AgentDispatchRepository: RecordRepository {
         &self,
         project_slug: &str,
     ) -> Result<u16, RegistrationError>;
+    /// Returns the explicit Project override, if one is configured.
+    fn project_task_concurrency_limit(
+        &self,
+        project_slug: &str,
+    ) -> Result<Option<u16>, RegistrationError>;
     /// Appends a redacted immutable authorization decision.
     fn add_assignment_authorization_audit(
         &self,
@@ -895,7 +929,31 @@ fn authorize_assignment_operation<R: AgentDispatchRepository>(
 /// The application boundary for operations shared by all transports.
 pub struct Application {
     records: Box<dyn RecordRepository>,
+    dispatch: Option<Box<dyn AgentDispatchRepository>>,
     inspector: Box<dyn RepositoryInspector>,
+}
+
+/// Stable operator-facing facts about one Project's dispatch capacity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentDispatchProjectStatus {
+    pub project_slug: String,
+    pub capacity: u16,
+    pub configured_capacity: Option<u16>,
+}
+
+/// Stable operator-facing facts about daemon dispatch configuration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentDispatchStatus {
+    pub herdr_socket_path: Option<PathBuf>,
+    pub endpoint_diagnostic: String,
+    pub project: Option<AgentDispatchProjectStatus>,
+}
+
+/// Result of requesting a single daemon-owned reconciliation pass.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentDispatchReconcileResult {
+    pub acquired_lease: bool,
+    pub reconciled_assignments: usize,
 }
 
 impl Application {
@@ -905,7 +963,122 @@ impl Application {
         records: Box<dyn RecordRepository>,
         inspector: Box<dyn RepositoryInspector>,
     ) -> Self {
-        Self { records, inspector }
+        Self {
+            records,
+            dispatch: None,
+            inspector,
+        }
+    }
+
+    /// Creates an application with the durable dispatch boundary enabled.
+    #[must_use]
+    pub fn with_agent_dispatch(
+        records: Box<dyn RecordRepository>,
+        dispatch: Box<dyn AgentDispatchRepository>,
+        inspector: Box<dyn RepositoryInspector>,
+    ) -> Self {
+        Self {
+            records,
+            dispatch: Some(dispatch),
+            inspector,
+        }
+    }
+
+    fn dispatch(&self) -> Result<&dyn AgentDispatchRepository, RegistrationError> {
+        self.dispatch.as_deref().ok_or_else(|| {
+            RegistrationError::new(
+                "agent-dispatch-unavailable",
+                "Agent Dispatch is not configured for this daemon",
+            )
+        })
+    }
+
+    /// Sets or clears the absolute Herdr endpoint socket path.
+    ///
+    /// # Errors
+    ///
+    /// Returns validation, configuration, or persistence failures.
+    pub fn set_herdr_socket_path(&self, path: Option<&Path>) -> Result<(), RegistrationError> {
+        self.dispatch()?.set_herdr_socket_path(path)
+    }
+
+    /// Returns the seeded immutable Task Agent Profile.
+    ///
+    /// # Errors
+    ///
+    /// Returns configuration or persistence failures.
+    pub fn task_agent_profile(&self) -> Result<AgentProfile, RegistrationError> {
+        self.dispatch()?.agent_profile(RecordType::Task, 1)
+    }
+
+    /// Sets or clears a registered Project's Task dispatch capacity override.
+    ///
+    /// # Errors
+    ///
+    /// Returns validation, configuration, or persistence failures.
+    pub fn set_project_task_concurrency_limit(
+        &self,
+        project_slug: &str,
+        limit: Option<u16>,
+    ) -> Result<(), RegistrationError> {
+        self.dispatch()?
+            .set_project_task_concurrency_limit(project_slug, limit)
+    }
+
+    /// Returns dispatch configuration and, optionally, one Project's capacity facts.
+    ///
+    /// # Errors
+    ///
+    /// Returns configuration, Project lookup, or persistence failures.
+    pub fn agent_dispatch_status(
+        &self,
+        project_slug: Option<&str>,
+    ) -> Result<AgentDispatchStatus, RegistrationError> {
+        let dispatch = self.dispatch()?;
+        let socket = dispatch.herdr_socket_path()?;
+        let project = project_slug
+            .map(|slug| {
+                Ok(AgentDispatchProjectStatus {
+                    project_slug: slug.into(),
+                    capacity: dispatch.effective_project_task_concurrency_limit(slug)?,
+                    configured_capacity: dispatch.project_task_concurrency_limit(slug)?,
+                })
+            })
+            .transpose()?;
+        Ok(AgentDispatchStatus {
+            endpoint_diagnostic: if socket.is_some() {
+                "configured; provider adapter unavailable".into()
+            } else {
+                "unset".into()
+            },
+            herdr_socket_path: socket,
+            project,
+        })
+    }
+
+    /// Requests one bounded reconciliation scan owned entirely by this daemon.
+    ///
+    /// # Errors
+    ///
+    /// Returns configuration or persistence failures.
+    pub fn reconcile_agent_dispatch(
+        &self,
+        daemon_id: &str,
+        now_millis: u64,
+    ) -> Result<AgentDispatchReconcileResult, RegistrationError> {
+        let scan = reconcile_agent_dispatch(
+            self.dispatch()?,
+            &UnavailableAgentDispatchAdapter,
+            daemon_id,
+            now_millis,
+            AgentDispatchReconciliationPolicy {
+                scan_lease_millis: 30_000,
+            },
+        )?;
+        Ok(AgentDispatchReconcileResult {
+            acquired_lease: scan.acquired_lease,
+            reconciled_assignments: scan.reconciled.len(),
+        })
     }
 
     /// Registers an eligible Git main Worktree as a Project.
