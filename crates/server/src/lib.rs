@@ -15,7 +15,10 @@ use std::{
     sync::Arc,
 };
 
-use tokio::io::AsyncReadExt;
+use tokio::{
+    io::AsyncReadExt,
+    sync::{mpsc, watch},
+};
 
 use askama::Template;
 use axum::{
@@ -42,7 +45,7 @@ use forge_rpc::{
     SystemApiServer, SystemStatusResponse,
 };
 use forge_store::SqliteProjectRepository;
-use herdr::HerdrAdapterFactory;
+use herdr::{HerdrAdapterFactory, observe_status_changes};
 use jsonrpsee::{
     core::{RpcResult, async_trait},
     server::{Server, stop_channel},
@@ -816,19 +819,49 @@ pub async fn serve(config: DaemonConfig) -> Result<(), std::io::Error> {
         .managed
         .as_ref()
         .map(|managed| managed.daemon_instance_id.clone());
+    let daemon = Daemon::with_daemon_instance_id(application, daemon_instance_id);
+    let (observer_shutdown, observer_shutdown_receiver) = watch::channel(false);
+    let (reconcile_wake, mut reconcile_wakes) = mpsc::channel(1);
+    let observer = tokio::spawn(observe_status_changes(
+        config.store_path.clone(),
+        reconcile_wake,
+        observer_shutdown_receiver.clone(),
+    ));
+    let reconciliation_daemon = daemon.clone();
+    let reconciliation_worker = tokio::spawn(async move {
+        let mut shutdown = observer_shutdown_receiver;
+        loop {
+            tokio::select! {
+                wake = reconcile_wakes.recv() => {
+                    if wake.is_none() { return; }
+                    let daemon = reconciliation_daemon.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        let now_millis = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis()
+                            .try_into()
+                            .unwrap_or(u64::MAX);
+                        daemon.application.reconcile_agent_dispatch("herdr-observer", now_millis)
+                    }).await;
+                }
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() { return; }
+                }
+            }
+        }
+    });
     let lifecycle_shutdown = match config.managed.as_ref() {
         Some(managed) => Some(bind_lifecycle_control(managed)?),
         None => None,
     };
-    axum::serve(
-        listener,
-        router(Daemon::with_daemon_instance_id(
-            application,
-            daemon_instance_id,
-        )),
-    )
-    .with_graceful_shutdown(wait_for_shutdown(lifecycle_shutdown))
-    .await
+    let result = axum::serve(listener, router(daemon))
+        .with_graceful_shutdown(wait_for_shutdown(lifecycle_shutdown))
+        .await;
+    let _ = observer_shutdown.send(true);
+    let _ = observer.await;
+    let _ = reconciliation_worker.await;
+    result
 }
 
 async fn wait_for_shutdown(lifecycle_shutdown: Option<LifecycleControl>) {

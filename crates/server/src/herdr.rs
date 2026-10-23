@@ -6,6 +6,12 @@ use std::{
     time::Duration,
 };
 
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader as AsyncBufReader},
+    sync::{mpsc, watch},
+    time::sleep,
+};
+
 use forge_app::{
     AgentAdapterError, AgentAssignmentResource, AgentDispatchAdapter, AgentDispatchContext,
     AgentDispatchRepository, AgentObservation, AgentProfile, NewAgentAssignmentResource,
@@ -62,6 +68,180 @@ impl HerdrAdapterFactory {
 /// A synchronous, one-request-per-connection Herdr protocol-22 client.
 pub struct HerdrAdapter {
     socket_path: PathBuf,
+}
+
+/// Runs the long-lived event side of Herdr observation. Events only enqueue a wake; the
+/// server-owned reconciliation worker performs the authoritative `agent.get` polling.
+pub(crate) async fn observe_status_changes(
+    store_path: PathBuf,
+    wake: mpsc::Sender<()>,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    loop {
+        if *shutdown.borrow() {
+            return;
+        }
+        let Some((socket_path, panes)) = owned_panes(&store_path) else {
+            if wait_or_shutdown(&mut shutdown, Duration::from_secs(1)).await {
+                return;
+            }
+            continue;
+        };
+        if panes.is_empty() {
+            if wait_or_shutdown(&mut shutdown, Duration::from_secs(1)).await {
+                return;
+            }
+            continue;
+        }
+        if observe_connection(&socket_path, &panes, &wake, &mut shutdown)
+            .await
+            .is_err()
+            && wait_or_shutdown(&mut shutdown, Duration::from_secs(1)).await
+        {
+            return;
+        }
+    }
+}
+
+async fn wait_or_shutdown(shutdown: &mut watch::Receiver<bool>, duration: Duration) -> bool {
+    tokio::select! {
+        () = sleep(duration) => false,
+        changed = shutdown.changed() => changed.is_err() || *shutdown.borrow(),
+    }
+}
+
+fn owned_panes(store_path: &std::path::Path) -> Option<(PathBuf, Vec<String>)> {
+    let repository = SqliteProjectRepository::open(store_path).ok()?;
+    let socket_path = repository.herdr_socket_path().ok()??;
+    let mut panes = Vec::new();
+    for assignment in repository.list_open_agent_assignments().ok()? {
+        for resource in repository
+            .list_agent_assignment_resources(&assignment.id)
+            .ok()?
+        {
+            if resource.resource_kind == "pane" && resource.retired_at_millis.is_none() {
+                panes.push(resource.resource_id);
+            }
+        }
+    }
+    panes.sort();
+    panes.dedup();
+    Some((socket_path, panes))
+}
+
+async fn observe_connection(
+    socket_path: &std::path::Path,
+    panes: &[String],
+    wake: &mpsc::Sender<()>,
+    shutdown: &mut watch::Receiver<bool>,
+) -> Result<(), ()> {
+    #[cfg(unix)]
+    {
+        let stream = tokio::net::UnixStream::connect(socket_path)
+            .await
+            .map_err(|_| ())?;
+        let mut stream = AsyncBufReader::new(stream);
+        let subscriptions: Vec<_> = panes
+            .iter()
+            .map(|pane_id| json!({"type":"pane.agent_status_changed", "pane_id": pane_id}))
+            .collect();
+        write_async_request(
+            stream.get_mut(),
+            "events.subscribe",
+            json!({"subscriptions": subscriptions}),
+        )
+        .await?;
+        let response = read_async_json(&mut stream).await?;
+        if response.get("error").is_some() {
+            return Err(());
+        }
+        // Herdr requires subscribe-before-snapshot. The snapshot is deliberately not used as
+        // durable state; it establishes the reconnect ordering before authoritative polling.
+        write_async_request(stream.get_mut(), "session.snapshot", json!({})).await?;
+        let snapshot = read_async_json(&mut stream).await?;
+        validate_snapshot(snapshot.get("result").unwrap_or(&snapshot))?;
+        let _ = wake.try_send(());
+
+        loop {
+            let mut line = String::new();
+            tokio::select! {
+                read = stream.read_line(&mut line) => {
+                    if read.map_err(|_| ())? == 0 { return Err(()); }
+                }
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() { return Ok(()); }
+                    continue;
+                }
+            }
+            let event: Value = serde_json::from_str(&line).map_err(|_| ())?;
+            if event_is_owned_status_change(&event, panes) {
+                let _ = wake.try_send(());
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (socket_path, panes, wake, shutdown);
+        Err(())
+    }
+}
+
+async fn write_async_request(
+    stream: &mut tokio::net::UnixStream,
+    method: &str,
+    params: Value,
+) -> Result<(), ()> {
+    let request = json!({"id":"forge-dispatch-observer", "method":method, "params":params});
+    let encoded = serde_json::to_vec(&request).map_err(|_| ())?;
+    stream.write_all(&encoded).await.map_err(|_| ())?;
+    stream.write_all(b"\n").await.map_err(|_| ())?;
+    stream.flush().await.map_err(|_| ())
+}
+
+async fn read_async_json(stream: &mut AsyncBufReader<tokio::net::UnixStream>) -> Result<Value, ()> {
+    let mut line = String::new();
+    if stream.read_line(&mut line).await.map_err(|_| ())? == 0 {
+        return Err(());
+    }
+    serde_json::from_str(&line).map_err(|_| ())
+}
+
+fn validate_snapshot(snapshot: &Value) -> Result<(), ()> {
+    let snapshot = snapshot.get("snapshot").unwrap_or(snapshot);
+    (snapshot.get("protocol").and_then(Value::as_u64) == Some(PROTOCOL)
+        && snapshot
+            .get("schema_version")
+            .or_else(|| snapshot.get("schemaVersion"))
+            .is_none_or(|version| version.as_u64() == Some(SCHEMA_VERSION))
+        && snapshot
+            .get("workspaces")
+            .and_then(Value::as_array)
+            .is_some())
+    .then_some(())
+    .ok_or(())
+}
+
+fn event_is_owned_status_change(event: &Value, panes: &[String]) -> bool {
+    let envelope = event
+        .get("params")
+        .or_else(|| event.get("event"))
+        .or_else(|| event.get("payload"))
+        .unwrap_or(event);
+    let payload = envelope
+        .get("event")
+        .or_else(|| envelope.get("payload"))
+        .unwrap_or(envelope);
+    let event_type = payload
+        .get("type")
+        .or_else(|| envelope.get("type"))
+        .or_else(|| event.get("type"))
+        .and_then(Value::as_str);
+    event_type == Some("pane.agent_status_changed")
+        && payload
+            .get("pane_id")
+            .or_else(|| payload.pointer("/pane/pane_id"))
+            .and_then(Value::as_str)
+            .is_some_and(|pane_id| panes.iter().any(|owned| owned == pane_id))
 }
 
 impl HerdrAdapter {
@@ -557,5 +737,41 @@ mod tests {
             super::HerdrAdapter::observation_from_agent(&agent, ("workspace", "tab", "pane")),
             Err(forge_app::AgentAdapterError::Conflict(_))
         ));
+    }
+
+    #[test]
+    fn status_events_wake_only_for_owned_panes_and_are_safe_to_repeat() {
+        let owned = vec!["owned-pane".to_owned()];
+        let matching = serde_json::json!({
+            "method":"event",
+            "params":{"event":{"type":"pane.agent_status_changed", "pane_id":"owned-pane"}}
+        });
+        let mismatched = serde_json::json!({
+            "type":"pane.agent_status_changed", "pane_id":"someone-elses-pane"
+        });
+        let unrelated = serde_json::json!({"type":"pane.created", "pane_id":"owned-pane"});
+
+        // Duplicate delivery only produces equivalent stateless wake eligibility; durable state
+        // remains exclusively in the subsequent authoritative reconciliation.
+        assert!(super::event_is_owned_status_change(&matching, &owned));
+        assert!(super::event_is_owned_status_change(&matching, &owned));
+        assert!(!super::event_is_owned_status_change(&mismatched, &owned));
+        assert!(!super::event_is_owned_status_change(&unrelated, &owned));
+    }
+
+    #[test]
+    fn observer_snapshot_validation_requires_the_supported_contract() {
+        assert!(
+            super::validate_snapshot(&serde_json::json!({
+                "snapshot":{"protocol":22, "schema_version":1, "workspaces":[]}
+            }))
+            .is_ok()
+        );
+        assert!(
+            super::validate_snapshot(&serde_json::json!({
+                "protocol":21, "schema_version":1, "workspaces":[]
+            }))
+            .is_err()
+        );
     }
 }
