@@ -212,6 +212,10 @@ _Avoid_: link
 A directed Record Relationship from a Blocked Record to a Prerequisite Record. A Blocked Record cannot become In Progress until every prerequisite is Done.
 _Avoid_: blocker, prerequisite link
 
+**Generated-By Relationship**:
+A directed, many-to-many, cross-Project-Scope provenance Record Relationship from a generated Record to the Record whose work or output caused its creation; any Record Types may participate. It does not imply parenthood, dependency, or lifecycle control.
+_Avoid_: generator link, derived from
+
 **Blocked Record**:
 The dependent endpoint of a Dependency Relationship. It remains ineligible to become In Progress while any direct Prerequisite Record is not Done.
 _Avoid_: dependent task, blocked task

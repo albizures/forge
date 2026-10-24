@@ -621,14 +621,18 @@ impl From<RecordUpdate> for RecordUpdateResponse {
                 None,
                 None,
             ),
-            RecordUpdateKind::RelationshipAdded { related_record_id } => (
+            RecordUpdateKind::RelationshipAdded {
+                related_record_id, ..
+            } => (
                 "relationship-added",
                 None,
                 None,
                 Some(related_record_id),
                 None,
             ),
-            RecordUpdateKind::RelationshipRemoved { related_record_id } => (
+            RecordUpdateKind::RelationshipRemoved {
+                related_record_id, ..
+            } => (
                 "relationship-removed",
                 None,
                 None,
@@ -735,6 +739,7 @@ impl From<Record> for RecordResponse {
                     kind: match relationship.kind {
                         RecordRelationshipKind::ParentChild => "parent-child",
                         RecordRelationshipKind::DependsOn => "depends-on",
+                        RecordRelationshipKind::GeneratedBy => "generated-by",
                     }
                     .into(),
                     from_id: relationship.from_id,

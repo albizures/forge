@@ -26,15 +26,18 @@ pub enum RecordStatus {
 pub enum RecordRelationshipKind {
     ParentChild,
     DependsOn,
+    GeneratedBy,
 }
 
 /// An endpoint-neutral typed Relationship between two Records.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecordRelationship {
     pub kind: RecordRelationshipKind,
-    /// The directional source. For `DependsOn`, this is the blocked Record.
+    /// The directional source. For `DependsOn`, this is the blocked Record; for
+    /// `GeneratedBy`, this is the generated Record.
     pub from_id: u64,
-    /// The directional target. For `DependsOn`, this is the prerequisite Record.
+    /// The directional target. For `DependsOn`, this is the prerequisite Record;
+    /// for `GeneratedBy`, this is the generator Record.
     pub to_id: u64,
     /// Hierarchy compatibility field, populated only for `ParentChild`.
     pub parent_id: u64,
@@ -86,6 +89,8 @@ pub struct Record {
 pub struct NewRecord {
     pub body: String,
     pub project_slugs: Vec<String>,
+    /// Records which caused this Record to be opened.
+    pub generated_by_ids: Vec<u64>,
 }
 
 /// A non-generic Record before persistence assigns its identity and initial status.
@@ -95,6 +100,8 @@ pub struct NewTypedRecord {
     pub task_kind: Option<TaskKind>,
     pub body: String,
     pub project_slugs: Vec<String>,
+    /// Records which caused this Record to be opened.
+    pub generated_by_ids: Vec<u64>,
 }
 
 /// Optional discovery constraints for Records.
@@ -189,9 +196,13 @@ pub enum RecordUpdateKind {
     },
     RelationshipAdded {
         related_record_id: u64,
+        /// Absent only for legacy persisted updates whose kind is unknowable.
+        relationship_kind: Option<RecordRelationshipKind>,
     },
     RelationshipRemoved {
         related_record_id: u64,
+        /// Absent only for legacy persisted updates whose kind is unknowable.
+        relationship_kind: Option<RecordRelationshipKind>,
     },
     CommentAdded {
         comment_id: RecordCommentId,
@@ -1928,6 +1939,20 @@ impl Application {
         body: &str,
         project_slugs: Vec<String>,
     ) -> Result<Record, RegistrationError> {
+        self.open_record_with_generators(body, project_slugs, vec![])
+    }
+
+    /// Opens a generic Record and atomically records its provenance.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-facing error for invalid input, missing generators, or storage failures.
+    pub fn open_record_with_generators(
+        &self,
+        body: &str,
+        project_slugs: Vec<String>,
+        generated_by_ids: Vec<u64>,
+    ) -> Result<Record, RegistrationError> {
         if body.trim().is_empty() {
             return Err(RegistrationError::new(
                 "invalid-body",
@@ -1945,6 +1970,7 @@ impl Application {
         self.records.open_record(&NewRecord {
             body: body.to_owned(),
             project_slugs,
+            generated_by_ids,
         })
     }
 
@@ -2161,12 +2187,31 @@ impl Application {
         project_slugs: Vec<String>,
         task_kind: Option<TaskKind>,
     ) -> Result<Record, RegistrationError> {
+        self.open_typed_record_with_generators(record_type, body, project_slugs, task_kind, vec![])
+    }
+
+    /// Opens a typed Record and atomically records its provenance.
+    ///
+    /// Transport adapters use this entry point when Record-opening input names generators.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-facing validation, generator lookup, or storage error.
+    pub fn open_typed_record_with_generators(
+        &self,
+        record_type: RecordType,
+        body: &str,
+        project_slugs: Vec<String>,
+        task_kind: Option<TaskKind>,
+        generated_by_ids: Vec<u64>,
+    ) -> Result<Record, RegistrationError> {
         Self::require_body(body)?;
         self.records.open_typed_record(&NewTypedRecord {
             record_type,
             task_kind,
             body: body.to_owned(),
             project_slugs,
+            generated_by_ids,
         })
     }
 

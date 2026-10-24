@@ -72,7 +72,7 @@ impl SqliteProjectRepository {
                 to_id INTEGER NOT NULL REFERENCES records(id),
                 parent_id INTEGER REFERENCES records(id),
                 child_id INTEGER REFERENCES records(id) UNIQUE,
-                kind TEXT NOT NULL CHECK (kind IN ('parent-child', 'depends-on')),
+                kind TEXT NOT NULL CHECK (kind IN ('parent-child', 'depends-on', 'generated-by')),
                 PRIMARY KEY (from_id, to_id, kind)
             );
             CREATE TABLE IF NOT EXISTS record_updates (
@@ -83,7 +83,8 @@ impl SqliteProjectRepository {
                 from_status TEXT,
                 to_status TEXT,
                 related_record_id INTEGER REFERENCES records(id),
-                comment_id INTEGER
+                comment_id INTEGER,
+                relationship_kind TEXT CHECK (relationship_kind IN ('parent-child', 'depends-on', 'generated-by'))
             );
             CREATE TABLE IF NOT EXISTS record_comments (
                 id INTEGER PRIMARY KEY NOT NULL,
@@ -576,17 +577,10 @@ impl RecordRepository for SqliteProjectRepository {
                 .map_err(storage_error)?;
         }
         insert_update(&transaction, id, RecordUpdateKind::Created)?;
+        add_generated_by_relationships(&transaction, id, &record.generated_by_ids)?;
+        let opened = load_record(&transaction, id)?;
         transaction.commit().map_err(storage_error)?;
-        Ok(Record {
-            id,
-            record_type: RecordType::Generic,
-            task_kind: None,
-            body: record.body.clone(),
-            project_slugs: record.project_slugs.clone(),
-            status: RecordStatus::Open,
-            completion_resolution: None,
-            relationships: vec![],
-        })
+        Ok(opened)
     }
 
     fn open_typed_record(&self, record: &NewTypedRecord) -> Result<Record, RegistrationError> {
@@ -613,6 +607,7 @@ impl RecordRepository for SqliteProjectRepository {
                 .map_err(storage_error)?;
         }
         insert_update(&transaction, id, RecordUpdateKind::Created)?;
+        add_generated_by_relationships(&transaction, id, &record.generated_by_ids)?;
         let opened = load_record(&transaction, id)?;
         transaction.commit().map_err(storage_error)?;
         Ok(opened)
@@ -661,6 +656,7 @@ impl RecordRepository for SqliteProjectRepository {
             task_id,
             RecordUpdateKind::RelationshipAdded {
                 related_record_id: spec_id,
+                relationship_kind: Some(RecordRelationshipKind::ParentChild),
             },
         )?;
         insert_update(
@@ -668,6 +664,7 @@ impl RecordRepository for SqliteProjectRepository {
             spec_id,
             RecordUpdateKind::RelationshipAdded {
                 related_record_id: task_id,
+                relationship_kind: Some(RecordRelationshipKind::ParentChild),
             },
         )?;
         let task = load_record(&transaction, task_id)?;
@@ -735,6 +732,7 @@ impl RecordRepository for SqliteProjectRepository {
             task_id,
             RecordUpdateKind::RelationshipAdded {
                 related_record_id: wayfinder_id,
+                relationship_kind: Some(RecordRelationshipKind::ParentChild),
             },
         )?;
         insert_update(
@@ -742,6 +740,7 @@ impl RecordRepository for SqliteProjectRepository {
             wayfinder_id,
             RecordUpdateKind::RelationshipAdded {
                 related_record_id: task_id,
+                relationship_kind: Some(RecordRelationshipKind::ParentChild),
             },
         )?;
         let task = load_record(&transaction, task_id)?;
@@ -817,6 +816,7 @@ impl RecordRepository for SqliteProjectRepository {
             grilling_id,
             RecordUpdateKind::RelationshipAdded {
                 related_record_id: wayfinder_id,
+                relationship_kind: Some(RecordRelationshipKind::ParentChild),
             },
         )?;
         insert_update(
@@ -824,6 +824,7 @@ impl RecordRepository for SqliteProjectRepository {
             wayfinder_id,
             RecordUpdateKind::RelationshipAdded {
                 related_record_id: grilling_id,
+                relationship_kind: Some(RecordRelationshipKind::ParentChild),
             },
         )?;
         let grilling = load_record(&transaction, grilling_id)?;
@@ -1035,12 +1036,29 @@ impl RecordRepository for SqliteProjectRepository {
                 }
                 transaction.execute("INSERT INTO record_relationships (from_id, to_id, kind) VALUES (?1, ?2, 'depends-on')", params![child_id.cast_signed(), parent_id.cast_signed()]).map_err(|error| if matches!(error.sqlite_error_code(), Some(ErrorCode::ConstraintViolation)) { RegistrationError::new("duplicate-relationship", "Relationship already exists") } else { storage_error(error) })?;
             }
+            RecordRelationshipKind::GeneratedBy => {
+                if child.status != RecordStatus::Open {
+                    return Err(RegistrationError::new(
+                        "generated-record-not-open",
+                        "provenance may change only while its generated Record is Open",
+                    ));
+                }
+                let cycle: bool = transaction.query_row("WITH RECURSIVE generators(id) AS (SELECT to_id FROM record_relationships WHERE kind = 'generated-by' AND from_id = ?1 UNION SELECT relationship.to_id FROM record_relationships relationship JOIN generators ON relationship.from_id = generators.id WHERE relationship.kind = 'generated-by') SELECT EXISTS(SELECT 1 FROM generators WHERE id = ?2)", params![parent_id.cast_signed(), child_id.cast_signed()], |row| row.get(0)).map_err(storage_error)?;
+                if cycle {
+                    return Err(RegistrationError::new(
+                        "relationship-cycle",
+                        "generated-by Relationships cannot form a cycle",
+                    ));
+                }
+                transaction.execute("INSERT INTO record_relationships (from_id, to_id, kind) VALUES (?1, ?2, 'generated-by')", params![child_id.cast_signed(), parent_id.cast_signed()]).map_err(|error| if matches!(error.sqlite_error_code(), Some(ErrorCode::ConstraintViolation)) { RegistrationError::new("duplicate-relationship", "Relationship already exists") } else { storage_error(error) })?;
+            }
         }
         insert_update(
             &transaction,
             child_id,
             RecordUpdateKind::RelationshipAdded {
                 related_record_id: parent_id,
+                relationship_kind: Some(kind),
             },
         )?;
         insert_update(
@@ -1048,6 +1066,7 @@ impl RecordRepository for SqliteProjectRepository {
             parent_id,
             RecordUpdateKind::RelationshipAdded {
                 related_record_id: child_id,
+                relationship_kind: Some(kind),
             },
         )?;
         let record = load_record(&transaction, child_id)?;
@@ -1084,6 +1103,12 @@ impl RecordRepository for SqliteProjectRepository {
                     "a dependency may change only while its blocked Record is Open",
                 ));
             }
+            RecordRelationshipKind::GeneratedBy if child.status != RecordStatus::Open => {
+                return Err(RegistrationError::new(
+                    "generated-record-not-open",
+                    "provenance may change only while its generated Record is Open",
+                ));
+            }
             RecordRelationshipKind::DependsOn
                 if !(child.record_type == parent.record_type
                     && matches!(child.record_type, RecordType::Task | RecordType::Spec)
@@ -1102,6 +1127,7 @@ impl RecordRepository for SqliteProjectRepository {
         let kind_name = match kind {
             RecordRelationshipKind::ParentChild => "parent-child",
             RecordRelationshipKind::DependsOn => "depends-on",
+            RecordRelationshipKind::GeneratedBy => "generated-by",
         };
         let deleted = transaction
             .execute(
@@ -1120,6 +1146,7 @@ impl RecordRepository for SqliteProjectRepository {
             child_id,
             RecordUpdateKind::RelationshipRemoved {
                 related_record_id: parent_id,
+                relationship_kind: Some(kind),
             },
         )?;
         insert_update(
@@ -1127,6 +1154,7 @@ impl RecordRepository for SqliteProjectRepository {
             parent_id,
             RecordUpdateKind::RelationshipRemoved {
                 related_record_id: child_id,
+                relationship_kind: Some(kind),
             },
         )?;
         let record = load_record(&transaction, child_id)?;
@@ -1210,7 +1238,7 @@ impl RecordRepository for SqliteProjectRepository {
             .lock()
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
         load_record(&connection, id)?;
-        connection.prepare("SELECT id, created_at_millis, kind, from_status, to_status, related_record_id, comment_id FROM record_updates WHERE record_id = ?1 ORDER BY created_at_millis DESC, id DESC")
+        connection.prepare("SELECT id, created_at_millis, kind, from_status, to_status, related_record_id, comment_id, relationship_kind FROM record_updates WHERE record_id = ?1 ORDER BY created_at_millis DESC, id DESC")
             .map_err(storage_error)?
             .query_map([id.cast_signed()], update_from_row)
             .map_err(storage_error)?
@@ -2243,7 +2271,7 @@ impl RecordUpdateSubscriptionRepository for SqliteProjectRepository {
                 "cursor predates the Subscription creation cursor",
             ));
         }
-        let updates = connection.prepare("SELECT id, record_id, created_at_millis, kind, from_status, to_status, related_record_id, comment_id FROM record_updates WHERE id > ?1 ORDER BY id ASC").map_err(storage_error)?.query_map([after.0.cast_signed()], update_envelope_from_row).map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)?;
+        let updates = connection.prepare("SELECT id, record_id, created_at_millis, kind, from_status, to_status, related_record_id, comment_id, relationship_kind FROM record_updates WHERE id > ?1 ORDER BY id ASC").map_err(storage_error)?.query_map([after.0.cast_signed()], update_envelope_from_row).map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)?;
         Ok(updates
             .into_iter()
             .filter(|update| {
@@ -2338,6 +2366,22 @@ fn load_subscription(
     ))
 }
 
+fn relationship_kind_name(kind: RecordRelationshipKind) -> &'static str {
+    match kind {
+        RecordRelationshipKind::ParentChild => "parent-child",
+        RecordRelationshipKind::DependsOn => "depends-on",
+        RecordRelationshipKind::GeneratedBy => "generated-by",
+    }
+}
+fn parse_relationship_kind(kind: &str) -> rusqlite::Result<RecordRelationshipKind> {
+    match kind {
+        "parent-child" => Ok(RecordRelationshipKind::ParentChild),
+        "depends-on" => Ok(RecordRelationshipKind::DependsOn),
+        "generated-by" => Ok(RecordRelationshipKind::GeneratedBy),
+        _ => Err(rusqlite::Error::InvalidQuery),
+    }
+}
+
 fn status_name(status: RecordStatus) -> &'static str {
     match status {
         RecordStatus::Open => "open",
@@ -2352,50 +2396,62 @@ fn insert_update(
     record_id: u64,
     kind: RecordUpdateKind,
 ) -> Result<(), RegistrationError> {
-    let (kind, from_status, to_status, related_record_id, comment_id) = match kind {
-        RecordUpdateKind::Created => ("created", None, None, None, None),
-        RecordUpdateKind::BodyEdited => ("body-edited", None, None, None, None),
-        RecordUpdateKind::StatusTransition { from, to } => (
-            "status-transition",
-            Some(status_name(from)),
-            Some(status_name(to)),
-            None,
-            None,
-        ),
-        RecordUpdateKind::RelationshipAdded { related_record_id } => (
-            "relationship-added",
-            None,
-            None,
-            Some(related_record_id.cast_signed()),
-            None,
-        ),
-        RecordUpdateKind::RelationshipRemoved { related_record_id } => (
-            "relationship-removed",
-            None,
-            None,
-            Some(related_record_id.cast_signed()),
-            None,
-        ),
-        RecordUpdateKind::CommentAdded { comment_id } => (
-            "comment-added",
-            None,
-            None,
-            None,
-            Some(comment_id.0.cast_signed()),
-        ),
-        RecordUpdateKind::CommentDeleted { comment_id } => (
-            "comment-deleted",
-            None,
-            None,
-            None,
-            Some(comment_id.0.cast_signed()),
-        ),
-    };
+    let (kind, from_status, to_status, related_record_id, comment_id, relationship_kind) =
+        match kind {
+            RecordUpdateKind::Created => ("created", None, None, None, None, None),
+            RecordUpdateKind::BodyEdited => ("body-edited", None, None, None, None, None),
+            RecordUpdateKind::StatusTransition { from, to } => (
+                "status-transition",
+                Some(status_name(from)),
+                Some(status_name(to)),
+                None,
+                None,
+                None,
+            ),
+            RecordUpdateKind::RelationshipAdded {
+                related_record_id,
+                relationship_kind,
+            } => (
+                "relationship-added",
+                None,
+                None,
+                Some(related_record_id.cast_signed()),
+                None,
+                relationship_kind.map(relationship_kind_name),
+            ),
+            RecordUpdateKind::RelationshipRemoved {
+                related_record_id,
+                relationship_kind,
+            } => (
+                "relationship-removed",
+                None,
+                None,
+                Some(related_record_id.cast_signed()),
+                None,
+                relationship_kind.map(relationship_kind_name),
+            ),
+            RecordUpdateKind::CommentAdded { comment_id } => (
+                "comment-added",
+                None,
+                None,
+                None,
+                Some(comment_id.0.cast_signed()),
+                None,
+            ),
+            RecordUpdateKind::CommentDeleted { comment_id } => (
+                "comment-deleted",
+                None,
+                None,
+                None,
+                Some(comment_id.0.cast_signed()),
+                None,
+            ),
+        };
     let created_at_millis = now_millis()?;
     connection
         .execute(
-            "INSERT INTO record_updates (record_id, created_at_millis, kind, from_status, to_status, related_record_id, comment_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![record_id.cast_signed(), created_at_millis, kind, from_status, to_status, related_record_id, comment_id],
+            "INSERT INTO record_updates (record_id, created_at_millis, kind, from_status, to_status, related_record_id, comment_id, relationship_kind) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![record_id.cast_signed(), created_at_millis, kind, from_status, to_status, related_record_id, comment_id, relationship_kind],
         )
         .map_err(storage_error)?;
     Ok(())
@@ -2422,6 +2478,7 @@ fn update_from_row_at(
     let to_status: Option<String> = row.get(created_at_index + 3)?;
     let related_record_id: Option<i64> = row.get(created_at_index + 4)?;
     let comment_id: Option<i64> = row.get(created_at_index + 5)?;
+    let relationship_kind: Option<String> = row.get(created_at_index + 6)?;
     let status = |value: String| match value.as_str() {
         "open" => Ok(RecordStatus::Open),
         "in_progress" => Ok(RecordStatus::InProgress),
@@ -2439,11 +2496,19 @@ fn update_from_row_at(
             related_record_id: related_record_id
                 .ok_or(rusqlite::Error::InvalidQuery)?
                 .cast_unsigned(),
+            relationship_kind: relationship_kind
+                .as_deref()
+                .map(parse_relationship_kind)
+                .transpose()?,
         },
         "relationship-removed" => RecordUpdateKind::RelationshipRemoved {
             related_record_id: related_record_id
                 .ok_or(rusqlite::Error::InvalidQuery)?
                 .cast_unsigned(),
+            relationship_kind: relationship_kind
+                .as_deref()
+                .map(parse_relationship_kind)
+                .transpose()?,
         },
         "comment-added" => RecordUpdateKind::CommentAdded {
             comment_id: RecordCommentId(
@@ -2527,6 +2592,53 @@ fn validate_projects(
                 format!("Project `{slug}` is not registered"),
             ));
         }
+    }
+    Ok(())
+}
+
+fn add_generated_by_relationships(
+    connection: &Connection,
+    generated_id: u64,
+    generator_ids: &[u64],
+) -> Result<(), RegistrationError> {
+    let mut generators = generator_ids.to_vec();
+    generators.sort_unstable();
+    if generators.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(RegistrationError::new(
+            "duplicate-relationship",
+            "generated-by Relationships must not be duplicated",
+        ));
+    }
+    for generator_id in generators {
+        if generator_id == generated_id {
+            return Err(RegistrationError::new(
+                "invalid-relationship",
+                "a Record cannot be generated by itself",
+            ));
+        }
+        load_record(connection, generator_id)?;
+        connection
+            .execute(
+                "INSERT INTO record_relationships (from_id, to_id, kind) VALUES (?1, ?2, 'generated-by')",
+                params![generated_id.cast_signed(), generator_id.cast_signed()],
+            )
+            .map_err(storage_error)?;
+        insert_update(
+            connection,
+            generated_id,
+            RecordUpdateKind::RelationshipAdded {
+                related_record_id: generator_id,
+                relationship_kind: Some(RecordRelationshipKind::GeneratedBy),
+            },
+        )?;
+        insert_update(
+            connection,
+            generator_id,
+            RecordUpdateKind::RelationshipAdded {
+                related_record_id: generated_id,
+                relationship_kind: Some(RecordRelationshipKind::GeneratedBy),
+            },
+        )?;
     }
     Ok(())
 }
@@ -2663,6 +2775,7 @@ fn load_record(connection: &Connection, id: u64) -> Result<Record, RegistrationE
         .map(|row| match row.map_err(storage_error)? {
             (from_id, to_id, Some(parent_id), Some(child_id), kind) if kind == "parent-child" => Ok(RecordRelationship { kind: RecordRelationshipKind::ParentChild, from_id, to_id, parent_id, child_id }),
             (from_id, to_id, None, None, kind) if kind == "depends-on" => Ok(RecordRelationship { kind: RecordRelationshipKind::DependsOn, from_id, to_id, parent_id: 0, child_id: 0 }),
+            (from_id, to_id, None, None, kind) if kind == "generated-by" => Ok(RecordRelationship { kind: RecordRelationshipKind::GeneratedBy, from_id, to_id, parent_id: 0, child_id: 0 }),
             _ => Err(RegistrationError::new("storage", "stored Record has an invalid Relationship kind")),
         })
         .collect::<Result<Vec<_>, RegistrationError>>()?;
@@ -2769,7 +2882,11 @@ fn migrate_record_relationship_schema(connection: &Connection) -> Result<(), Reg
             |row| row.get(0),
         )
         .map_err(storage_error)?;
+    if schema.contains("from_id") && schema.contains("generated-by") {
+        return Ok(());
+    }
     if schema.contains("from_id") {
+        connection.execute_batch("PRAGMA foreign_keys = OFF; ALTER TABLE record_relationships RENAME TO record_relationships_old; CREATE TABLE record_relationships (from_id INTEGER NOT NULL REFERENCES records(id), to_id INTEGER NOT NULL REFERENCES records(id), parent_id INTEGER REFERENCES records(id), child_id INTEGER REFERENCES records(id) UNIQUE, kind TEXT NOT NULL CHECK (kind IN ('parent-child', 'depends-on', 'generated-by')), PRIMARY KEY (from_id, to_id, kind)); INSERT INTO record_relationships SELECT from_id, to_id, parent_id, child_id, kind FROM record_relationships_old; DROP TABLE record_relationships_old; PRAGMA foreign_keys = ON;").map_err(storage_error)?;
         return Ok(());
     }
     connection.execute_batch("PRAGMA foreign_keys = OFF;
@@ -2777,7 +2894,7 @@ fn migrate_record_relationship_schema(connection: &Connection) -> Result<(), Reg
         CREATE TABLE record_relationships (
             from_id INTEGER NOT NULL REFERENCES records(id), to_id INTEGER NOT NULL REFERENCES records(id),
             parent_id INTEGER REFERENCES records(id), child_id INTEGER REFERENCES records(id) UNIQUE,
-            kind TEXT NOT NULL CHECK (kind IN ('parent-child', 'depends-on')), PRIMARY KEY (from_id, to_id, kind)
+            kind TEXT NOT NULL CHECK (kind IN ('parent-child', 'depends-on', 'generated-by')), PRIMARY KEY (from_id, to_id, kind)
         );
         INSERT INTO record_relationships (from_id, to_id, parent_id, child_id, kind)
             SELECT child_id, parent_id, parent_id, child_id, kind FROM record_relationships_old;
@@ -2795,6 +2912,16 @@ fn migrate_record_updates_schema(connection: &Connection) -> Result<(), Registra
         .map_err(storage_error)?;
     if !schema.contains("comment-added") {
         connection.execute_batch("PRAGMA foreign_keys = OFF; CREATE TABLE record_updates_new (id INTEGER PRIMARY KEY NOT NULL, record_id INTEGER NOT NULL REFERENCES records(id), created_at_millis INTEGER NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('created', 'body-edited', 'status-transition', 'relationship-added', 'relationship-removed', 'comment-added', 'comment-deleted')), from_status TEXT, to_status TEXT, related_record_id INTEGER REFERENCES records(id), comment_id INTEGER); INSERT INTO record_updates_new (id, record_id, created_at_millis, kind, from_status, to_status, related_record_id) SELECT id, record_id, created_at_millis, kind, from_status, to_status, related_record_id FROM record_updates; DROP TABLE record_updates; ALTER TABLE record_updates_new RENAME TO record_updates; PRAGMA foreign_keys = ON;").map_err(storage_error)?;
+    }
+    let columns = connection
+        .prepare("PRAGMA table_info(record_updates)")
+        .map_err(storage_error)?
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(storage_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(storage_error)?;
+    if !columns.iter().any(|column| column == "relationship_kind") {
+        connection.execute_batch("ALTER TABLE record_updates ADD COLUMN relationship_kind TEXT CHECK (relationship_kind IN ('parent-child', 'depends-on', 'generated-by'));").map_err(storage_error)?;
     }
     Ok(())
 }
@@ -2859,6 +2986,62 @@ mod tests {
     }
 
     #[test]
+    fn atomically_opens_and_corrects_generated_by_provenance() {
+        let store = SqliteProjectRepository::in_memory().unwrap();
+        let generator = store
+            .open_record(&NewRecord {
+                body: "generator".into(),
+                project_slugs: vec![],
+                generated_by_ids: vec![],
+            })
+            .unwrap();
+        let generated = store
+            .open_record(&NewRecord {
+                body: "generated".into(),
+                project_slugs: vec![],
+                generated_by_ids: vec![generator.id],
+            })
+            .unwrap();
+        assert!(generated.relationships.iter().any(|relationship| {
+            relationship.kind == RecordRelationshipKind::GeneratedBy
+                && relationship.from_id == generated.id
+                && relationship.to_id == generator.id
+                && relationship.parent_id == 0
+                && relationship.child_id == 0
+        }));
+        assert!(matches!(
+            store.list_record_updates(generated.id).unwrap()[0].kind,
+            RecordUpdateKind::RelationshipAdded {
+                related_record_id,
+                relationship_kind: Some(RecordRelationshipKind::GeneratedBy),
+            } if related_record_id == generator.id
+        ));
+        assert_eq!(
+            store
+                .relate_records(
+                    generator.id,
+                    generated.id,
+                    RecordRelationshipKind::GeneratedBy
+                )
+                .unwrap_err()
+                .code,
+            "relationship-cycle"
+        );
+        store.start_record(generated.id).unwrap();
+        assert_eq!(
+            store
+                .unrelate_records(
+                    generated.id,
+                    generator.id,
+                    RecordRelationshipKind::GeneratedBy
+                )
+                .unwrap_err()
+                .code,
+            "generated-record-not-open"
+        );
+    }
+
+    #[test]
     fn persists_directional_task_dependencies_and_notifies_both_endpoints() {
         let store = SqliteProjectRepository::in_memory().unwrap();
         store.register(&project("alpha", "/repos/alpha")).unwrap();
@@ -2867,6 +3050,7 @@ mod tests {
             task_kind: None,
             body: body.into(),
             project_slugs: vec!["alpha".into()],
+            generated_by_ids: vec![],
         };
         let blocked = store.open_typed_record(&task("blocked")).unwrap();
         let prerequisite = store.open_typed_record(&task("prerequisite")).unwrap();
@@ -2886,7 +3070,7 @@ mod tests {
             == blocked.id
             && relationship.to_id == prerequisite.id));
         assert!(
-            matches!(store.list_record_updates(prerequisite.id).unwrap()[0].kind, RecordUpdateKind::RelationshipAdded { related_record_id } if related_record_id == blocked.id)
+            matches!(store.list_record_updates(prerequisite.id).unwrap()[0].kind, RecordUpdateKind::RelationshipAdded { related_record_id, .. } if related_record_id == blocked.id)
         );
         assert_eq!(
             store
@@ -2941,6 +3125,7 @@ mod tests {
             task_kind: None,
             body: body.into(),
             project_slugs: vec![],
+            generated_by_ids: vec![],
         };
         let blocked = store.open_typed_record(&task("blocked")).unwrap();
         let first = store.open_typed_record(&task("first")).unwrap();
@@ -3036,18 +3221,21 @@ mod tests {
             .open_record(&NewRecord {
                 body: "alpha".into(),
                 project_slugs: vec!["alpha".into()],
+                generated_by_ids: vec![],
             })
             .unwrap();
         let both = store
             .open_record(&NewRecord {
                 body: "both".into(),
                 project_slugs: vec!["alpha".into(), "beta".into()],
+                generated_by_ids: vec![],
             })
             .unwrap();
         let unscoped = store
             .open_record(&NewRecord {
                 body: "unscoped".into(),
                 project_slugs: vec![],
+                generated_by_ids: vec![],
             })
             .unwrap();
         store.start_record(both.id).unwrap();
@@ -3089,6 +3277,7 @@ mod tests {
             .open_record(&NewRecord {
                 body: "original".into(),
                 project_slugs: vec![],
+                generated_by_ids: vec![],
             })
             .unwrap();
         assert_eq!(
@@ -3119,18 +3308,21 @@ mod tests {
             .open_record(&NewRecord {
                 body: "parent".into(),
                 project_slugs: vec![],
+                generated_by_ids: vec![],
             })
             .unwrap();
         let child = store
             .open_record(&NewRecord {
                 body: "child".into(),
                 project_slugs: vec![],
+                generated_by_ids: vec![],
             })
             .unwrap();
         let grandchild = store
             .open_record(&NewRecord {
                 body: "grandchild".into(),
                 project_slugs: vec![],
+                generated_by_ids: vec![],
             })
             .unwrap();
         assert_eq!(
@@ -3185,12 +3377,14 @@ mod tests {
             .open_record(&NewRecord {
                 body: "parent".into(),
                 project_slugs: vec![],
+                generated_by_ids: vec![],
             })
             .unwrap();
         let child = store
             .open_record(&NewRecord {
                 body: "child".into(),
                 project_slugs: vec![],
+                generated_by_ids: vec![],
             })
             .unwrap();
         assert_eq!(
@@ -3215,10 +3409,10 @@ mod tests {
                 || pair[0].created_at_millis > pair[1].created_at_millis)
         );
         assert!(
-            matches!(updates[0].kind, RecordUpdateKind::RelationshipRemoved { related_record_id } if related_record_id == parent.id)
+            matches!(updates[0].kind, RecordUpdateKind::RelationshipRemoved { related_record_id, .. } if related_record_id == parent.id)
         );
         assert!(
-            matches!(updates[1].kind, RecordUpdateKind::RelationshipAdded { related_record_id } if related_record_id == parent.id)
+            matches!(updates[1].kind, RecordUpdateKind::RelationshipAdded { related_record_id, .. } if related_record_id == parent.id)
         );
         assert!(matches!(
             updates[2].kind,
@@ -3249,6 +3443,7 @@ mod tests {
             .open_record(&NewRecord {
                 body: "record".into(),
                 project_slugs: vec![],
+                generated_by_ids: vec![],
             })
             .unwrap();
         let first = store.add_record_comment(record.id, "first", None).unwrap();
@@ -3297,7 +3492,8 @@ mod tests {
             store
                 .open_record(&NewRecord {
                     body: "unscoped".into(),
-                    project_slugs: vec![]
+                    project_slugs: vec![],
+                    generated_by_ids: vec![],
                 })
                 .unwrap()
                 .status,
@@ -3307,6 +3503,7 @@ mod tests {
             .open_record(&NewRecord {
                 body: "scoped".into(),
                 project_slugs: vec!["alpha".into()],
+                generated_by_ids: vec![],
             })
             .unwrap();
         assert_eq!(record.project_slugs, ["alpha"]);
@@ -3314,7 +3511,8 @@ mod tests {
             store
                 .open_record(&NewRecord {
                     body: "bad".into(),
-                    project_slugs: vec!["missing".into()]
+                    project_slugs: vec!["missing".into()],
+                    generated_by_ids: vec![],
                 })
                 .unwrap_err()
                 .code,
@@ -3332,6 +3530,7 @@ mod tests {
                 task_kind: None,
                 body: "spec".into(),
                 project_slugs: vec!["alpha".into()],
+                generated_by_ids: vec![],
             })
             .unwrap();
         let task = store
@@ -3410,6 +3609,7 @@ mod tests {
                 task_kind: None,
                 body: "wayfinder".into(),
                 project_slugs: vec!["alpha".into(), "beta".into()],
+                generated_by_ids: vec![],
             })
             .unwrap();
         let full_scope = store
@@ -3470,6 +3670,7 @@ mod tests {
                 task_kind: None,
                 body: "gamma task".into(),
                 project_slugs: vec!["gamma".into()],
+                generated_by_ids: vec![],
             })
             .unwrap();
         assert_eq!(
@@ -3519,7 +3720,7 @@ mod tests {
             CREATE TABLE record_relationships (
                 from_id INTEGER NOT NULL REFERENCES records(id), to_id INTEGER NOT NULL REFERENCES records(id),
                 parent_id INTEGER REFERENCES records(id), child_id INTEGER REFERENCES records(id) UNIQUE,
-                kind TEXT NOT NULL CHECK (kind IN ('parent-child', 'depends-on')), PRIMARY KEY (from_id, to_id, kind)
+                kind TEXT NOT NULL CHECK (kind IN ('parent-child', 'depends-on', 'generated-by')), PRIMARY KEY (from_id, to_id, kind)
             );
             INSERT INTO projects VALUES ('alpha', '/repos/alpha', 'https://example.test/repo.git');
             INSERT INTO records VALUES (1, 'generic', 'generic', 'open', NULL);
@@ -3549,6 +3750,7 @@ mod tests {
                     task_kind: None,
                     body: "wayfinder".into(),
                     project_slugs: vec!["alpha".into()],
+                    generated_by_ids: vec![],
                 })
                 .unwrap()
                 .record_type,
@@ -3561,6 +3763,7 @@ mod tests {
                     task_kind: None,
                     body: "grilling".into(),
                     project_slugs: vec!["alpha".into()],
+                    generated_by_ids: vec![],
                 })
                 .unwrap()
                 .record_type,
@@ -3632,18 +3835,21 @@ mod tests {
                 task_kind: None,
                 body: "task".into(),
                 project_slugs: vec!["alpha".into()],
+                generated_by_ids: vec![],
             })
             .unwrap();
         let target = store
             .open_record(&NewRecord {
                 body: "target".into(),
                 project_slugs: vec![],
+                generated_by_ids: vec![],
             })
             .unwrap();
         let other = store
             .open_record(&NewRecord {
                 body: "other".into(),
                 project_slugs: vec![],
+                generated_by_ids: vec![],
             })
             .unwrap();
         store
@@ -3727,6 +3933,7 @@ mod tests {
             task_kind: None,
             body: body.into(),
             project_slugs: vec![project_slug.into()],
+            generated_by_ids: vec![],
         };
         let assigned = store.open_typed_record(&task("assigned", "alpha")).unwrap();
         let prerequisite = store
@@ -3819,7 +4026,7 @@ mod tests {
                     update.record_id == prerequisite.id
                         && matches!(
                             update.update.kind,
-                            RecordUpdateKind::RelationshipRemoved { related_record_id }
+                            RecordUpdateKind::RelationshipRemoved { related_record_id, .. }
                                 if related_record_id == assigned.id
                         )
                 })
@@ -3846,6 +4053,7 @@ mod tests {
                 task_kind: None,
                 body: "task".into(),
                 project_slugs: vec!["alpha".into()],
+                generated_by_ids: vec![],
             })
             .unwrap();
 
@@ -3990,6 +4198,7 @@ mod tests {
                 task_kind: None,
                 body: "task".into(),
                 project_slugs: vec!["alpha".into()],
+                generated_by_ids: vec![],
             })
             .unwrap();
         assert_eq!(
@@ -4098,6 +4307,7 @@ mod tests {
                 task_kind: None,
                 body: "dispatch me".into(),
                 project_slugs: vec!["alpha".into()],
+                generated_by_ids: vec![],
             })
             .unwrap();
         store
@@ -4152,6 +4362,7 @@ mod tests {
             task_kind: None,
             body: body.into(),
             project_slugs: vec!["alpha".into()],
+            generated_by_ids: vec![],
         };
         let blocked = store.open_typed_record(&task("blocked")).unwrap();
         let prerequisite = store.open_typed_record(&task("prerequisite")).unwrap();
@@ -4189,6 +4400,7 @@ mod tests {
                 task_kind: None,
                 body: "first".into(),
                 project_slugs: vec!["alpha".into()],
+                generated_by_ids: vec![],
             })
             .unwrap();
         store
@@ -4197,6 +4409,7 @@ mod tests {
                 task_kind: None,
                 body: "second".into(),
                 project_slugs: vec!["alpha".into()],
+                generated_by_ids: vec![],
             })
             .unwrap();
 
@@ -4263,6 +4476,7 @@ mod tests {
                 task_kind: None,
                 body: "spec".into(),
                 project_slugs: vec!["alpha".into()],
+                generated_by_ids: vec![],
             })
             .unwrap();
         let task = store.open_task_under_spec("task", spec.id, None).unwrap();

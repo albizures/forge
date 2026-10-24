@@ -1298,11 +1298,15 @@ fn record_update_event(
             "status-transition",
             format!(",\"from_status\":\"{from:?}\",\"to_status\":\"{to:?}\""),
         ),
-        RecordUpdateKind::RelationshipAdded { related_record_id } => (
+        RecordUpdateKind::RelationshipAdded {
+            related_record_id, ..
+        } => (
             "relationship-added",
             format!(",\"related_record_id\":{related_record_id}"),
         ),
-        RecordUpdateKind::RelationshipRemoved { related_record_id } => (
+        RecordUpdateKind::RelationshipRemoved {
+            related_record_id, ..
+        } => (
             "relationship-removed",
             format!(",\"related_record_id\":{related_record_id}"),
         ),
@@ -1893,12 +1897,14 @@ mod tests {
                 task_kind: None,
                 body: "owner".into(),
                 project_slugs: vec!["alpha".into()],
+                generated_by_ids: vec![],
             })
             .unwrap();
         let target = store
             .open_record(&NewRecord {
                 body: "target".into(),
                 project_slugs: vec!["alpha".into()],
+                generated_by_ids: vec![],
             })
             .unwrap();
         store
@@ -2497,9 +2503,11 @@ mod tests {
             },
             RecordUpdateKind::RelationshipAdded {
                 related_record_id: 4,
+                relationship_kind: None,
             },
             RecordUpdateKind::RelationshipRemoved {
                 related_record_id: 4,
+                relationship_kind: None,
             },
             RecordUpdateKind::CommentAdded {
                 comment_id: forge_app::RecordCommentId(3),

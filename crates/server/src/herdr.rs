@@ -895,6 +895,7 @@ mod tests {
                 task_kind: None,
                 body: "dispatch task".into(),
                 project_slugs: vec!["project".into()],
+                generated_by_ids: vec![],
             })
             .unwrap();
         let assignment = repository
