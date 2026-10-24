@@ -6,34 +6,38 @@
 mod herdr;
 
 use std::{
+    collections::HashMap,
+    convert::Infallible,
     env, fs, io,
     io::Write,
     net::SocketAddr,
     path::{Path, PathBuf},
     process::Command,
     str::FromStr,
-    sync::Arc,
+    sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use tokio::{
     io::AsyncReadExt,
     sync::{mpsc, watch},
 };
+use tokio_stream::wrappers::ReceiverStream;
 
 use askama::Template;
 use axum::{
     Router,
     body::Body,
-    extract::Request,
+    extract::{ConnectInfo, Path as AxumPath, Request, State},
     http::{StatusCode, header},
-    response::Html,
+    response::{Html, IntoResponse, Response, Sse, sse::Event},
     routing::{get, post},
 };
 use forge_app::{
     AgentDispatchAdapter, AgentDispatchAdapterFactory, AgentProfile, Application,
     ApplicationStatus, ManagedWorktreeAdapter, Project, RecordStatus, RecordType,
-    RecordUpdateKindFilter, RecordUpdateSubscriptionId, RegistrationError, RepositoryInspector,
-    WorktreeSafetyAssessment,
+    RecordUpdateEnvelope, RecordUpdateId, RecordUpdateKind, RecordUpdateKindFilter,
+    RecordUpdateSubscriptionId, RegistrationError, RepositoryInspector, WorktreeSafetyAssessment,
 };
 use forge_rpc::{
     AddRecordCommentRequest, AgentDispatchApiServer, AgentDispatchProfileResponse,
@@ -52,6 +56,7 @@ use forge_rpc::{
     WorktreeRootResponse,
 };
 use forge_store::SqliteProjectRepository;
+use futures_util::StreamExt as FuturesStreamExt;
 use herdr::{HerdrAdapterFactory, observe_status_changes};
 use jsonrpsee::{
     core::{RpcResult, async_trait},
@@ -200,6 +205,83 @@ impl DaemonConfig {
 pub struct Daemon {
     application: Arc<Application>,
     management: ManagementStatus,
+    delivery: Arc<SubscriptionDelivery>,
+}
+
+#[derive(Default)]
+struct SubscriptionDelivery {
+    connections: Mutex<HashMap<RecordUpdateSubscriptionId, DeliveryConnection>>,
+}
+
+struct DeliveryConnection {
+    sender: mpsc::Sender<RecordUpdateEnvelope>,
+    cancelled: watch::Sender<bool>,
+    cursor: RecordUpdateId,
+}
+
+type DeliveryConnectionStart = (
+    mpsc::Receiver<RecordUpdateEnvelope>,
+    watch::Receiver<bool>,
+    Vec<RecordUpdateEnvelope>,
+);
+
+impl SubscriptionDelivery {
+    /// Claims the active connection slot before replaying under the publication lock.
+    /// A committed update is therefore either in `replay` or waits to be queued live.
+    fn connect_and_replay(
+        &self,
+        application: &Application,
+        id: RecordUpdateSubscriptionId,
+        cursor: RecordUpdateId,
+    ) -> Result<DeliveryConnectionStart, RegistrationError> {
+        let (sender, receiver) = mpsc::channel(256);
+        let (cancelled, cancellation) = watch::channel(false);
+        let mut connections = self
+            .connections
+            .lock()
+            .expect("delivery lock is not poisoned");
+        if let Some(previous) = connections.insert(
+            id,
+            DeliveryConnection {
+                sender,
+                cancelled,
+                cursor,
+            },
+        ) {
+            let _ = previous.cancelled.send(true);
+        }
+        let replay = application.replay_assignment_subscription_updates(id, cursor)?;
+        if let Some(last) = replay.last() {
+            connections
+                .get_mut(&id)
+                .expect("new delivery connection is retained")
+                .cursor = last.update.id;
+        }
+        Ok((receiver, cancellation, replay))
+    }
+
+    fn publish(&self, application: &Application) {
+        let mut connections = self
+            .connections
+            .lock()
+            .expect("delivery lock is not poisoned");
+        connections.retain(|id, connection| {
+            let Ok(updates) =
+                application.replay_assignment_subscription_updates(*id, connection.cursor)
+            else {
+                let _ = connection.cancelled.send(true);
+                return false;
+            };
+            for update in updates {
+                connection.cursor = update.update.id;
+                if connection.sender.try_send(update).is_err() {
+                    let _ = connection.cancelled.send(true);
+                    return false;
+                }
+            }
+            true
+        });
+    }
 }
 
 impl Daemon {
@@ -217,6 +299,7 @@ impl Daemon {
     ) -> Self {
         Self {
             application: Arc::new(application),
+            delivery: Arc::new(SubscriptionDelivery::default()),
             management: ManagementStatus::new(
                 RevisionIdentity::from(forge_build_info::current()),
                 daemon_instance_id,
@@ -795,21 +878,30 @@ impl RecordApiServer for Daemon {
     async fn open(&self, request: OpenRecordRequest) -> RpcResult<RecordResponse> {
         self.application
             .open_record(&request.body, request.project_scope.project_slugs)
-            .map(Into::into)
+            .map(|record| {
+                self.delivery.publish(&self.application);
+                record.into()
+            })
             .map_err(rpc_error)
     }
 
     async fn open_spec(&self, request: OpenSpecRequest) -> RpcResult<RecordResponse> {
         self.application
             .open_spec(&request.body, request.project_slug)
-            .map(Into::into)
+            .map(|record| {
+                self.delivery.publish(&self.application);
+                record.into()
+            })
             .map_err(rpc_error)
     }
 
     async fn open_task(&self, request: OpenTaskRequest) -> RpcResult<RecordResponse> {
         self.application
             .open_task(&request.body, request.project_slug)
-            .map(Into::into)
+            .map(|record| {
+                self.delivery.publish(&self.application);
+                record.into()
+            })
             .map_err(rpc_error)
     }
 
@@ -819,7 +911,10 @@ impl RecordApiServer for Daemon {
     ) -> RpcResult<RecordResponse> {
         self.application
             .open_task_under_spec(&request.body, request.spec_id)
-            .map(Into::into)
+            .map(|record| {
+                self.delivery.publish(&self.application);
+                record.into()
+            })
             .map_err(rpc_error)
     }
 
@@ -848,21 +943,30 @@ impl RecordApiServer for Daemon {
     async fn edit(&self, request: EditRecordRequest) -> RpcResult<RecordResponse> {
         self.application
             .edit_record(request.id, &request.body)
-            .map(Into::into)
+            .map(|record| {
+                self.delivery.publish(&self.application);
+                record.into()
+            })
             .map_err(rpc_error)
     }
 
     async fn start(&self, request: RecordIdRequest) -> RpcResult<RecordResponse> {
         self.application
             .start_record(request.id)
-            .map(Into::into)
+            .map(|record| {
+                self.delivery.publish(&self.application);
+                record.into()
+            })
             .map_err(rpc_error)
     }
 
     async fn done(&self, request: DoneRecordRequest) -> RpcResult<RecordResponse> {
         self.application
             .done_record(request.id, request.completion_resolution.as_deref())
-            .map(Into::into)
+            .map(|record| {
+                self.delivery.publish(&self.application);
+                record.into()
+            })
             .map_err(rpc_error)
     }
 
@@ -870,7 +974,10 @@ impl RecordApiServer for Daemon {
         relationship_kind(&request.kind)?;
         self.application
             .relate_records(request.child_id, request.parent_id)
-            .map(Into::into)
+            .map(|record| {
+                self.delivery.publish(&self.application);
+                record.into()
+            })
             .map_err(rpc_error)
     }
 
@@ -878,7 +985,10 @@ impl RecordApiServer for Daemon {
         relationship_kind(&request.kind)?;
         self.application
             .unrelate_records(request.child_id, request.parent_id)
-            .map(Into::into)
+            .map(|record| {
+                self.delivery.publish(&self.application);
+                record.into()
+            })
             .map_err(rpc_error)
     }
 
@@ -897,7 +1007,10 @@ impl RecordApiServer for Daemon {
     ) -> RpcResult<forge_rpc::RecordCommentResponse> {
         self.application
             .add_record_comment(request.record_id, &request.body, request.author.as_deref())
-            .map(Into::into)
+            .map(|comment| {
+                self.delivery.publish(&self.application);
+                comment.into()
+            })
             .map_err(rpc_error)
     }
 
@@ -913,6 +1026,7 @@ impl RecordApiServer for Daemon {
     async fn comment_delete(&self, request: DeleteRecordCommentRequest) -> RpcResult<()> {
         self.application
             .delete_record_comment(request.record_id, request.comment_id)
+            .inspect(|()| self.delivery.publish(&self.application))
             .map_err(rpc_error)
     }
 }
@@ -988,6 +1102,144 @@ impl ProjectApiServer for Daemon {
     }
 }
 
+async fn subscription_events(
+    State(daemon): State<Daemon>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    AxumPath((assignment_id, subscription_id)): AxumPath<(String, u64)>,
+    request: Request,
+) -> Response {
+    if !peer.ip().is_loopback() {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let id = RecordUpdateSubscriptionId(subscription_id);
+    let subscription = match daemon
+        .application
+        .assignment_subscription_delivery(&assignment_id, id)
+    {
+        Ok(subscription) => subscription,
+        Err(error) if error.code == "subscription-not-found" => {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        Err(error) if error.code == "subscription-expired" => {
+            return StatusCode::GONE.into_response();
+        }
+        Err(error) if error.code == "assignment-subscription-mismatch" => {
+            return StatusCode::FORBIDDEN.into_response();
+        }
+        Err(_) => return StatusCode::UNAUTHORIZED.into_response(),
+    };
+    let header_cursor = request
+        .headers()
+        .get("last-event-id")
+        .and_then(|value| value.to_str().ok());
+    let query_cursor = request.uri().query().and_then(|query| {
+        query
+            .split('&')
+            .find_map(|part| part.strip_prefix("after="))
+    });
+    let parse_cursor = |value: &str| value.parse::<u64>().ok().map(RecordUpdateId);
+    let header_cursor = header_cursor.map(parse_cursor);
+    let query_cursor = query_cursor.map(parse_cursor);
+    if header_cursor.is_some_and(|cursor| cursor.is_none())
+        || query_cursor.is_some_and(|cursor| cursor.is_none())
+        || matches!((header_cursor.flatten(), query_cursor.flatten()), (Some(left), Some(right)) if left != right)
+    {
+        return (StatusCode::BAD_REQUEST, "invalid-cursor").into_response();
+    }
+    let cursor = header_cursor
+        .flatten()
+        .or(query_cursor.flatten())
+        .unwrap_or(subscription.start_cursor);
+    if cursor < subscription.start_cursor {
+        return resync_required(id, subscription.start_cursor);
+    }
+    let (receiver, mut cancellation, replay) =
+        match daemon
+            .delivery
+            .connect_and_replay(&daemon.application, id, cursor)
+        {
+            Ok(connection) => connection,
+            Err(error) if error.code == "invalid-cursor" => {
+                return resync_required(id, subscription.start_cursor);
+            }
+            Err(error) if error.code == "subscription-expired" => {
+                return StatusCode::GONE.into_response();
+            }
+            Err(_) => return StatusCode::NOT_FOUND.into_response(),
+        };
+    let initial = std::iter::once(Ok::<Event, Infallible>(
+        Event::default().retry(Duration::from_millis(1_000)),
+    ))
+    .chain(
+        replay
+            .into_iter()
+            .map(move |update| Ok(record_update_event(id, &update))),
+    );
+    let stream = tokio_stream::iter(initial)
+        .chain(
+            ReceiverStream::new(receiver).map(move |update| Ok(record_update_event(id, &update))),
+        )
+        .take_until(async move {
+            let _ = cancellation.changed().await;
+        });
+    let mut response = Sse::new(stream)
+        .keep_alive(
+            axum::response::sse::KeepAlive::new()
+                .interval(Duration::from_secs(15))
+                .text("keepalive"),
+        )
+        .into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-cache, no-transform"),
+    );
+    response
+        .headers_mut()
+        .insert("x-accel-buffering", header::HeaderValue::from_static("no"));
+    response
+}
+
+fn resync_required(id: RecordUpdateSubscriptionId, start: RecordUpdateId) -> Response {
+    (
+        StatusCode::CONFLICT,
+        [(header::CONTENT_TYPE, "application/json")],
+        format!("{{\"code\":\"resync-required\",\"subscription_id\":{},\"retention_floor\":0,\"start_after_update_id\":{},\"head\":{}}}", id.0, start.0, start.0),
+    ).into_response()
+}
+
+fn record_update_event(
+    subscription_id: RecordUpdateSubscriptionId,
+    envelope: &RecordUpdateEnvelope,
+) -> Event {
+    let (kind, extra) = match envelope.update.kind {
+        RecordUpdateKind::Created => ("created", String::new()),
+        RecordUpdateKind::BodyEdited => ("body-edited", String::new()),
+        RecordUpdateKind::StatusTransition { from, to } => (
+            "status-transition",
+            format!(",\"from_status\":\"{from:?}\",\"to_status\":\"{to:?}\""),
+        ),
+        RecordUpdateKind::RelationshipAdded { related_record_id } => (
+            "relationship-added",
+            format!(",\"related_record_id\":{related_record_id}"),
+        ),
+        RecordUpdateKind::RelationshipRemoved { related_record_id } => (
+            "relationship-removed",
+            format!(",\"related_record_id\":{related_record_id}"),
+        ),
+        RecordUpdateKind::CommentAdded { comment_id } => {
+            ("comment-added", format!(",\"comment_id\":{}", comment_id.0))
+        }
+        RecordUpdateKind::CommentDeleted { comment_id } => (
+            "comment-deleted",
+            format!(",\"comment_id\":{}", comment_id.0),
+        ),
+    };
+    Event::default()
+        .id(envelope.update.id.0.to_string())
+        .event("record-update")
+        .data(format!("{{\"subscription_id\":{},\"record_id\":{},\"record_update_id\":{},\"kind\":\"{kind}\",\"timestamp\":{}{} }}", subscription_id.0, envelope.record_id, envelope.update.id.0, envelope.update.created_at_millis, extra))
+}
+
 fn rpc_error(error: RegistrationError) -> jsonrpsee::types::ErrorObjectOwned {
     jsonrpsee::types::ErrorObjectOwned::owned(-32001, error.message, Some(error.code))
 }
@@ -1000,6 +1252,7 @@ fn rpc_error(error: RegistrationError) -> jsonrpsee::types::ErrorObjectOwned {
 pub fn router(daemon: Daemon) -> Router {
     let page_daemon = daemon.clone();
     let status_daemon = daemon.clone();
+    let subscription_daemon = daemon.clone();
     let mut methods = SystemApiServer::into_rpc(daemon.clone());
     methods
         .merge(ProjectApiServer::into_rpc(daemon.clone()))
@@ -1021,6 +1274,10 @@ pub fn router(daemon: Daemon) -> Router {
     let server_handle = Arc::new(server_handle);
 
     Router::new()
+        .route(
+            "/v1/agent-assignments/{assignment_id}/record-update-subscriptions/{subscription_id}/events",
+            get(subscription_events).with_state(subscription_daemon),
+        )
         .route(
             "/",
             get(move || {
@@ -1187,9 +1444,12 @@ pub async fn serve(config: DaemonConfig) -> Result<(), std::io::Error> {
         Some(managed) => Some(bind_lifecycle_control(managed)?),
         None => None,
     };
-    let result = axum::serve(listener, router(daemon))
-        .with_graceful_shutdown(wait_for_shutdown(lifecycle_shutdown))
-        .await;
+    let result = axum::serve(
+        listener,
+        router(daemon).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(wait_for_shutdown(lifecycle_shutdown))
+    .await;
     let _ = observer_shutdown.send(true);
     let _ = observer.await;
     let _ = reconciliation_worker.await;
@@ -1369,8 +1629,12 @@ mod tests {
     use axum::{
         body::{Body, to_bytes},
         http::{Request, header},
+        response::{IntoResponse, Sse},
     };
-    use forge_app::{Application, Project, RegistrationError, RepositoryInspector};
+    use forge_app::{
+        Application, Project, RecordUpdate, RecordUpdateEnvelope, RecordUpdateId, RecordUpdateKind,
+        RecordUpdateSubscriptionId, RegistrationError, RepositoryInspector,
+    };
     use forge_rpc::{
         DoneRecordRequest, EditRecordRequest, ListRecordsRequest, OpenRecordRequest,
         OpenSpecRequest, OpenTaskRequest, OpenTaskUnderSpecRequest, ProjectApiClient,
@@ -1850,5 +2114,41 @@ mod tests {
         );
 
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn record_update_events_use_complete_named_sse_json_frames() {
+        let event = super::record_update_event(
+            RecordUpdateSubscriptionId(9),
+            &RecordUpdateEnvelope {
+                record_id: 47,
+                update: RecordUpdate {
+                    id: RecordUpdateId(12),
+                    created_at_millis: 123,
+                    kind: RecordUpdateKind::CommentAdded {
+                        comment_id: forge_app::RecordCommentId(3),
+                    },
+                },
+            },
+        );
+        let response = Sse::new(tokio_stream::iter([Ok::<_, std::convert::Infallible>(
+            event,
+        )]))
+        .into_response();
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "text/event-stream"
+        );
+        let frame = String::from_utf8(
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert_eq!(
+            frame,
+            "id: 12\nevent: record-update\ndata: {\"subscription_id\":9,\"record_id\":47,\"record_update_id\":12,\"kind\":\"comment-added\",\"timestamp\":123,\"comment_id\":3 }\n\n"
+        );
     }
 }

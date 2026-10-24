@@ -106,7 +106,7 @@ pub struct RecordUpdateEnvelope {
 }
 
 /// Opaque stable identity assigned to a durable Record Update Subscription.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct RecordUpdateSubscriptionId(pub u64);
 
 /// The update categories a subscription may select.
@@ -1492,6 +1492,43 @@ impl Application {
             correlation_id,
             subscription_id,
         )
+    }
+
+    /// Validates delivery ownership without renewing the Subscription lease.
+    ///
+    /// # Errors
+    ///
+    /// Returns authorization, ownership, or lease failures.
+    pub fn assignment_subscription_delivery(
+        &self,
+        assignment_id: &str,
+        subscription_id: RecordUpdateSubscriptionId,
+    ) -> Result<RecordUpdateSubscription, RegistrationError> {
+        let dispatch = self.dispatch()?;
+        let assignment = dispatch.agent_assignment(assignment_id)?;
+        let subscription = dispatch.record_update_subscription(subscription_id)?;
+        if assignment.closed_at_millis.is_none() && subscription.assignment_id == assignment.id {
+            Ok(subscription)
+        } else {
+            Err(RegistrationError::new(
+                "assignment-subscription-mismatch",
+                "Subscription is not owned by the named open Assignment",
+            ))
+        }
+    }
+
+    /// Replays selected committed updates after a durable global cursor.
+    ///
+    /// # Errors
+    ///
+    /// Returns storage, lease, or cursor failures.
+    pub fn replay_assignment_subscription_updates(
+        &self,
+        subscription_id: RecordUpdateSubscriptionId,
+        after: RecordUpdateId,
+    ) -> Result<Vec<RecordUpdateEnvelope>, RegistrationError> {
+        self.dispatch()?
+            .replay_record_updates(subscription_id, after)
     }
 
     /// Sets or clears a registered Project's Task dispatch capacity override.

@@ -1851,7 +1851,28 @@ impl RecordUpdateSubscriptionRepository for SqliteProjectRepository {
             .connection
             .lock()
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
-        load_subscription(&connection, id, now_millis()?)
+        let now = now_millis()?;
+        match load_subscription(&connection, id, now) {
+            Ok(subscription) => Ok(subscription),
+            Err(error) if error.code == "subscription-not-found" => {
+                let expired: bool = connection
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM record_update_subscriptions WHERE id = ?1 AND lease_expires_at_millis <= ?2)",
+                        params![id.0.cast_signed(), now],
+                        |row| row.get(0),
+                    )
+                    .map_err(storage_error)?;
+                if expired {
+                    Err(RegistrationError::new(
+                        "subscription-expired",
+                        "Subscription lease has expired",
+                    ))
+                } else {
+                    Err(error)
+                }
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn renew_record_update_subscription(

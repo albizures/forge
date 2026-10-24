@@ -11,10 +11,12 @@ forge-app = { path = "../app" }
 forge-build-info = { path = "../build-info" }
 forge-rpc = { path = "../rpc" }
 forge-store = { path = "../store" }
+futures-util = "0.3.34"
 askama = "0.14.0"
 axum = "0.8.8"
 jsonrpsee = { version = "0.26.0", features = ["http-client", "server"] }
 tokio = { version = "1.48.0", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-stream = "0.1.17"
 tower = { version = "0.5.2", features = ["util"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }

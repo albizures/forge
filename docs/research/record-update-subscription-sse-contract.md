@@ -27,11 +27,10 @@ The management API creates, renews, changes targets, and deletes subscriptions; 
 
 ```text
 GET /v1/agent-assignments/{assignment_id}/record-update-subscriptions/{subscription_id}/events
-Authorization: Bearer <assignment-capability>
 Last-Event-ID: <decimal-update-id>  # optional
 ```
 
-The endpoint validates that the opaque capability authorizes the named, still-open assignment; that assignment owns the subscription; and its lease has not expired. It must not infer authority from the subscription ID. Failures before a stream starts are ordinary HTTP responses: `401` missing/invalid capability, `403` valid capability for another assignment, `404` absent subscription, and `410 subscription-expired` for an expired lease. The existing unauthenticated daemon listener is therefore not sufficient: adding this endpoint requires an authenticated HTTP capability seam.
+V1 exposes this endpoint only on the daemon's loopback listener: Agents and the daemon are co-resident trusted local processes. It deliberately has no HTTP bearer capability requirement. The endpoint still validates that the named Assignment is open, owns the Subscription, and that its lease has not expired; it must reject non-loopback peers. Failures before a stream starts are ordinary HTTP responses: `403` Assignment/subscription mismatch or non-loopback peer, `404` absent subscription, and `410 subscription-expired` for an expired lease. Remote Agent delivery requires an authenticated transport boundary and is out of scope for V1.
 
 A malformed, too-old, or pre-subscription cursor returns `409 Conflict` with `application/json`:
 
@@ -73,11 +72,11 @@ An SSE connection validates capability/lease at open only. It does not renew the
 3. **Boundary:** no cursor begins after the captured creation cursor; a cursor before that cursor, malformed decimal cursor, or conflicting header/query cursor yields the stated recovery/error response. Future simulated `retention_floor` advancement yields `409 resync-required`.
 4. **Filtering and envelope:** unrelated target/filter updates never emit; each supported kind serializes only its allowed references and no Record state or capability.
 5. **Race:** inject an update between live-listener registration and replay query; it arrives exactly once in that uninterrupted connection. Inject an update immediately after the query; it arrives live.
-6. **Authorization/lifecycle:** another assignment's capability cannot subscribe; expiry does not renew from streaming; explicit deletion and assignment retirement end a stream and block reconnect; direct-child target authorization is enforced at subscription mutation.
+6. **Loopback/lifecycle:** non-loopback peers cannot subscribe; a named Assignment cannot open another Assignment's Subscription; expiry does not renew from streaming; explicit deletion and assignment retirement end a stream and block reconnect; direct-child target authorization is enforced at subscription mutation.
 7. **Connection replacement:** opening a second stream cancels the first and only the current generation receives subsequent live deliveries.
 8. **Slow consumer:** fill 256 pending envelopes without polling the writer; the stream is cancelled, publication and Record writes complete without waiting, and a new stream can replay/reconcile from the last dispatched ID.
 9. **Process boundary:** document/test that in-process publication reaches same-process connections only; reject or defer multi-process configuration until a cross-process wake mechanism exists.
 
 ## Implementation handoff
 
-Turn this contract plus **Map Record Update Subscription integration seams (#468)** into an implementation Spec. That Spec should introduce the subscription domain/repository port, global ascending Record Update envelope query, transaction-safe creation/retirement behavior, post-commit in-process adapter, authenticated Axum endpoint, and the tests above. It must not implement Pi behavior, WebSockets, dynamic targets, transitive traversal, or exactly-once delivery.
+Turn this contract plus **Map Record Update Subscription integration seams (#468)** into an implementation Spec. That Spec should introduce the subscription domain/repository port, global ascending Record Update envelope query, transaction-safe creation/retirement behavior, post-commit in-process adapter, authenticated Axum endpoint, and the tests above. It must keep delivery loopback-only and must not implement Pi behavior, remote authenticated delivery, WebSockets, dynamic targets, transitive traversal, or exactly-once delivery.
