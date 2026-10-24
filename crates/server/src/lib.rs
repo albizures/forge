@@ -1064,9 +1064,11 @@ fn record_type(record_type: &str) -> RpcResult<RecordType> {
         "generic" => Ok(RecordType::Generic),
         "spec" => Ok(RecordType::Spec),
         "task" => Ok(RecordType::Task),
+        "wayfinder" => Ok(RecordType::Wayfinder),
+        "grilling" => Ok(RecordType::Grilling),
         _ => Err(rpc_error(RegistrationError::new(
             "invalid-record-type",
-            "Record type must be generic, spec, or task",
+            "Record type must be generic, spec, task, wayfinder, or grilling",
         ))),
     }
 }

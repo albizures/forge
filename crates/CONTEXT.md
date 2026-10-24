@@ -109,7 +109,7 @@ Forge’s generic primary entity for representing work across multiple workflows
 _Avoid_: v1 entity
 
 **Record Type**:
-The immutable kind selected when a Record opens. Generic Record, Spec, and Task are the initial Record Types.
+The immutable kind selected when a Record opens. Generic Record, Spec, Task, Wayfinder, and Grilling are the Record Types.
 _Avoid_: category, label
 
 **Record Identifier**:
@@ -121,8 +121,20 @@ A Record type that defines planned work for exactly one Project and may parent T
 _Avoid_: specification, issue
 
 **Task**:
-A Record type that represents a unit of work with zero or one Project Scope. It may be opened under one Spec, from which it receives its Project Scope, or opened without a parent; its membership and scope are immutable after opening, and it may not parent another Record.
+A leaf Record type that represents a unit of work with exactly one Project Scope when opened under a Wayfinder, selected from that Wayfinder's Project Scope. It may also be opened under one Spec, from which it receives its Project Scope, or opened without a parent. Its membership and scope are immutable after opening. A branch may be recorded as its work output but is not Forge lifecycle or relationship state.
 _Avoid_: subtask, to-do
+
+**Task Kind**:
+An optional immutable semantic classification of a Task: Research, Prototype, or Review. It does not alter the Task lifecycle, dependency behavior, or branch-output handling.
+_Avoid_: task type, profile
+
+**Wayfinder**:
+A planning-map Record type with one or more Projects in its Project Scope. It may parent Tasks and Grillings.
+_Avoid_: plan, container
+
+**Grilling**:
+A human-in-the-loop decision Record type that is a leaf child of one Wayfinder. Its immutable Project Scope contains one or more Projects selected from its parent Wayfinder's Project Scope. It is included in the executable frontier only when a caller explicitly includes human-in-the-loop work.
+_Avoid_: question, approval
 
 **Agent Assignment**:
 A Forge-owned, durable association between one Record and an externally managed Agent. It records the provider-facing identity and lifecycle of one work attempt; assignments remain as history after an Agent is removed or replaced.
@@ -213,7 +225,7 @@ An optional immutable, non-blank free-text explanation recorded when a Record be
 _Avoid_: outcome code
 
 **Parent Record**:
-A Record whose work includes the work represented by one or more Child Records through the parent/child Relationship kind. It may become Done only when all of its Child Records are Done at that time, and shares its Project Scope with every Child Record.
+A Record whose work includes the work represented by one or more Child Records through the parent/child Relationship kind. It may become Done only when all of its Child Records are Done at that time. A Spec shares its Project Scope with every Child Record; a Wayfinder may have a multi-Project Scope while its Task and Grilling children select non-empty subsets of that scope.
 _Avoid_: container, owner
 
 **Child Record**:

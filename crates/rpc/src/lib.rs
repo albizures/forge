@@ -622,6 +622,8 @@ fn record_type_name(record_type: forge_app::RecordType) -> String {
         forge_app::RecordType::Generic => "generic",
         forge_app::RecordType::Spec => "spec",
         forge_app::RecordType::Task => "task",
+        forge_app::RecordType::Wayfinder => "wayfinder",
+        forge_app::RecordType::Grilling => "grilling",
     }
     .into()
 }

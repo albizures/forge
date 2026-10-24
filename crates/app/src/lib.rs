@@ -48,6 +48,8 @@ pub enum RecordType {
     Generic,
     Spec,
     Task,
+    Wayfinder,
+    Grilling,
 }
 
 /// A unit of work whose immutable type governs its scope and hierarchy.

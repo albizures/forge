@@ -56,7 +56,7 @@ impl SqliteProjectRepository {
             );
             CREATE TABLE IF NOT EXISTS records (
                 id INTEGER PRIMARY KEY NOT NULL,
-                record_type TEXT NOT NULL CHECK (record_type IN ('generic', 'spec', 'task')),
+                record_type TEXT NOT NULL CHECK (record_type IN ('generic', 'spec', 'task', 'wayfinder', 'grilling')),
                 body TEXT NOT NULL,
                 status TEXT NOT NULL CHECK (status IN ('open', 'in_progress', 'done')),
                 completion_resolution TEXT
@@ -2370,7 +2370,17 @@ fn validate_typed_record(record: &NewTypedRecord) -> Result<(), RegistrationErro
             "invalid-project-scope",
             "a standalone Task may have at most one Project in its scope",
         )),
-        RecordType::Spec | RecordType::Task => Ok(()),
+        RecordType::Wayfinder if record.project_slugs.is_empty() => Err(RegistrationError::new(
+            "invalid-project-scope",
+            "a Wayfinder must have at least one Project in its scope",
+        )),
+        RecordType::Grilling if record.project_slugs.is_empty() => Err(RegistrationError::new(
+            "invalid-project-scope",
+            "a Grilling must have at least one Project in its scope",
+        )),
+        RecordType::Spec | RecordType::Task | RecordType::Wayfinder | RecordType::Grilling => {
+            Ok(())
+        }
     }
 }
 
@@ -2379,6 +2389,8 @@ fn record_type_name(record_type: RecordType) -> &'static str {
         RecordType::Generic => "generic",
         RecordType::Spec => "spec",
         RecordType::Task => "task",
+        RecordType::Wayfinder => "wayfinder",
+        RecordType::Grilling => "grilling",
     }
 }
 
@@ -2387,6 +2399,8 @@ fn record_type(value: &str) -> Result<RecordType, RegistrationError> {
         "generic" => Ok(RecordType::Generic),
         "spec" => Ok(RecordType::Spec),
         "task" => Ok(RecordType::Task),
+        "wayfinder" => Ok(RecordType::Wayfinder),
+        "grilling" => Ok(RecordType::Grilling),
         _ => Err(RegistrationError::new(
             "storage",
             "stored Record has an invalid type",
@@ -2469,23 +2483,59 @@ fn now_millis() -> Result<i64, RegistrationError> {
 }
 
 fn migrate_record_type_schema(connection: &Connection) -> Result<(), RegistrationError> {
-    let has_record_type: bool = connection
+    let columns = connection
         .prepare("PRAGMA table_info(records)")
         .map_err(storage_error)?
         .query_map([], |row| row.get::<_, String>(1))
         .map_err(storage_error)?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(storage_error)?
-        .iter()
-        .any(|column| column == "record_type");
-    if !has_record_type {
+        .map_err(storage_error)?;
+    if !columns.iter().any(|column| column == "record_type") {
         connection
             .execute_batch(
-                "ALTER TABLE records ADD COLUMN record_type TEXT NOT NULL DEFAULT 'generic' CHECK (record_type IN ('generic', 'spec', 'task'));",
+                "ALTER TABLE records ADD COLUMN record_type TEXT NOT NULL DEFAULT 'generic' CHECK (record_type IN ('generic', 'spec', 'task', 'wayfinder', 'grilling'));",
             )
             .map_err(storage_error)?;
+        return Ok(());
     }
-    Ok(())
+
+    let schema: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'records'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(storage_error)?;
+    if schema.contains("'wayfinder'") && schema.contains("'grilling'") {
+        return Ok(());
+    }
+
+    connection
+        .execute_batch("PRAGMA foreign_keys = OFF;")
+        .map_err(storage_error)?;
+    let migration = (|| {
+        let transaction = connection.unchecked_transaction().map_err(storage_error)?;
+        transaction
+            .execute_batch(
+                "CREATE TABLE records_new (
+                    id INTEGER PRIMARY KEY NOT NULL,
+                    record_type TEXT NOT NULL CHECK (record_type IN ('generic', 'spec', 'task', 'wayfinder', 'grilling')),
+                    body TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK (status IN ('open', 'in_progress', 'done')),
+                    completion_resolution TEXT
+                );
+                INSERT INTO records_new (id, record_type, body, status, completion_resolution)
+                    SELECT id, record_type, body, status, completion_resolution FROM records;
+                DROP TABLE records;
+                ALTER TABLE records_new RENAME TO records;",
+            )
+            .map_err(storage_error)?;
+        transaction.commit().map_err(storage_error)
+    })();
+    let foreign_keys = connection
+        .execute_batch("PRAGMA foreign_keys = ON;")
+        .map_err(storage_error);
+    migration.and(foreign_keys)
 }
 
 fn migrate_record_relationship_schema(connection: &Connection) -> Result<(), RegistrationError> {
@@ -3102,6 +3152,77 @@ mod tests {
                 .code,
             "invalid-relationship"
         );
+    }
+
+    #[test]
+    fn migrates_typed_records_and_widens_the_record_type_constraint() {
+        let path = std::env::temp_dir().join(format!(
+            "forge-store-record-type-migration-{}.sqlite",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection.execute_batch("PRAGMA foreign_keys = ON;
+            CREATE TABLE projects (slug TEXT PRIMARY KEY NOT NULL, registered_folder TEXT UNIQUE NOT NULL, origin_url TEXT NOT NULL);
+            CREATE TABLE records (
+                id INTEGER PRIMARY KEY NOT NULL,
+                record_type TEXT NOT NULL CHECK (record_type IN ('generic', 'spec', 'task')),
+                body TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('open', 'in_progress', 'done')),
+                completion_resolution TEXT
+            );
+            CREATE TABLE record_projects (record_id INTEGER NOT NULL REFERENCES records(id), project_slug TEXT NOT NULL REFERENCES projects(slug), PRIMARY KEY (record_id, project_slug));
+            CREATE TABLE record_relationships (
+                from_id INTEGER NOT NULL REFERENCES records(id), to_id INTEGER NOT NULL REFERENCES records(id),
+                parent_id INTEGER REFERENCES records(id), child_id INTEGER REFERENCES records(id) UNIQUE,
+                kind TEXT NOT NULL CHECK (kind IN ('parent-child', 'depends-on')), PRIMARY KEY (from_id, to_id, kind)
+            );
+            INSERT INTO projects VALUES ('alpha', '/repos/alpha', 'https://example.test/repo.git');
+            INSERT INTO records VALUES (1, 'generic', 'generic', 'open', NULL);
+            INSERT INTO records VALUES (2, 'spec', 'spec', 'open', NULL);
+            INSERT INTO records VALUES (3, 'task', 'task', 'done', 'complete');
+            INSERT INTO record_projects VALUES (1, 'alpha');
+            INSERT INTO record_projects VALUES (2, 'alpha');
+            INSERT INTO record_projects VALUES (3, 'alpha');
+            INSERT INTO record_relationships VALUES (3, 2, 2, 3, 'parent-child');").unwrap();
+        drop(connection);
+
+        let store = SqliteProjectRepository::open(&path).unwrap();
+        assert_eq!(
+            store.show_record(1).unwrap().record_type,
+            RecordType::Generic
+        );
+        assert_eq!(store.show_record(2).unwrap().record_type, RecordType::Spec);
+        let task = store.show_record(3).unwrap();
+        assert_eq!(task.record_type, RecordType::Task);
+        assert_eq!(task.project_slugs, ["alpha"]);
+        assert_eq!(task.relationships[0].parent_id, 2);
+        assert_eq!(task.completion_resolution.as_deref(), Some("complete"));
+        assert_eq!(
+            store
+                .open_typed_record(&NewTypedRecord {
+                    record_type: RecordType::Wayfinder,
+                    body: "wayfinder".into(),
+                    project_slugs: vec!["alpha".into()],
+                })
+                .unwrap()
+                .record_type,
+            RecordType::Wayfinder
+        );
+        assert_eq!(
+            store
+                .open_typed_record(&NewTypedRecord {
+                    record_type: RecordType::Grilling,
+                    body: "grilling".into(),
+                    project_slugs: vec!["alpha".into()],
+                })
+                .unwrap()
+                .record_type,
+            RecordType::Grilling
+        );
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
