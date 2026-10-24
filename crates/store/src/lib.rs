@@ -983,82 +983,7 @@ impl RecordRepository for SqliteProjectRepository {
         let transaction = connection.transaction().map_err(storage_error)?;
         let child = load_record(&transaction, child_id)?;
         let parent = load_record(&transaction, parent_id)?;
-        match kind {
-            RecordRelationshipKind::ParentChild => {
-                if child.record_type != RecordType::Generic
-                    || !matches!(parent.record_type, RecordType::Generic | RecordType::Task)
-                {
-                    return Err(RegistrationError::new(
-                        "invalid-relationship",
-                        "only a Generic Record may be attached to a Generic or Task parent after opening",
-                    ));
-                }
-                if child.project_slugs != parent.project_slugs {
-                    return Err(RegistrationError::new(
-                        "scope-mismatch",
-                        "parent and child Records must have identical Project Scopes",
-                    ));
-                }
-                let cycle: bool = transaction.query_row(
-                    "WITH RECURSIVE descendants(id) AS (SELECT child_id FROM record_relationships WHERE kind = 'parent-child' AND parent_id = ?1 UNION SELECT relationship.child_id FROM record_relationships relationship JOIN descendants ON relationship.parent_id = descendants.id WHERE relationship.kind = 'parent-child') SELECT EXISTS(SELECT 1 FROM descendants WHERE id = ?2)",
-                    params![child_id.cast_signed(), parent_id.cast_signed()], |row| row.get(0)
-                ).map_err(storage_error)?;
-                if cycle {
-                    return Err(RegistrationError::new(
-                        "relationship-cycle",
-                        "parent/child Relationships cannot form a cycle",
-                    ));
-                }
-                transaction.execute("INSERT INTO record_relationships (from_id, to_id, parent_id, child_id, kind) VALUES (?1, ?2, ?2, ?1, 'parent-child')", params![child_id.cast_signed(), parent_id.cast_signed()]).map_err(|error| if matches!(error.sqlite_error_code(), Some(ErrorCode::ConstraintViolation)) { RegistrationError::new("child-already-related", "a child Record can have only one parent") } else { storage_error(error) })?;
-            }
-            RecordRelationshipKind::DependsOn => {
-                if child.status != RecordStatus::Open {
-                    return Err(RegistrationError::new(
-                        "blocked-record-not-open",
-                        "a dependency may change only while its blocked Record is Open",
-                    ));
-                }
-                let valid_dependency = child.record_type == parent.record_type
-                    && matches!(child.record_type, RecordType::Task | RecordType::Spec)
-                    || child.record_type == RecordType::Task
-                        && parent.record_type == RecordType::Grilling
-                        && child.project_slugs.len() == 1
-                        && parent.project_slugs.contains(&child.project_slugs[0]);
-                if !valid_dependency {
-                    return Err(RegistrationError::new(
-                        "invalid-relationship",
-                        "depends-on requires same-type Task or Spec Records, or a Task scoped within a Grilling",
-                    ));
-                }
-                let cycle: bool = transaction.query_row(
-                    "WITH RECURSIVE prerequisites(id) AS (SELECT to_id FROM record_relationships WHERE kind = 'depends-on' AND from_id = ?1 UNION SELECT relationship.to_id FROM record_relationships relationship JOIN prerequisites ON relationship.from_id = prerequisites.id WHERE relationship.kind = 'depends-on') SELECT EXISTS(SELECT 1 FROM prerequisites WHERE id = ?2)",
-                    params![parent_id.cast_signed(), child_id.cast_signed()], |row| row.get(0)
-                ).map_err(storage_error)?;
-                if cycle {
-                    return Err(RegistrationError::new(
-                        "relationship-cycle",
-                        "dependency Relationships cannot form a cycle",
-                    ));
-                }
-                transaction.execute("INSERT INTO record_relationships (from_id, to_id, kind) VALUES (?1, ?2, 'depends-on')", params![child_id.cast_signed(), parent_id.cast_signed()]).map_err(|error| if matches!(error.sqlite_error_code(), Some(ErrorCode::ConstraintViolation)) { RegistrationError::new("duplicate-relationship", "Relationship already exists") } else { storage_error(error) })?;
-            }
-            RecordRelationshipKind::GeneratedBy => {
-                if child.status != RecordStatus::Open {
-                    return Err(RegistrationError::new(
-                        "generated-record-not-open",
-                        "provenance may change only while its generated Record is Open",
-                    ));
-                }
-                let cycle: bool = transaction.query_row("WITH RECURSIVE generators(id) AS (SELECT to_id FROM record_relationships WHERE kind = 'generated-by' AND from_id = ?1 UNION SELECT relationship.to_id FROM record_relationships relationship JOIN generators ON relationship.from_id = generators.id WHERE relationship.kind = 'generated-by') SELECT EXISTS(SELECT 1 FROM generators WHERE id = ?2)", params![parent_id.cast_signed(), child_id.cast_signed()], |row| row.get(0)).map_err(storage_error)?;
-                if cycle {
-                    return Err(RegistrationError::new(
-                        "relationship-cycle",
-                        "generated-by Relationships cannot form a cycle",
-                    ));
-                }
-                transaction.execute("INSERT INTO record_relationships (from_id, to_id, kind) VALUES (?1, ?2, 'generated-by')", params![child_id.cast_signed(), parent_id.cast_signed()]).map_err(|error| if matches!(error.sqlite_error_code(), Some(ErrorCode::ConstraintViolation)) { RegistrationError::new("duplicate-relationship", "Relationship already exists") } else { storage_error(error) })?;
-            }
-        }
+        insert_relationship(&transaction, &child, &parent, kind)?;
         insert_update(
             &transaction,
             child_id,
@@ -2397,6 +2322,92 @@ fn status_name(status: RecordStatus) -> &'static str {
 }
 
 #[allow(clippy::needless_pass_by_value)]
+fn insert_relationship(
+    transaction: &rusqlite::Transaction<'_>,
+    child: &Record,
+    parent: &Record,
+    kind: RecordRelationshipKind,
+) -> Result<(), RegistrationError> {
+    match kind {
+        RecordRelationshipKind::ParentChild => {
+            if child.record_type != RecordType::Generic
+                || !matches!(parent.record_type, RecordType::Generic | RecordType::Task)
+            {
+                return Err(RegistrationError::new(
+                    "invalid-relationship",
+                    "only a Generic Record may be attached to a Generic or Task parent after opening",
+                ));
+            }
+            if child.project_slugs != parent.project_slugs {
+                return Err(RegistrationError::new(
+                    "scope-mismatch",
+                    "parent and child Records must have identical Project Scopes",
+                ));
+            }
+            let cycle: bool = transaction.query_row(
+                "WITH RECURSIVE descendants(id) AS (SELECT child_id FROM record_relationships WHERE kind = 'parent-child' AND parent_id = ?1 UNION SELECT relationship.child_id FROM record_relationships relationship JOIN descendants ON relationship.parent_id = descendants.id WHERE relationship.kind = 'parent-child') SELECT EXISTS(SELECT 1 FROM descendants WHERE id = ?2)",
+                params![child.id.cast_signed(), parent.id.cast_signed()], |row| row.get(0)
+            ).map_err(storage_error)?;
+            if cycle {
+                return Err(RegistrationError::new(
+                    "relationship-cycle",
+                    "parent/child Relationships cannot form a cycle",
+                ));
+            }
+            transaction.execute("INSERT INTO record_relationships (from_id, to_id, parent_id, child_id, kind) VALUES (?1, ?2, ?2, ?1, 'parent-child')", params![child.id.cast_signed(), parent.id.cast_signed()]).map_err(|error| if matches!(error.sqlite_error_code(), Some(ErrorCode::ConstraintViolation)) { RegistrationError::new("child-already-related", "a child Record can have only one parent") } else { storage_error(error) })?;
+        }
+        RecordRelationshipKind::DependsOn => {
+            if child.status != RecordStatus::Open {
+                return Err(RegistrationError::new(
+                    "blocked-record-not-open",
+                    "a dependency may change only while its blocked Record is Open",
+                ));
+            }
+            let valid_dependency = child.record_type == parent.record_type
+                && matches!(child.record_type, RecordType::Task | RecordType::Spec)
+                || child.record_type == RecordType::Task
+                    && parent.record_type == RecordType::Grilling
+                    && child.project_slugs.len() == 1
+                    && parent.project_slugs.contains(&child.project_slugs[0]);
+            if !valid_dependency {
+                return Err(RegistrationError::new(
+                    "invalid-relationship",
+                    "depends-on requires same-type Task or Spec Records, or a Task scoped within a Grilling",
+                ));
+            }
+            let cycle: bool = transaction.query_row(
+                "WITH RECURSIVE prerequisites(id) AS (SELECT to_id FROM record_relationships WHERE kind = 'depends-on' AND from_id = ?1 UNION SELECT relationship.to_id FROM record_relationships relationship JOIN prerequisites ON relationship.from_id = prerequisites.id WHERE relationship.kind = 'depends-on') SELECT EXISTS(SELECT 1 FROM prerequisites WHERE id = ?2)",
+                params![parent.id.cast_signed(), child.id.cast_signed()], |row| row.get(0)
+            ).map_err(storage_error)?;
+            if cycle {
+                return Err(RegistrationError::new(
+                    "relationship-cycle",
+                    "dependency Relationships cannot form a cycle",
+                ));
+            }
+            transaction.execute("INSERT INTO record_relationships (from_id, to_id, kind) VALUES (?1, ?2, 'depends-on')", params![child.id.cast_signed(), parent.id.cast_signed()]).map_err(|error| if matches!(error.sqlite_error_code(), Some(ErrorCode::ConstraintViolation)) { RegistrationError::new("duplicate-relationship", "Relationship already exists") } else { storage_error(error) })?;
+        }
+        RecordRelationshipKind::GeneratedBy => {
+            if child.status != RecordStatus::Open {
+                return Err(RegistrationError::new(
+                    "generated-record-not-open",
+                    "provenance may change only while its generated Record is Open",
+                ));
+            }
+            let cycle: bool = transaction.query_row("WITH RECURSIVE generators(id) AS (SELECT to_id FROM record_relationships WHERE kind = 'generated-by' AND from_id = ?1 UNION SELECT relationship.to_id FROM record_relationships relationship JOIN generators ON relationship.from_id = generators.id WHERE relationship.kind = 'generated-by') SELECT EXISTS(SELECT 1 FROM generators WHERE id = ?2)", params![parent.id.cast_signed(), child.id.cast_signed()], |row| row.get(0)).map_err(storage_error)?;
+            if cycle {
+                return Err(RegistrationError::new(
+                    "relationship-cycle",
+                    "generated-by Relationships cannot form a cycle",
+                ));
+            }
+            transaction.execute("INSERT INTO record_relationships (from_id, to_id, kind) VALUES (?1, ?2, 'generated-by')", params![child.id.cast_signed(), parent.id.cast_signed()]).map_err(|error| if matches!(error.sqlite_error_code(), Some(ErrorCode::ConstraintViolation)) { RegistrationError::new("duplicate-relationship", "Relationship already exists") } else { storage_error(error) })?;
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::needless_pass_by_value)]
 fn insert_update(
     connection: &Connection,
     record_id: u64,
@@ -2974,8 +2985,8 @@ mod tests {
     use forge_app::{
         AgentDispatchRepository, ManagedWorktreeRepository, NewAgentAssignment,
         NewAgentAssignmentResource, NewRecord, NewRecordUpdateSubscription, NewTypedRecord,
-        Project, ProjectRepository, RecordListFilter, RecordRelationshipKind, RecordRepository,
-        RecordStatus, RecordType, RecordUpdateKind, RecordUpdateKindFilter,
+        Project, ProjectRepository, Record, RecordListFilter, RecordRelationshipKind,
+        RecordRepository, RecordStatus, RecordType, RecordUpdateKind, RecordUpdateKindFilter,
         RecordUpdateSubscriptionRepository, TaskKind, assignment_add_comment,
         assignment_complete_task, assignment_context, assignment_create_record_update_subscription,
     };
@@ -3606,6 +3617,61 @@ mod tests {
     #[test]
     fn opens_scoped_grillings_and_gates_tasks_on_them() {
         let store = SqliteProjectRepository::in_memory().unwrap();
+        let (wayfinder, full_scope) = opens_scoped_grillings(&store);
+        let alpha_task = store
+            .open_task_under_wayfinder(
+                "alpha task",
+                wayfinder.id,
+                Some("alpha".into()),
+                None,
+                vec![],
+            )
+            .unwrap();
+        store
+            .relate_records(
+                alpha_task.id,
+                full_scope.id,
+                RecordRelationshipKind::DependsOn,
+            )
+            .unwrap();
+        assert_eq!(
+            store.start_record(alpha_task.id).unwrap_err().code,
+            "dependencies-not-done"
+        );
+        let gamma_task = store
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Task,
+                task_kind: None,
+                body: "gamma task".into(),
+                project_slugs: vec!["gamma".into()],
+                generated_by_ids: vec![],
+            })
+            .unwrap();
+        assert_eq!(
+            store
+                .relate_records(
+                    gamma_task.id,
+                    full_scope.id,
+                    RecordRelationshipKind::DependsOn,
+                )
+                .unwrap_err()
+                .code,
+            "invalid-relationship"
+        );
+        store.start_record(full_scope.id).unwrap();
+        store.done_record(full_scope.id, None).unwrap();
+        assert_eq!(
+            store.start_record(alpha_task.id).unwrap().status,
+            RecordStatus::InProgress
+        );
+        store.start_record(wayfinder.id).unwrap();
+        assert_eq!(
+            store.done_record(wayfinder.id, None).unwrap_err().code,
+            "children-not-done"
+        );
+    }
+
+    fn opens_scoped_grillings(store: &SqliteProjectRepository) -> (Record, Record) {
         store.register(&project("alpha", "/repos/alpha")).unwrap();
         store.register(&project("beta", "/repos/beta")).unwrap();
         store.register(&project("gamma", "/repos/gamma")).unwrap();
@@ -3666,57 +3732,7 @@ mod tests {
                 .len(),
             2
         );
-        let alpha_task = store
-            .open_task_under_wayfinder(
-                "alpha task",
-                wayfinder.id,
-                Some("alpha".into()),
-                None,
-                vec![],
-            )
-            .unwrap();
-        store
-            .relate_records(
-                alpha_task.id,
-                full_scope.id,
-                RecordRelationshipKind::DependsOn,
-            )
-            .unwrap();
-        assert_eq!(
-            store.start_record(alpha_task.id).unwrap_err().code,
-            "dependencies-not-done"
-        );
-        let gamma_task = store
-            .open_typed_record(&NewTypedRecord {
-                record_type: RecordType::Task,
-                task_kind: None,
-                body: "gamma task".into(),
-                project_slugs: vec!["gamma".into()],
-                generated_by_ids: vec![],
-            })
-            .unwrap();
-        assert_eq!(
-            store
-                .relate_records(
-                    gamma_task.id,
-                    full_scope.id,
-                    RecordRelationshipKind::DependsOn,
-                )
-                .unwrap_err()
-                .code,
-            "invalid-relationship"
-        );
-        store.start_record(full_scope.id).unwrap();
-        store.done_record(full_scope.id, None).unwrap();
-        assert_eq!(
-            store.start_record(alpha_task.id).unwrap().status,
-            RecordStatus::InProgress
-        );
-        store.start_record(wayfinder.id).unwrap();
-        assert_eq!(
-            store.done_record(wayfinder.id, None).unwrap_err().code,
-            "children-not-done"
-        );
+        (wayfinder, full_scope)
     }
 
     #[test]
