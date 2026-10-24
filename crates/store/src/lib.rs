@@ -2596,6 +2596,10 @@ mod tests {
             "retirement evidence is idempotent"
         );
 
+        asserts_project_configuration_persists(&store);
+    }
+
+    fn asserts_project_configuration_persists(store: &SqliteProjectRepository) {
         assert_eq!(
             store
                 .effective_project_task_concurrency_limit("alpha")

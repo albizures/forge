@@ -1,6 +1,7 @@
 //! Protocol-22 client for the local Herdr Unix-socket API.
 
 use std::{
+    fmt::Write as _,
     io::{BufRead, BufReader, Write},
     path::PathBuf,
     time::Duration,
@@ -245,6 +246,7 @@ fn event_is_owned_status_change(event: &Value, panes: &[String]) -> bool {
 }
 
 impl HerdrAdapter {
+    #[allow(clippy::needless_pass_by_value)] // Required by the non-Unix fallback's ownership shape.
     fn request(&self, method: &str, params: Value) -> Result<Value, AgentAdapterError> {
         #[cfg(unix)]
         {
@@ -441,7 +443,7 @@ impl HerdrAdapter {
             })
     }
 
-    /// Parses an authoritative AgentInfo response. Readiness and sequence fields are
+    /// Parses an authoritative `AgentInfo` response. Readiness and sequence fields are
     /// deliberately not lifecycle inputs: only the protocol status is normalized.
     fn observation_from_agent(
         agent: &Value,
@@ -571,50 +573,47 @@ impl AgentDispatchAdapter for HerdrAdapter {
     ) -> Result<(), AgentAdapterError> {
         self.probe()?;
         let label = Self::label(context)?;
-        let workspace = match Self::active(&context.resources, "workspace") {
-            Some(id) => id.to_owned(),
-            None => {
-                let id = self.workspace_id(context)?;
-                Self::retain(resources, context, "workspace", &id)?;
-                id
-            }
+        let workspace = if let Some(id) = Self::active(&context.resources, "workspace") {
+            id.to_owned()
+        } else {
+            let id = self.workspace_id(context)?;
+            Self::retain(resources, context, "workspace", &id)?;
+            id
         };
-        let (tab, root) = match Self::active(&context.resources, "tab") {
-            Some(id) => (id.to_owned(), None),
-            None => {
-                let result = self.request("tab.create", json!({"workspace_id": workspace, "label": label, "cwd": context.registered_project_folder, "focus": false}))?;
-                let id = result
-                    .pointer("/tab/tab_id")
-                    .or_else(|| result.get("tab_id"))
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        AgentAdapterError::Endpoint("tab.create did not return tab_id".into())
-                    })?
-                    .to_owned();
-                let root = result
-                    .pointer("/root_pane/pane_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned);
-                Self::retain(resources, context, "tab", &id)?;
-                (id, root)
-            }
+        let (tab, root) = if let Some(id) = Self::active(&context.resources, "tab") {
+            (id.to_owned(), None)
+        } else {
+            let result = self.request("tab.create", json!({"workspace_id": workspace, "label": label, "cwd": context.registered_project_folder, "focus": false}))?;
+            let id = result
+                .pointer("/tab/tab_id")
+                .or_else(|| result.get("tab_id"))
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    AgentAdapterError::Endpoint("tab.create did not return tab_id".into())
+                })?
+                .to_owned();
+            let root = result
+                .pointer("/root_pane/pane_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            Self::retain(resources, context, "tab", &id)?;
+            (id, root)
         };
-        let pane = match Self::active(&context.resources, "pane") {
-            Some(id) => id.to_owned(),
-            None => {
-                let root = root.unwrap_or(self.root_pane(&workspace, &tab)?);
-                let result = self.request("pane.split", json!({"target_pane_id": root, "workspace_id": workspace, "direction": "right", "focus": false}))?;
-                let id = result
-                    .pointer("/pane/pane_id")
-                    .or_else(|| result.get("pane_id"))
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        AgentAdapterError::Endpoint("pane.split did not return pane_id".into())
-                    })?
-                    .to_owned();
-                Self::retain(resources, context, "pane", &id)?;
-                id
-            }
+        let pane = if let Some(id) = Self::active(&context.resources, "pane") {
+            id.to_owned()
+        } else {
+            let root = root.unwrap_or(self.root_pane(&workspace, &tab)?);
+            let result = self.request("pane.split", json!({"target_pane_id": root, "workspace_id": workspace, "direction": "right", "focus": false}))?;
+            let id = result
+                .pointer("/pane/pane_id")
+                .or_else(|| result.get("pane_id"))
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    AgentAdapterError::Endpoint("pane.split did not return pane_id".into())
+                })?
+                .to_owned();
+            Self::retain(resources, context, "pane", &id)?;
+            id
         };
         if Self::active(&context.resources, "agent-name").is_none() {
             self.request("agent.start", json!({"name": label, "kind": "pi", "pane_id": pane, "args": ["--model", context.assignment.profile.model], "timeout_ms": context.assignment.profile.startup_timeout_millis}))?;
@@ -622,11 +621,13 @@ impl AgentDispatchAdapter for HerdrAdapter {
         }
         let mut prompt = context.rendered_initial_prompt.clone();
         if let Some(capability) = &context.capability_delivery {
-            prompt.push_str(&format!(
+            write!(
+                prompt,
                 "\n\nForge capability endpoint: {}\nForge capability secret file: {}",
                 capability.endpoint,
                 capability.secret_file.display()
-            ));
+            )
+            .expect("writing to String cannot fail");
         }
         match self.request("agent.prompt", json!({"target": label, "text": prompt})) {
             Ok(_) => Ok(()),
@@ -685,7 +686,7 @@ impl AgentDispatchAdapter for HerdrAdapter {
                     tab_present = true;
                 }
                 Err(AgentAdapterError::NotFound(_)) => {
-                    Self::retire_resource(resources, context, "tab", tab)?
+                    Self::retire_resource(resources, context, "tab", tab)?;
                 }
                 Err(error) => {
                     return Err(AgentAdapterError::Cleanup(format!("tab.get: {error:?}")));
@@ -728,17 +729,16 @@ impl AgentDispatchAdapter for HerdrAdapter {
         if let (Some(pane), Some(agent)) = (&pane, &agent)
             && pane_present
         {
-            match self.agent_observation(agent, (&workspace, tab.as_deref().unwrap_or(""), pane))? {
-                AgentObservation::Absent => {
-                    Self::retire_resource(resources, context, "agent-name", agent)?
-                }
-                _ => {
-                    self.cleanup_request(
-                        "pane.release_agent",
-                        json!({"pane_id": pane, "source": "forge-agent-dispatch", "agent": agent, "seq": 1}),
-                    )?;
-                    Self::retire_resource(resources, context, "agent-name", agent)?;
-                }
+            if self.agent_observation(agent, (&workspace, tab.as_deref().unwrap_or(""), pane))?
+                == AgentObservation::Absent
+            {
+                Self::retire_resource(resources, context, "agent-name", agent)?;
+            } else {
+                self.cleanup_request(
+                    "pane.release_agent",
+                    json!({"pane_id": pane, "source": "forge-agent-dispatch", "agent": agent, "seq": 1}),
+                )?;
+                Self::retire_resource(resources, context, "agent-name", agent)?;
             }
         }
         if let Some(pane) = &pane
@@ -866,6 +866,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[allow(clippy::too_many_lines)] // The full request/response transcript documents one lifecycle.
     fn retirement_releases_and_closes_only_the_verified_dedicated_resources() {
         use std::{
             io::{BufRead, BufReader, Write},
