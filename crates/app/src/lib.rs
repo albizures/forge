@@ -52,6 +52,14 @@ pub enum RecordType {
     Grilling,
 }
 
+/// Optional immutable metadata that classifies a Task without changing its workflow semantics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TaskKind {
+    Research,
+    Prototype,
+    Review,
+}
+
 /// A unit of work whose immutable type governs its scope and hierarchy.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Record {
@@ -59,6 +67,8 @@ pub struct Record {
     pub id: u64,
     /// Immutable type selected at opening.
     pub record_type: RecordType,
+    /// Optional immutable metadata, populated only for Tasks.
+    pub task_kind: Option<TaskKind>,
     /// Required Markdown content, separate from its structured metadata.
     pub body: String,
     /// Immutable, lexically ordered Project Scope selected at opening.
@@ -82,6 +92,7 @@ pub struct NewRecord {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NewTypedRecord {
     pub record_type: RecordType,
+    pub task_kind: Option<TaskKind>,
     pub body: String,
     pub project_slugs: Vec<String>,
 }
@@ -92,6 +103,7 @@ pub struct RecordListFilter {
     pub project_slug: Option<String>,
     pub status: Option<RecordStatus>,
     pub record_type: Option<RecordType>,
+    pub task_kind: Option<TaskKind>,
 }
 
 /// Opaque stable identity assigned to a Forge-authored Record Update.
@@ -359,7 +371,12 @@ pub trait RecordRepository: ProjectRepository {
     /// # Errors
     ///
     /// Returns a user-facing error when the parent is not a Spec or storage fails.
-    fn open_task_under_spec(&self, body: &str, spec_id: u64) -> Result<Record, RegistrationError>;
+    fn open_task_under_spec(
+        &self,
+        body: &str,
+        spec_id: u64,
+        task_kind: Option<TaskKind>,
+    ) -> Result<Record, RegistrationError>;
     /// Opens a Task beneath a Wayfinder, selecting one Project from its scope.
     ///
     /// # Errors
@@ -370,6 +387,7 @@ pub trait RecordRepository: ProjectRepository {
         body: &str,
         wayfinder_id: u64,
         project_slug: Option<String>,
+        task_kind: Option<TaskKind>,
     ) -> Result<Record, RegistrationError>;
     /// Opens a Grilling beneath a Wayfinder, inheriting or selecting its Project Scope.
     ///
@@ -1936,7 +1954,7 @@ impl Application {
     ///
     /// Returns a user-facing error for a blank body or storage failure.
     pub fn open_spec(&self, body: &str, project_slug: String) -> Result<Record, RegistrationError> {
-        self.open_typed_record(RecordType::Spec, body, vec![project_slug])
+        self.open_typed_record(RecordType::Spec, body, vec![project_slug], None)
     }
 
     /// Opens a Wayfinder with a non-empty immutable Project Scope.
@@ -1956,7 +1974,7 @@ impl Application {
                 "Wayfinder Project Scope must not contain duplicate Project slugs",
             ));
         }
-        self.open_typed_record(RecordType::Wayfinder, body, project_slugs)
+        self.open_typed_record(RecordType::Wayfinder, body, project_slugs, None)
     }
 
     /// Opens a standalone Task with zero or one Project Scope.
@@ -1968,8 +1986,14 @@ impl Application {
         &self,
         body: &str,
         project_slug: Option<String>,
+        task_kind: Option<TaskKind>,
     ) -> Result<Record, RegistrationError> {
-        self.open_typed_record(RecordType::Task, body, project_slug.into_iter().collect())
+        self.open_typed_record(
+            RecordType::Task,
+            body,
+            project_slug.into_iter().collect(),
+            task_kind,
+        )
     }
 
     /// Opens a Task under `spec_id`, inheriting its scope and membership atomically.
@@ -1981,9 +2005,10 @@ impl Application {
         &self,
         body: &str,
         spec_id: u64,
+        task_kind: Option<TaskKind>,
     ) -> Result<Record, RegistrationError> {
         Self::require_body(body)?;
-        self.records.open_task_under_spec(body, spec_id)
+        self.records.open_task_under_spec(body, spec_id, task_kind)
     }
 
     /// Opens a Task under a Wayfinder, selecting one Project from its scope.
@@ -1996,10 +2021,11 @@ impl Application {
         body: &str,
         wayfinder_id: u64,
         project_slug: Option<String>,
+        task_kind: Option<TaskKind>,
     ) -> Result<Record, RegistrationError> {
         Self::require_body(body)?;
         self.records
-            .open_task_under_wayfinder(body, wayfinder_id, project_slug)
+            .open_task_under_wayfinder(body, wayfinder_id, project_slug, task_kind)
     }
 
     /// Opens a Grilling beneath a Wayfinder, inheriting or selecting its Project Scope.
@@ -2028,11 +2054,13 @@ impl Application {
         project_slug: Option<String>,
         status: Option<RecordStatus>,
         record_type: Option<RecordType>,
+        task_kind: Option<TaskKind>,
     ) -> Result<Vec<Record>, RegistrationError> {
         self.records.list_records(&RecordListFilter {
             project_slug,
             status,
             record_type,
+            task_kind,
         })
     }
 
@@ -2131,10 +2159,12 @@ impl Application {
         record_type: RecordType,
         body: &str,
         project_slugs: Vec<String>,
+        task_kind: Option<TaskKind>,
     ) -> Result<Record, RegistrationError> {
         Self::require_body(body)?;
         self.records.open_typed_record(&NewTypedRecord {
             record_type,
+            task_kind,
             body: body.to_owned(),
             project_slugs,
         })
@@ -2240,6 +2270,7 @@ mod tests {
             let record = Record {
                 id: (records.len() + 1) as u64,
                 record_type: RecordType::Generic,
+                task_kind: None,
                 body: record.body.clone(),
                 project_slugs: record.project_slugs.clone(),
                 status: RecordStatus::Open,
@@ -2254,6 +2285,7 @@ mod tests {
             let record = Record {
                 id: (records.len() + 1) as u64,
                 record_type: record.record_type,
+                task_kind: record.task_kind,
                 body: record.body.clone(),
                 project_slugs: record.project_slugs.clone(),
                 status: RecordStatus::Open,
@@ -2267,6 +2299,7 @@ mod tests {
             &self,
             body: &str,
             spec_id: u64,
+            task_kind: Option<TaskKind>,
         ) -> Result<Record, RegistrationError> {
             let spec = self.show_record(spec_id)?;
             if spec.record_type != RecordType::Spec {
@@ -2287,6 +2320,7 @@ mod tests {
             let task = Record {
                 id: task_id,
                 record_type: RecordType::Task,
+                task_kind,
                 body: body.to_owned(),
                 project_slugs: spec.project_slugs,
                 status: RecordStatus::Open,
@@ -2306,6 +2340,7 @@ mod tests {
             body: &str,
             wayfinder_id: u64,
             project_slug: Option<String>,
+            task_kind: Option<TaskKind>,
         ) -> Result<Record, RegistrationError> {
             let wayfinder = self.show_record(wayfinder_id)?;
             if wayfinder.record_type != RecordType::Wayfinder {
@@ -2342,6 +2377,7 @@ mod tests {
             let task = Record {
                 id: task_id,
                 record_type: RecordType::Task,
+                task_kind,
                 body: body.to_owned(),
                 project_slugs: vec![project_slug],
                 status: RecordStatus::Open,
@@ -2404,6 +2440,7 @@ mod tests {
             let grilling = Record {
                 id: grilling_id,
                 record_type: RecordType::Grilling,
+                task_kind: None,
                 body: body.to_owned(),
                 project_slugs,
                 status: RecordStatus::Open,
@@ -2780,6 +2817,7 @@ mod tests {
         let mut record = Record {
             id: 7,
             record_type: RecordType::Task,
+            task_kind: None,
             body: "task".into(),
             project_slugs: vec!["alpha".into()],
             status: RecordStatus::InProgress,
@@ -2824,7 +2862,7 @@ mod tests {
             .open_wayfinder("wayfinder", vec!["alpha".into()])
             .unwrap();
         let wayfinder_task = app
-            .open_task_under_wayfinder("wayfinder child", wayfinder.id, None)
+            .open_task_under_wayfinder("wayfinder child", wayfinder.id, None, None)
             .unwrap();
         assert_eq!(wayfinder_task.project_slugs, ["alpha"]);
         let multi_wayfinder = app
@@ -2832,27 +2870,32 @@ mod tests {
             .unwrap();
         assert_eq!(multi_wayfinder.project_slugs, ["alpha", "beta"]);
         assert_eq!(
-            app.open_task_under_wayfinder("missing", multi_wayfinder.id, None)
+            app.open_task_under_wayfinder("missing", multi_wayfinder.id, None, None)
                 .unwrap_err()
                 .code,
             "missing-project"
         );
         assert_eq!(
-            app.open_task_under_wayfinder("outside", multi_wayfinder.id, Some("gamma".into()))
-                .unwrap_err()
-                .code,
+            app.open_task_under_wayfinder(
+                "outside",
+                multi_wayfinder.id,
+                Some("gamma".into()),
+                None
+            )
+            .unwrap_err()
+            .code,
             "scope-mismatch"
         );
 
-        let standalone = app.open_task("standalone", None).unwrap();
+        let standalone = app.open_task("standalone", None, None).unwrap();
         assert_eq!(standalone.record_type, RecordType::Task);
         assert!(standalone.project_slugs.is_empty());
-        let task = app.open_task_under_spec("child", spec.id).unwrap();
+        let task = app.open_task_under_spec("child", spec.id, None).unwrap();
         assert_eq!(task.record_type, RecordType::Task);
         assert_eq!(task.project_slugs, ["alpha"]);
         assert_eq!(task.relationships[0].parent_id, spec.id);
         assert_eq!(
-            app.open_task_under_spec("invalid", standalone.id)
+            app.open_task_under_spec("invalid", standalone.id, None)
                 .unwrap_err()
                 .code,
             "invalid-parent-type"
@@ -2880,8 +2923,8 @@ mod tests {
     #[test]
     fn application_rejects_starts_with_unfinished_direct_prerequisites() {
         let app = application();
-        let blocked = app.open_task("blocked", None).unwrap();
-        let prerequisite = app.open_task("prerequisite", None).unwrap();
+        let blocked = app.open_task("blocked", None, None).unwrap();
+        let prerequisite = app.open_task("prerequisite", None, None).unwrap();
         app.relate_records(
             blocked.id,
             prerequisite.id,
@@ -2912,7 +2955,7 @@ mod tests {
         app.start_record(beta.id).unwrap();
 
         assert_eq!(
-            app.list_records(Some("alpha".into()), None, None)
+            app.list_records(Some("alpha".into()), None, None, None)
                 .unwrap()
                 .into_iter()
                 .map(|record| record.id)
@@ -2920,7 +2963,7 @@ mod tests {
             vec![beta.id, alpha.id]
         );
         assert_eq!(
-            app.list_records(None, Some(RecordStatus::Open), None)
+            app.list_records(None, Some(RecordStatus::Open), None, None)
                 .unwrap()
                 .into_iter()
                 .map(|record| record.id)
@@ -3045,6 +3088,7 @@ mod tests {
             Record {
                 id: 1,
                 record_type: RecordType::Generic,
+                task_kind: None,
                 body: "body".into(),
                 project_slugs: vec!["alpha".into(), "zeta".into()],
                 status: RecordStatus::Open,

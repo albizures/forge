@@ -15,8 +15,8 @@ use forge_app::{
     RecordListFilter, RecordRelationship, RecordRelationshipKind, RecordRepository, RecordStatus,
     RecordType, RecordUpdate, RecordUpdateEnvelope, RecordUpdateId, RecordUpdateKind,
     RecordUpdateKindFilter, RecordUpdateSubscription, RecordUpdateSubscriptionId,
-    RecordUpdateSubscriptionRepository, RegistrationError, WorktreeClaim, WorktreeClaimState,
-    is_worktree_eligible, managed_worktree_path,
+    RecordUpdateSubscriptionRepository, RegistrationError, TaskKind, WorktreeClaim,
+    WorktreeClaimState, is_worktree_eligible, managed_worktree_path,
 };
 use rusqlite::{Connection, ErrorCode, OptionalExtension, params};
 
@@ -57,6 +57,7 @@ impl SqliteProjectRepository {
             CREATE TABLE IF NOT EXISTS records (
                 id INTEGER PRIMARY KEY NOT NULL,
                 record_type TEXT NOT NULL CHECK (record_type IN ('generic', 'spec', 'task', 'wayfinder', 'grilling')),
+                task_kind TEXT CHECK (task_kind IN ('research', 'prototype', 'review')),
                 body TEXT NOT NULL,
                 status TEXT NOT NULL CHECK (status IN ('open', 'in_progress', 'done')),
                 completion_resolution TEXT
@@ -194,6 +195,7 @@ impl SqliteProjectRepository {
             .map_err(storage_error)?;
         migrate_record_status_schema(&connection)?;
         migrate_record_type_schema(&connection)?;
+        migrate_task_kind_schema(&connection)?;
         migrate_record_relationship_schema(&connection)?;
         migrate_record_updates_schema(&connection)?;
         migrate_agent_assignment_schema(&connection)?;
@@ -578,6 +580,7 @@ impl RecordRepository for SqliteProjectRepository {
         Ok(Record {
             id,
             record_type: RecordType::Generic,
+            task_kind: None,
             body: record.body.clone(),
             project_slugs: record.project_slugs.clone(),
             status: RecordStatus::Open,
@@ -596,8 +599,8 @@ impl RecordRepository for SqliteProjectRepository {
         validate_projects(&transaction, &record.project_slugs)?;
         transaction
             .execute(
-                "INSERT INTO records (record_type, body, status) VALUES (?1, ?2, 'open')",
-                params![record_type_name(record.record_type), record.body],
+                "INSERT INTO records (record_type, task_kind, body, status) VALUES (?1, ?2, ?3, 'open')",
+                params![record_type_name(record.record_type), task_kind_name(record.task_kind), record.body],
             )
             .map_err(storage_error)?;
         let id = transaction.last_insert_rowid().cast_unsigned();
@@ -615,7 +618,12 @@ impl RecordRepository for SqliteProjectRepository {
         Ok(opened)
     }
 
-    fn open_task_under_spec(&self, body: &str, spec_id: u64) -> Result<Record, RegistrationError> {
+    fn open_task_under_spec(
+        &self,
+        body: &str,
+        spec_id: u64,
+        task_kind: Option<TaskKind>,
+    ) -> Result<Record, RegistrationError> {
         let mut connection = self
             .connection
             .lock()
@@ -630,8 +638,8 @@ impl RecordRepository for SqliteProjectRepository {
         }
         transaction
             .execute(
-                "INSERT INTO records (record_type, body, status) VALUES ('task', ?1, 'open')",
-                [body],
+                "INSERT INTO records (record_type, task_kind, body, status) VALUES ('task', ?1, ?2, 'open')",
+                params![task_kind_name(task_kind), body],
             )
             .map_err(storage_error)?;
         let task_id = transaction.last_insert_rowid().cast_unsigned();
@@ -672,6 +680,7 @@ impl RecordRepository for SqliteProjectRepository {
         body: &str,
         wayfinder_id: u64,
         project_slug: Option<String>,
+        task_kind: Option<TaskKind>,
     ) -> Result<Record, RegistrationError> {
         let mut connection = self
             .connection
@@ -703,8 +712,8 @@ impl RecordRepository for SqliteProjectRepository {
         };
         transaction
             .execute(
-                "INSERT INTO records (record_type, body, status) VALUES ('task', ?1, 'open')",
-                [body],
+                "INSERT INTO records (record_type, task_kind, body, status) VALUES ('task', ?1, ?2, 'open')",
+                params![task_kind_name(task_kind), body],
             )
             .map_err(storage_error)?;
         let task_id = transaction.last_insert_rowid().cast_unsigned();
@@ -843,6 +852,9 @@ impl RecordRepository for SqliteProjectRepository {
                 filter
                     .record_type
                     .is_none_or(|record_type| record.record_type == record_type)
+                    && filter
+                        .task_kind
+                        .is_none_or(|task_kind| record.task_kind == Some(task_kind))
             })
             .collect())
     }
@@ -2520,6 +2532,12 @@ fn validate_projects(
 }
 
 fn validate_typed_record(record: &NewTypedRecord) -> Result<(), RegistrationError> {
+    if record.record_type != RecordType::Task && record.task_kind.is_some() {
+        return Err(RegistrationError::new(
+            "invalid-task-kind",
+            "Task Kind may be selected only for a Task",
+        ));
+    }
     match record.record_type {
         RecordType::Generic => Err(RegistrationError::new(
             "invalid-record-type",
@@ -2557,6 +2575,28 @@ fn record_type_name(record_type: RecordType) -> &'static str {
     }
 }
 
+fn task_kind_name(task_kind: Option<TaskKind>) -> Option<&'static str> {
+    task_kind.map(|task_kind| match task_kind {
+        TaskKind::Research => "research",
+        TaskKind::Prototype => "prototype",
+        TaskKind::Review => "review",
+    })
+}
+
+fn task_kind(value: Option<String>) -> Result<Option<TaskKind>, RegistrationError> {
+    value
+        .map(|value| match value.as_str() {
+            "research" => Ok(TaskKind::Research),
+            "prototype" => Ok(TaskKind::Prototype),
+            "review" => Ok(TaskKind::Review),
+            _ => Err(RegistrationError::new(
+                "storage",
+                "stored Task has an invalid kind",
+            )),
+        })
+        .transpose()
+}
+
 fn record_type(value: &str) -> Result<RecordType, RegistrationError> {
     match value {
         "generic" => Ok(RecordType::Generic),
@@ -2572,16 +2612,17 @@ fn record_type(value: &str) -> Result<RecordType, RegistrationError> {
 }
 
 fn load_record(connection: &Connection, id: u64) -> Result<Record, RegistrationError> {
-    let (stored_record_type, body, status, completion_resolution) = connection
+    let (stored_record_type, stored_task_kind, body, status, completion_resolution) = connection
         .query_row(
-            "SELECT record_type, body, status, completion_resolution FROM records WHERE id = ?1",
+            "SELECT record_type, task_kind, body, status, completion_resolution FROM records WHERE id = ?1",
             [id.cast_signed()],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get(3)?,
+                    row.get::<_, String>(3)?,
+                    row.get(4)?,
                 ))
             },
         )
@@ -2628,6 +2669,7 @@ fn load_record(connection: &Connection, id: u64) -> Result<Record, RegistrationE
     Ok(Record {
         id,
         record_type: record_type(&stored_record_type)?,
+        task_kind: task_kind(stored_task_kind)?,
         body,
         project_slugs,
         status,
@@ -2699,6 +2741,24 @@ fn migrate_record_type_schema(connection: &Connection) -> Result<(), Registratio
         .execute_batch("PRAGMA foreign_keys = ON;")
         .map_err(storage_error);
     migration.and(foreign_keys)
+}
+
+fn migrate_task_kind_schema(connection: &Connection) -> Result<(), RegistrationError> {
+    let columns = connection
+        .prepare("PRAGMA table_info(records)")
+        .map_err(storage_error)?
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(storage_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(storage_error)?;
+    if !columns.iter().any(|column| column == "task_kind") {
+        connection
+            .execute_batch(
+                "ALTER TABLE records ADD COLUMN task_kind TEXT CHECK (task_kind IN ('research', 'prototype', 'review'));",
+            )
+            .map_err(storage_error)?;
+    }
+    Ok(())
 }
 
 fn migrate_record_relationship_schema(connection: &Connection) -> Result<(), RegistrationError> {
@@ -2783,8 +2843,8 @@ mod tests {
         NewAgentAssignmentResource, NewRecord, NewRecordUpdateSubscription, NewTypedRecord,
         Project, ProjectRepository, RecordListFilter, RecordRelationshipKind, RecordRepository,
         RecordStatus, RecordType, RecordUpdateKind, RecordUpdateKindFilter,
-        RecordUpdateSubscriptionRepository, assignment_add_comment, assignment_complete_task,
-        assignment_context, assignment_create_record_update_subscription,
+        RecordUpdateSubscriptionRepository, TaskKind, assignment_add_comment,
+        assignment_complete_task, assignment_context, assignment_create_record_update_subscription,
     };
     use std::{
         path::{Path, PathBuf},
@@ -2804,6 +2864,7 @@ mod tests {
         store.register(&project("alpha", "/repos/alpha")).unwrap();
         let task = |body: &str| NewTypedRecord {
             record_type: RecordType::Task,
+            task_kind: None,
             body: body.into(),
             project_slugs: vec!["alpha".into()],
         };
@@ -2877,6 +2938,7 @@ mod tests {
         let store = SqliteProjectRepository::in_memory().unwrap();
         let task = |body: &str| NewTypedRecord {
             record_type: RecordType::Task,
+            task_kind: None,
             body: body.into(),
             project_slugs: vec![],
         };
@@ -2996,6 +3058,7 @@ mod tests {
                     project_slug: Some("alpha".into()),
                     status: None,
                     record_type: None,
+                    task_kind: None,
                 })
                 .unwrap()
                 .into_iter()
@@ -3009,6 +3072,7 @@ mod tests {
                     project_slug: None,
                     status: Some(RecordStatus::Open),
                     record_type: None,
+                    task_kind: None,
                 })
                 .unwrap()
                 .into_iter()
@@ -3265,12 +3329,16 @@ mod tests {
         let spec = store
             .open_typed_record(&NewTypedRecord {
                 record_type: RecordType::Spec,
+                task_kind: None,
                 body: "spec".into(),
                 project_slugs: vec!["alpha".into()],
             })
             .unwrap();
-        let task = store.open_task_under_spec("task", spec.id).unwrap();
+        let task = store
+            .open_task_under_spec("task", spec.id, Some(TaskKind::Research))
+            .unwrap();
         assert_eq!(task.record_type, RecordType::Task);
+        assert_eq!(task.task_kind, Some(TaskKind::Research));
         assert_eq!(task.project_slugs, ["alpha"]);
         assert_eq!(task.relationships[0].parent_id, spec.id);
         assert_eq!(
@@ -3279,13 +3347,25 @@ mod tests {
                     project_slug: None,
                     status: None,
                     record_type: Some(RecordType::Task),
+                    task_kind: None,
                 })
                 .unwrap(),
             vec![task.clone()]
         );
         assert_eq!(
             store
-                .open_task_under_spec("nope", task.id)
+                .list_records(&RecordListFilter {
+                    project_slug: None,
+                    status: None,
+                    record_type: None,
+                    task_kind: Some(TaskKind::Research),
+                })
+                .unwrap(),
+            vec![task.clone()]
+        );
+        assert_eq!(
+            store
+                .open_task_under_spec("nope", task.id, None)
                 .unwrap_err()
                 .code,
             "invalid-parent-type"
@@ -3295,7 +3375,8 @@ mod tests {
                 .list_records(&RecordListFilter {
                     project_slug: None,
                     status: None,
-                    record_type: None
+                    record_type: None,
+                    task_kind: None,
                 })
                 .unwrap()
                 .len(),
@@ -3326,6 +3407,7 @@ mod tests {
         let wayfinder = store
             .open_typed_record(&NewTypedRecord {
                 record_type: RecordType::Wayfinder,
+                task_kind: None,
                 body: "wayfinder".into(),
                 project_slugs: vec!["alpha".into(), "beta".into()],
             })
@@ -3362,13 +3444,14 @@ mod tests {
                     project_slug: None,
                     status: None,
                     record_type: Some(RecordType::Grilling),
+                    task_kind: None,
                 })
                 .unwrap()
                 .len(),
             2
         );
         let alpha_task = store
-            .open_task_under_wayfinder("alpha task", wayfinder.id, Some("alpha".into()))
+            .open_task_under_wayfinder("alpha task", wayfinder.id, Some("alpha".into()), None)
             .unwrap();
         store
             .relate_records(
@@ -3384,6 +3467,7 @@ mod tests {
         let gamma_task = store
             .open_typed_record(&NewTypedRecord {
                 record_type: RecordType::Task,
+                task_kind: None,
                 body: "gamma task".into(),
                 project_slugs: vec!["gamma".into()],
             })
@@ -3462,6 +3546,7 @@ mod tests {
             store
                 .open_typed_record(&NewTypedRecord {
                     record_type: RecordType::Wayfinder,
+                    task_kind: None,
                     body: "wayfinder".into(),
                     project_slugs: vec!["alpha".into()],
                 })
@@ -3473,6 +3558,7 @@ mod tests {
             store
                 .open_typed_record(&NewTypedRecord {
                     record_type: RecordType::Grilling,
+                    task_kind: None,
                     body: "grilling".into(),
                     project_slugs: vec!["alpha".into()],
                 })
@@ -3543,6 +3629,7 @@ mod tests {
         let task = store
             .open_typed_record(&NewTypedRecord {
                 record_type: RecordType::Task,
+                task_kind: None,
                 body: "task".into(),
                 project_slugs: vec!["alpha".into()],
             })
@@ -3637,6 +3724,7 @@ mod tests {
         }
         let task = |body: &str, project_slug: &str| NewTypedRecord {
             record_type: RecordType::Task,
+            task_kind: None,
             body: body.into(),
             project_slugs: vec![project_slug.into()],
         };
@@ -3755,6 +3843,7 @@ mod tests {
         let task = store
             .open_typed_record(&NewTypedRecord {
                 record_type: RecordType::Task,
+                task_kind: None,
                 body: "task".into(),
                 project_slugs: vec!["alpha".into()],
             })
@@ -3898,6 +3987,7 @@ mod tests {
         let task = store
             .open_typed_record(&NewTypedRecord {
                 record_type: RecordType::Task,
+                task_kind: None,
                 body: "task".into(),
                 project_slugs: vec!["alpha".into()],
             })
@@ -4005,6 +4095,7 @@ mod tests {
         let task = store
             .open_typed_record(&NewTypedRecord {
                 record_type: RecordType::Task,
+                task_kind: None,
                 body: "dispatch me".into(),
                 project_slugs: vec!["alpha".into()],
             })
@@ -4058,6 +4149,7 @@ mod tests {
         store.register(&project("alpha", "/repos/alpha")).unwrap();
         let task = |body: &str| NewTypedRecord {
             record_type: RecordType::Task,
+            task_kind: None,
             body: body.into(),
             project_slugs: vec!["alpha".into()],
         };
@@ -4094,6 +4186,7 @@ mod tests {
         let first = store
             .open_typed_record(&NewTypedRecord {
                 record_type: RecordType::Task,
+                task_kind: None,
                 body: "first".into(),
                 project_slugs: vec!["alpha".into()],
             })
@@ -4101,6 +4194,7 @@ mod tests {
         store
             .open_typed_record(&NewTypedRecord {
                 record_type: RecordType::Task,
+                task_kind: None,
                 body: "second".into(),
                 project_slugs: vec!["alpha".into()],
             })
@@ -4166,12 +4260,15 @@ mod tests {
         let spec = store
             .open_typed_record(&NewTypedRecord {
                 record_type: RecordType::Spec,
+                task_kind: None,
                 body: "spec".into(),
                 project_slugs: vec!["alpha".into()],
             })
             .unwrap();
-        let task = store.open_task_under_spec("task", spec.id).unwrap();
-        let sibling = store.open_task_under_spec("sibling", spec.id).unwrap();
+        let task = store.open_task_under_spec("task", spec.id, None).unwrap();
+        let sibling = store
+            .open_task_under_spec("sibling", spec.id, None)
+            .unwrap();
         store.start_record(task.id).unwrap();
         store
             .create_agent_assignment(&NewAgentAssignment {

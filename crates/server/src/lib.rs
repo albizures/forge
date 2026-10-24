@@ -37,7 +37,8 @@ use forge_app::{
     AgentDispatchAdapter, AgentDispatchAdapterFactory, AgentProfile, Application,
     ApplicationStatus, ManagedWorktreeAdapter, Project, RecordStatus, RecordType,
     RecordUpdateEnvelope, RecordUpdateId, RecordUpdateKind, RecordUpdateKindFilter,
-    RecordUpdateSubscriptionId, RegistrationError, RepositoryInspector, WorktreeSafetyAssessment,
+    RecordUpdateSubscriptionId, RegistrationError, RepositoryInspector, TaskKind,
+    WorktreeSafetyAssessment,
 };
 use forge_rpc::{
     AddRecordCommentRequest, AgentDispatchApiServer, AgentDispatchProfileResponse,
@@ -898,7 +899,11 @@ impl RecordApiServer for Daemon {
 
     async fn open_task(&self, request: OpenTaskRequest) -> RpcResult<RecordResponse> {
         self.application
-            .open_task(&request.body, request.project_slug)
+            .open_task(
+                &request.body,
+                request.project_slug,
+                request.task_kind.as_deref().map(task_kind).transpose()?,
+            )
             .map(|record| {
                 self.delivery.publish(&self.application);
                 record.into()
@@ -921,7 +926,11 @@ impl RecordApiServer for Daemon {
         request: OpenTaskUnderSpecRequest,
     ) -> RpcResult<RecordResponse> {
         self.application
-            .open_task_under_spec(&request.body, request.spec_id)
+            .open_task_under_spec(
+                &request.body,
+                request.spec_id,
+                request.task_kind.as_deref().map(task_kind).transpose()?,
+            )
             .map(|record| {
                 self.delivery.publish(&self.application);
                 record.into()
@@ -934,7 +943,12 @@ impl RecordApiServer for Daemon {
         request: OpenTaskUnderWayfinderRequest,
     ) -> RpcResult<RecordResponse> {
         self.application
-            .open_task_under_wayfinder(&request.body, request.wayfinder_id, request.project_slug)
+            .open_task_under_wayfinder(
+                &request.body,
+                request.wayfinder_id,
+                request.project_slug,
+                request.task_kind.as_deref().map(task_kind).transpose()?,
+            )
             .map(|record| {
                 self.delivery.publish(&self.application);
                 record.into()
@@ -973,8 +987,9 @@ impl RecordApiServer for Daemon {
             .as_deref()
             .map(record_type)
             .transpose()?;
+        let task_kind = request.task_kind.as_deref().map(task_kind).transpose()?;
         self.application
-            .list_records(request.project_slug, status, record_type)
+            .list_records(request.project_slug, status, record_type, task_kind)
             .map(|records| ListRecordsResponse {
                 records: records.into_iter().map(Into::into).collect(),
             })
@@ -1096,6 +1111,18 @@ fn record_status(status: &str) -> RpcResult<RecordStatus> {
         _ => Err(rpc_error(RegistrationError::new(
             "invalid-status",
             "Record status must be open, in_progress, or done",
+        ))),
+    }
+}
+
+fn task_kind(task_kind: &str) -> RpcResult<TaskKind> {
+    match task_kind {
+        "research" => Ok(TaskKind::Research),
+        "prototype" => Ok(TaskKind::Prototype),
+        "review" => Ok(TaskKind::Review),
+        _ => Err(rpc_error(RegistrationError::new(
+            "invalid-task-kind",
+            "Task Kind must be research, prototype, or review",
         ))),
     }
 }
@@ -1863,6 +1890,7 @@ mod tests {
         let owner = store
             .open_typed_record(&NewTypedRecord {
                 record_type: RecordType::Task,
+                task_kind: None,
                 body: "owner".into(),
                 project_slugs: vec!["alpha".into()],
             })
@@ -2196,6 +2224,7 @@ mod tests {
                     project_slug: Some("server-test-project".into()),
                     status: Some("open".into()),
                     record_type: None,
+                    task_kind: None,
                 })
                 .await
                 .unwrap()
@@ -2214,6 +2243,7 @@ mod tests {
             .open_task_under_spec(OpenTaskUnderSpecRequest {
                 body: "A daemon-backed Task".into(),
                 spec_id: spec.id,
+                task_kind: None,
             })
             .await
             .unwrap();
@@ -2225,6 +2255,7 @@ mod tests {
                 .open_task(OpenTaskRequest {
                     body: "Standalone daemon-backed Task".into(),
                     project_slug: None,
+                    task_kind: None,
                 })
                 .await
                 .unwrap()
@@ -2245,6 +2276,7 @@ mod tests {
                 body: "A scoped daemon-backed Task".into(),
                 wayfinder_id: wayfinder.id,
                 project_slug: None,
+                task_kind: None,
             })
             .await
             .unwrap();
@@ -2267,6 +2299,7 @@ mod tests {
                 project_slug: Some("server-test-project".into()),
                 status: None,
                 record_type: Some("wayfinder".into()),
+                task_kind: None,
             })
             .await
             .unwrap();
@@ -2278,6 +2311,7 @@ mod tests {
                 project_slug: None,
                 status: None,
                 record_type: Some("spec".into()),
+                task_kind: None,
             })
             .await
             .unwrap();
@@ -2289,6 +2323,7 @@ mod tests {
                 .open_task_under_spec(OpenTaskUnderSpecRequest {
                     body: "Invalid child".into(),
                     spec_id: record.id,
+                    task_kind: None,
                 })
                 .await
                 .is_err()
@@ -2299,6 +2334,7 @@ mod tests {
                     project_slug: None,
                     status: None,
                     record_type: Some("invalid".into()),
+                    task_kind: None,
                 })
                 .await
                 .is_err()

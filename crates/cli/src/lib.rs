@@ -447,11 +447,13 @@ pub async fn request_open_task(
     url: &str,
     body: &str,
     project_slug: Option<String>,
+    task_kind: Option<String>,
 ) -> Result<RecordResponse, String> {
     client(url)?
         .open_task(OpenTaskRequest {
             body: body.into(),
             project_slug,
+            task_kind,
         })
         .await
         .map_err(record_error("open Task"))
@@ -466,11 +468,13 @@ pub async fn request_open_task_under_spec(
     url: &str,
     body: &str,
     spec_id: u64,
+    task_kind: Option<String>,
 ) -> Result<RecordResponse, String> {
     client(url)?
         .open_task_under_spec(OpenTaskUnderSpecRequest {
             body: body.into(),
             spec_id,
+            task_kind,
         })
         .await
         .map_err(record_error("open Task under Spec"))
@@ -486,12 +490,14 @@ pub async fn request_open_task_under_wayfinder(
     body: &str,
     wayfinder_id: u64,
     project_slug: Option<String>,
+    task_kind: Option<String>,
 ) -> Result<RecordResponse, String> {
     client(url)?
         .open_task_under_wayfinder(OpenTaskUnderWayfinderRequest {
             body: body.into(),
             wayfinder_id,
             project_slug,
+            task_kind,
         })
         .await
         .map_err(record_error("open Task under Wayfinder"))
@@ -528,6 +534,7 @@ pub async fn request_list_records(
     project_slug: Option<String>,
     status: Option<String>,
     record_type: Option<String>,
+    task_kind: Option<String>,
 ) -> Result<ListRecordsResponse, String> {
     RecordApiClient::list(
         &client(url)?,
@@ -535,6 +542,7 @@ pub async fn request_list_records(
             project_slug,
             status,
             record_type,
+            task_kind,
         },
     )
     .await
@@ -855,24 +863,24 @@ mod tests {
                 .unwrap();
         assert_eq!(wayfinder.record_type, "wayfinder");
         let wayfinder_task =
-            request_open_task_under_wayfinder(&url, "Scoped Child Task", wayfinder.id, None)
+            request_open_task_under_wayfinder(&url, "Scoped Child Task", wayfinder.id, None, None)
                 .await
                 .unwrap();
         assert_eq!(wayfinder_task.project_scope, wayfinder.project_scope);
 
-        let standalone = request_open_task(&url, "Standalone Task", None)
+        let standalone = request_open_task(&url, "Standalone Task", None, None)
             .await
             .unwrap();
         assert_eq!(standalone.record_type, "task");
         assert!(standalone.project_scope.project_slugs.is_empty());
-        let child = request_open_task_under_spec(&url, "Child Task", spec.id)
+        let child = request_open_task_under_spec(&url, "Child Task", spec.id, None)
             .await
             .unwrap();
         assert_eq!(child.record_type, "task");
         assert_eq!(child.project_scope, spec.project_scope);
         assert_eq!(child.relationships[0].parent_id, spec.id);
 
-        let listed = request_list_records(&url, None, None, Some("task".into()))
+        let listed = request_list_records(&url, None, None, Some("task".into()), None)
             .await
             .unwrap();
         assert_eq!(listed.records.len(), 3);
@@ -894,6 +902,7 @@ mod tests {
             records: vec![RecordResponse {
                 id: 4,
                 record_type: "generic".into(),
+                task_kind: None,
                 body: "body".into(),
                 project_scope: ProjectScopeRequest {
                     project_slugs: vec![],
@@ -930,6 +939,7 @@ mod tests {
             render_record_opened(&RecordResponse {
                 id: 4,
                 record_type: "generic".into(),
+                task_kind: None,
                 body: "body".into(),
                 project_scope: ProjectScopeRequest {
                     project_slugs: vec![]

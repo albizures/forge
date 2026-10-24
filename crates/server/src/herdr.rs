@@ -892,6 +892,7 @@ mod tests {
         let record = repository
             .open_typed_record(&NewTypedRecord {
                 record_type: RecordType::Task,
+                task_kind: None,
                 body: "dispatch task".into(),
                 project_slugs: vec!["project".into()],
             })

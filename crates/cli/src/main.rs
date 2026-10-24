@@ -316,6 +316,9 @@ struct ListRecordsArgs {
     /// Restrict results to a Record Type.
     #[arg(long = "type", value_parser = ["generic", "spec", "task", "wayfinder", "grilling"])]
     record_type: Option<String>,
+    /// Restrict results to a Task Kind.
+    #[arg(long = "kind", value_parser = ["research", "prototype", "review"])]
+    task_kind: Option<String>,
     #[arg(long, value_name = "URL")]
     server_url: Option<String>,
     #[arg(long)]
@@ -414,6 +417,9 @@ struct OpenTaskArgs {
     /// The standalone Task's optional Project.
     #[arg(long, value_name = "SLUG")]
     project: Option<String>,
+    /// Optional immutable Task Kind metadata.
+    #[arg(long = "kind", value_parser = ["research", "prototype", "review"])]
+    task_kind: Option<String>,
     #[arg(long, value_name = "URL")]
     server_url: Option<String>,
     #[arg(long)]
@@ -427,6 +433,9 @@ struct OpenTaskUnderSpecArgs {
     /// The parent Spec's ID.
     #[arg(long)]
     spec: u64,
+    /// Optional immutable Task Kind metadata.
+    #[arg(long = "kind", value_parser = ["research", "prototype", "review"])]
+    task_kind: Option<String>,
     #[arg(long, value_name = "URL")]
     server_url: Option<String>,
     #[arg(long)]
@@ -459,6 +468,9 @@ struct OpenTaskUnderWayfinderArgs {
     /// The selected Project; inferred only for a single-Project Wayfinder.
     #[arg(long, value_name = "SLUG")]
     project: Option<String>,
+    /// Optional immutable Task Kind metadata.
+    #[arg(long = "kind", value_parser = ["research", "prototype", "review"])]
+    task_kind: Option<String>,
     #[arg(long, value_name = "URL")]
     server_url: Option<String>,
     #[arg(long)]
@@ -856,6 +868,7 @@ async fn list_records(args: ListRecordsArgs) -> i32 {
         args.project,
         status,
         args.record_type,
+        args.task_kind,
     )
     .await
     {
@@ -1095,6 +1108,7 @@ async fn open_task(args: OpenTaskArgs) -> i32 {
             &resolve_endpoint(args.server_url.as_deref()).await,
             &body,
             args.project,
+            args.task_kind,
         )
         .await,
     )
@@ -1112,6 +1126,7 @@ async fn open_task_under_spec(args: OpenTaskUnderSpecArgs) -> i32 {
             &resolve_endpoint(args.server_url.as_deref()).await,
             &body,
             args.spec,
+            args.task_kind,
         )
         .await,
     )
@@ -1148,6 +1163,7 @@ async fn open_task_under_wayfinder(args: OpenTaskUnderWayfinderArgs) -> i32 {
             &body,
             args.wayfinder,
             args.project,
+            args.task_kind,
         )
         .await,
     )

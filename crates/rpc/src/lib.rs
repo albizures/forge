@@ -4,7 +4,7 @@ use forge_app::{
     AgentDispatchProjectStatus, AgentDispatchReconcileResult, AgentDispatchStatus, AgentProfile,
     ApplicationStatus, ManagedWorktreeInfo, Project, Record, RecordComment, RecordRelationshipKind,
     RecordStatus, RecordUpdate, RecordUpdateKind, RecordUpdateKindFilter, RecordUpdateSubscription,
-    RegistrationError, WorktreeClaimState,
+    RegistrationError, TaskKind, WorktreeClaimState,
 };
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
 use serde::{Deserialize, Serialize};
@@ -518,12 +518,14 @@ pub struct OpenWayfinderRequest {
 pub struct OpenTaskRequest {
     pub body: String,
     pub project_slug: Option<String>,
+    pub task_kind: Option<String>,
 }
 /// Opens a Task under a Spec, inheriting its scope atomically.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct OpenTaskUnderSpecRequest {
     pub body: String,
     pub spec_id: u64,
+    pub task_kind: Option<String>,
 }
 /// Opens a Task under a Wayfinder with an optional selected Project.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -531,6 +533,7 @@ pub struct OpenTaskUnderWayfinderRequest {
     pub body: String,
     pub wayfinder_id: u64,
     pub project_slug: Option<String>,
+    pub task_kind: Option<String>,
 }
 /// Opens a Grilling under a Wayfinder, inheriting its scope unless a subset is selected.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -553,6 +556,7 @@ pub struct ListRecordsRequest {
     pub project_slug: Option<String>,
     pub status: Option<String>,
     pub record_type: Option<String>,
+    pub task_kind: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ListRecordsResponse {
@@ -649,6 +653,15 @@ impl From<RecordUpdate> for RecordUpdateResponse {
         }
     }
 }
+fn task_kind_name(task_kind: TaskKind) -> String {
+    match task_kind {
+        TaskKind::Research => "research",
+        TaskKind::Prototype => "prototype",
+        TaskKind::Review => "review",
+    }
+    .into()
+}
+
 fn record_type_name(record_type: forge_app::RecordType) -> String {
     match record_type {
         forge_app::RecordType::Generic => "generic",
@@ -696,6 +709,7 @@ pub struct RecordRelationshipResponse {
 pub struct RecordResponse {
     pub id: u64,
     pub record_type: String,
+    pub task_kind: Option<String>,
     pub body: String,
     pub project_scope: ProjectScopeRequest,
     pub status: String,
@@ -707,6 +721,7 @@ impl From<Record> for RecordResponse {
         Self {
             id: record.id,
             record_type: record_type_name(record.record_type),
+            task_kind: record.task_kind.map(task_kind_name),
             body: record.body,
             project_scope: ProjectScopeRequest {
                 project_slugs: record.project_slugs,
