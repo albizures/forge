@@ -184,6 +184,27 @@ comments, and update logs. The release verification gate passed `cargo fmt
 test covering migration, typed creation, filtering, and invalid hierarchy
 rejection.
 
+## Generated-by provenance release notes
+
+This release adds the directed `generated-by` Record Relationship. It records
+that a generated Record was caused by another Record's work or output; it does
+not affect hierarchy, lifecycle, readiness, dispatch, or dependency behavior.
+
+Existing SQLite databases migrate automatically when opened. The migration
+extends relationship and update-log constraints for `generated-by`; legacy
+relationship updates retain an absent relationship kind rather than receiving
+invented history. No operator action or data rewrite is required. Back up a
+production database before upgrading under the normal operational policy.
+
+For API and CLI clients, record-opening commands accept repeatable
+`--generated-by <ID>` inputs, and relationship correction accepts
+`--kind generated-by`. Additions and removals are permitted only while the
+generated Record is Open. New relationship add/remove updates and subscription
+payloads include their relationship kind; clients consuming update events
+should tolerate its absence for migrated legacy events. Assignment Context
+includes directly incident provenance Records, but subscription authorization
+remains limited to direct prerequisites.
+
 ## Herdr/Pi dispatch provider handoff
 
 This release provides a durable, daemon-owned **Herdr/Pi dispatch provider**
