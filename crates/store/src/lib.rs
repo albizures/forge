@@ -3941,7 +3941,7 @@ mod tests {
 
     #[test]
     #[allow(clippy::too_many_lines)]
-    fn assignment_context_and_subscriptions_follow_direct_dependencies_across_scopes() {
+    fn assignment_context_includes_direct_provenance_but_subscriptions_only_allow_prerequisites() {
         let store = SqliteProjectRepository::in_memory().unwrap();
         for (slug, folder) in [
             ("alpha", "/repos/alpha"),
@@ -3967,6 +3967,12 @@ mod tests {
         let transitive = store
             .open_typed_record(&task("transitive", "beta"))
             .unwrap();
+        let generator = store
+            .open_typed_record(&task("generator", "gamma"))
+            .unwrap();
+        let transitive_generator = store
+            .open_typed_record(&task("transitive generator", "beta"))
+            .unwrap();
         store
             .relate_records(
                 assigned.id,
@@ -3985,6 +3991,20 @@ mod tests {
             )
             .unwrap();
         store
+            .relate_records(
+                assigned.id,
+                generator.id,
+                RecordRelationshipKind::GeneratedBy,
+            )
+            .unwrap();
+        store
+            .relate_records(
+                generator.id,
+                transitive_generator.id,
+                RecordRelationshipKind::GeneratedBy,
+            )
+            .unwrap();
+        store
             .create_agent_assignment(&NewAgentAssignment {
                 id: "owner".into(),
                 record_id: assigned.id,
@@ -3995,16 +4015,31 @@ mod tests {
 
         let context = assignment_context(&store, "owner", "cap-owner", "context").unwrap();
         assert_eq!(context.task.id, assigned.id);
+        let mut related_ids = context
+            .directly_related_records
+            .iter()
+            .map(|record| record.id)
+            .collect::<Vec<_>>();
+        related_ids.sort_unstable();
+        assert_eq!(
+            related_ids,
+            vec![prerequisite.id, dependent.id, generator.id]
+        );
         assert_eq!(
             context
                 .directly_related_records
                 .iter()
-                .map(|record| record.id)
-                .collect::<Vec<_>>(),
-            vec![prerequisite.id, dependent.id]
+                .find(|record| record.id == generator.id)
+                .unwrap()
+                .project_slugs,
+            ["gamma"]
         );
-        assert_eq!(context.directly_related_records[0].project_slugs, ["beta"]);
-        assert_eq!(context.directly_related_records[1].project_slugs, ["gamma"]);
+        assert!(
+            !context
+                .directly_related_records
+                .iter()
+                .any(|record| record.id == transitive_generator.id)
+        );
 
         let subscription = assignment_create_record_update_subscription(
             &store,
@@ -4016,7 +4051,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(subscription.target_record_ids, vec![prerequisite.id]);
-        for target in [dependent.id, transitive.id] {
+        for target in [
+            dependent.id,
+            transitive.id,
+            generator.id,
+            transitive_generator.id,
+        ] {
             assert_eq!(
                 assignment_create_record_update_subscription(
                     &store,

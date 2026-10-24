@@ -1137,6 +1137,14 @@ pub fn assignment_context<R: AgentDispatchRepository>(
     let related = task
         .relationships
         .iter()
+        .filter(|relationship| {
+            matches!(
+                relationship.kind,
+                RecordRelationshipKind::ParentChild
+                    | RecordRelationshipKind::DependsOn
+                    | RecordRelationshipKind::GeneratedBy
+            )
+        })
         .filter_map(|relationship| {
             (relationship.from_id == task.id)
                 .then_some(relationship.to_id)

@@ -161,7 +161,7 @@ The renewable time-bounded validity of a Record Update Subscription. Opening Sub
 _Avoid_: heartbeat, connection timeout
 
 **Assignment Context**:
-The bounded Forge information an Agent Assignment may read: its assigned Record and directly related Records. A Child Record assignment may read its Parent Record but not sibling Child Records; a Parent Record assignment may read its direct Child Records. An assignment may also read its direct prerequisite and dependent Records across Project Scopes. It does not include transitive relationship traversal.
+The bounded Forge information an Agent Assignment may read: its assigned Record and directly related Records. A Child Record assignment may read its Parent Record but not sibling Child Records; a Parent Record assignment may read its direct Child Records. An assignment may also read its direct prerequisite, dependent, and generated-by Records across Project Scopes. It does not include transitive relationship traversal.
 _Avoid_: project visibility, record graph access
 
 **Agent Profile**:

@@ -1796,17 +1796,18 @@ mod tests {
     };
     use forge_app::{
         AgentDispatchRepository, Application, NewAgentAssignment, NewRecord,
-        NewRecordUpdateSubscription, NewTypedRecord, Project, ProjectRepository, RecordRepository,
-        RecordStatus, RecordType, RecordUpdate, RecordUpdateEnvelope, RecordUpdateId,
-        RecordUpdateKind, RecordUpdateSubscriptionId, RecordUpdateSubscriptionRepository,
-        RegistrationError, RepositoryInspector,
+        NewRecordUpdateSubscription, NewTypedRecord, Project, ProjectRepository,
+        RecordRelationshipKind, RecordRepository, RecordStatus, RecordType, RecordUpdate,
+        RecordUpdateEnvelope, RecordUpdateId, RecordUpdateKind, RecordUpdateSubscriptionId,
+        RecordUpdateSubscriptionRepository, RegistrationError, RepositoryInspector,
     };
     use forge_rpc::{
-        DoneRecordRequest, EditRecordRequest, ListRecordsRequest,
-        OpenGrillingUnderWayfinderRequest, OpenRecordRequest, OpenSpecRequest, OpenTaskRequest,
-        OpenTaskUnderSpecRequest, OpenTaskUnderWayfinderRequest, OpenWayfinderRequest,
-        ProjectApiClient, ProjectHereRequest, ProjectScopeRequest, RecordApiClient,
-        RecordIdRequest, RegisterProjectRequest, SystemApiClient, SystemApiServer,
+        AgentSubscriptionApiServer, CreateAgentSubscriptionRequest, DoneRecordRequest,
+        EditRecordRequest, ListRecordsRequest, OpenGrillingUnderWayfinderRequest,
+        OpenRecordRequest, OpenSpecRequest, OpenTaskRequest, OpenTaskUnderSpecRequest,
+        OpenTaskUnderWayfinderRequest, OpenWayfinderRequest, ProjectApiClient, ProjectHereRequest,
+        ProjectScopeRequest, RecordApiClient, RecordIdRequest, RegisterProjectRequest,
+        SystemApiClient, SystemApiServer,
     };
     use forge_store::SqliteProjectRepository;
     use futures_util::StreamExt;
@@ -1997,6 +1998,89 @@ mod tests {
             45678,
         )));
         request
+    }
+
+    #[tokio::test]
+    async fn subscription_rpc_only_authorizes_direct_prerequisites_not_provenance() {
+        let database_path = std::env::temp_dir().join(format!(
+            "forge-provenance-subscription-{}-{}.sqlite3",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = SqliteProjectRepository::open(&database_path).unwrap();
+        for slug in ["alpha", "beta", "gamma"] {
+            store
+                .register(&Project {
+                    slug: slug.into(),
+                    registered_folder: PathBuf::from(format!("/repos/{slug}")),
+                    origin_url: format!("https://example.test/{slug}.git"),
+                })
+                .unwrap();
+        }
+        let task = |body: &str, project_slug: &str| NewTypedRecord {
+            record_type: RecordType::Task,
+            task_kind: None,
+            body: body.into(),
+            project_slugs: vec![project_slug.into()],
+            generated_by_ids: vec![],
+        };
+        let owner = store.open_typed_record(&task("owner", "alpha")).unwrap();
+        let prerequisite = store
+            .open_typed_record(&task("prerequisite", "beta"))
+            .unwrap();
+        let generated = store
+            .open_typed_record(&task("generated", "gamma"))
+            .unwrap();
+        store
+            .relate_records(owner.id, prerequisite.id, RecordRelationshipKind::DependsOn)
+            .unwrap();
+        store
+            .relate_records(owner.id, generated.id, RecordRelationshipKind::GeneratedBy)
+            .unwrap();
+        store
+            .create_agent_assignment(&NewAgentAssignment {
+                id: "owner-assignment".into(),
+                record_id: owner.id,
+                project_slug: "alpha".into(),
+                profile_revision: 1,
+            })
+            .unwrap();
+        drop(store);
+
+        let daemon = Daemon::new(Application::with_agent_dispatch(
+            Box::new(SqliteProjectRepository::open(&database_path).unwrap()),
+            Box::new(SqliteProjectRepository::open(&database_path).unwrap()),
+            Box::new(super::ServerAgentDispatchAdapterFactory {
+                herdr: super::HerdrAdapterFactory::from_configuration_store(database_path.clone()),
+            }),
+            Box::new(TestInspector),
+        ));
+        let request = |target_record_id| CreateAgentSubscriptionRequest {
+            assignment_id: "owner-assignment".into(),
+            capability_id: "cap-owner".into(),
+            correlation_id: "subscription".into(),
+            target_record_ids: vec![target_record_id],
+            kind_filters: vec![],
+        };
+        assert_eq!(
+            AgentSubscriptionApiServer::create(&daemon, request(prerequisite.id))
+                .await
+                .unwrap()
+                .target_record_ids,
+            vec![prerequisite.id]
+        );
+        assert!(
+            AgentSubscriptionApiServer::create(&daemon, request(generated.id))
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("assignment-capability-denied")
+        );
+        drop(daemon);
+        std::fs::remove_file(database_path).unwrap();
     }
 
     #[test]
