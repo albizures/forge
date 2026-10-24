@@ -241,6 +241,46 @@ pub trait ManagedWorktreeRepository: RecordRepository {
     fn worktree_claim(&self, record_id: u64) -> Result<Option<WorktreeClaim>, RegistrationError>;
     /// Lists Claims which need recovery work.
     fn worktree_claims_requiring_cleanup(&self) -> Result<Vec<WorktreeClaim>, RegistrationError>;
+    /// Deletes a Claim only after its checkout has been safely removed.
+    fn delete_worktree_claim(&self, record_id: u64) -> Result<(), RegistrationError>;
+}
+
+/// Local, offline evidence supporting a Managed Worktree removal decision.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorktreeSafetyAssessment {
+    pub facts: Vec<String>,
+    pub blockers: Vec<String>,
+    pub removable: bool,
+}
+
+/// Server-owned Git and platform-shell operations for Managed Worktrees.
+#[allow(clippy::missing_errors_doc)]
+pub trait ManagedWorktreeAdapter: Send + Sync {
+    fn create(
+        &self,
+        repository: &Path,
+        path: &Path,
+        branch: &str,
+        base: &str,
+    ) -> Result<(), RegistrationError>;
+    fn remove(&self, path: &Path, force: bool) -> Result<(), RegistrationError>;
+    fn assess(&self, path: &Path) -> WorktreeSafetyAssessment;
+    fn run_setup_hook(
+        &self,
+        path: &Path,
+        hook: &str,
+        project_slug: &str,
+        record_id: u64,
+        branch: &str,
+        base: &str,
+    ) -> Result<(), RegistrationError>;
+}
+
+/// A Claim together with its current local removal assessment.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ManagedWorktreeInfo {
+    pub claim: WorktreeClaim,
+    pub safety: WorktreeSafetyAssessment,
 }
 
 /// Persistence operations for generic Records.
@@ -1057,6 +1097,8 @@ fn authorize_assignment_operation<R: AgentDispatchRepository>(
 /// The application boundary for operations shared by all transports.
 pub struct Application {
     records: Box<dyn RecordRepository>,
+    managed_worktrees: Option<Box<dyn ManagedWorktreeRepository>>,
+    worktree_adapter: Option<Box<dyn ManagedWorktreeAdapter>>,
     dispatch: Option<Box<dyn AgentDispatchRepository>>,
     adapter_factory: Option<Box<dyn AgentDispatchAdapterFactory>>,
     inspector: Box<dyn RepositoryInspector>,
@@ -1094,6 +1136,26 @@ impl Application {
     ) -> Self {
         Self {
             records,
+            managed_worktrees: None,
+            worktree_adapter: None,
+            dispatch: None,
+            adapter_factory: None,
+            inspector,
+        }
+    }
+
+    /// Creates an application with managed Worktree persistence and server operations enabled.
+    #[must_use]
+    pub fn with_managed_worktrees(
+        records: Box<dyn RecordRepository>,
+        managed_worktrees: Box<dyn ManagedWorktreeRepository>,
+        worktree_adapter: Box<dyn ManagedWorktreeAdapter>,
+        inspector: Box<dyn RepositoryInspector>,
+    ) -> Self {
+        Self {
+            records,
+            managed_worktrees: Some(managed_worktrees),
+            worktree_adapter: Some(worktree_adapter),
             dispatch: None,
             adapter_factory: None,
             inspector,
@@ -1110,10 +1172,50 @@ impl Application {
     ) -> Self {
         Self {
             records,
+            managed_worktrees: None,
+            worktree_adapter: None,
             dispatch: Some(dispatch),
             adapter_factory: Some(adapter_factory),
             inspector,
         }
+    }
+
+    /// Creates an application with both managed Worktrees and Agent Dispatch enabled.
+    #[must_use]
+    pub fn with_managed_worktrees_and_agent_dispatch(
+        records: Box<dyn RecordRepository>,
+        managed_worktrees: Box<dyn ManagedWorktreeRepository>,
+        worktree_adapter: Box<dyn ManagedWorktreeAdapter>,
+        dispatch: Box<dyn AgentDispatchRepository>,
+        adapter_factory: Box<dyn AgentDispatchAdapterFactory>,
+        inspector: Box<dyn RepositoryInspector>,
+    ) -> Self {
+        Self {
+            records,
+            managed_worktrees: Some(managed_worktrees),
+            worktree_adapter: Some(worktree_adapter),
+            dispatch: Some(dispatch),
+            adapter_factory: Some(adapter_factory),
+            inspector,
+        }
+    }
+
+    fn managed_worktrees(&self) -> Result<&dyn ManagedWorktreeRepository, RegistrationError> {
+        self.managed_worktrees.as_deref().ok_or_else(|| {
+            RegistrationError::new(
+                "managed-worktrees-unavailable",
+                "Managed Worktrees are not configured for this daemon",
+            )
+        })
+    }
+
+    fn worktree_adapter(&self) -> Result<&dyn ManagedWorktreeAdapter, RegistrationError> {
+        self.worktree_adapter.as_deref().ok_or_else(|| {
+            RegistrationError::new(
+                "managed-worktrees-unavailable",
+                "Managed Worktree Git operations are not configured for this daemon",
+            )
+        })
     }
 
     fn dispatch(&self) -> Result<&dyn AgentDispatchRepository, RegistrationError> {
@@ -1220,6 +1322,159 @@ impl Application {
             acquired_lease: scan.acquired_lease,
             reconciled_assignments: scan.reconciled.len(),
         })
+    }
+
+    /// Creates and activates a Managed Worktree for an In Progress Task.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable lifecycle, hook, or Git failure.
+    pub fn create_managed_worktree(
+        &self,
+        record_id: u64,
+        branch: &str,
+        base: &str,
+    ) -> Result<WorktreeClaim, RegistrationError> {
+        let managed = self.managed_worktrees()?;
+        let adapter = self.worktree_adapter()?;
+        let record = managed.show_record(record_id)?;
+        if !is_worktree_eligible(&record) {
+            return Err(RegistrationError::new(
+                "task-not-in-progress",
+                "a Managed Worktree requires an In Progress Task scoped to exactly one Project",
+            ));
+        }
+        if managed.worktree_claim(record_id)?.is_some() {
+            return Err(RegistrationError::new(
+                "claim-exists",
+                "Task already has a Managed Worktree Claim",
+            ));
+        }
+        let claim = managed.reserve_worktree_claim(record_id)?;
+        let project = match managed.project(&claim.project_slug) {
+            Ok(project) => project,
+            Err(error) => return self.rollback_worktree_claim(&claim, error),
+        };
+        if let Err(error) = adapter.create(&project.registered_folder, &claim.path, branch, base) {
+            return self.rollback_worktree_claim(&claim, error);
+        }
+        if let Some(hook) = managed.project_setup_hook(&claim.project_slug)?
+            && adapter
+                .run_setup_hook(
+                    &claim.path,
+                    &hook,
+                    &claim.project_slug,
+                    record_id,
+                    branch,
+                    base,
+                )
+                .is_err()
+        {
+            let error = RegistrationError::new("setup-hook-failed", "Project Setup Hook failed");
+            return self.rollback_checkout_and_claim(&claim, error);
+        }
+        managed.activate_worktree_claim(record_id)
+    }
+
+    fn rollback_worktree_claim(
+        &self,
+        claim: &WorktreeClaim,
+        error: RegistrationError,
+    ) -> Result<WorktreeClaim, RegistrationError> {
+        if self
+            .managed_worktrees()?
+            .delete_worktree_claim(claim.record_id)
+            .is_err()
+        {
+            self.managed_worktrees()?
+                .require_worktree_claim_cleanup(claim.record_id)?;
+        }
+        Err(error)
+    }
+
+    fn rollback_checkout_and_claim(
+        &self,
+        claim: &WorktreeClaim,
+        error: RegistrationError,
+    ) -> Result<WorktreeClaim, RegistrationError> {
+        if self.worktree_adapter()?.remove(&claim.path, true).is_ok()
+            && self
+                .managed_worktrees()?
+                .delete_worktree_claim(claim.record_id)
+                .is_ok()
+        {
+            return Err(error);
+        }
+        self.managed_worktrees()?
+            .require_worktree_claim_cleanup(claim.record_id)?;
+        Err(error)
+    }
+
+    /// Returns a Managed Worktree Claim and its local safety assessment.
+    ///
+    /// # Errors
+    ///
+    /// Returns a missing Claim or Git adapter failure.
+    pub fn managed_worktree_info(
+        &self,
+        record_id: u64,
+    ) -> Result<ManagedWorktreeInfo, RegistrationError> {
+        let claim = self
+            .managed_worktrees()?
+            .worktree_claim(record_id)?
+            .ok_or_else(|| {
+                RegistrationError::new("claim-not-found", "Task has no Managed Worktree Claim")
+            })?;
+        Ok(ManagedWorktreeInfo {
+            safety: self.worktree_adapter()?.assess(&claim.path),
+            claim,
+        })
+    }
+
+    /// Removes a Managed Worktree after local safety checks, unless explicitly forced.
+    ///
+    /// # Errors
+    ///
+    /// Returns an unsafe-removal, cleanup, or Git adapter failure.
+    pub fn remove_managed_worktree(
+        &self,
+        record_id: u64,
+        force: bool,
+    ) -> Result<(), RegistrationError> {
+        let info = self.managed_worktree_info(record_id)?;
+        if info.claim.state != WorktreeClaimState::Active && !force {
+            return Err(RegistrationError::new(
+                "managed-worktree-invalid",
+                "Managed Worktree Claim requires doctor repair",
+            ));
+        }
+        if !force && !info.safety.removable {
+            return Err(RegistrationError::new(
+                "unsafe-removal",
+                "Managed Worktree cannot be ordinarily removed",
+            ));
+        }
+        if let Err(error) = self.worktree_adapter()?.remove(&info.claim.path, force) {
+            self.managed_worktrees()?
+                .require_worktree_claim_cleanup(record_id)?;
+            return Err(error);
+        }
+        self.managed_worktrees()?.delete_worktree_claim(record_id)
+    }
+
+    /// Explicitly repairs a Claim requiring cleanup by force-removing its checkout.
+    ///
+    /// # Errors
+    ///
+    /// Returns a cleanup or Git adapter failure.
+    pub fn repair_managed_worktree(&self, record_id: u64) -> Result<(), RegistrationError> {
+        let info = self.managed_worktree_info(record_id)?;
+        if let Err(error) = self.worktree_adapter()?.remove(&info.claim.path, true) {
+            self.managed_worktrees()?
+                .require_worktree_claim_cleanup(record_id)?;
+            return Err(error);
+        }
+        self.managed_worktrees()?.delete_worktree_claim(record_id)
     }
 
     /// Registers an eligible Git main Worktree as a Project.

@@ -475,6 +475,27 @@ impl ManagedWorktreeRepository for SqliteProjectRepository {
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
         connection.prepare("SELECT record_id, project_slug, path, state FROM worktree_claims WHERE state = 'cleanup-required' ORDER BY record_id").map_err(storage_error)?.query_map([], worktree_claim_from_row).map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)
     }
+
+    fn delete_worktree_claim(&self, record_id: u64) -> Result<(), RegistrationError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        if connection
+            .execute(
+                "DELETE FROM worktree_claims WHERE record_id = ?1",
+                [record_id.cast_signed()],
+            )
+            .map_err(storage_error)?
+            == 0
+        {
+            return Err(RegistrationError::new(
+                "worktree-claim-not-found",
+                "Record has no Worktree Claim",
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl RecordRepository for SqliteProjectRepository {
@@ -2670,6 +2691,12 @@ mod tests {
             store.worktree_claim(task.id).unwrap(),
             Some(cleanup),
             "completed Task claims are retained"
+        );
+        store.delete_worktree_claim(task.id).unwrap();
+        assert_eq!(store.worktree_claim(task.id).unwrap(), None);
+        assert_eq!(
+            store.delete_worktree_claim(task.id).unwrap_err().code,
+            "worktree-claim-not-found"
         );
     }
 

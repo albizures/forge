@@ -31,7 +31,8 @@ use axum::{
 };
 use forge_app::{
     AgentDispatchAdapter, AgentDispatchAdapterFactory, AgentProfile, Application,
-    ApplicationStatus, Project, RecordStatus, RecordType, RegistrationError, RepositoryInspector,
+    ApplicationStatus, ManagedWorktreeAdapter, Project, RecordStatus, RecordType,
+    RegistrationError, RepositoryInspector, WorktreeSafetyAssessment,
 };
 use forge_rpc::{
     AddRecordCommentRequest, AgentDispatchApiServer, AgentDispatchProfileResponse,
@@ -299,6 +300,174 @@ fn git(folder: &Path, arguments: &[&str]) -> Result<String, ()> {
     }
 }
 
+/// Server-only adapter for Git worktree lifecycle and platform-shell setup hooks.
+pub struct GitWorktreeAdapter;
+
+impl ManagedWorktreeAdapter for GitWorktreeAdapter {
+    fn create(
+        &self,
+        repository: &Path,
+        path: &Path,
+        branch: &str,
+        base: &str,
+    ) -> Result<(), RegistrationError> {
+        git(
+            repository,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                branch,
+                &path.to_string_lossy(),
+                base,
+            ],
+        )
+        .map(|_| ())
+        .map_err(|()| {
+            RegistrationError::new(
+                "managed-worktree-invalid",
+                "could not create Managed Worktree",
+            )
+        })
+    }
+
+    fn remove(&self, path: &Path, force: bool) -> Result<(), RegistrationError> {
+        if !path.exists() {
+            return Ok(());
+        }
+        let path = path.to_string_lossy();
+        let arguments = if force {
+            vec!["worktree", "remove", "--force", &path]
+        } else {
+            vec!["worktree", "remove", &path]
+        };
+        match git(Path::new(&*path), &arguments) {
+            Ok(_) => Ok(()),
+            Err(()) if force => fs::remove_dir_all(&*path).map_err(|_| {
+                RegistrationError::new(
+                    "managed-worktree-invalid",
+                    "could not remove Managed Worktree",
+                )
+            }),
+            Err(()) => Err(RegistrationError::new(
+                "managed-worktree-invalid",
+                "could not remove Managed Worktree",
+            )),
+        }
+    }
+
+    fn assess(&self, path: &Path) -> WorktreeSafetyAssessment {
+        let mut facts = Vec::new();
+        let mut blockers = Vec::new();
+        if !path.is_dir() {
+            return WorktreeSafetyAssessment {
+                facts: vec!["checkout-missing".into()],
+                blockers: vec!["checkout-missing".into()],
+                removable: false,
+            };
+        }
+        if git(path, &["rev-parse", "--is-inside-work-tree"]).as_deref() != Ok("true") {
+            return WorktreeSafetyAssessment {
+                facts: vec!["git-metadata-invalid".into()],
+                blockers: vec!["git-metadata-invalid".into()],
+                removable: false,
+            };
+        }
+        match git(path, &["status", "--porcelain"]) {
+            Ok(status) if status.is_empty() => facts.push("clean".into()),
+            Ok(_) => {
+                facts.push("dirty".into());
+                blockers.push("dirty");
+            }
+            Err(()) => {
+                facts.push("git-metadata-invalid".into());
+                blockers.push("git-metadata-invalid");
+            }
+        }
+        if git(
+            path,
+            &[
+                "rev-parse",
+                "--abbrev-ref",
+                "--symbolic-full-name",
+                "@{upstream}",
+            ],
+        )
+        .is_err()
+        {
+            facts.push("upstream-unresolvable".into());
+            blockers.push("upstream-unresolvable");
+        } else if let Ok(counts) = git(
+            path,
+            &["rev-list", "--left-right", "--count", "@{upstream}...HEAD"],
+        ) {
+            let values: Vec<_> = counts.split_whitespace().collect();
+            if let [behind, ahead] = values.as_slice() {
+                if *behind != "0" {
+                    facts.push(format!("behind:{behind}"));
+                }
+                if *ahead != "0" {
+                    facts.push(format!("ahead:{ahead}"));
+                    blockers.push("ahead");
+                }
+            } else {
+                facts.push("upstream-unresolvable".into());
+                blockers.push("upstream-unresolvable");
+            }
+        } else {
+            facts.push("upstream-unresolvable".into());
+            blockers.push("upstream-unresolvable");
+        }
+        WorktreeSafetyAssessment {
+            removable: blockers.is_empty(),
+            facts,
+            blockers: blockers.into_iter().map(str::to_owned).collect(),
+        }
+    }
+
+    fn run_setup_hook(
+        &self,
+        path: &Path,
+        hook: &str,
+        project_slug: &str,
+        record_id: u64,
+        branch: &str,
+        base: &str,
+    ) -> Result<(), RegistrationError> {
+        #[cfg(windows)]
+        let mut command = {
+            let mut command = Command::new("cmd");
+            command.args(["/C", hook]);
+            command
+        };
+        #[cfg(not(windows))]
+        let mut command = {
+            let mut command = Command::new("sh");
+            command.args(["-c", hook]);
+            command
+        };
+        let status = command
+            .current_dir(path)
+            .env("FORGE_PROJECT_SLUG", project_slug)
+            .env("FORGE_RECORD_ID", record_id.to_string())
+            .env("FORGE_WORKTREE_PATH", path)
+            .env("FORGE_BRANCH", branch)
+            .env("FORGE_BASE", base)
+            .status()
+            .map_err(|_| {
+                RegistrationError::new("setup-hook-failed", "could not run Project Setup Hook")
+            })?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(RegistrationError::new(
+                "setup-hook-failed",
+                "Project Setup Hook failed",
+            ))
+        }
+    }
+}
+
 fn resolve_git_path(root: &Path, value: &str) -> PathBuf {
     let path = Path::new(value);
     fs::canonicalize(if path.is_absolute() {
@@ -387,8 +556,12 @@ fn application_from_config(config: &DaemonConfig) -> Result<Application, String>
         SqliteProjectRepository::open(&config.store_path).map_err(|error| error.message)?;
     let dispatch =
         SqliteProjectRepository::open(&config.store_path).map_err(|error| error.message)?;
-    Ok(Application::with_agent_dispatch(
+    let managed_worktrees =
+        SqliteProjectRepository::open(&config.store_path).map_err(|error| error.message)?;
+    Ok(Application::with_managed_worktrees_and_agent_dispatch(
         Box::new(records),
+        Box::new(managed_worktrees),
+        Box::new(GitWorktreeAdapter),
         Box::new(dispatch),
         Box::new(ServerAgentDispatchAdapterFactory {
             herdr: HerdrAdapterFactory::from_configuration_store(config.store_path.clone()),
@@ -1102,6 +1275,30 @@ mod tests {
                 origin_url: "https://example.test/origin.git".into(),
             })
         }
+    }
+
+    #[test]
+    fn git_worktree_safety_reports_missing_and_invalid_checkouts() {
+        use forge_app::ManagedWorktreeAdapter;
+
+        let adapter = super::GitWorktreeAdapter;
+        let missing = adapter.assess(Path::new("/definitely-not-a-forge-worktree"));
+        assert_eq!(missing.facts, ["checkout-missing"]);
+        assert_eq!(missing.blockers, ["checkout-missing"]);
+        assert!(!missing.removable);
+
+        let directory = std::env::temp_dir().join(format!(
+            "forge-invalid-worktree-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let invalid = adapter.assess(&directory);
+        assert_eq!(invalid.facts, ["git-metadata-invalid"]);
+        assert_eq!(invalid.blockers, ["git-metadata-invalid"]);
+        adapter.remove(&directory, true).unwrap();
     }
 
     fn test_application() -> Application {
