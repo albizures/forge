@@ -927,6 +927,8 @@ pub trait RecordUpdateSubscriptionRepository: AgentDispatchRepository {
         &self,
         id: RecordUpdateSubscriptionId,
     ) -> Result<(), RegistrationError>;
+    /// Returns the greatest committed global Record Update cursor, or zero before any updates.
+    fn record_update_head(&self) -> Result<RecordUpdateId, RegistrationError>;
     /// Replays selected global updates strictly after `after`, ascending by cursor.
     fn replay_record_updates(
         &self,
@@ -1515,6 +1517,15 @@ impl Application {
                 "Subscription is not owned by the named open Assignment",
             ))
         }
+    }
+
+    /// Returns the greatest committed global Record Update cursor.
+    ///
+    /// # Errors
+    ///
+    /// Returns a dispatch storage error.
+    pub fn record_update_head(&self) -> Result<RecordUpdateId, RegistrationError> {
+        self.dispatch()?.record_update_head()
     }
 
     /// Replays selected committed updates after a durable global cursor.

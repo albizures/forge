@@ -1923,6 +1923,21 @@ impl RecordUpdateSubscriptionRepository for SqliteProjectRepository {
         Ok(())
     }
 
+    fn record_update_head(&self) -> Result<RecordUpdateId, RegistrationError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        connection
+            .query_row(
+                "SELECT COALESCE(MAX(id), 0) FROM record_updates",
+                [],
+                |row| row.get::<_, i64>(0).map(i64::cast_unsigned),
+            )
+            .map(RecordUpdateId)
+            .map_err(storage_error)
+    }
+
     fn replay_record_updates(
         &self,
         id: RecordUpdateSubscriptionId,
@@ -2939,6 +2954,7 @@ mod tests {
         store.edit_record(other.id, "unselected").unwrap();
         store.start_record(target.id).unwrap();
         store.edit_record(target.id, "selected").unwrap();
+        assert!(store.record_update_head().unwrap() > subscription.start_cursor);
         let replay = store
             .replay_record_updates(subscription.id, subscription.start_cursor)
             .unwrap();

@@ -1151,7 +1151,10 @@ async fn subscription_events(
         .or(query_cursor.flatten())
         .unwrap_or(subscription.start_cursor);
     if cursor < subscription.start_cursor {
-        return resync_required(id, subscription.start_cursor);
+        return match daemon.application.record_update_head() {
+            Ok(head) => resync_required(id, subscription.start_cursor, head),
+            Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        };
     }
     let (receiver, mut cancellation, replay) =
         match daemon
@@ -1160,7 +1163,10 @@ async fn subscription_events(
         {
             Ok(connection) => connection,
             Err(error) if error.code == "invalid-cursor" => {
-                return resync_required(id, subscription.start_cursor);
+                return match daemon.application.record_update_head() {
+                    Ok(head) => resync_required(id, subscription.start_cursor, head),
+                    Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+                };
             }
             Err(error) if error.code == "subscription-expired" => {
                 return StatusCode::GONE.into_response();
@@ -1199,11 +1205,15 @@ async fn subscription_events(
     response
 }
 
-fn resync_required(id: RecordUpdateSubscriptionId, start: RecordUpdateId) -> Response {
+fn resync_required(
+    id: RecordUpdateSubscriptionId,
+    start: RecordUpdateId,
+    head: RecordUpdateId,
+) -> Response {
     (
         StatusCode::CONFLICT,
         [(header::CONTENT_TYPE, "application/json")],
-        format!("{{\"code\":\"resync-required\",\"subscription_id\":{},\"retention_floor\":0,\"start_after_update_id\":{},\"head\":{}}}", id.0, start.0, start.0),
+        format!("{{\"code\":\"resync-required\",\"subscription_id\":{},\"retention_floor\":0,\"start_after_update_id\":{},\"head\":{}}}", id.0, start.0, head.0),
     ).into_response()
 }
 
@@ -1662,7 +1672,7 @@ mod tests {
 
     use axum::{
         body::{Body, to_bytes},
-        http::{Request, header},
+        http::{Request, StatusCode, header},
         response::{IntoResponse, Sse},
     };
     use forge_app::{
@@ -2148,6 +2158,27 @@ mod tests {
         );
 
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn resync_required_reports_current_head_after_subscription_creation() {
+        let response = super::resync_required(
+            RecordUpdateSubscriptionId(9),
+            RecordUpdateId(12),
+            RecordUpdateId(18),
+        );
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = String::from_utf8(
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert_eq!(
+            body,
+            "{\"code\":\"resync-required\",\"subscription_id\":9,\"retention_floor\":0,\"start_after_update_id\":12,\"head\":18}"
+        );
     }
 
     #[tokio::test]
