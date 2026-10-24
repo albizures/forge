@@ -98,6 +98,52 @@ pub struct RecordUpdate {
     pub kind: RecordUpdateKind,
 }
 
+/// A Record Update in Forge's global cursor order.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecordUpdateEnvelope {
+    pub record_id: u64,
+    pub update: RecordUpdate,
+}
+
+/// Opaque stable identity assigned to a durable Record Update Subscription.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct RecordUpdateSubscriptionId(pub u64);
+
+/// The update categories a subscription may select.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum RecordUpdateKindFilter {
+    Created,
+    BodyEdited,
+    StatusTransition,
+    RelationshipAdded,
+    RelationshipRemoved,
+    CommentAdded,
+    CommentDeleted,
+}
+
+/// A durable, leased request for updates to explicit Records.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecordUpdateSubscription {
+    pub id: RecordUpdateSubscriptionId,
+    pub assignment_id: String,
+    /// Sorted, duplicate-free explicit Record IDs.
+    pub target_record_ids: Vec<u64>,
+    /// Sorted, duplicate-free categories; empty selects every category.
+    pub kind_filters: Vec<RecordUpdateKindFilter>,
+    /// The greatest committed global update cursor at creation.
+    pub start_cursor: RecordUpdateId,
+    /// Unix milliseconds at which the lease becomes invalid.
+    pub lease_expires_at_millis: u64,
+}
+
+/// Persistence input for a durable Record Update Subscription.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NewRecordUpdateSubscription {
+    pub assignment_id: String,
+    pub target_record_ids: Vec<u64>,
+    pub kind_filters: Vec<RecordUpdateKindFilter>,
+}
+
 /// Opaque stable identity assigned to a Record Comment.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct RecordCommentId(pub u64);
@@ -853,6 +899,37 @@ pub struct AssignmentContext {
     pub assignment_id: String,
     pub task: Record,
     pub directly_related_records: Vec<Record>,
+}
+
+/// Persistence boundary for durable Record Update Subscription state and replay.
+#[allow(clippy::missing_errors_doc)]
+pub trait RecordUpdateSubscriptionRepository: AgentDispatchRepository {
+    /// Creates an idempotent 30-minute leased Subscription and captures its start cursor.
+    fn create_record_update_subscription(
+        &self,
+        subscription: &NewRecordUpdateSubscription,
+    ) -> Result<RecordUpdateSubscription, RegistrationError>;
+    /// Returns a Subscription while its lease remains valid.
+    fn record_update_subscription(
+        &self,
+        id: RecordUpdateSubscriptionId,
+    ) -> Result<RecordUpdateSubscription, RegistrationError>;
+    /// Renews a Subscription's 30-minute lease.
+    fn renew_record_update_subscription(
+        &self,
+        id: RecordUpdateSubscriptionId,
+    ) -> Result<RecordUpdateSubscription, RegistrationError>;
+    /// Deletes a Subscription and all of its selections.
+    fn delete_record_update_subscription(
+        &self,
+        id: RecordUpdateSubscriptionId,
+    ) -> Result<(), RegistrationError>;
+    /// Replays selected global updates strictly after `after`, ascending by cursor.
+    fn replay_record_updates(
+        &self,
+        id: RecordUpdateSubscriptionId,
+        after: RecordUpdateId,
+    ) -> Result<Vec<RecordUpdateEnvelope>, RegistrationError>;
 }
 
 /// Durable persistence boundary for provider-neutral dispatch foundations.
