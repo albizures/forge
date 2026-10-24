@@ -468,6 +468,14 @@ impl ManagedWorktreeRepository for SqliteProjectRepository {
         load_worktree_claim(&connection, record_id)
     }
 
+    fn worktree_claims(&self) -> Result<Vec<WorktreeClaim>, RegistrationError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        connection.prepare("SELECT record_id, project_slug, path, state FROM worktree_claims ORDER BY record_id").map_err(storage_error)?.query_map([], worktree_claim_from_row).map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)
+    }
+
     fn worktree_claims_requiring_cleanup(&self) -> Result<Vec<WorktreeClaim>, RegistrationError> {
         let connection = self
             .connection

@@ -37,13 +37,16 @@ use forge_app::{
 use forge_rpc::{
     AddRecordCommentRequest, AgentDispatchApiServer, AgentDispatchProfileResponse,
     AgentDispatchReconcileResponse, AgentDispatchStatusRequest, AgentDispatchStatusResponse,
-    DeleteRecordCommentRequest, DoneRecordRequest, EditRecordRequest, ListRecordCommentsResponse,
-    ListRecordUpdatesResponse, ListRecordsRequest, ListRecordsResponse, ManagementStatus,
+    CreateManagedWorktreeRequest, DeleteRecordCommentRequest, DoctorManagedWorktreesRequest,
+    DoneRecordRequest, EditRecordRequest, ListManagedWorktreesRequest,
+    ListManagedWorktreesResponse, ListRecordCommentsResponse, ListRecordUpdatesResponse,
+    ListRecordsRequest, ListRecordsResponse, ManagedWorktreeResponse, ManagementStatus,
     OpenRecordRequest, OpenSpecRequest, OpenTaskRequest, OpenTaskUnderSpecRequest,
     ProjectApiServer, ProjectHereRequest, ProjectHereResponse, RecordApiServer, RecordIdRequest,
     RecordResponse, RegisterProjectRequest, RegisterProjectResponse, RelateRecordRequest,
-    RevisionIdentity, SetAgentDispatchEndpointRequest, SetAgentDispatchProjectRequest,
-    SystemApiServer, SystemStatusResponse,
+    RemoveManagedWorktreeRequest, RevisionIdentity, SetAgentDispatchEndpointRequest,
+    SetAgentDispatchProjectRequest, SetProjectSetupHookRequest, SetWorktreeRootRequest,
+    SystemApiServer, SystemStatusResponse, WorktreeApiServer, WorktreeRootResponse,
 };
 use forge_store::SqliteProjectRepository;
 use herdr::{HerdrAdapterFactory, observe_status_changes};
@@ -654,6 +657,87 @@ impl AgentDispatchApiServer for Daemon {
 }
 
 #[async_trait]
+impl WorktreeApiServer for Daemon {
+    async fn root_get(&self) -> RpcResult<WorktreeRootResponse> {
+        self.application
+            .worktree_root()
+            .map(|root| WorktreeRootResponse {
+                root: root.map(|path| path.to_string_lossy().into_owned()),
+            })
+            .map_err(rpc_error)
+    }
+    async fn root_set(&self, request: SetWorktreeRootRequest) -> RpcResult<WorktreeRootResponse> {
+        self.application
+            .set_worktree_root(request.root.as_deref().map(Path::new))
+            .and_then(|()| self.application.worktree_root())
+            .map(|root| WorktreeRootResponse {
+                root: root.map(|path| path.to_string_lossy().into_owned()),
+            })
+            .map_err(rpc_error)
+    }
+    async fn setup_hook_set(&self, request: SetProjectSetupHookRequest) -> RpcResult<()> {
+        self.application
+            .set_project_setup_hook(&request.project_slug, request.hook.as_deref())
+            .map_err(rpc_error)
+    }
+    async fn create(
+        &self,
+        request: CreateManagedWorktreeRequest,
+    ) -> RpcResult<ManagedWorktreeResponse> {
+        self.application
+            .create_managed_worktree(request.record_id, &request.branch, &request.base)
+            .and_then(|_| self.application.managed_worktree_info(request.record_id))
+            .map(Into::into)
+            .map_err(rpc_error)
+    }
+    async fn info(&self, request: RecordIdRequest) -> RpcResult<ManagedWorktreeResponse> {
+        self.application
+            .managed_worktree_info(request.id)
+            .map(Into::into)
+            .map_err(rpc_error)
+    }
+    async fn list(
+        &self,
+        request: ListManagedWorktreesRequest,
+    ) -> RpcResult<ListManagedWorktreesResponse> {
+        self.application
+            .list_managed_worktrees(request.include_all)
+            .map(|worktrees| ListManagedWorktreesResponse {
+                worktrees: worktrees.into_iter().map(Into::into).collect(),
+            })
+            .map_err(rpc_error)
+    }
+    async fn remove(&self, request: RemoveManagedWorktreeRequest) -> RpcResult<()> {
+        self.application
+            .remove_managed_worktree(request.record_id, request.force)
+            .map_err(rpc_error)
+    }
+    async fn doctor(
+        &self,
+        request: DoctorManagedWorktreesRequest,
+    ) -> RpcResult<ListManagedWorktreesResponse> {
+        let worktrees = self
+            .application
+            .list_managed_worktrees(false)
+            .map_err(rpc_error)?;
+        if request.repair {
+            for worktree in &worktrees {
+                self.application
+                    .repair_managed_worktree(worktree.claim.record_id)
+                    .map_err(rpc_error)?;
+            }
+        }
+        Ok(ListManagedWorktreesResponse {
+            worktrees: if request.repair {
+                Vec::new()
+            } else {
+                worktrees.into_iter().map(Into::into).collect()
+            },
+        })
+    }
+}
+
+#[async_trait]
 impl RecordApiServer for Daemon {
     async fn open(&self, request: OpenRecordRequest) -> RpcResult<RecordResponse> {
         self.application
@@ -853,6 +937,9 @@ pub fn router(daemon: Daemon) -> Router {
         .expect("RPC method names must not overlap");
     methods
         .merge(AgentDispatchApiServer::into_rpc(daemon.clone()))
+        .expect("RPC method names must not overlap");
+    methods
+        .merge(WorktreeApiServer::into_rpc(daemon.clone()))
         .expect("RPC method names must not overlap");
     methods
         .merge(RecordApiServer::into_rpc(daemon))

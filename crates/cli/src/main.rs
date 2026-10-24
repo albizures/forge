@@ -1,16 +1,18 @@
 use clap::{Args, Parser, Subcommand};
 use forge_cli::{
-    render_agent_dispatch_status, render_human_status, render_json_status, render_project_here,
-    render_project_registered, render_record, render_record_comments, render_record_list,
-    render_record_opened, render_record_updates, request_add_record_comment,
-    request_agent_dispatch_endpoint, request_agent_dispatch_profile,
+    render_agent_dispatch_status, render_human_status, render_json_status, render_managed_worktree,
+    render_managed_worktrees, render_project_here, render_project_registered, render_record,
+    render_record_comments, render_record_list, render_record_opened, render_record_updates,
+    request_add_record_comment, request_agent_dispatch_endpoint, request_agent_dispatch_profile,
     request_agent_dispatch_project, request_agent_dispatch_reconcile,
     request_agent_dispatch_status, request_delete_record_comment, request_done_record,
-    request_edit_record, request_list_records, request_open_record, request_open_spec,
-    request_open_task, request_open_task_under_spec, request_project_here, request_record_comments,
-    request_record_updates, request_register_project, request_relate_record, request_show_record,
-    request_start_record, request_status, request_unrelate_record,
-    resolve_endpoint as resolve_managed_endpoint,
+    request_edit_record, request_list_records, request_managed_worktree_create,
+    request_managed_worktree_doctor, request_managed_worktree_info, request_managed_worktree_list,
+    request_managed_worktree_remove, request_open_record, request_open_spec, request_open_task,
+    request_open_task_under_spec, request_project_here, request_project_setup_hook,
+    request_record_comments, request_record_updates, request_register_project,
+    request_relate_record, request_show_record, request_start_record, request_status,
+    request_unrelate_record, request_worktree_root, resolve_endpoint as resolve_managed_endpoint,
 };
 use std::io::Read;
 
@@ -54,11 +56,135 @@ enum Command {
         #[command(subcommand)]
         command: TaskCommand,
     },
+    /// Configure managed Worktrees.
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
+    /// Configure a Project.
+    Project {
+        #[command(subcommand)]
+        command: ProjectCommand,
+    },
+    /// Manage Forge-owned Worktrees.
+    Worktree {
+        #[command(subcommand)]
+        command: WorktreeCommand,
+    },
     /// Configure and inspect daemon-owned Agent Dispatch.
     AgentDispatch {
         #[command(subcommand)]
         command: AgentDispatchCommand,
     },
+}
+#[derive(Debug, Subcommand)]
+enum ConfigCommand {
+    Get(ConfigGetArgs),
+    Set(ConfigSetArgs),
+}
+#[derive(Args, Debug)]
+struct ConfigGetArgs {
+    key: String,
+    #[arg(long, value_name = "URL")]
+    server_url: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Args, Debug)]
+struct ConfigSetArgs {
+    key: String,
+    value: String,
+    #[arg(long, value_name = "URL")]
+    server_url: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Debug, Subcommand)]
+enum ProjectCommand {
+    SetupHook {
+        #[command(subcommand)]
+        command: ProjectSetupHookCommand,
+    },
+}
+#[derive(Debug, Subcommand)]
+enum ProjectSetupHookCommand {
+    Set(ProjectSetupHookSetArgs),
+    Clear(ProjectSetupHookClearArgs),
+}
+#[derive(Args, Debug)]
+struct ProjectSetupHookSetArgs {
+    #[arg(long)]
+    project: String,
+    hook: String,
+    #[arg(long, value_name = "URL")]
+    server_url: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Args, Debug)]
+struct ProjectSetupHookClearArgs {
+    #[arg(long)]
+    project: String,
+    #[arg(long, value_name = "URL")]
+    server_url: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Debug, Subcommand)]
+enum WorktreeCommand {
+    Create(WorktreeCreateArgs),
+    Info(WorktreeIdArgs),
+    List(WorktreeListArgs),
+    Remove(WorktreeRemoveArgs),
+    Doctor(WorktreeDoctorArgs),
+}
+#[derive(Args, Debug)]
+struct WorktreeCreateArgs {
+    task: u64,
+    #[arg(long)]
+    branch: String,
+    #[arg(long)]
+    base: String,
+    #[arg(long, value_name = "URL")]
+    server_url: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Args, Debug)]
+struct WorktreeIdArgs {
+    task: u64,
+    #[arg(long, value_name = "URL")]
+    server_url: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Args, Debug)]
+struct WorktreeListArgs {
+    #[arg(long = "all")]
+    include_all: bool,
+    #[arg(long, value_name = "URL")]
+    server_url: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Args, Debug)]
+struct WorktreeRemoveArgs {
+    task: u64,
+    #[arg(long)]
+    force: bool,
+    #[arg(long, value_name = "URL")]
+    server_url: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Args, Debug)]
+struct WorktreeDoctorArgs {
+    #[arg(long)]
+    repair: bool,
+    #[arg(long, value_name = "URL")]
+    server_url: Option<String>,
+    #[arg(long)]
+    json: bool,
 }
 #[derive(Debug, Subcommand)]
 enum AddCommand {
@@ -373,10 +499,141 @@ async fn main() {
             TaskCommand::Open(args) => open_task(args).await,
             TaskCommand::UnderSpec(args) => open_task_under_spec(args).await,
         },
+        Command::Config { command } => config(command).await,
+        Command::Project { command } => project(command).await,
+        Command::Worktree { command } => worktree(command).await,
         Command::AgentDispatch { command } => agent_dispatch(command).await,
     };
     std::process::exit(exit_code);
 }
+async fn config(command: ConfigCommand) -> i32 {
+    let (key, root, set, url, json) = match command {
+        ConfigCommand::Get(args) => (args.key, None, false, args.server_url, args.json),
+        ConfigCommand::Set(args) => (args.key, Some(args.value), true, args.server_url, args.json),
+    };
+    if key != "worktreeRoot" {
+        eprintln!("forge config: unsupported key `{key}`; supported key: worktreeRoot");
+        return 1;
+    }
+    match request_worktree_root(&resolve_endpoint(url.as_deref()).await, root, set).await {
+        Ok(response) => {
+            if json {
+                println!("{}", serde_json::to_string(&response).unwrap());
+            } else {
+                println!("{}", response.root.as_deref().unwrap_or("unset"));
+            }
+            0
+        }
+        Err(error) => {
+            eprintln!("forge config: {error}");
+            1
+        }
+    }
+}
+async fn project(command: ProjectCommand) -> i32 {
+    let ProjectCommand::SetupHook { command } = command;
+    let (project, hook, server_url, json) = match command {
+        ProjectSetupHookCommand::Set(args) => {
+            (args.project, Some(args.hook), args.server_url, args.json)
+        }
+        ProjectSetupHookCommand::Clear(args) => (args.project, None, args.server_url, args.json),
+    };
+    match request_project_setup_hook(
+        &resolve_endpoint(server_url.as_deref()).await,
+        project,
+        hook,
+    )
+    .await
+    {
+        Ok(()) => {
+            if json {
+                println!("{{}}");
+            } else {
+                println!("Updated Project Setup Hook");
+            }
+            0
+        }
+        Err(error) => {
+            eprintln!("forge project setup-hook: {error}");
+            1
+        }
+    }
+}
+async fn worktree(command: WorktreeCommand) -> i32 {
+    let (result, json) = match command {
+        WorktreeCommand::Create(args) => (
+            request_managed_worktree_create(
+                &resolve_endpoint(args.server_url.as_deref()).await,
+                args.task,
+                args.branch,
+                args.base,
+            )
+            .await
+            .map(|value| serde_json::to_value(value).unwrap()),
+            args.json,
+        ),
+        WorktreeCommand::Info(args) => (
+            request_managed_worktree_info(
+                &resolve_endpoint(args.server_url.as_deref()).await,
+                args.task,
+            )
+            .await
+            .map(|value| serde_json::to_value(value).unwrap()),
+            args.json,
+        ),
+        WorktreeCommand::List(args) => (
+            request_managed_worktree_list(
+                &resolve_endpoint(args.server_url.as_deref()).await,
+                args.include_all,
+            )
+            .await
+            .map(|value| serde_json::to_value(value).unwrap()),
+            args.json,
+        ),
+        WorktreeCommand::Remove(args) => (
+            request_managed_worktree_remove(
+                &resolve_endpoint(args.server_url.as_deref()).await,
+                args.task,
+                args.force,
+            )
+            .await
+            .map(|()| serde_json::Value::Null),
+            args.json,
+        ),
+        WorktreeCommand::Doctor(args) => (
+            request_managed_worktree_doctor(
+                &resolve_endpoint(args.server_url.as_deref()).await,
+                args.repair,
+            )
+            .await
+            .map(|value| serde_json::to_value(value).unwrap()),
+            args.json,
+        ),
+    };
+    match result {
+        Ok(value) => {
+            if json {
+                println!("{value}");
+            } else if let Ok(value) =
+                serde_json::from_value::<forge_rpc::ManagedWorktreeResponse>(value.clone())
+            {
+                println!("{}", render_managed_worktree(&value));
+            } else if let Ok(value) =
+                serde_json::from_value::<forge_rpc::ListManagedWorktreesResponse>(value.clone())
+            {
+                println!("{}", render_managed_worktrees(&value));
+            } else {
+                println!("Removed Managed Worktree");
+            }
+            0
+        }
+        Err(error) => {
+            eprintln!("forge worktree: {error}");
+            1
+        }
+    }
+}
+
 async fn agent_dispatch(command: AgentDispatchCommand) -> i32 {
     let (result, json) = match command {
         AgentDispatchCommand::Endpoint(args) => (
@@ -877,6 +1134,41 @@ mod tests {
         };
         assert_eq!(args.spec, 42);
         assert!(Cli::try_parse_from(["forge", "task", "under-spec", "--body", "Child"]).is_err());
+    }
+
+    #[test]
+    fn managed_worktree_commands_parse_the_public_contract() {
+        assert!(
+            Cli::try_parse_from(["forge", "config", "set", "worktreeRoot", "/tmp/worktrees"])
+                .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "forge",
+                "project",
+                "setup-hook",
+                "set",
+                "--project",
+                "alpha",
+                "cargo test"
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "forge", "worktree", "create", "42", "--branch", "task-42", "--base", "main",
+                "--json"
+            ])
+            .is_ok()
+        );
+        assert!(Cli::try_parse_from(["forge", "worktree", "info", "42"]).is_ok());
+        assert!(Cli::try_parse_from(["forge", "worktree", "list", "--all"]).is_ok());
+        assert!(Cli::try_parse_from(["forge", "worktree", "remove", "42", "--force"]).is_ok());
+        assert!(Cli::try_parse_from(["forge", "worktree", "doctor", "--repair"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["forge", "worktree", "create", "42", "--branch", "task-42"])
+                .is_err()
+        );
     }
 
     #[test]

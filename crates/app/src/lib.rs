@@ -239,6 +239,8 @@ pub trait ManagedWorktreeRepository: RecordRepository {
     ) -> Result<WorktreeClaim, RegistrationError>;
     /// Returns one Claim, including Claims retained after Record completion.
     fn worktree_claim(&self, record_id: u64) -> Result<Option<WorktreeClaim>, RegistrationError>;
+    /// Lists all Claims, including Claims retained after Record completion.
+    fn worktree_claims(&self) -> Result<Vec<WorktreeClaim>, RegistrationError>;
     /// Lists Claims which need recovery work.
     fn worktree_claims_requiring_cleanup(&self) -> Result<Vec<WorktreeClaim>, RegistrationError>;
     /// Deletes a Claim only after its checkout has been safely removed.
@@ -1408,6 +1410,63 @@ impl Application {
         self.managed_worktrees()?
             .require_worktree_claim_cleanup(claim.record_id)?;
         Err(error)
+    }
+
+    /// Configures the absolute user-wide Worktree Root.
+    ///
+    /// # Errors
+    ///
+    /// Returns persistence or path-validation failures.
+    pub fn set_worktree_root(&self, root: Option<&Path>) -> Result<(), RegistrationError> {
+        self.managed_worktrees()?.set_worktree_root(root)
+    }
+
+    /// Returns the configured user-wide Worktree Root.
+    ///
+    /// # Errors
+    ///
+    /// Returns persistence failures.
+    pub fn worktree_root(&self) -> Result<Option<PathBuf>, RegistrationError> {
+        self.managed_worktrees()?.worktree_root()
+    }
+
+    /// Configures a registered Project's Setup Hook.
+    ///
+    /// # Errors
+    ///
+    /// Returns persistence or Project-validation failures.
+    pub fn set_project_setup_hook(
+        &self,
+        project_slug: &str,
+        hook: Option<&str>,
+    ) -> Result<(), RegistrationError> {
+        self.managed_worktrees()?
+            .set_project_setup_hook(project_slug, hook)
+    }
+
+    /// Lists managed Worktrees and their current safety assessments.
+    ///
+    /// # Errors
+    ///
+    /// Returns persistence or adapter failures.
+    pub fn list_managed_worktrees(
+        &self,
+        include_all: bool,
+    ) -> Result<Vec<ManagedWorktreeInfo>, RegistrationError> {
+        let managed = self.managed_worktrees()?;
+        let claims = if include_all {
+            managed.worktree_claims()?
+        } else {
+            managed.worktree_claims_requiring_cleanup()?
+        };
+        let adapter = self.worktree_adapter()?;
+        Ok(claims
+            .into_iter()
+            .map(|claim| ManagedWorktreeInfo {
+                safety: adapter.assess(&claim.path),
+                claim,
+            })
+            .collect())
     }
 
     /// Returns a Managed Worktree Claim and its local safety assessment.

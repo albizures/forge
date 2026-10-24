@@ -2,8 +2,8 @@
 
 use forge_app::{
     AgentDispatchProjectStatus, AgentDispatchReconcileResult, AgentDispatchStatus, AgentProfile,
-    ApplicationStatus, Project, Record, RecordComment, RecordRelationshipKind, RecordStatus,
-    RecordUpdate, RecordUpdateKind, RegistrationError,
+    ApplicationStatus, ManagedWorktreeInfo, Project, Record, RecordComment, RecordRelationshipKind,
+    RecordStatus, RecordUpdate, RecordUpdateKind, RegistrationError, WorktreeClaimState,
 };
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
 use serde::{Deserialize, Serialize};
@@ -29,6 +29,14 @@ pub const AGENT_DISPATCH_PROFILE_METHOD: &str = "agentDispatch.profile";
 pub const AGENT_DISPATCH_PROJECT_SET_METHOD: &str = "agentDispatch.projectSet";
 pub const AGENT_DISPATCH_STATUS_METHOD: &str = "agentDispatch.status";
 pub const AGENT_DISPATCH_RECONCILE_METHOD: &str = "agentDispatch.reconcile";
+pub const WORKTREE_ROOT_GET_METHOD: &str = "worktree.rootGet";
+pub const WORKTREE_ROOT_SET_METHOD: &str = "worktree.rootSet";
+pub const WORKTREE_SETUP_HOOK_SET_METHOD: &str = "worktree.setupHookSet";
+pub const WORKTREE_CREATE_METHOD: &str = "worktree.create";
+pub const WORKTREE_INFO_METHOD: &str = "worktree.info";
+pub const WORKTREE_LIST_METHOD: &str = "worktree.list";
+pub const WORKTREE_REMOVE_METHOD: &str = "worktree.remove";
+pub const WORKTREE_DOCTOR_METHOD: &str = "worktree.doctor";
 
 #[rpc(client, server, namespace = "system")]
 pub trait SystemApi {
@@ -66,6 +74,35 @@ pub trait AgentDispatchApi {
     ) -> RpcResult<AgentDispatchStatusResponse>;
     #[method(name = "reconcile")]
     async fn reconcile(&self) -> RpcResult<AgentDispatchReconcileResponse>;
+}
+
+#[rpc(client, server, namespace = "worktree")]
+pub trait WorktreeApi {
+    #[method(name = "rootGet")]
+    async fn root_get(&self) -> RpcResult<WorktreeRootResponse>;
+    #[method(name = "rootSet")]
+    async fn root_set(&self, request: SetWorktreeRootRequest) -> RpcResult<WorktreeRootResponse>;
+    #[method(name = "setupHookSet")]
+    async fn setup_hook_set(&self, request: SetProjectSetupHookRequest) -> RpcResult<()>;
+    #[method(name = "create")]
+    async fn create(
+        &self,
+        request: CreateManagedWorktreeRequest,
+    ) -> RpcResult<ManagedWorktreeResponse>;
+    #[method(name = "info")]
+    async fn info(&self, request: RecordIdRequest) -> RpcResult<ManagedWorktreeResponse>;
+    #[method(name = "list")]
+    async fn list(
+        &self,
+        request: ListManagedWorktreesRequest,
+    ) -> RpcResult<ListManagedWorktreesResponse>;
+    #[method(name = "remove")]
+    async fn remove(&self, request: RemoveManagedWorktreeRequest) -> RpcResult<()>;
+    #[method(name = "doctor")]
+    async fn doctor(
+        &self,
+        request: DoctorManagedWorktreesRequest,
+    ) -> RpcResult<ListManagedWorktreesResponse>;
 }
 
 #[rpc(client, server, namespace = "record")]
@@ -280,6 +317,71 @@ impl From<AgentDispatchReconcileResult> for AgentDispatchReconcileResponse {
             reconciled_assignments: value.reconciled_assignments,
         }
     }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SetWorktreeRootRequest {
+    pub root: Option<String>,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorktreeRootResponse {
+    pub root: Option<String>,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SetProjectSetupHookRequest {
+    pub project_slug: String,
+    pub hook: Option<String>,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CreateManagedWorktreeRequest {
+    pub record_id: u64,
+    pub branch: String,
+    pub base: String,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RemoveManagedWorktreeRequest {
+    pub record_id: u64,
+    pub force: bool,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ListManagedWorktreesRequest {
+    pub include_all: bool,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DoctorManagedWorktreesRequest {
+    pub repair: bool,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ManagedWorktreeResponse {
+    pub record_id: u64,
+    pub project_slug: String,
+    pub path: String,
+    pub state: String,
+    pub facts: Vec<String>,
+    pub blockers: Vec<String>,
+    pub removable: bool,
+}
+impl From<ManagedWorktreeInfo> for ManagedWorktreeResponse {
+    fn from(value: ManagedWorktreeInfo) -> Self {
+        Self {
+            record_id: value.claim.record_id,
+            project_slug: value.claim.project_slug,
+            path: value.claim.path.to_string_lossy().into_owned(),
+            state: match value.claim.state {
+                WorktreeClaimState::Reserving => "reserving",
+                WorktreeClaimState::Active => "active",
+                WorktreeClaimState::CleanupRequired => "cleanup-required",
+            }
+            .into(),
+            facts: value.safety.facts,
+            blockers: value.safety.blockers,
+            removable: value.safety.removable,
+        }
+    }
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ListManagedWorktreesResponse {
+    pub worktrees: Vec<ManagedWorktreeResponse>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
