@@ -360,6 +360,17 @@ pub trait RecordRepository: ProjectRepository {
     ///
     /// Returns a user-facing error when the parent is not a Spec or storage fails.
     fn open_task_under_spec(&self, body: &str, spec_id: u64) -> Result<Record, RegistrationError>;
+    /// Opens a Task beneath a Wayfinder, selecting one Project from its scope.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-facing error when the parent or selected Project is invalid.
+    fn open_task_under_wayfinder(
+        &self,
+        body: &str,
+        wayfinder_id: u64,
+        project_slug: Option<String>,
+    ) -> Result<Record, RegistrationError>;
     /// Lists Records matching Project Scope membership and lifecycle status.
     ///
     /// # Errors
@@ -1917,6 +1928,26 @@ impl Application {
         self.open_typed_record(RecordType::Spec, body, vec![project_slug])
     }
 
+    /// Opens a Wayfinder with a non-empty immutable Project Scope.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-facing error for a blank body, invalid scope, or storage failure.
+    pub fn open_wayfinder(
+        &self,
+        body: &str,
+        mut project_slugs: Vec<String>,
+    ) -> Result<Record, RegistrationError> {
+        project_slugs.sort();
+        if project_slugs.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(RegistrationError::new(
+                "duplicate-project",
+                "Wayfinder Project Scope must not contain duplicate Project slugs",
+            ));
+        }
+        self.open_typed_record(RecordType::Wayfinder, body, project_slugs)
+    }
+
     /// Opens a standalone Task with zero or one Project Scope.
     ///
     /// # Errors
@@ -1942,6 +1973,22 @@ impl Application {
     ) -> Result<Record, RegistrationError> {
         Self::require_body(body)?;
         self.records.open_task_under_spec(body, spec_id)
+    }
+
+    /// Opens a Task under a Wayfinder, selecting one Project from its scope.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-facing error for a blank body, invalid parent or scope, or storage failure.
+    pub fn open_task_under_wayfinder(
+        &self,
+        body: &str,
+        wayfinder_id: u64,
+        project_slug: Option<String>,
+    ) -> Result<Record, RegistrationError> {
+        Self::require_body(body)?;
+        self.records
+            .open_task_under_wayfinder(body, wayfinder_id, project_slug)
     }
 
     /// Lists Records matching the supplied optional discovery filters.
@@ -2223,6 +2270,61 @@ mod tests {
                 .iter_mut()
                 .find(|record| record.id == spec_id)
                 .expect("shown Spec must remain present while the repository lock is held");
+            parent.relationships.push(relationship);
+            records.push(task.clone());
+            Ok(task)
+        }
+        fn open_task_under_wayfinder(
+            &self,
+            body: &str,
+            wayfinder_id: u64,
+            project_slug: Option<String>,
+        ) -> Result<Record, RegistrationError> {
+            let wayfinder = self.show_record(wayfinder_id)?;
+            if wayfinder.record_type != RecordType::Wayfinder {
+                return Err(RegistrationError::new(
+                    "invalid-parent-type",
+                    "a Task may be opened under a Wayfinder only",
+                ));
+            }
+            let project_slug = match (project_slug, wayfinder.project_slugs.as_slice()) {
+                (Some(project_slug), scope) if scope.contains(&project_slug) => project_slug,
+                (Some(_), _) => {
+                    return Err(RegistrationError::new(
+                        "scope-mismatch",
+                        "Task Project must belong to the Wayfinder scope",
+                    ));
+                }
+                (None, [project_slug]) => project_slug.clone(),
+                (None, _) => {
+                    return Err(RegistrationError::new(
+                        "missing-project",
+                        "a multi-Project Wayfinder Task requires a Project",
+                    ));
+                }
+            };
+            let mut records = self.records.lock().unwrap();
+            let task_id = (records.len() + 1) as u64;
+            let relationship = RecordRelationship {
+                kind: RecordRelationshipKind::ParentChild,
+                from_id: task_id,
+                to_id: wayfinder_id,
+                parent_id: wayfinder_id,
+                child_id: task_id,
+            };
+            let task = Record {
+                id: task_id,
+                record_type: RecordType::Task,
+                body: body.to_owned(),
+                project_slugs: vec![project_slug],
+                status: RecordStatus::Open,
+                completion_resolution: None,
+                relationships: vec![relationship.clone()],
+            };
+            let parent = records
+                .iter_mut()
+                .find(|record| record.id == wayfinder_id)
+                .unwrap();
             parent.relationships.push(relationship);
             records.push(task.clone());
             Ok(task)
@@ -2627,6 +2729,30 @@ mod tests {
         let spec = app.open_spec("spec", "alpha".into()).unwrap();
         assert_eq!(spec.record_type, RecordType::Spec);
         assert_eq!(spec.project_slugs, ["alpha"]);
+
+        let wayfinder = app
+            .open_wayfinder("wayfinder", vec!["alpha".into()])
+            .unwrap();
+        let wayfinder_task = app
+            .open_task_under_wayfinder("wayfinder child", wayfinder.id, None)
+            .unwrap();
+        assert_eq!(wayfinder_task.project_slugs, ["alpha"]);
+        let multi_wayfinder = app
+            .open_wayfinder("multi", vec!["beta".into(), "alpha".into()])
+            .unwrap();
+        assert_eq!(multi_wayfinder.project_slugs, ["alpha", "beta"]);
+        assert_eq!(
+            app.open_task_under_wayfinder("missing", multi_wayfinder.id, None)
+                .unwrap_err()
+                .code,
+            "missing-project"
+        );
+        assert_eq!(
+            app.open_task_under_wayfinder("outside", multi_wayfinder.id, Some("gamma".into()))
+                .unwrap_err()
+                .code,
+            "scope-mismatch"
+        );
 
         let standalone = app.open_task("standalone", None).unwrap();
         assert_eq!(standalone.record_type, RecordType::Task);

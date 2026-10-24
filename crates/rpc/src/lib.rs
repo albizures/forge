@@ -133,10 +133,17 @@ pub trait RecordApi {
     async fn open_spec(&self, request: OpenSpecRequest) -> RpcResult<RecordResponse>;
     #[method(name = "openTask")]
     async fn open_task(&self, request: OpenTaskRequest) -> RpcResult<RecordResponse>;
+    #[method(name = "openWayfinder")]
+    async fn open_wayfinder(&self, request: OpenWayfinderRequest) -> RpcResult<RecordResponse>;
     #[method(name = "openTaskUnderSpec")]
     async fn open_task_under_spec(
         &self,
         request: OpenTaskUnderSpecRequest,
+    ) -> RpcResult<RecordResponse>;
+    #[method(name = "openTaskUnderWayfinder")]
+    async fn open_task_under_wayfinder(
+        &self,
+        request: OpenTaskUnderWayfinderRequest,
     ) -> RpcResult<RecordResponse>;
     #[method(name = "show")]
     async fn show(&self, request: RecordIdRequest) -> RpcResult<RecordResponse>;
@@ -495,6 +502,12 @@ pub struct OpenSpecRequest {
     pub body: String,
     pub project_slug: String,
 }
+/// Opens a Wayfinder with a non-empty Project Scope.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct OpenWayfinderRequest {
+    pub body: String,
+    pub project_scope: ProjectScopeRequest,
+}
 /// Opens a standalone Task with an optional single-Project scope.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct OpenTaskRequest {
@@ -506,6 +519,13 @@ pub struct OpenTaskRequest {
 pub struct OpenTaskUnderSpecRequest {
     pub body: String,
     pub spec_id: u64,
+}
+/// Opens a Task under a Wayfinder with an optional selected Project.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct OpenTaskUnderWayfinderRequest {
+    pub body: String,
+    pub wayfinder_id: u64,
+    pub project_slug: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProjectScopeRequest {

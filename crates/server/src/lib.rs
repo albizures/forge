@@ -47,13 +47,13 @@ use forge_rpc::{
     EditRecordRequest, ListManagedWorktreesRequest, ListManagedWorktreesResponse,
     ListRecordCommentsResponse, ListRecordUpdatesResponse, ListRecordsRequest, ListRecordsResponse,
     ManageAgentSubscriptionRequest, ManagedWorktreeResponse, ManagementStatus, OpenRecordRequest,
-    OpenSpecRequest, OpenTaskRequest, OpenTaskUnderSpecRequest, ProjectApiServer,
-    ProjectHereRequest, ProjectHereResponse, RecordApiServer, RecordIdRequest, RecordResponse,
-    RecordUpdateSubscriptionResponse, RegisterProjectRequest, RegisterProjectResponse,
-    RelateRecordRequest, RemoveManagedWorktreeRequest, RevisionIdentity,
-    SetAgentDispatchEndpointRequest, SetAgentDispatchProjectRequest, SetProjectSetupHookRequest,
-    SetWorktreeRootRequest, SystemApiServer, SystemStatusResponse, WorktreeApiServer,
-    WorktreeRootResponse,
+    OpenSpecRequest, OpenTaskRequest, OpenTaskUnderSpecRequest, OpenTaskUnderWayfinderRequest,
+    OpenWayfinderRequest, ProjectApiServer, ProjectHereRequest, ProjectHereResponse,
+    RecordApiServer, RecordIdRequest, RecordResponse, RecordUpdateSubscriptionResponse,
+    RegisterProjectRequest, RegisterProjectResponse, RelateRecordRequest,
+    RemoveManagedWorktreeRequest, RevisionIdentity, SetAgentDispatchEndpointRequest,
+    SetAgentDispatchProjectRequest, SetProjectSetupHookRequest, SetWorktreeRootRequest,
+    SystemApiServer, SystemStatusResponse, WorktreeApiServer, WorktreeRootResponse,
 };
 use forge_store::SqliteProjectRepository;
 use futures_util::StreamExt as FuturesStreamExt;
@@ -905,12 +905,35 @@ impl RecordApiServer for Daemon {
             .map_err(rpc_error)
     }
 
+    async fn open_wayfinder(&self, request: OpenWayfinderRequest) -> RpcResult<RecordResponse> {
+        self.application
+            .open_wayfinder(&request.body, request.project_scope.project_slugs)
+            .map(|record| {
+                self.delivery.publish(&self.application);
+                record.into()
+            })
+            .map_err(rpc_error)
+    }
+
     async fn open_task_under_spec(
         &self,
         request: OpenTaskUnderSpecRequest,
     ) -> RpcResult<RecordResponse> {
         self.application
             .open_task_under_spec(&request.body, request.spec_id)
+            .map(|record| {
+                self.delivery.publish(&self.application);
+                record.into()
+            })
+            .map_err(rpc_error)
+    }
+
+    async fn open_task_under_wayfinder(
+        &self,
+        request: OpenTaskUnderWayfinderRequest,
+    ) -> RpcResult<RecordResponse> {
+        self.application
+            .open_task_under_wayfinder(&request.body, request.wayfinder_id, request.project_slug)
             .map(|record| {
                 self.delivery.publish(&self.application);
                 record.into()
@@ -1687,9 +1710,9 @@ mod tests {
     };
     use forge_rpc::{
         DoneRecordRequest, EditRecordRequest, ListRecordsRequest, OpenRecordRequest,
-        OpenSpecRequest, OpenTaskRequest, OpenTaskUnderSpecRequest, ProjectApiClient,
-        ProjectHereRequest, ProjectScopeRequest, RecordApiClient, RecordIdRequest,
-        RegisterProjectRequest, SystemApiClient, SystemApiServer,
+        OpenSpecRequest, OpenTaskRequest, OpenTaskUnderSpecRequest, OpenTaskUnderWayfinderRequest,
+        OpenWayfinderRequest, ProjectApiClient, ProjectHereRequest, ProjectScopeRequest,
+        RecordApiClient, RecordIdRequest, RegisterProjectRequest, SystemApiClient, SystemApiServer,
     };
     use forge_store::SqliteProjectRepository;
     use futures_util::StreamExt;
@@ -2189,6 +2212,37 @@ mod tests {
                 .record_type,
             "task"
         );
+        let wayfinder = client
+            .open_wayfinder(OpenWayfinderRequest {
+                body: "A daemon-backed Wayfinder".into(),
+                project_scope: ProjectScopeRequest {
+                    project_slugs: vec!["server-test-project".into()],
+                },
+            })
+            .await
+            .unwrap();
+        let wayfinder_task = client
+            .open_task_under_wayfinder(OpenTaskUnderWayfinderRequest {
+                body: "A scoped daemon-backed Task".into(),
+                wayfinder_id: wayfinder.id,
+                project_slug: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(wayfinder.record_type, "wayfinder");
+        assert_eq!(wayfinder_task.project_scope, wayfinder.project_scope);
+        assert_eq!(wayfinder_task.relationships[0].parent_id, wayfinder.id);
+        let wayfinders = client
+            .list(ListRecordsRequest {
+                project_slug: Some("server-test-project".into()),
+                status: None,
+                record_type: Some("wayfinder".into()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(wayfinders.records.len(), 1);
+        assert_eq!(wayfinders.records[0].id, wayfinder.id);
+        assert_eq!(wayfinders.records[0].record_type, "wayfinder");
         let specs = client
             .list(ListRecordsRequest {
                 project_slug: None,

@@ -9,10 +9,11 @@ use forge_cli::{
     request_edit_record, request_list_records, request_managed_worktree_create,
     request_managed_worktree_doctor, request_managed_worktree_info, request_managed_worktree_list,
     request_managed_worktree_remove, request_open_record, request_open_spec, request_open_task,
-    request_open_task_under_spec, request_project_here, request_project_setup_hook,
-    request_record_comments, request_record_updates, request_register_project,
-    request_relate_record, request_show_record, request_start_record, request_status,
-    request_unrelate_record, request_worktree_root, resolve_endpoint as resolve_managed_endpoint,
+    request_open_task_under_spec, request_open_task_under_wayfinder, request_open_wayfinder,
+    request_project_here, request_project_setup_hook, request_record_comments,
+    request_record_updates, request_register_project, request_relate_record, request_show_record,
+    request_start_record, request_status, request_unrelate_record, request_worktree_root,
+    resolve_endpoint as resolve_managed_endpoint,
 };
 use std::io::Read;
 
@@ -50,6 +51,11 @@ enum Command {
     Spec {
         #[command(subcommand)]
         command: SpecCommand,
+    },
+    /// Manage Wayfinders.
+    Wayfinder {
+        #[command(subcommand)]
+        command: WayfinderCommand,
     },
     /// Manage Tasks.
     Task {
@@ -201,11 +207,18 @@ enum SpecCommand {
     Open(OpenSpecArgs),
 }
 #[derive(Debug, Subcommand)]
+enum WayfinderCommand {
+    /// Open a Wayfinder with one or more Projects.
+    Open(OpenWayfinderArgs),
+}
+#[derive(Debug, Subcommand)]
 enum TaskCommand {
     /// Open a standalone Task with zero or one Project.
     Open(OpenTaskArgs),
     /// Open a Task beneath a Spec, inheriting the Spec's Project Scope.
     UnderSpec(OpenTaskUnderSpecArgs),
+    /// Open a Task beneath a Wayfinder, selecting one scoped Project.
+    UnderWayfinder(OpenTaskUnderWayfinderArgs),
 }
 #[derive(Debug, Subcommand)]
 enum AgentDispatchCommand {
@@ -289,8 +302,8 @@ struct ListRecordsArgs {
     /// Restrict results to open, in-progress, or done Records.
     #[arg(long, value_parser = ["open", "in-progress", "done"])]
     status: Option<String>,
-    /// Restrict results to generic, spec, or task Records.
-    #[arg(long = "type", value_parser = ["generic", "spec", "task"])]
+    /// Restrict results to a Record Type.
+    #[arg(long = "type", value_parser = ["generic", "spec", "task", "wayfinder", "grilling"])]
     record_type: Option<String>,
     #[arg(long, value_name = "URL")]
     server_url: Option<String>,
@@ -370,6 +383,19 @@ struct OpenSpecArgs {
     json: bool,
 }
 #[derive(Args, Debug)]
+struct OpenWayfinderArgs {
+    /// Markdown body, or - to read it from standard input.
+    #[arg(long)]
+    body: String,
+    /// A Project in the Wayfinder's immutable Project Scope.
+    #[arg(long = "project", value_name = "SLUG", required = true)]
+    project: Vec<String>,
+    #[arg(long, value_name = "URL")]
+    server_url: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Args, Debug)]
 struct OpenTaskArgs {
     /// Markdown body, or - to read it from standard input.
     #[arg(long)]
@@ -390,6 +416,22 @@ struct OpenTaskUnderSpecArgs {
     /// The parent Spec's ID.
     #[arg(long)]
     spec: u64,
+    #[arg(long, value_name = "URL")]
+    server_url: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Args, Debug)]
+struct OpenTaskUnderWayfinderArgs {
+    /// Markdown body, or - to read it from standard input.
+    #[arg(long)]
+    body: String,
+    /// The parent Wayfinder's ID.
+    #[arg(long)]
+    wayfinder: u64,
+    /// The selected Project; inferred only for a single-Project Wayfinder.
+    #[arg(long, value_name = "SLUG")]
+    project: Option<String>,
     #[arg(long, value_name = "URL")]
     server_url: Option<String>,
     #[arg(long)]
@@ -495,9 +537,13 @@ async fn main() {
         Command::Spec { command } => match command {
             SpecCommand::Open(args) => open_spec(args).await,
         },
+        Command::Wayfinder { command } => match command {
+            WayfinderCommand::Open(args) => open_wayfinder(args).await,
+        },
         Command::Task { command } => match command {
             TaskCommand::Open(args) => open_task(args).await,
             TaskCommand::UnderSpec(args) => open_task_under_spec(args).await,
+            TaskCommand::UnderWayfinder(args) => open_task_under_wayfinder(args).await,
         },
         Command::Config { command } => config(command).await,
         Command::Project { command } => project(command).await,
@@ -990,6 +1036,23 @@ async fn open_spec(args: OpenSpecArgs) -> i32 {
     )
 }
 
+async fn open_wayfinder(args: OpenWayfinderArgs) -> i32 {
+    let body = match read_body(args.body, "wayfinder open") {
+        Ok(body) => body,
+        Err(exit_code) => return exit_code,
+    };
+    open_typed_result(
+        "wayfinder open",
+        args.json,
+        request_open_wayfinder(
+            &resolve_endpoint(args.server_url.as_deref()).await,
+            &body,
+            args.project,
+        )
+        .await,
+    )
+}
+
 async fn open_task(args: OpenTaskArgs) -> i32 {
     let body = match read_body(args.body, "task open") {
         Ok(body) => body,
@@ -1024,6 +1087,24 @@ async fn open_task_under_spec(args: OpenTaskUnderSpecArgs) -> i32 {
     )
 }
 
+async fn open_task_under_wayfinder(args: OpenTaskUnderWayfinderArgs) -> i32 {
+    let body = match read_body(args.body, "task under-wayfinder") {
+        Ok(body) => body,
+        Err(exit_code) => return exit_code,
+    };
+    open_typed_result(
+        "task under-wayfinder",
+        args.json,
+        request_open_task_under_wayfinder(
+            &resolve_endpoint(args.server_url.as_deref()).await,
+            &body,
+            args.wayfinder,
+            args.project,
+        )
+        .await,
+    )
+}
+
 fn open_typed_result(
     operation: &str,
     json: bool,
@@ -1050,7 +1131,7 @@ fn open_typed_result(
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Command, RecordCommand, SpecCommand, TaskCommand};
+    use super::{Cli, Command, RecordCommand, SpecCommand, TaskCommand, WayfinderCommand};
     use clap::Parser;
 
     #[test]
@@ -1093,6 +1174,26 @@ mod tests {
         };
         assert_eq!(args.project, "alpha");
 
+        let cli = Cli::try_parse_from([
+            "forge",
+            "wayfinder",
+            "open",
+            "--body",
+            "Map",
+            "--project",
+            "alpha",
+            "--project",
+            "beta",
+        ])
+        .unwrap();
+        let Command::Wayfinder {
+            command: WayfinderCommand::Open(args),
+        } = cli.command
+        else {
+            panic!("expected wayfinder open command");
+        };
+        assert_eq!(args.project, ["alpha", "beta"]);
+
         let cli = Cli::try_parse_from(["forge", "task", "open", "--body", "Task"]).unwrap();
         let Command::Task {
             command: TaskCommand::Open(args),
@@ -1134,6 +1235,27 @@ mod tests {
         };
         assert_eq!(args.spec, 42);
         assert!(Cli::try_parse_from(["forge", "task", "under-spec", "--body", "Child"]).is_err());
+
+        let cli = Cli::try_parse_from([
+            "forge",
+            "task",
+            "under-wayfinder",
+            "--body",
+            "Child",
+            "--wayfinder",
+            "43",
+            "--project",
+            "alpha",
+        ])
+        .unwrap();
+        let Command::Task {
+            command: TaskCommand::UnderWayfinder(args),
+        } = cli.command
+        else {
+            panic!("expected task under-wayfinder command");
+        };
+        assert_eq!(args.wayfinder, 43);
+        assert_eq!(args.project.as_deref(), Some("alpha"));
     }
 
     #[test]

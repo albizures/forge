@@ -6,8 +6,9 @@ use forge_rpc::{
     DeleteRecordCommentRequest, DoneRecordRequest, EditRecordRequest, ListManagedWorktreesResponse,
     ListRecordCommentsResponse, ListRecordUpdatesResponse, ListRecordsRequest, ListRecordsResponse,
     ManagedWorktreeResponse, OpenRecordRequest, OpenSpecRequest, OpenTaskRequest,
-    OpenTaskUnderSpecRequest, ProjectApiClient, ProjectHereRequest, ProjectHereResponse,
-    ProjectScopeRequest, RecordApiClient, RecordIdRequest, RecordResponse, RegisterProjectRequest,
+    OpenTaskUnderSpecRequest, OpenTaskUnderWayfinderRequest, OpenWayfinderRequest,
+    ProjectApiClient, ProjectHereRequest, ProjectHereResponse, ProjectScopeRequest,
+    RecordApiClient, RecordIdRequest, RecordResponse, RegisterProjectRequest,
     RegisterProjectResponse, RelateRecordRequest, SystemApiClient, SystemStatusResponse,
     WorktreeApiClient, WorktreeRootResponse,
 };
@@ -418,6 +419,25 @@ pub async fn request_open_spec(
         .map_err(record_error("open Spec"))
 }
 
+/// Opens a Wayfinder through the daemon.
+///
+/// # Errors
+///
+/// Returns an endpoint or daemon validation error.
+pub async fn request_open_wayfinder(
+    url: &str,
+    body: &str,
+    project_slugs: Vec<String>,
+) -> Result<RecordResponse, String> {
+    client(url)?
+        .open_wayfinder(OpenWayfinderRequest {
+            body: body.into(),
+            project_scope: ProjectScopeRequest { project_slugs },
+        })
+        .await
+        .map_err(record_error("open Wayfinder"))
+}
+
 /// Opens a standalone Task through the daemon.
 ///
 /// # Errors
@@ -454,6 +474,27 @@ pub async fn request_open_task_under_spec(
         })
         .await
         .map_err(record_error("open Task under Spec"))
+}
+
+/// Opens a Task under a Wayfinder through the daemon.
+///
+/// # Errors
+///
+/// Returns an endpoint or daemon validation error.
+pub async fn request_open_task_under_wayfinder(
+    url: &str,
+    body: &str,
+    wayfinder_id: u64,
+    project_slug: Option<String>,
+) -> Result<RecordResponse, String> {
+    client(url)?
+        .open_task_under_wayfinder(OpenTaskUnderWayfinderRequest {
+            body: body.into(),
+            wayfinder_id,
+            project_slug,
+        })
+        .await
+        .map_err(record_error("open Task under Wayfinder"))
 }
 
 /// Lists Records through the daemon using optional scope, status, and type filters.
@@ -787,6 +828,17 @@ mod tests {
             .unwrap();
         assert_eq!(spec.record_type, "spec");
         assert_eq!(spec.project_scope.project_slugs, ["cli-test-project"]);
+        let wayfinder =
+            request_open_wayfinder(&url, "Wayfinder body", vec!["cli-test-project".into()])
+                .await
+                .unwrap();
+        assert_eq!(wayfinder.record_type, "wayfinder");
+        let wayfinder_task =
+            request_open_task_under_wayfinder(&url, "Scoped Child Task", wayfinder.id, None)
+                .await
+                .unwrap();
+        assert_eq!(wayfinder_task.project_scope, wayfinder.project_scope);
+
         let standalone = request_open_task(&url, "Standalone Task", None)
             .await
             .unwrap();
@@ -802,7 +854,7 @@ mod tests {
         let listed = request_list_records(&url, None, None, Some("task".into()))
             .await
             .unwrap();
-        assert_eq!(listed.records.len(), 2);
+        assert_eq!(listed.records.len(), 3);
         assert!(
             listed
                 .records
@@ -810,7 +862,7 @@ mod tests {
                 .all(|record| record.record_type == "task")
         );
         assert_eq!(render_record(&spec), "spec 1 (open)\n\nSpec body");
-        assert_eq!(render_record_opened(&child), "Opened task 3 (open)");
+        assert_eq!(render_record_opened(&child), "Opened task 5 (open)");
 
         server.abort();
     }

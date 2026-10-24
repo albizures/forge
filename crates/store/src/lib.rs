@@ -667,6 +667,79 @@ impl RecordRepository for SqliteProjectRepository {
         Ok(task)
     }
 
+    fn open_task_under_wayfinder(
+        &self,
+        body: &str,
+        wayfinder_id: u64,
+        project_slug: Option<String>,
+    ) -> Result<Record, RegistrationError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        let transaction = connection.transaction().map_err(storage_error)?;
+        let wayfinder = load_record(&transaction, wayfinder_id)?;
+        if wayfinder.record_type != RecordType::Wayfinder {
+            return Err(RegistrationError::new(
+                "invalid-parent-type",
+                "a Task may be opened under a Wayfinder only",
+            ));
+        }
+        let project_slug = match (project_slug, wayfinder.project_slugs.as_slice()) {
+            (Some(project_slug), scope) if scope.contains(&project_slug) => project_slug,
+            (Some(_), _) => {
+                return Err(RegistrationError::new(
+                    "scope-mismatch",
+                    "Task Project must belong to the Wayfinder scope",
+                ));
+            }
+            (None, [project_slug]) => project_slug.clone(),
+            (None, _) => {
+                return Err(RegistrationError::new(
+                    "missing-project",
+                    "a multi-Project Wayfinder Task requires a Project",
+                ));
+            }
+        };
+        transaction
+            .execute(
+                "INSERT INTO records (record_type, body, status) VALUES ('task', ?1, 'open')",
+                [body],
+            )
+            .map_err(storage_error)?;
+        let task_id = transaction.last_insert_rowid().cast_unsigned();
+        transaction
+            .execute(
+                "INSERT INTO record_projects (record_id, project_slug) VALUES (?1, ?2)",
+                params![task_id.cast_signed(), project_slug],
+            )
+            .map_err(storage_error)?;
+        transaction
+            .execute(
+                "INSERT INTO record_relationships (from_id, to_id, parent_id, child_id, kind) VALUES (?1, ?2, ?2, ?1, 'parent-child')",
+                params![task_id.cast_signed(), wayfinder_id.cast_signed()],
+            )
+            .map_err(storage_error)?;
+        insert_update(&transaction, task_id, RecordUpdateKind::Created)?;
+        insert_update(
+            &transaction,
+            task_id,
+            RecordUpdateKind::RelationshipAdded {
+                related_record_id: wayfinder_id,
+            },
+        )?;
+        insert_update(
+            &transaction,
+            wayfinder_id,
+            RecordUpdateKind::RelationshipAdded {
+                related_record_id: task_id,
+            },
+        )?;
+        let task = load_record(&transaction, task_id)?;
+        transaction.commit().map_err(storage_error)?;
+        Ok(task)
+    }
+
     fn list_records(&self, filter: &RecordListFilter) -> Result<Vec<Record>, RegistrationError> {
         let connection = self
             .connection
