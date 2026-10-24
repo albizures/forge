@@ -884,6 +884,9 @@ pub enum AssignmentAuthorizationOperation {
     ReadContext,
     AddComment,
     CompleteTask,
+    CreateSubscription,
+    RenewSubscription,
+    DeleteSubscription,
 }
 
 /// The recorded decision; neither capability material nor Comment content is retained.
@@ -1136,7 +1139,100 @@ pub fn assignment_complete_task<R: AgentDispatchRepository>(
     repository.done_record(task_id, resolution)
 }
 
-fn authorize_assignment_operation<R: AgentDispatchRepository>(
+/// Authorizes creation of a Subscription for explicit direct children of the assigned Record.
+#[allow(clippy::missing_errors_doc)]
+pub fn assignment_create_record_update_subscription<
+    R: RecordUpdateSubscriptionRepository + ?Sized,
+>(
+    repository: &R,
+    assignment_id: &str,
+    capability_id: &str,
+    correlation_id: &str,
+    target_record_ids: Vec<u64>,
+    kind_filters: Vec<RecordUpdateKindFilter>,
+) -> Result<RecordUpdateSubscription, RegistrationError> {
+    let assignment = repository.agent_assignment(assignment_id)?;
+    let allowed = assignment.closed_at_millis.is_none()
+        && !target_record_ids.is_empty()
+        && target_record_ids.iter().all(|target_id| {
+            repository.show_record(*target_id).is_ok_and(|target| {
+                target.relationships.iter().any(|relationship| {
+                    relationship.parent_id == assignment.record_id
+                        && relationship.child_id == *target_id
+                })
+            })
+        });
+    authorize_assignment_operation(
+        repository,
+        &assignment,
+        capability_id,
+        correlation_id,
+        AssignmentAuthorizationOperation::CreateSubscription,
+        assignment.record_id,
+        allowed,
+    )?;
+    repository.create_record_update_subscription(&NewRecordUpdateSubscription {
+        assignment_id: assignment.id,
+        target_record_ids,
+        kind_filters,
+    })
+}
+
+/// Authorizes renewal only for the named open Assignment's Subscription.
+#[allow(clippy::missing_errors_doc)]
+pub fn assignment_renew_record_update_subscription<
+    R: RecordUpdateSubscriptionRepository + ?Sized,
+>(
+    repository: &R,
+    assignment_id: &str,
+    capability_id: &str,
+    correlation_id: &str,
+    subscription_id: RecordUpdateSubscriptionId,
+) -> Result<RecordUpdateSubscription, RegistrationError> {
+    let assignment = repository.agent_assignment(assignment_id)?;
+    let subscription = repository.record_update_subscription(subscription_id)?;
+    let allowed =
+        assignment.closed_at_millis.is_none() && subscription.assignment_id == assignment.id;
+    authorize_assignment_operation(
+        repository,
+        &assignment,
+        capability_id,
+        correlation_id,
+        AssignmentAuthorizationOperation::RenewSubscription,
+        assignment.record_id,
+        allowed,
+    )?;
+    repository.renew_record_update_subscription(subscription_id)
+}
+
+/// Authorizes deletion only for the named open Assignment's Subscription.
+#[allow(clippy::missing_errors_doc)]
+pub fn assignment_delete_record_update_subscription<
+    R: RecordUpdateSubscriptionRepository + ?Sized,
+>(
+    repository: &R,
+    assignment_id: &str,
+    capability_id: &str,
+    correlation_id: &str,
+    subscription_id: RecordUpdateSubscriptionId,
+) -> Result<(), RegistrationError> {
+    let assignment = repository.agent_assignment(assignment_id)?;
+    let subscription = repository.record_update_subscription(subscription_id)?;
+    let allowed =
+        assignment.closed_at_millis.is_none() && subscription.assignment_id == assignment.id;
+    authorize_assignment_operation(
+        repository,
+        &assignment,
+        capability_id,
+        correlation_id,
+        AssignmentAuthorizationOperation::DeleteSubscription,
+        assignment.record_id,
+        allowed,
+    )?;
+    repository.delete_record_update_subscription(subscription_id)
+}
+
+fn authorize_assignment_operation<R: AgentDispatchRepository + ?Sized>(
     repository: &R,
     assignment: &AgentAssignment,
     capability_id: &str,
@@ -1178,7 +1274,7 @@ pub struct Application {
     records: Box<dyn RecordRepository>,
     managed_worktrees: Option<Box<dyn ManagedWorktreeRepository>>,
     worktree_adapter: Option<Box<dyn ManagedWorktreeAdapter>>,
-    dispatch: Option<Box<dyn AgentDispatchRepository>>,
+    dispatch: Option<Box<dyn RecordUpdateSubscriptionRepository>>,
     adapter_factory: Option<Box<dyn AgentDispatchAdapterFactory>>,
     inspector: Box<dyn RepositoryInspector>,
 }
@@ -1245,7 +1341,7 @@ impl Application {
     #[must_use]
     pub fn with_agent_dispatch(
         records: Box<dyn RecordRepository>,
-        dispatch: Box<dyn AgentDispatchRepository>,
+        dispatch: Box<dyn RecordUpdateSubscriptionRepository>,
         adapter_factory: Box<dyn AgentDispatchAdapterFactory>,
         inspector: Box<dyn RepositoryInspector>,
     ) -> Self {
@@ -1265,7 +1361,7 @@ impl Application {
         records: Box<dyn RecordRepository>,
         managed_worktrees: Box<dyn ManagedWorktreeRepository>,
         worktree_adapter: Box<dyn ManagedWorktreeAdapter>,
-        dispatch: Box<dyn AgentDispatchRepository>,
+        dispatch: Box<dyn RecordUpdateSubscriptionRepository>,
         adapter_factory: Box<dyn AgentDispatchAdapterFactory>,
         inspector: Box<dyn RepositoryInspector>,
     ) -> Self {
@@ -1297,7 +1393,7 @@ impl Application {
         })
     }
 
-    fn dispatch(&self) -> Result<&dyn AgentDispatchRepository, RegistrationError> {
+    fn dispatch(&self) -> Result<&dyn RecordUpdateSubscriptionRepository, RegistrationError> {
         self.dispatch.as_deref().ok_or_else(|| {
             RegistrationError::new(
                 "agent-dispatch-unavailable",
@@ -1331,6 +1427,71 @@ impl Application {
     /// Returns configuration or persistence failures.
     pub fn task_agent_profile(&self) -> Result<AgentProfile, RegistrationError> {
         self.dispatch()?.agent_profile(RecordType::Task, 1)
+    }
+
+    /// Creates an Assignment-authorized durable Record Update Subscription.
+    ///
+    /// # Errors
+    ///
+    /// Returns authorization, validation, or persistence failures.
+    pub fn create_assignment_subscription(
+        &self,
+        assignment_id: &str,
+        capability_id: &str,
+        correlation_id: &str,
+        target_record_ids: Vec<u64>,
+        kind_filters: Vec<RecordUpdateKindFilter>,
+    ) -> Result<RecordUpdateSubscription, RegistrationError> {
+        assignment_create_record_update_subscription(
+            self.dispatch()?,
+            assignment_id,
+            capability_id,
+            correlation_id,
+            target_record_ids,
+            kind_filters,
+        )
+    }
+
+    /// Renews an Assignment-owned durable Record Update Subscription.
+    ///
+    /// # Errors
+    ///
+    /// Returns authorization, expiry, or persistence failures.
+    pub fn renew_assignment_subscription(
+        &self,
+        assignment_id: &str,
+        capability_id: &str,
+        correlation_id: &str,
+        subscription_id: RecordUpdateSubscriptionId,
+    ) -> Result<RecordUpdateSubscription, RegistrationError> {
+        assignment_renew_record_update_subscription(
+            self.dispatch()?,
+            assignment_id,
+            capability_id,
+            correlation_id,
+            subscription_id,
+        )
+    }
+
+    /// Deletes an Assignment-owned durable Record Update Subscription.
+    ///
+    /// # Errors
+    ///
+    /// Returns authorization or persistence failures.
+    pub fn delete_assignment_subscription(
+        &self,
+        assignment_id: &str,
+        capability_id: &str,
+        correlation_id: &str,
+        subscription_id: RecordUpdateSubscriptionId,
+    ) -> Result<(), RegistrationError> {
+        assignment_delete_record_update_subscription(
+            self.dispatch()?,
+            assignment_id,
+            capability_id,
+            correlation_id,
+            subscription_id,
+        )
     }
 
     /// Sets or clears a registered Project's Task dispatch capacity override.

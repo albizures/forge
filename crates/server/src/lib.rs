@@ -32,21 +32,24 @@ use axum::{
 use forge_app::{
     AgentDispatchAdapter, AgentDispatchAdapterFactory, AgentProfile, Application,
     ApplicationStatus, ManagedWorktreeAdapter, Project, RecordStatus, RecordType,
-    RegistrationError, RepositoryInspector, WorktreeSafetyAssessment,
+    RecordUpdateKindFilter, RecordUpdateSubscriptionId, RegistrationError, RepositoryInspector,
+    WorktreeSafetyAssessment,
 };
 use forge_rpc::{
     AddRecordCommentRequest, AgentDispatchApiServer, AgentDispatchProfileResponse,
     AgentDispatchReconcileResponse, AgentDispatchStatusRequest, AgentDispatchStatusResponse,
-    CreateManagedWorktreeRequest, DeleteRecordCommentRequest, DoctorManagedWorktreesRequest,
-    DoneRecordRequest, EditRecordRequest, ListManagedWorktreesRequest,
-    ListManagedWorktreesResponse, ListRecordCommentsResponse, ListRecordUpdatesResponse,
-    ListRecordsRequest, ListRecordsResponse, ManagedWorktreeResponse, ManagementStatus,
-    OpenRecordRequest, OpenSpecRequest, OpenTaskRequest, OpenTaskUnderSpecRequest,
-    ProjectApiServer, ProjectHereRequest, ProjectHereResponse, RecordApiServer, RecordIdRequest,
-    RecordResponse, RegisterProjectRequest, RegisterProjectResponse, RelateRecordRequest,
-    RemoveManagedWorktreeRequest, RevisionIdentity, SetAgentDispatchEndpointRequest,
-    SetAgentDispatchProjectRequest, SetProjectSetupHookRequest, SetWorktreeRootRequest,
-    SystemApiServer, SystemStatusResponse, WorktreeApiServer, WorktreeRootResponse,
+    AgentSubscriptionApiServer, CreateAgentSubscriptionRequest, CreateManagedWorktreeRequest,
+    DeleteRecordCommentRequest, DoctorManagedWorktreesRequest, DoneRecordRequest,
+    EditRecordRequest, ListManagedWorktreesRequest, ListManagedWorktreesResponse,
+    ListRecordCommentsResponse, ListRecordUpdatesResponse, ListRecordsRequest, ListRecordsResponse,
+    ManageAgentSubscriptionRequest, ManagedWorktreeResponse, ManagementStatus, OpenRecordRequest,
+    OpenSpecRequest, OpenTaskRequest, OpenTaskUnderSpecRequest, ProjectApiServer,
+    ProjectHereRequest, ProjectHereResponse, RecordApiServer, RecordIdRequest, RecordResponse,
+    RecordUpdateSubscriptionResponse, RegisterProjectRequest, RegisterProjectResponse,
+    RelateRecordRequest, RemoveManagedWorktreeRequest, RevisionIdentity,
+    SetAgentDispatchEndpointRequest, SetAgentDispatchProjectRequest, SetProjectSetupHookRequest,
+    SetWorktreeRootRequest, SystemApiServer, SystemStatusResponse, WorktreeApiServer,
+    WorktreeRootResponse,
 };
 use forge_store::SqliteProjectRepository;
 use herdr::{HerdrAdapterFactory, observe_status_changes};
@@ -738,6 +741,56 @@ impl WorktreeApiServer for Daemon {
 }
 
 #[async_trait]
+impl AgentSubscriptionApiServer for Daemon {
+    async fn create(
+        &self,
+        request: CreateAgentSubscriptionRequest,
+    ) -> RpcResult<RecordUpdateSubscriptionResponse> {
+        let filters = request
+            .kind_filters
+            .iter()
+            .map(|filter| record_update_kind_filter(filter))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.application
+            .create_assignment_subscription(
+                &request.assignment_id,
+                &request.capability_id,
+                &request.correlation_id,
+                request.target_record_ids,
+                filters,
+            )
+            .map(Into::into)
+            .map_err(rpc_error)
+    }
+
+    async fn renew(
+        &self,
+        request: ManageAgentSubscriptionRequest,
+    ) -> RpcResult<RecordUpdateSubscriptionResponse> {
+        self.application
+            .renew_assignment_subscription(
+                &request.assignment_id,
+                &request.capability_id,
+                &request.correlation_id,
+                RecordUpdateSubscriptionId(request.subscription_id),
+            )
+            .map(Into::into)
+            .map_err(rpc_error)
+    }
+
+    async fn delete(&self, request: ManageAgentSubscriptionRequest) -> RpcResult<()> {
+        self.application
+            .delete_assignment_subscription(
+                &request.assignment_id,
+                &request.capability_id,
+                &request.correlation_id,
+                RecordUpdateSubscriptionId(request.subscription_id),
+            )
+            .map_err(rpc_error)
+    }
+}
+
+#[async_trait]
 impl RecordApiServer for Daemon {
     async fn open(&self, request: OpenRecordRequest) -> RpcResult<RecordResponse> {
         self.application
@@ -864,6 +917,22 @@ impl RecordApiServer for Daemon {
     }
 }
 
+fn record_update_kind_filter(filter: &str) -> RpcResult<RecordUpdateKindFilter> {
+    match filter {
+        "created" => Ok(RecordUpdateKindFilter::Created),
+        "body-edited" => Ok(RecordUpdateKindFilter::BodyEdited),
+        "status-transition" => Ok(RecordUpdateKindFilter::StatusTransition),
+        "relationship-added" => Ok(RecordUpdateKindFilter::RelationshipAdded),
+        "relationship-removed" => Ok(RecordUpdateKindFilter::RelationshipRemoved),
+        "comment-added" => Ok(RecordUpdateKindFilter::CommentAdded),
+        "comment-deleted" => Ok(RecordUpdateKindFilter::CommentDeleted),
+        _ => Err(rpc_error(RegistrationError::new(
+            "invalid-subscription-filter",
+            "unknown Record Update filter",
+        ))),
+    }
+}
+
 fn record_status(status: &str) -> RpcResult<RecordStatus> {
     match status {
         "open" => Ok(RecordStatus::Open),
@@ -937,6 +1006,9 @@ pub fn router(daemon: Daemon) -> Router {
         .expect("RPC method names must not overlap");
     methods
         .merge(AgentDispatchApiServer::into_rpc(daemon.clone()))
+        .expect("RPC method names must not overlap");
+    methods
+        .merge(AgentSubscriptionApiServer::into_rpc(daemon.clone()))
         .expect("RPC method names must not overlap");
     methods
         .merge(WorktreeApiServer::into_rpc(daemon.clone()))
