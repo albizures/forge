@@ -13,20 +13,21 @@ integration boundary and V1 lifecycle.
 
 A subscription belongs to one open Agent Assignment and is authorized by that
 assignment's opaque capability. The capability is validated by Forge for every
-subscription-management request and when delivery is opened. A capability for
-another assignment does not authorize access, and closing or retiring the owner
-revokes access and removes or makes its subscriptions unreadable.
+subscription-management request. Delivery is restricted to the daemon's
+loopback listener and validates the named open assignment and subscription
+ownership. Closing or retiring the owner revokes access and removes or makes
+its subscriptions unreadable.
 
-An assignment may create or change subscriptions only for direct Child Records
-of its assigned Parent Record. Targets are explicit normalized Record IDs; they do not follow later
+An assignment may create subscriptions only for direct Child Records of its
+assigned Parent Record. Targets are explicit normalized Record IDs; they do not follow later
 relationship changes and are never derived transitively. A subscription has a
 target set, optional normalized Record Update-kind filter, a captured starting
 cursor, and a renewable 30-minute lease.
 
 ## Lifecycle and management
 
-The management API supports creating, renewing, changing targets, and deleting
-subscriptions. Its RPC shapes are an implementation seam.
+The management API supports creating, renewing, and deleting subscriptions.
+Its RPC shapes are an implementation seam.
 
 Creation is idempotent for the same owner, normalized targets, and filter. An
 unexpired matching subscription is returned with its original starting cursor.
@@ -37,11 +38,13 @@ retirement promptly cancel active delivery.
 
 ## Delivery and reconciliation
 
-The authenticated delivery endpoint is:
+The loopback delivery endpoint is:
 
 ```text
 GET /v1/agent-assignments/{assignment_id}/record-update-subscriptions/{subscription_id}/events
-Authorization: Bearer <assignment-capability>
+
+The endpoint is available only through the daemon's loopback listener; V1 has
+no HTTP bearer capability requirement.
 ```
 
 It delivers committed matching updates through SSE. Each notification is a
@@ -82,4 +85,4 @@ shared between processes.
 V1 does not implement a Pi extension or prescribe Pi/client reactions. It does
 not provide WebSockets, dynamic or transitive targets, exactly-once delivery,
 or cross-process fanout. Subscription delivery is deliberately a replaceable
-transport boundary; V1 uses authenticated SSE.
+transport boundary; V1 uses loopback-only SSE.

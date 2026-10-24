@@ -1237,7 +1237,41 @@ fn record_update_event(
     Event::default()
         .id(envelope.update.id.0.to_string())
         .event("record-update")
-        .data(format!("{{\"subscription_id\":{},\"record_id\":{},\"record_update_id\":{},\"kind\":\"{kind}\",\"timestamp\":{}{} }}", subscription_id.0, envelope.record_id, envelope.update.id.0, envelope.update.created_at_millis, extra))
+        .data(format!("{{\"subscription_id\":{},\"record_id\":{},\"record_update_id\":{},\"kind\":\"{kind}\",\"timestamp\":\"{}\"{} }}", subscription_id.0, envelope.record_id, envelope.update.id.0, rfc3339_utc_timestamp(envelope.update.created_at_millis), extra))
+}
+
+fn rfc3339_utc_timestamp(millis: u64) -> String {
+    let seconds = millis / 1_000;
+    let milliseconds = millis % 1_000;
+    let days = seconds / 86_400;
+    let seconds_of_day = seconds % 86_400;
+    let (year, month, day) = civil_date_from_days_since_unix_epoch(days);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{milliseconds:03}Z",
+        seconds_of_day / 3_600,
+        (seconds_of_day % 3_600) / 60,
+        seconds_of_day % 60,
+    )
+}
+
+fn civil_date_from_days_since_unix_epoch(days: u64) -> (u64, u64, u64) {
+    // Civil-date conversion from Howard Hinnant's public-domain algorithm.
+    let days = days + 719_468;
+    let era = days / 146_097;
+    let day_of_era = days % 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = if month_prime < 10 {
+        month_prime + 3
+    } else {
+        month_prime - 9
+    };
+    year += u64::from(month <= 2);
+    (year, month, day)
 }
 
 fn rpc_error(error: RegistrationError) -> jsonrpsee::types::ErrorObjectOwned {
@@ -1632,8 +1666,8 @@ mod tests {
         response::{IntoResponse, Sse},
     };
     use forge_app::{
-        Application, Project, RecordUpdate, RecordUpdateEnvelope, RecordUpdateId, RecordUpdateKind,
-        RecordUpdateSubscriptionId, RegistrationError, RepositoryInspector,
+        Application, Project, RecordStatus, RecordUpdate, RecordUpdateEnvelope, RecordUpdateId,
+        RecordUpdateKind, RecordUpdateSubscriptionId, RegistrationError, RepositoryInspector,
     };
     use forge_rpc::{
         DoneRecordRequest, EditRecordRequest, ListRecordsRequest, OpenRecordRequest,
@@ -2118,37 +2152,57 @@ mod tests {
 
     #[tokio::test]
     async fn record_update_events_use_complete_named_sse_json_frames() {
-        let event = super::record_update_event(
-            RecordUpdateSubscriptionId(9),
-            &RecordUpdateEnvelope {
-                record_id: 47,
-                update: RecordUpdate {
-                    id: RecordUpdateId(12),
-                    created_at_millis: 123,
-                    kind: RecordUpdateKind::CommentAdded {
-                        comment_id: forge_app::RecordCommentId(3),
+        let kinds = [
+            RecordUpdateKind::Created,
+            RecordUpdateKind::BodyEdited,
+            RecordUpdateKind::StatusTransition {
+                from: RecordStatus::Open,
+                to: RecordStatus::InProgress,
+            },
+            RecordUpdateKind::RelationshipAdded {
+                related_record_id: 4,
+            },
+            RecordUpdateKind::RelationshipRemoved {
+                related_record_id: 4,
+            },
+            RecordUpdateKind::CommentAdded {
+                comment_id: forge_app::RecordCommentId(3),
+            },
+            RecordUpdateKind::CommentDeleted {
+                comment_id: forge_app::RecordCommentId(3),
+            },
+        ];
+
+        for kind in kinds {
+            let event = super::record_update_event(
+                RecordUpdateSubscriptionId(9),
+                &RecordUpdateEnvelope {
+                    record_id: 47,
+                    update: RecordUpdate {
+                        id: RecordUpdateId(12),
+                        created_at_millis: 123,
+                        kind,
                     },
                 },
-            },
-        );
-        let response = Sse::new(tokio_stream::iter([Ok::<_, std::convert::Infallible>(
-            event,
-        )]))
-        .into_response();
-        assert_eq!(
-            response.headers()[header::CONTENT_TYPE],
-            "text/event-stream"
-        );
-        let frame = String::from_utf8(
-            to_bytes(response.into_body(), usize::MAX)
-                .await
-                .unwrap()
-                .to_vec(),
-        )
-        .unwrap();
-        assert_eq!(
-            frame,
-            "id: 12\nevent: record-update\ndata: {\"subscription_id\":9,\"record_id\":47,\"record_update_id\":12,\"kind\":\"comment-added\",\"timestamp\":123,\"comment_id\":3 }\n\n"
-        );
+            );
+            let response = Sse::new(tokio_stream::iter([Ok::<_, std::convert::Infallible>(
+                event,
+            )]))
+            .into_response();
+            assert_eq!(
+                response.headers()[header::CONTENT_TYPE],
+                "text/event-stream"
+            );
+            let frame = String::from_utf8(
+                to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap()
+                    .to_vec(),
+            )
+            .unwrap();
+            assert!(frame.starts_with("id: 12\nevent: record-update\ndata: {"));
+            assert!(frame.contains("\"timestamp\":\"1970-01-01T00:00:00.123Z\""));
+            assert!(frame.ends_with(" }\n\n"));
+        }
     }
 }
