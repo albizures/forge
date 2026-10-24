@@ -292,9 +292,9 @@ enum RecordCommand {
     Start(RecordIdArgs),
     /// Complete an in-progress Record.
     Done(DoneRecordArgs),
-    /// Link Records with `--kind child-of` or `--kind depends-on`.
+    /// Link Records with `--kind child-of`, `--kind depends-on`, or `--kind generated-by`.
     Relate(RelationshipArgs),
-    /// Remove a Record Relationship with `--kind child-of` or `--kind depends-on`.
+    /// Remove a Record Relationship with `--kind child-of`, `--kind depends-on`, or `--kind generated-by`.
     Unrelate(RelationshipArgs),
     /// Add an immutable Comment to a Record.
     Comment(AddRecordCommentArgs),
@@ -374,7 +374,7 @@ struct DoneRecordArgs {
 #[derive(Args, Debug)]
 struct RelationshipArgs {
     from_id: u64,
-    #[arg(long, value_parser = ["child-of", "depends-on"])]
+    #[arg(long, value_parser = ["child-of", "depends-on", "generated-by"])]
     kind: String,
     #[arg(long = "to")]
     to_id: u64,
@@ -391,6 +391,9 @@ struct OpenSpecArgs {
     /// The Spec's required Project.
     #[arg(long, value_name = "SLUG")]
     project: String,
+    /// Record that generated this Record. Repeat for multiple generators.
+    #[arg(long = "generated-by", value_name = "ID")]
+    generated_by_ids: Vec<u64>,
     #[arg(long, value_name = "URL")]
     server_url: Option<String>,
     #[arg(long)]
@@ -404,6 +407,9 @@ struct OpenWayfinderArgs {
     /// A Project in the Wayfinder's immutable Project Scope.
     #[arg(long = "project", value_name = "SLUG", required = true)]
     project: Vec<String>,
+    /// Record that generated this Record. Repeat for multiple generators.
+    #[arg(long = "generated-by", value_name = "ID")]
+    generated_by_ids: Vec<u64>,
     #[arg(long, value_name = "URL")]
     server_url: Option<String>,
     #[arg(long)]
@@ -420,6 +426,9 @@ struct OpenTaskArgs {
     /// Optional immutable Task Kind metadata.
     #[arg(long = "kind", value_parser = ["research", "prototype", "review"])]
     task_kind: Option<String>,
+    /// Record that generated this Record. Repeat for multiple generators.
+    #[arg(long = "generated-by", value_name = "ID")]
+    generated_by_ids: Vec<u64>,
     #[arg(long, value_name = "URL")]
     server_url: Option<String>,
     #[arg(long)]
@@ -436,6 +445,9 @@ struct OpenTaskUnderSpecArgs {
     /// Optional immutable Task Kind metadata.
     #[arg(long = "kind", value_parser = ["research", "prototype", "review"])]
     task_kind: Option<String>,
+    /// Record that generated this Record. Repeat for multiple generators.
+    #[arg(long = "generated-by", value_name = "ID")]
+    generated_by_ids: Vec<u64>,
     #[arg(long, value_name = "URL")]
     server_url: Option<String>,
     #[arg(long)]
@@ -452,6 +464,9 @@ struct OpenGrillingUnderWayfinderArgs {
     /// A Project in the Grilling's scope. Omit to inherit the whole Wayfinder scope.
     #[arg(long = "project", value_name = "SLUG")]
     project: Option<Vec<String>>,
+    /// Record that generated this Record. Repeat for multiple generators.
+    #[arg(long = "generated-by", value_name = "ID")]
+    generated_by_ids: Vec<u64>,
     #[arg(long, value_name = "URL")]
     server_url: Option<String>,
     #[arg(long)]
@@ -471,6 +486,9 @@ struct OpenTaskUnderWayfinderArgs {
     /// Optional immutable Task Kind metadata.
     #[arg(long = "kind", value_parser = ["research", "prototype", "review"])]
     task_kind: Option<String>,
+    /// Record that generated this Record. Repeat for multiple generators.
+    #[arg(long = "generated-by", value_name = "ID")]
+    generated_by_ids: Vec<u64>,
     #[arg(long, value_name = "URL")]
     server_url: Option<String>,
     #[arg(long)]
@@ -488,6 +506,9 @@ struct OpenRecordArgs {
     /// Explicitly select no Projects.
     #[arg(long = "no-projects")]
     no_projects: bool,
+    /// Record that generated this Record. Repeat for multiple generators.
+    #[arg(long = "generated-by", value_name = "ID")]
+    generated_by_ids: Vec<u64>,
     #[arg(long, value_name = "URL")]
     server_url: Option<String>,
     #[arg(long)]
@@ -1041,6 +1062,7 @@ async fn open_record(args: OpenRecordArgs) -> i32 {
         &resolve_endpoint(args.server_url.as_deref()).await,
         &body,
         args.project,
+        args.generated_by_ids,
     )
     .await
     {
@@ -1074,6 +1096,7 @@ async fn open_spec(args: OpenSpecArgs) -> i32 {
             &resolve_endpoint(args.server_url.as_deref()).await,
             &body,
             args.project,
+            args.generated_by_ids,
         )
         .await,
     )
@@ -1091,6 +1114,7 @@ async fn open_wayfinder(args: OpenWayfinderArgs) -> i32 {
             &resolve_endpoint(args.server_url.as_deref()).await,
             &body,
             args.project,
+            args.generated_by_ids,
         )
         .await,
     )
@@ -1109,6 +1133,7 @@ async fn open_task(args: OpenTaskArgs) -> i32 {
             &body,
             args.project,
             args.task_kind,
+            args.generated_by_ids,
         )
         .await,
     )
@@ -1127,6 +1152,7 @@ async fn open_task_under_spec(args: OpenTaskUnderSpecArgs) -> i32 {
             &body,
             args.spec,
             args.task_kind,
+            args.generated_by_ids,
         )
         .await,
     )
@@ -1145,6 +1171,7 @@ async fn open_grilling_under_wayfinder(args: OpenGrillingUnderWayfinderArgs) -> 
             &body,
             args.wayfinder,
             args.project,
+            args.generated_by_ids,
         )
         .await,
     )
@@ -1164,6 +1191,7 @@ async fn open_task_under_wayfinder(args: OpenTaskUnderWayfinderArgs) -> i32 {
             args.wayfinder,
             args.project,
             args.task_kind,
+            args.generated_by_ids,
         )
         .await,
     )

@@ -879,7 +879,11 @@ impl AgentSubscriptionApiServer for Daemon {
 impl RecordApiServer for Daemon {
     async fn open(&self, request: OpenRecordRequest) -> RpcResult<RecordResponse> {
         self.application
-            .open_record(&request.body, request.project_scope.project_slugs)
+            .open_record_with_generators(
+                &request.body,
+                request.project_scope.project_slugs,
+                request.generated_by_ids,
+            )
             .map(|record| {
                 self.delivery.publish(&self.application);
                 record.into()
@@ -889,7 +893,13 @@ impl RecordApiServer for Daemon {
 
     async fn open_spec(&self, request: OpenSpecRequest) -> RpcResult<RecordResponse> {
         self.application
-            .open_spec(&request.body, request.project_slug)
+            .open_typed_record_with_generators(
+                forge_app::RecordType::Spec,
+                &request.body,
+                vec![request.project_slug],
+                None,
+                request.generated_by_ids,
+            )
             .map(|record| {
                 self.delivery.publish(&self.application);
                 record.into()
@@ -899,10 +909,12 @@ impl RecordApiServer for Daemon {
 
     async fn open_task(&self, request: OpenTaskRequest) -> RpcResult<RecordResponse> {
         self.application
-            .open_task(
+            .open_typed_record_with_generators(
+                forge_app::RecordType::Task,
                 &request.body,
-                request.project_slug,
+                request.project_slug.into_iter().collect(),
                 request.task_kind.as_deref().map(task_kind).transpose()?,
+                request.generated_by_ids,
             )
             .map(|record| {
                 self.delivery.publish(&self.application);
@@ -913,7 +925,13 @@ impl RecordApiServer for Daemon {
 
     async fn open_wayfinder(&self, request: OpenWayfinderRequest) -> RpcResult<RecordResponse> {
         self.application
-            .open_wayfinder(&request.body, request.project_scope.project_slugs)
+            .open_typed_record_with_generators(
+                forge_app::RecordType::Wayfinder,
+                &request.body,
+                request.project_scope.project_slugs,
+                None,
+                request.generated_by_ids,
+            )
             .map(|record| {
                 self.delivery.publish(&self.application);
                 record.into()
@@ -930,6 +948,7 @@ impl RecordApiServer for Daemon {
                 &request.body,
                 request.spec_id,
                 request.task_kind.as_deref().map(task_kind).transpose()?,
+                request.generated_by_ids,
             )
             .map(|record| {
                 self.delivery.publish(&self.application);
@@ -948,6 +967,7 @@ impl RecordApiServer for Daemon {
                 request.wayfinder_id,
                 request.project_slug,
                 request.task_kind.as_deref().map(task_kind).transpose()?,
+                request.generated_by_ids,
             )
             .map(|record| {
                 self.delivery.publish(&self.application);
@@ -965,6 +985,7 @@ impl RecordApiServer for Daemon {
                 &request.body,
                 request.wayfinder_id,
                 request.project_scope.map(|scope| scope.project_slugs),
+                request.generated_by_ids,
             )
             .map(|record| {
                 self.delivery.publish(&self.application);
@@ -1145,9 +1166,10 @@ fn relationship_kind(kind: &str) -> RpcResult<forge_app::RecordRelationshipKind>
     match kind {
         "child-of" => Ok(forge_app::RecordRelationshipKind::ParentChild),
         "depends-on" => Ok(forge_app::RecordRelationshipKind::DependsOn),
+        "generated-by" => Ok(forge_app::RecordRelationshipKind::GeneratedBy),
         _ => Err(rpc_error(RegistrationError::new(
             "unsupported-relationship-kind",
-            "Relationship kind must be child-of or depends-on",
+            "Relationship kind must be child-of, depends-on, or generated-by",
         ))),
     }
 }
@@ -1299,16 +1321,30 @@ fn record_update_event(
             format!(",\"from_status\":\"{from:?}\",\"to_status\":\"{to:?}\""),
         ),
         RecordUpdateKind::RelationshipAdded {
-            related_record_id, ..
+            related_record_id,
+            relationship_kind,
         } => (
             "relationship-added",
-            format!(",\"related_record_id\":{related_record_id}"),
+            format!(
+                ",\"related_record_id\":{related_record_id}{}",
+                relationship_kind.map_or(String::new(), |kind| format!(
+                    ",\"relationship_kind\":\"{}\"",
+                    relationship_kind_name(kind)
+                ))
+            ),
         ),
         RecordUpdateKind::RelationshipRemoved {
-            related_record_id, ..
+            related_record_id,
+            relationship_kind,
         } => (
             "relationship-removed",
-            format!(",\"related_record_id\":{related_record_id}"),
+            format!(
+                ",\"related_record_id\":{related_record_id}{}",
+                relationship_kind.map_or(String::new(), |kind| format!(
+                    ",\"relationship_kind\":\"{}\"",
+                    relationship_kind_name(kind)
+                ))
+            ),
         ),
         RecordUpdateKind::CommentAdded { comment_id } => {
             ("comment-added", format!(",\"comment_id\":{}", comment_id.0))
@@ -1322,6 +1358,14 @@ fn record_update_event(
         .id(envelope.update.id.0.to_string())
         .event("record-update")
         .data(format!("{{\"subscription_id\":{},\"record_id\":{},\"record_update_id\":{},\"kind\":\"{kind}\",\"timestamp\":\"{}\"{} }}", subscription_id.0, envelope.record_id, envelope.update.id.0, rfc3339_utc_timestamp(envelope.update.created_at_millis), extra))
+}
+
+fn relationship_kind_name(kind: forge_app::RecordRelationshipKind) -> &'static str {
+    match kind {
+        forge_app::RecordRelationshipKind::ParentChild => "parent-child",
+        forge_app::RecordRelationshipKind::DependsOn => "depends-on",
+        forge_app::RecordRelationshipKind::GeneratedBy => "generated-by",
+    }
 }
 
 fn rfc3339_utc_timestamp(millis: u64) -> String {
@@ -2212,6 +2256,7 @@ mod tests {
                 project_scope: ProjectScopeRequest {
                     project_slugs: vec!["server-test-project".into()],
                 },
+                generated_by_ids: vec![],
             })
             .await
             .unwrap();
@@ -2241,6 +2286,7 @@ mod tests {
             .open_spec(OpenSpecRequest {
                 body: "A daemon-backed Spec".into(),
                 project_slug: "server-test-project".into(),
+                generated_by_ids: vec![],
             })
             .await
             .unwrap();
@@ -2250,6 +2296,7 @@ mod tests {
                 body: "A daemon-backed Task".into(),
                 spec_id: spec.id,
                 task_kind: None,
+                generated_by_ids: vec![],
             })
             .await
             .unwrap();
@@ -2262,6 +2309,7 @@ mod tests {
                     body: "Standalone daemon-backed Task".into(),
                     project_slug: None,
                     task_kind: None,
+                    generated_by_ids: vec![],
                 })
                 .await
                 .unwrap()
@@ -2274,6 +2322,7 @@ mod tests {
                 project_scope: ProjectScopeRequest {
                     project_slugs: vec!["server-test-project".into()],
                 },
+                generated_by_ids: vec![],
             })
             .await
             .unwrap();
@@ -2283,6 +2332,7 @@ mod tests {
                 wayfinder_id: wayfinder.id,
                 project_slug: None,
                 task_kind: None,
+                generated_by_ids: vec![],
             })
             .await
             .unwrap();
@@ -2294,6 +2344,7 @@ mod tests {
                 body: "A daemon-backed Grilling".into(),
                 wayfinder_id: wayfinder.id,
                 project_scope: None,
+                generated_by_ids: vec![],
             })
             .await
             .unwrap();
@@ -2330,6 +2381,7 @@ mod tests {
                     body: "Invalid child".into(),
                     spec_id: record.id,
                     task_kind: None,
+                    generated_by_ids: vec![],
                 })
                 .await
                 .is_err()
@@ -2379,6 +2431,7 @@ mod tests {
                     project_scope: ProjectScopeRequest {
                         project_slugs: vec![],
                     },
+                    generated_by_ids: vec![],
                 })
                 .await
                 .unwrap()

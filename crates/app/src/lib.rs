@@ -387,6 +387,7 @@ pub trait RecordRepository: ProjectRepository {
         body: &str,
         spec_id: u64,
         task_kind: Option<TaskKind>,
+        generated_by_ids: Vec<u64>,
     ) -> Result<Record, RegistrationError>;
     /// Opens a Task beneath a Wayfinder, selecting one Project from its scope.
     ///
@@ -399,6 +400,7 @@ pub trait RecordRepository: ProjectRepository {
         wayfinder_id: u64,
         project_slug: Option<String>,
         task_kind: Option<TaskKind>,
+        generated_by_ids: Vec<u64>,
     ) -> Result<Record, RegistrationError>;
     /// Opens a Grilling beneath a Wayfinder, inheriting or selecting its Project Scope.
     ///
@@ -410,6 +412,7 @@ pub trait RecordRepository: ProjectRepository {
         body: &str,
         wayfinder_id: u64,
         project_slugs: Option<Vec<String>>,
+        generated_by_ids: Vec<u64>,
     ) -> Result<Record, RegistrationError>;
     /// Lists Records matching Project Scope membership and lifecycle status.
     ///
@@ -2032,9 +2035,11 @@ impl Application {
         body: &str,
         spec_id: u64,
         task_kind: Option<TaskKind>,
+        generated_by_ids: Vec<u64>,
     ) -> Result<Record, RegistrationError> {
         Self::require_body(body)?;
-        self.records.open_task_under_spec(body, spec_id, task_kind)
+        self.records
+            .open_task_under_spec(body, spec_id, task_kind, generated_by_ids)
     }
 
     /// Opens a Task under a Wayfinder, selecting one Project from its scope.
@@ -2048,10 +2053,16 @@ impl Application {
         wayfinder_id: u64,
         project_slug: Option<String>,
         task_kind: Option<TaskKind>,
+        generated_by_ids: Vec<u64>,
     ) -> Result<Record, RegistrationError> {
         Self::require_body(body)?;
-        self.records
-            .open_task_under_wayfinder(body, wayfinder_id, project_slug, task_kind)
+        self.records.open_task_under_wayfinder(
+            body,
+            wayfinder_id,
+            project_slug,
+            task_kind,
+            generated_by_ids,
+        )
     }
 
     /// Opens a Grilling beneath a Wayfinder, inheriting or selecting its Project Scope.
@@ -2064,10 +2075,15 @@ impl Application {
         body: &str,
         wayfinder_id: u64,
         project_slugs: Option<Vec<String>>,
+        generated_by_ids: Vec<u64>,
     ) -> Result<Record, RegistrationError> {
         Self::require_body(body)?;
-        self.records
-            .open_grilling_under_wayfinder(body, wayfinder_id, project_slugs)
+        self.records.open_grilling_under_wayfinder(
+            body,
+            wayfinder_id,
+            project_slugs,
+            generated_by_ids,
+        )
     }
 
     /// Lists Records matching the supplied optional discovery filters.
@@ -2345,6 +2361,7 @@ mod tests {
             body: &str,
             spec_id: u64,
             task_kind: Option<TaskKind>,
+            _generated_by_ids: Vec<u64>,
         ) -> Result<Record, RegistrationError> {
             let spec = self.show_record(spec_id)?;
             if spec.record_type != RecordType::Spec {
@@ -2386,6 +2403,7 @@ mod tests {
             wayfinder_id: u64,
             project_slug: Option<String>,
             task_kind: Option<TaskKind>,
+            _generated_by_ids: Vec<u64>,
         ) -> Result<Record, RegistrationError> {
             let wayfinder = self.show_record(wayfinder_id)?;
             if wayfinder.record_type != RecordType::Wayfinder {
@@ -2442,6 +2460,7 @@ mod tests {
             body: &str,
             wayfinder_id: u64,
             project_slugs: Option<Vec<String>>,
+            _generated_by_ids: Vec<u64>,
         ) -> Result<Record, RegistrationError> {
             let wayfinder = self.show_record(wayfinder_id)?;
             if wayfinder.record_type != RecordType::Wayfinder {
@@ -2907,7 +2926,7 @@ mod tests {
             .open_wayfinder("wayfinder", vec!["alpha".into()])
             .unwrap();
         let wayfinder_task = app
-            .open_task_under_wayfinder("wayfinder child", wayfinder.id, None, None)
+            .open_task_under_wayfinder("wayfinder child", wayfinder.id, None, None, vec![])
             .unwrap();
         assert_eq!(wayfinder_task.project_slugs, ["alpha"]);
         let multi_wayfinder = app
@@ -2915,7 +2934,7 @@ mod tests {
             .unwrap();
         assert_eq!(multi_wayfinder.project_slugs, ["alpha", "beta"]);
         assert_eq!(
-            app.open_task_under_wayfinder("missing", multi_wayfinder.id, None, None)
+            app.open_task_under_wayfinder("missing", multi_wayfinder.id, None, None, vec![])
                 .unwrap_err()
                 .code,
             "missing-project"
@@ -2925,7 +2944,8 @@ mod tests {
                 "outside",
                 multi_wayfinder.id,
                 Some("gamma".into()),
-                None
+                None,
+                vec![]
             )
             .unwrap_err()
             .code,
@@ -2935,12 +2955,14 @@ mod tests {
         let standalone = app.open_task("standalone", None, None).unwrap();
         assert_eq!(standalone.record_type, RecordType::Task);
         assert!(standalone.project_slugs.is_empty());
-        let task = app.open_task_under_spec("child", spec.id, None).unwrap();
+        let task = app
+            .open_task_under_spec("child", spec.id, None, vec![])
+            .unwrap();
         assert_eq!(task.record_type, RecordType::Task);
         assert_eq!(task.project_slugs, ["alpha"]);
         assert_eq!(task.relationships[0].parent_id, spec.id);
         assert_eq!(
-            app.open_task_under_spec("invalid", standalone.id, None)
+            app.open_task_under_spec("invalid", standalone.id, None, vec![])
                 .unwrap_err()
                 .code,
             "invalid-parent-type"

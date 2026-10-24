@@ -618,6 +618,7 @@ impl RecordRepository for SqliteProjectRepository {
         body: &str,
         spec_id: u64,
         task_kind: Option<TaskKind>,
+        generated_by_ids: Vec<u64>,
     ) -> Result<Record, RegistrationError> {
         let mut connection = self
             .connection
@@ -667,6 +668,7 @@ impl RecordRepository for SqliteProjectRepository {
                 relationship_kind: Some(RecordRelationshipKind::ParentChild),
             },
         )?;
+        add_generated_by_relationships(&transaction, task_id, &generated_by_ids)?;
         let task = load_record(&transaction, task_id)?;
         transaction.commit().map_err(storage_error)?;
         Ok(task)
@@ -678,6 +680,7 @@ impl RecordRepository for SqliteProjectRepository {
         wayfinder_id: u64,
         project_slug: Option<String>,
         task_kind: Option<TaskKind>,
+        generated_by_ids: Vec<u64>,
     ) -> Result<Record, RegistrationError> {
         let mut connection = self
             .connection
@@ -743,6 +746,7 @@ impl RecordRepository for SqliteProjectRepository {
                 relationship_kind: Some(RecordRelationshipKind::ParentChild),
             },
         )?;
+        add_generated_by_relationships(&transaction, task_id, &generated_by_ids)?;
         let task = load_record(&transaction, task_id)?;
         transaction.commit().map_err(storage_error)?;
         Ok(task)
@@ -753,6 +757,7 @@ impl RecordRepository for SqliteProjectRepository {
         body: &str,
         wayfinder_id: u64,
         project_slugs: Option<Vec<String>>,
+        generated_by_ids: Vec<u64>,
     ) -> Result<Record, RegistrationError> {
         let mut connection = self
             .connection
@@ -827,6 +832,7 @@ impl RecordRepository for SqliteProjectRepository {
                 relationship_kind: Some(RecordRelationshipKind::ParentChild),
             },
         )?;
+        add_generated_by_relationships(&transaction, grilling_id, &generated_by_ids)?;
         let grilling = load_record(&transaction, grilling_id)?;
         transaction.commit().map_err(storage_error)?;
         Ok(grilling)
@@ -3534,7 +3540,7 @@ mod tests {
             })
             .unwrap();
         let task = store
-            .open_task_under_spec("task", spec.id, Some(TaskKind::Research))
+            .open_task_under_spec("task", spec.id, Some(TaskKind::Research), vec![])
             .unwrap();
         assert_eq!(task.record_type, RecordType::Task);
         assert_eq!(task.task_kind, Some(TaskKind::Research));
@@ -3564,7 +3570,7 @@ mod tests {
         );
         assert_eq!(
             store
-                .open_task_under_spec("nope", task.id, None)
+                .open_task_under_spec("nope", task.id, None, vec![])
                 .unwrap_err()
                 .code,
             "invalid-parent-type"
@@ -3613,27 +3619,37 @@ mod tests {
             })
             .unwrap();
         let full_scope = store
-            .open_grilling_under_wayfinder("full", wayfinder.id, None)
+            .open_grilling_under_wayfinder("full", wayfinder.id, None, vec![])
             .unwrap();
         assert_eq!(full_scope.record_type, RecordType::Grilling);
         assert_eq!(full_scope.project_slugs, ["alpha", "beta"]);
         assert_eq!(
             store
-                .open_grilling_under_wayfinder("subset", wayfinder.id, Some(vec!["beta".into()]),)
+                .open_grilling_under_wayfinder(
+                    "subset",
+                    wayfinder.id,
+                    Some(vec!["beta".into()]),
+                    vec![]
+                )
                 .unwrap()
                 .project_slugs,
             ["beta"]
         );
         assert_eq!(
             store
-                .open_grilling_under_wayfinder("empty", wayfinder.id, Some(vec![]))
+                .open_grilling_under_wayfinder("empty", wayfinder.id, Some(vec![]), vec![])
                 .unwrap_err()
                 .code,
             "empty-project-scope"
         );
         assert_eq!(
             store
-                .open_grilling_under_wayfinder("outside", wayfinder.id, Some(vec!["gamma".into()]),)
+                .open_grilling_under_wayfinder(
+                    "outside",
+                    wayfinder.id,
+                    Some(vec!["gamma".into()]),
+                    vec![]
+                )
                 .unwrap_err()
                 .code,
             "scope-mismatch"
@@ -3651,7 +3667,13 @@ mod tests {
             2
         );
         let alpha_task = store
-            .open_task_under_wayfinder("alpha task", wayfinder.id, Some("alpha".into()), None)
+            .open_task_under_wayfinder(
+                "alpha task",
+                wayfinder.id,
+                Some("alpha".into()),
+                None,
+                vec![],
+            )
             .unwrap();
         store
             .relate_records(
@@ -4479,9 +4501,11 @@ mod tests {
                 generated_by_ids: vec![],
             })
             .unwrap();
-        let task = store.open_task_under_spec("task", spec.id, None).unwrap();
+        let task = store
+            .open_task_under_spec("task", spec.id, None, vec![])
+            .unwrap();
         let sibling = store
-            .open_task_under_spec("sibling", spec.id, None)
+            .open_task_under_spec("sibling", spec.id, None, vec![])
             .unwrap();
         store.start_record(task.id).unwrap();
         store

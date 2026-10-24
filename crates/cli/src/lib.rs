@@ -383,11 +383,13 @@ pub async fn request_open_record(
     url: &str,
     body: &str,
     project_slugs: Vec<String>,
+    generated_by_ids: Vec<u64>,
 ) -> Result<RecordResponse, String> {
     client(url)?
         .open(OpenRecordRequest {
             body: body.into(),
             project_scope: ProjectScopeRequest { project_slugs },
+            generated_by_ids,
         })
         .await
         .map_err(|error| format!("could not open Record through Forge daemon: {error}"))
@@ -409,11 +411,13 @@ pub async fn request_open_spec(
     url: &str,
     body: &str,
     project_slug: String,
+    generated_by_ids: Vec<u64>,
 ) -> Result<RecordResponse, String> {
     client(url)?
         .open_spec(OpenSpecRequest {
             body: body.into(),
             project_slug,
+            generated_by_ids,
         })
         .await
         .map_err(record_error("open Spec"))
@@ -428,11 +432,13 @@ pub async fn request_open_wayfinder(
     url: &str,
     body: &str,
     project_slugs: Vec<String>,
+    generated_by_ids: Vec<u64>,
 ) -> Result<RecordResponse, String> {
     client(url)?
         .open_wayfinder(OpenWayfinderRequest {
             body: body.into(),
             project_scope: ProjectScopeRequest { project_slugs },
+            generated_by_ids,
         })
         .await
         .map_err(record_error("open Wayfinder"))
@@ -448,12 +454,14 @@ pub async fn request_open_task(
     body: &str,
     project_slug: Option<String>,
     task_kind: Option<String>,
+    generated_by_ids: Vec<u64>,
 ) -> Result<RecordResponse, String> {
     client(url)?
         .open_task(OpenTaskRequest {
             body: body.into(),
             project_slug,
             task_kind,
+            generated_by_ids,
         })
         .await
         .map_err(record_error("open Task"))
@@ -469,12 +477,14 @@ pub async fn request_open_task_under_spec(
     body: &str,
     spec_id: u64,
     task_kind: Option<String>,
+    generated_by_ids: Vec<u64>,
 ) -> Result<RecordResponse, String> {
     client(url)?
         .open_task_under_spec(OpenTaskUnderSpecRequest {
             body: body.into(),
             spec_id,
             task_kind,
+            generated_by_ids,
         })
         .await
         .map_err(record_error("open Task under Spec"))
@@ -491,6 +501,7 @@ pub async fn request_open_task_under_wayfinder(
     wayfinder_id: u64,
     project_slug: Option<String>,
     task_kind: Option<String>,
+    generated_by_ids: Vec<u64>,
 ) -> Result<RecordResponse, String> {
     client(url)?
         .open_task_under_wayfinder(OpenTaskUnderWayfinderRequest {
@@ -498,6 +509,7 @@ pub async fn request_open_task_under_wayfinder(
             wayfinder_id,
             project_slug,
             task_kind,
+            generated_by_ids,
         })
         .await
         .map_err(record_error("open Task under Wayfinder"))
@@ -513,12 +525,14 @@ pub async fn request_open_grilling_under_wayfinder(
     body: &str,
     wayfinder_id: u64,
     project_slugs: Option<Vec<String>>,
+    generated_by_ids: Vec<u64>,
 ) -> Result<RecordResponse, String> {
     client(url)?
         .open_grilling_under_wayfinder(OpenGrillingUnderWayfinderRequest {
             body: body.into(),
             wayfinder_id,
             project_scope: project_slugs.map(|project_slugs| ProjectScopeRequest { project_slugs }),
+            generated_by_ids,
         })
         .await
         .map_err(record_error("open Grilling under Wayfinder"))
@@ -745,7 +759,13 @@ pub fn render_record_updates(updates: &ListRecordUpdatesResponse) -> String {
                 update.related_record_id.or(update.comment_id),
             ) {
                 (Some(from), Some(to), _) => format!(" {from} -> {to}"),
-                (_, _, Some(id)) => format!(" Record {id}"),
+                (_, _, Some(id)) => format!(
+                    " Record {id}{}",
+                    update
+                        .relationship_kind
+                        .as_deref()
+                        .map_or(String::new(), |kind| format!(" ({kind})"))
+                ),
                 _ => String::new(),
             };
             format!(
@@ -852,28 +872,38 @@ mod tests {
             .await
             .unwrap();
 
-        let spec = request_open_spec(&url, "Spec body", "cli-test-project".into())
+        let spec = request_open_spec(&url, "Spec body", "cli-test-project".into(), vec![])
             .await
             .unwrap();
         assert_eq!(spec.record_type, "spec");
         assert_eq!(spec.project_scope.project_slugs, ["cli-test-project"]);
-        let wayfinder =
-            request_open_wayfinder(&url, "Wayfinder body", vec!["cli-test-project".into()])
-                .await
-                .unwrap();
+        let wayfinder = request_open_wayfinder(
+            &url,
+            "Wayfinder body",
+            vec!["cli-test-project".into()],
+            vec![],
+        )
+        .await
+        .unwrap();
         assert_eq!(wayfinder.record_type, "wayfinder");
-        let wayfinder_task =
-            request_open_task_under_wayfinder(&url, "Scoped Child Task", wayfinder.id, None, None)
-                .await
-                .unwrap();
+        let wayfinder_task = request_open_task_under_wayfinder(
+            &url,
+            "Scoped Child Task",
+            wayfinder.id,
+            None,
+            None,
+            vec![],
+        )
+        .await
+        .unwrap();
         assert_eq!(wayfinder_task.project_scope, wayfinder.project_scope);
 
-        let standalone = request_open_task(&url, "Standalone Task", None, None)
+        let standalone = request_open_task(&url, "Standalone Task", None, None, vec![])
             .await
             .unwrap();
         assert_eq!(standalone.record_type, "task");
         assert!(standalone.project_scope.project_slugs.is_empty());
-        let child = request_open_task_under_spec(&url, "Child Task", spec.id, None)
+        let child = request_open_task_under_spec(&url, "Child Task", spec.id, None, vec![])
             .await
             .unwrap();
         assert_eq!(child.record_type, "task");
@@ -926,6 +956,7 @@ mod tests {
                     from_status: Some("open".into()),
                     to_status: Some("in_progress".into()),
                     related_record_id: None,
+                    relationship_kind: None,
                     comment_id: None,
                 }],
             }),

@@ -500,18 +500,21 @@ impl From<Project> for RegisterProjectResponse {
 pub struct OpenRecordRequest {
     pub body: String,
     pub project_scope: ProjectScopeRequest,
+    pub generated_by_ids: Vec<u64>,
 }
 /// Opens a Spec with its required single-Project scope.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct OpenSpecRequest {
     pub body: String,
     pub project_slug: String,
+    pub generated_by_ids: Vec<u64>,
 }
 /// Opens a Wayfinder with a non-empty Project Scope.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct OpenWayfinderRequest {
     pub body: String,
     pub project_scope: ProjectScopeRequest,
+    pub generated_by_ids: Vec<u64>,
 }
 /// Opens a standalone Task with an optional single-Project scope.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -519,6 +522,7 @@ pub struct OpenTaskRequest {
     pub body: String,
     pub project_slug: Option<String>,
     pub task_kind: Option<String>,
+    pub generated_by_ids: Vec<u64>,
 }
 /// Opens a Task under a Spec, inheriting its scope atomically.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -526,6 +530,7 @@ pub struct OpenTaskUnderSpecRequest {
     pub body: String,
     pub spec_id: u64,
     pub task_kind: Option<String>,
+    pub generated_by_ids: Vec<u64>,
 }
 /// Opens a Task under a Wayfinder with an optional selected Project.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -534,6 +539,7 @@ pub struct OpenTaskUnderWayfinderRequest {
     pub wayfinder_id: u64,
     pub project_slug: Option<String>,
     pub task_kind: Option<String>,
+    pub generated_by_ids: Vec<u64>,
 }
 /// Opens a Grilling under a Wayfinder, inheriting its scope unless a subset is selected.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -541,6 +547,7 @@ pub struct OpenGrillingUnderWayfinderRequest {
     pub body: String,
     pub wayfinder_id: u64,
     pub project_scope: Option<ProjectScopeRequest>,
+    pub generated_by_ids: Vec<u64>,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProjectScopeRequest {
@@ -607,45 +614,57 @@ pub struct RecordUpdateResponse {
     pub from_status: Option<String>,
     pub to_status: Option<String>,
     pub related_record_id: Option<u64>,
+    pub relationship_kind: Option<String>,
     pub comment_id: Option<u64>,
 }
 impl From<RecordUpdate> for RecordUpdateResponse {
     fn from(update: RecordUpdate) -> Self {
-        let (kind, from_status, to_status, related_record_id, comment_id) = match update.kind {
-            RecordUpdateKind::Created => ("created", None, None, None, None),
-            RecordUpdateKind::BodyEdited => ("body-edited", None, None, None, None),
-            RecordUpdateKind::StatusTransition { from, to } => (
-                "status-transition",
-                Some(record_status_name(from)),
-                Some(record_status_name(to)),
-                None,
-                None,
-            ),
-            RecordUpdateKind::RelationshipAdded {
-                related_record_id, ..
-            } => (
-                "relationship-added",
-                None,
-                None,
-                Some(related_record_id),
-                None,
-            ),
-            RecordUpdateKind::RelationshipRemoved {
-                related_record_id, ..
-            } => (
-                "relationship-removed",
-                None,
-                None,
-                Some(related_record_id),
-                None,
-            ),
-            RecordUpdateKind::CommentAdded { comment_id } => {
-                ("comment-added", None, None, None, Some(comment_id.0))
-            }
-            RecordUpdateKind::CommentDeleted { comment_id } => {
-                ("comment-deleted", None, None, None, Some(comment_id.0))
-            }
-        };
+        let (kind, from_status, to_status, related_record_id, relationship_kind, comment_id) =
+            match update.kind {
+                RecordUpdateKind::Created => ("created", None, None, None, None, None),
+                RecordUpdateKind::BodyEdited => ("body-edited", None, None, None, None, None),
+                RecordUpdateKind::StatusTransition { from, to } => (
+                    "status-transition",
+                    Some(record_status_name(from)),
+                    Some(record_status_name(to)),
+                    None,
+                    None,
+                    None,
+                ),
+                RecordUpdateKind::RelationshipAdded {
+                    related_record_id,
+                    relationship_kind,
+                } => (
+                    "relationship-added",
+                    None,
+                    None,
+                    Some(related_record_id),
+                    relationship_kind.map(record_relationship_kind_name),
+                    None,
+                ),
+                RecordUpdateKind::RelationshipRemoved {
+                    related_record_id,
+                    relationship_kind,
+                } => (
+                    "relationship-removed",
+                    None,
+                    None,
+                    Some(related_record_id),
+                    relationship_kind.map(record_relationship_kind_name),
+                    None,
+                ),
+                RecordUpdateKind::CommentAdded { comment_id } => {
+                    ("comment-added", None, None, None, None, Some(comment_id.0))
+                }
+                RecordUpdateKind::CommentDeleted { comment_id } => (
+                    "comment-deleted",
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(comment_id.0),
+                ),
+            };
         Self {
             id: update.id.0,
             created_at_millis: update.created_at_millis,
@@ -653,10 +672,20 @@ impl From<RecordUpdate> for RecordUpdateResponse {
             from_status,
             to_status,
             related_record_id,
+            relationship_kind,
             comment_id,
         }
     }
 }
+fn record_relationship_kind_name(kind: RecordRelationshipKind) -> String {
+    match kind {
+        RecordRelationshipKind::ParentChild => "parent-child",
+        RecordRelationshipKind::DependsOn => "depends-on",
+        RecordRelationshipKind::GeneratedBy => "generated-by",
+    }
+    .into()
+}
+
 fn task_kind_name(task_kind: TaskKind) -> String {
     match task_kind {
         TaskKind::Research => "research",
