@@ -264,6 +264,62 @@ done, or other observed agent states only drive durable assignment
 reconciliation. Completion remains an explicit Forge Task action authorized by
 the assignment capability or a human workflow action.
 
+## Managed Worktree release handoff
+
+This release replaces the unsupported deployed legacy worktree surface. Do not
+use its `--path` or `--copy-manifest` arguments and do not migrate its existing
+state: Forge reports that state as unsupported and never adopts it
+automatically.
+
+A **Managed Worktree** is Forge's durable checkout for one in-progress Task
+scoped to exactly one Project. Forge creates it at
+`<worktree-root>/<project-slug>/<task-id>` and retains one Worktree Claim for
+that Task. Set the user-wide Worktree Root before creating the first checkout;
+the configured value is visible through the daemon-backed CLI:
+
+```sh
+forge config set worktreeRoot "$HOME/.forge/worktrees"
+forge config get worktreeRoot
+```
+
+Create a checkout with an explicit branch and base, then inspect or remove it:
+
+```sh
+forge worktree create 42 --branch task-42 --base main
+forge worktree info 42
+forge worktree list
+forge worktree remove 42
+```
+
+All worktree commands accept `--json`. `forge worktree list --all` includes
+claims that require attention. `forge worktree doctor` diagnoses those claims;
+only `forge worktree doctor --repair` performs repair. Ordinary removal is
+local and offline and refuses dirty checkouts, missing or invalid Git metadata,
+unresolvable upstreams, and local commits ahead of upstream. Behind or
+diverged status is informational. Inspect the ordered `blockers` and
+`removable` fields from `info`, `list`, or `doctor`; use `remove --force` only
+after deliberately accepting the reported risk.
+
+A Project Setup Hook is optional and runs in the new checkout through the
+platform shell. It receives `FORGE_PROJECT_SLUG`, `FORGE_RECORD_ID`,
+`FORGE_WORKTREE_PATH`, `FORGE_BRANCH`, and `FORGE_BASE`. A nonzero exit rolls
+back the checkout and claim; hook output is not persisted. Configure or remove
+the hook with:
+
+```sh
+forge project setup-hook set --project alpha 'cargo fetch'
+forge project setup-hook clear --project alpha
+```
+
+A claim moves from `reserving` to `active`. If creation rollback or removal is
+incomplete, it becomes `cleanup-required`; do not try to create a second
+checkout or bypass the claim. Use `forge worktree doctor` to obtain the
+recovery facts and explicitly repair or force-remove only when appropriate.
+
+Release verification completed with `cargo fmt --check`,
+`cargo clippy --workspace --all-targets -- -D warnings`, `cargo test
+--workspace`, and `git diff --check`.
+
 ## Browser and RPC access
 
 Open <http://127.0.0.1:45003/> in a browser. The page is server-rendered and

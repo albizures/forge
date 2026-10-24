@@ -132,8 +132,24 @@ _Avoid_: record agent metadata, agent link
 An opaque, revocable credential Forge issues for one open Agent Assignment. It grants only that Assignment's permitted agent-initiated operations through the Forge daemon, which is the sole authorization gateway; it is not protection against a hostile process running as the same OS user.
 _Avoid_: agent token, agent credential
 
+**Record Update Subscription**:
+A durable, leased request owned and authorized by one Agent Assignment to be notified when matching Record Updates are written for explicitly named Records. It survives a transient delivery-connection loss but is removed when its lease expires or its owning Agent Assignment is retired.
+_Avoid_: event subscription, agent session subscription
+
+**Subscription Delivery**:
+The connection-scoped transport of a Record Update Subscription's notifications. V1 uses server-sent events behind a transport adapter so a future transport may replace it without changing subscription semantics. Notifications use a compact Record Update envelope and are at-least-once; subscribers reconcile from Forge's authoritative reads.
+_Avoid_: subscription, event stream
+
+**Subscription Cursor**:
+The global Record Update Identifier a subscriber supplies to resume a Record Update Subscription. Forge replays matching later updates before live delivery; an invalid or unavailable cursor requires the subscriber to reconcile.
+_Avoid_: offset, checkpoint
+
+**Subscription Lease**:
+The renewable time-bounded validity of a Record Update Subscription. Opening Subscription Delivery validates but does not renew the lease.
+_Avoid_: heartbeat, connection timeout
+
 **Assignment Context**:
-The bounded Forge information an Agent Assignment may read: its Task and Records directly related to that Task, including its parent Spec, but not sibling Tasks or transitive relationship traversal.
+The bounded Forge information an Agent Assignment may read: its assigned Record and directly related Records. A Child Record assignment may read its Parent Record but not sibling Child Records; a Parent Record assignment may read its direct Child Records. It does not include transitive relationship traversal.
 _Avoid_: project visibility, record graph access
 
 **Agent Profile**:
