@@ -1672,12 +1672,16 @@ mod tests {
 
     use axum::{
         body::{Body, to_bytes},
+        extract::ConnectInfo,
         http::{Request, StatusCode, header},
         response::{IntoResponse, Sse},
     };
     use forge_app::{
-        Application, Project, RecordStatus, RecordUpdate, RecordUpdateEnvelope, RecordUpdateId,
-        RecordUpdateKind, RecordUpdateSubscriptionId, RegistrationError, RepositoryInspector,
+        AgentDispatchRepository, Application, NewAgentAssignment, NewRecord,
+        NewRecordUpdateSubscription, NewTypedRecord, Project, ProjectRepository, RecordRepository,
+        RecordStatus, RecordType, RecordUpdate, RecordUpdateEnvelope, RecordUpdateId,
+        RecordUpdateKind, RecordUpdateSubscriptionId, RecordUpdateSubscriptionRepository,
+        RegistrationError, RepositoryInspector,
     };
     use forge_rpc::{
         DoneRecordRequest, EditRecordRequest, ListRecordsRequest, OpenRecordRequest,
@@ -1686,6 +1690,7 @@ mod tests {
         RegisterProjectRequest, SystemApiClient, SystemApiServer,
     };
     use forge_store::SqliteProjectRepository;
+    use futures_util::StreamExt;
     use jsonrpsee::http_client::HttpClientBuilder;
     use tower::ServiceExt;
 
@@ -1773,6 +1778,103 @@ mod tests {
             Box::new(SqliteProjectRepository::in_memory().unwrap()),
             Box::new(TestInspector),
         )
+    }
+
+    struct SubscriptionTestDaemon {
+        daemon: Daemon,
+        database_path: PathBuf,
+    }
+
+    impl SubscriptionTestDaemon {
+        fn daemon(&self) -> Daemon {
+            self.daemon.clone()
+        }
+    }
+
+    impl Drop for SubscriptionTestDaemon {
+        fn drop(&mut self) {
+            let daemon = std::mem::replace(&mut self.daemon, Daemon::new(test_application()));
+            drop(daemon);
+            let _ = std::fs::remove_file(&self.database_path);
+        }
+    }
+
+    fn subscription_test_daemon() -> (SubscriptionTestDaemon, String, u64, u64) {
+        let database_path = std::env::temp_dir().join(format!(
+            "forge-subscription-endpoint-{}-{}.sqlite3",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = SqliteProjectRepository::open(&database_path).unwrap();
+        store
+            .register(&Project {
+                slug: "alpha".into(),
+                registered_folder: PathBuf::from("/repos/alpha"),
+                origin_url: "https://example.test/alpha.git".into(),
+            })
+            .unwrap();
+        let owner = store
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Task,
+                body: "owner".into(),
+                project_slugs: vec!["alpha".into()],
+            })
+            .unwrap();
+        let target = store
+            .open_record(&NewRecord {
+                body: "target".into(),
+                project_slugs: vec!["alpha".into()],
+            })
+            .unwrap();
+        store
+            .create_agent_assignment(&NewAgentAssignment {
+                id: "owner-assignment".into(),
+                record_id: owner.id,
+                project_slug: "alpha".into(),
+                profile_revision: 1,
+            })
+            .unwrap();
+        let subscription = store
+            .create_record_update_subscription(&NewRecordUpdateSubscription {
+                assignment_id: "owner-assignment".into(),
+                target_record_ids: vec![target.id],
+                kind_filters: vec![],
+            })
+            .unwrap();
+        store.edit_record(target.id, "delivered update").unwrap();
+        drop(store);
+        let records = SqliteProjectRepository::open(&database_path).unwrap();
+        let dispatch = SqliteProjectRepository::open(&database_path).unwrap();
+        (
+            SubscriptionTestDaemon {
+                daemon: Daemon::new(Application::with_agent_dispatch(
+                    Box::new(records),
+                    Box::new(dispatch),
+                    Box::new(super::ServerAgentDispatchAdapterFactory {
+                        herdr: super::HerdrAdapterFactory::from_configuration_store(
+                            database_path.clone(),
+                        ),
+                    }),
+                    Box::new(TestInspector),
+                )),
+                database_path,
+            },
+            "owner-assignment".into(),
+            subscription.id.0,
+            subscription.start_cursor.0,
+        )
+    }
+
+    fn loopback_request(uri: String) -> Request<Body> {
+        let mut request = Request::builder().uri(uri).body(Body::empty()).unwrap();
+        request.extensions_mut().insert(ConnectInfo(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            45678,
+        )));
+        request
     }
 
     #[test]
@@ -2158,6 +2260,87 @@ mod tests {
         );
 
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn subscription_endpoint_replays_framed_updates_and_enforces_cursor_guards() {
+        let (fixture, assignment_id, subscription_id, start_cursor) = subscription_test_daemon();
+        let daemon = fixture.daemon();
+        let endpoint = format!(
+            "/v1/agent-assignments/{assignment_id}/record-update-subscriptions/{subscription_id}/events"
+        );
+        let response = router(daemon.clone())
+            .oneshot(loopback_request(endpoint.clone()))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "text/event-stream"
+        );
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            "no-cache, no-transform"
+        );
+        assert_eq!(response.headers()["x-accel-buffering"], "no");
+        let mut stream = response.into_body().into_data_stream();
+        let retry = String::from_utf8(stream.next().await.unwrap().unwrap().to_vec()).unwrap();
+        let update = String::from_utf8(stream.next().await.unwrap().unwrap().to_vec()).unwrap();
+        assert_eq!(retry, "retry: 1000\n\n");
+        assert!(update.starts_with("id: "));
+        assert!(update.contains("event: record-update\n"));
+        assert!(update.contains(&format!("\"subscription_id\":{subscription_id}")));
+        assert!(update.contains("\"kind\":\"body-edited\""));
+        assert!(update.ends_with("\n\n"));
+
+        let response = router(daemon.clone())
+            .oneshot(loopback_request(format!(
+                "{endpoint}?after={}",
+                start_cursor + 1
+            )))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let mut conflict = loopback_request(format!("{endpoint}?after={}", start_cursor + 1));
+        conflict
+            .headers_mut()
+            .insert("last-event-id", start_cursor.to_string().parse().unwrap());
+        assert_eq!(
+            router(daemon.clone())
+                .oneshot(conflict)
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+
+        let response = router(daemon)
+            .oneshot(loopback_request(format!("{endpoint}?after=0")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+    }
+
+    #[tokio::test]
+    async fn subscription_endpoint_rejects_non_loopback_peers_before_delivery() {
+        let (fixture, assignment_id, subscription_id, _) = subscription_test_daemon();
+        let daemon = fixture.daemon();
+        let mut request = Request::builder()
+            .uri(format!(
+                "/v1/agent-assignments/{assignment_id}/record-update-subscriptions/{subscription_id}/events"
+            ))
+            .body(Body::empty())
+            .unwrap();
+        request.extensions_mut().insert(ConnectInfo(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1)),
+            45678,
+        )));
+        assert_eq!(
+            router(daemon).oneshot(request).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
     }
 
     #[tokio::test]
