@@ -2275,6 +2275,37 @@ mod tests {
         }
         fn start_record(&self, id: u64) -> Result<Record, RegistrationError> {
             let mut records = self.records.lock().unwrap();
+            let unfinished = records
+                .iter()
+                .find(|record| record.id == id)
+                .ok_or_else(|| RegistrationError::new("record-not-found", "Record does not exist"))?
+                .relationships
+                .iter()
+                .filter(|relationship| {
+                    relationship.kind == RecordRelationshipKind::DependsOn
+                        && relationship.from_id == id
+                })
+                .filter_map(|relationship| {
+                    records
+                        .iter()
+                        .find(|record| record.id == relationship.to_id)
+                        .filter(|record| record.status != RecordStatus::Done)
+                        .map(|record| record.id)
+                })
+                .collect::<Vec<_>>();
+            if !unfinished.is_empty() {
+                return Err(RegistrationError::new(
+                    "dependencies-not-done",
+                    format!(
+                        "direct prerequisite Records are not Done: {}",
+                        unfinished
+                            .iter()
+                            .map(u64::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                ));
+            }
             let record = records
                 .iter_mut()
                 .find(|record| record.id == id)
@@ -2324,18 +2355,13 @@ mod tests {
             records[index].completion_resolution = completion_resolution.map(str::to_owned);
             Ok(records[index].clone())
         }
+        #[allow(clippy::too_many_lines)]
         fn relate_records(
             &self,
             child_id: u64,
             parent_id: u64,
             kind: RecordRelationshipKind,
         ) -> Result<Record, RegistrationError> {
-            if kind != RecordRelationshipKind::ParentChild {
-                return Err(RegistrationError::new(
-                    "invalid-relationship",
-                    "test repository supports parent/child only",
-                ));
-            }
             if child_id == parent_id {
                 return Err(RegistrationError::new(
                     "invalid-relationship",
@@ -2355,6 +2381,35 @@ mod tests {
                 .ok_or_else(|| {
                     RegistrationError::new("record-not-found", "Record does not exist")
                 })?;
+            if kind == RecordRelationshipKind::DependsOn {
+                if records[child].status != RecordStatus::Open {
+                    return Err(RegistrationError::new(
+                        "blocked-record-not-open",
+                        "a dependency may change only while its blocked Record is Open",
+                    ));
+                }
+                if records[child].record_type != records[parent].record_type
+                    || !matches!(
+                        records[child].record_type,
+                        RecordType::Task | RecordType::Spec
+                    )
+                {
+                    return Err(RegistrationError::new(
+                        "invalid-relationship",
+                        "depends-on requires same-type Task or Spec Records",
+                    ));
+                }
+                let relationship = RecordRelationship {
+                    kind,
+                    from_id: child_id,
+                    to_id: parent_id,
+                    parent_id: 0,
+                    child_id: 0,
+                };
+                records[child].relationships.push(relationship.clone());
+                records[parent].relationships.push(relationship);
+                return Ok(records[child].clone());
+            }
             if records[child].record_type != RecordType::Generic
                 || !matches!(
                     records[parent].record_type,
@@ -2600,6 +2655,30 @@ mod tests {
         assert_eq!(
             app.done_record(spec.id, None).unwrap_err().code,
             "children-not-done"
+        );
+    }
+
+    #[test]
+    fn application_rejects_starts_with_unfinished_direct_prerequisites() {
+        let app = application();
+        let blocked = app.open_task("blocked", None).unwrap();
+        let prerequisite = app.open_task("prerequisite", None).unwrap();
+        app.relate_records(
+            blocked.id,
+            prerequisite.id,
+            RecordRelationshipKind::DependsOn,
+        )
+        .unwrap();
+
+        assert_eq!(
+            app.start_record(blocked.id).unwrap_err().code,
+            "dependencies-not-done"
+        );
+        app.start_record(prerequisite.id).unwrap();
+        app.done_record(prerequisite.id, None).unwrap();
+        assert_eq!(
+            app.start_record(blocked.id).unwrap().status,
+            RecordStatus::InProgress
         );
     }
 

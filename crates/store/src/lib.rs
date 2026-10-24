@@ -722,7 +722,35 @@ impl RecordRepository for SqliteProjectRepository {
     }
 
     fn start_record(&self, id: u64) -> Result<Record, RegistrationError> {
-        transition_record(&self.connection, id, "open", "in_progress", None)
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        let transaction = connection.transaction().map_err(storage_error)?;
+        let unfinished = unfinished_prerequisite_ids(&transaction, id)?;
+        if !unfinished.is_empty() {
+            return Err(dependencies_not_done_error(&unfinished));
+        }
+        let updated = transaction
+            .execute(
+                "UPDATE records SET status = 'in_progress' WHERE id = ?1 AND status = 'open'",
+                [id.cast_signed()],
+            )
+            .map_err(storage_error)?;
+        if updated == 0 {
+            return record_or_transition_error(&transaction, id);
+        }
+        insert_update(
+            &transaction,
+            id,
+            RecordUpdateKind::StatusTransition {
+                from: RecordStatus::Open,
+                to: RecordStatus::InProgress,
+            },
+        )?;
+        let record = load_record(&transaction, id)?;
+        transaction.commit().map_err(storage_error)?;
+        Ok(record)
     }
 
     fn done_record(
@@ -1465,7 +1493,7 @@ impl AgentDispatchRepository for SqliteProjectRepository {
             if used >= limit {
                 return Ok(None);
             }
-            let record_id = connection.query_row("SELECT record.id FROM records record JOIN record_projects scope ON scope.record_id = record.id WHERE record.record_type = 'task' AND (record.status = 'open' OR (record.status = 'in_progress' AND EXISTS (SELECT 1 FROM agent_assignments prior WHERE prior.record_id = record.id AND prior.closed_at_millis IS NOT NULL))) AND scope.project_slug = ?1 AND (SELECT COUNT(*) FROM record_projects only_scope WHERE only_scope.record_id = record.id) = 1 AND NOT EXISTS (SELECT 1 FROM agent_assignments assignment WHERE assignment.record_id = record.id AND assignment.closed_at_millis IS NULL) ORDER BY record.id LIMIT 1", [project_slug], |row| row.get::<_, i64>(0).map(i64::cast_unsigned)).optional().map_err(storage_error)?;
+            let record_id = connection.query_row("SELECT record.id FROM records record JOIN record_projects scope ON scope.record_id = record.id WHERE record.record_type = 'task' AND (record.status = 'open' OR (record.status = 'in_progress' AND EXISTS (SELECT 1 FROM agent_assignments prior WHERE prior.record_id = record.id AND prior.closed_at_millis IS NOT NULL))) AND scope.project_slug = ?1 AND (SELECT COUNT(*) FROM record_projects only_scope WHERE only_scope.record_id = record.id) = 1 AND NOT EXISTS (SELECT 1 FROM agent_assignments assignment WHERE assignment.record_id = record.id AND assignment.closed_at_millis IS NULL) AND NOT EXISTS (SELECT 1 FROM record_relationships dependency JOIN records prerequisite ON prerequisite.id = dependency.to_id WHERE dependency.from_id = record.id AND dependency.kind = 'depends-on' AND prerequisite.status != 'done') ORDER BY record.id LIMIT 1", [project_slug], |row| row.get::<_, i64>(0).map(i64::cast_unsigned)).optional().map_err(storage_error)?;
             let Some(record_id) = record_id else {
                 return Ok(None);
             };
@@ -2265,44 +2293,32 @@ fn update_from_row_at(
     })
 }
 
-fn transition_record(
-    connection: &Mutex<Connection>,
+fn unfinished_prerequisite_ids(
+    connection: &Connection,
     id: u64,
-    from: &str,
-    to: &str,
-    completion_resolution: Option<&str>,
-) -> Result<Record, RegistrationError> {
-    let mut connection = connection
-        .lock()
-        .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
-    let transaction = connection.transaction().map_err(storage_error)?;
-    let updated = transaction
-        .execute(
-            "UPDATE records SET status = ?1, completion_resolution = ?2 WHERE id = ?3 AND status = ?4",
-            params![to, completion_resolution, id.cast_signed(), from],
+) -> Result<Vec<u64>, RegistrationError> {
+    connection
+        .prepare(
+            "SELECT prerequisite.id FROM record_relationships dependency JOIN records prerequisite ON prerequisite.id = dependency.to_id WHERE dependency.from_id = ?1 AND dependency.kind = 'depends-on' AND prerequisite.status != 'done' ORDER BY prerequisite.id",
         )
-        .map_err(storage_error)?;
-    if updated == 0 {
-        return record_or_transition_error(&transaction, id);
-    }
-    let from = if from == "open" {
-        RecordStatus::Open
-    } else {
-        RecordStatus::InProgress
-    };
-    let to = if to == "in_progress" {
-        RecordStatus::InProgress
-    } else {
-        RecordStatus::Done
-    };
-    insert_update(
-        &transaction,
-        id,
-        RecordUpdateKind::StatusTransition { from, to },
-    )?;
-    let record = load_record(&transaction, id)?;
-    transaction.commit().map_err(storage_error)?;
-    Ok(record)
+        .map_err(storage_error)?
+        .query_map([id.cast_signed()], |row| row.get::<_, i64>(0).map(i64::cast_unsigned))
+        .map_err(storage_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(storage_error)
+}
+
+fn dependencies_not_done_error(ids: &[u64]) -> RegistrationError {
+    RegistrationError::new(
+        "dependencies-not-done",
+        format!(
+            "direct prerequisite Records are not Done: {}",
+            ids.iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    )
 }
 
 fn record_or_transition_error(
@@ -2621,6 +2637,8 @@ mod tests {
                 .code,
             "relationship-cycle"
         );
+        store.start_record(prerequisite.id).unwrap();
+        store.done_record(prerequisite.id, None).unwrap();
         store.start_record(blocked.id).unwrap();
         assert_eq!(
             store
@@ -2639,6 +2657,47 @@ mod tests {
                 .unwrap_err()
                 .code,
             "blocked-record-not-open"
+        );
+    }
+
+    #[test]
+    fn dependencies_gate_starts_until_each_direct_prerequisite_is_done() {
+        let store = SqliteProjectRepository::in_memory().unwrap();
+        let task = |body: &str| NewTypedRecord {
+            record_type: RecordType::Task,
+            body: body.into(),
+            project_slugs: vec![],
+        };
+        let blocked = store.open_typed_record(&task("blocked")).unwrap();
+        let first = store.open_typed_record(&task("first")).unwrap();
+        let second = store.open_typed_record(&task("second")).unwrap();
+        store
+            .relate_records(blocked.id, second.id, RecordRelationshipKind::DependsOn)
+            .unwrap();
+        store
+            .relate_records(blocked.id, first.id, RecordRelationshipKind::DependsOn)
+            .unwrap();
+
+        let error = store.start_record(blocked.id).unwrap_err();
+        assert_eq!(error.code, "dependencies-not-done");
+        assert_eq!(
+            error.message,
+            format!(
+                "direct prerequisite Records are not Done: {}, {}",
+                first.id, second.id
+            )
+        );
+        store.start_record(first.id).unwrap();
+        store.done_record(first.id, None).unwrap();
+        assert_eq!(
+            store.start_record(blocked.id).unwrap_err().code,
+            "dependencies-not-done"
+        );
+        store.start_record(second.id).unwrap();
+        store.done_record(second.id, None).unwrap();
+        assert_eq!(
+            store.start_record(blocked.id).unwrap().status,
+            RecordStatus::InProgress
         );
     }
 
@@ -3612,6 +3671,41 @@ mod tests {
         assert_eq!(
             store.list_agent_assignments(task.id).unwrap()[0].state,
             forge_app::AgentAssignmentState::Working
+        );
+    }
+
+    #[test]
+    fn agent_dispatch_skips_blocked_tasks_and_claims_eligible_work() {
+        let store = SqliteProjectRepository::in_memory().unwrap();
+        store.register(&project("alpha", "/repos/alpha")).unwrap();
+        let task = |body: &str| NewTypedRecord {
+            record_type: RecordType::Task,
+            body: body.into(),
+            project_slugs: vec!["alpha".into()],
+        };
+        let blocked = store.open_typed_record(&task("blocked")).unwrap();
+        let prerequisite = store.open_typed_record(&task("prerequisite")).unwrap();
+        let eligible = store.open_typed_record(&task("eligible")).unwrap();
+        store
+            .relate_records(
+                blocked.id,
+                prerequisite.id,
+                RecordRelationshipKind::DependsOn,
+            )
+            .unwrap();
+
+        let assignment = store
+            .claim_next_agent_assignment("alpha", "claim-1")
+            .unwrap()
+            .expect("eligible work must not be hidden by a blocked Task");
+        assert_eq!(assignment.record_id, prerequisite.id);
+        assert_eq!(
+            store.show_record(blocked.id).unwrap().status,
+            RecordStatus::Open
+        );
+        assert_eq!(
+            store.show_record(eligible.id).unwrap().status,
+            RecordStatus::Open
         );
     }
 
