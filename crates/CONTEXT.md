@@ -72,6 +72,26 @@ _Avoid_: project, remote repository
 A checked-out folder of a Repository. Only a main Worktree may be registered as a Project; a Repository's other Worktrees are workspaces of that Project rather than separate Projects.
 _Avoid_: project folder
 
+**Managed Worktree**:
+A Worktree created and durably tracked by Forge for an eligible Record under its Project.
+_Avoid_: task checkout, Forge workspace
+
+**Worktree Claim**:
+Forge's exclusive durable association of one eligible Record with one Managed Worktree. The claim prevents a second Managed Worktree for that Record.
+_Avoid_: worktree assignment, checkout lock
+
+**Worktree Root**:
+The user-configured folder beneath which Forge places Managed Worktrees by Project Slug and Record Identifier.
+_Avoid_: worktree base, checkout directory
+
+**Project Setup Hook**:
+An optional Project-configured shell command run in a newly created Managed Worktree.
+_Avoid_: install command, bootstrap script
+
+**Worktree Safety Assessment**:
+Forge's local, offline evaluation of whether a Managed Worktree can be ordinarily removed and the facts supporting that result.
+_Avoid_: cleanup check, removal status
+
 **Registered Folder**:
 The main Worktree folder associated with a Project during registration. Registered Folders cannot be equal to, ancestors of, or descendants of another Project's Registered Folder.
 _Avoid_: project folder

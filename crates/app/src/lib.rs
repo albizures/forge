@@ -164,6 +164,7 @@ pub trait RepositoryInspector: Send + Sync {
 }
 
 /// Persistence boundary owned by the application.
+#[allow(clippy::missing_errors_doc)]
 pub trait ProjectRepository: Send + Sync {
     /// Returns the Project registered under `slug`.
     fn project(&self, slug: &str) -> Result<Project, RegistrationError>;
@@ -179,6 +180,67 @@ pub trait ProjectRepository: Send + Sync {
     ///
     /// Returns a user-facing error when no Project contains the folder.
     fn find_containing(&self, folder: &Path) -> Result<Project, RegistrationError>;
+}
+
+/// Durable state of a Worktree Claim.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorktreeClaimState {
+    Reserving,
+    Active,
+    CleanupRequired,
+}
+
+/// Forge's exclusive durable association of one Record with a Managed Worktree.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorktreeClaim {
+    pub record_id: u64,
+    pub project_slug: String,
+    pub path: PathBuf,
+    pub state: WorktreeClaimState,
+}
+
+/// Returns whether a Record may own a Managed Worktree.
+#[must_use]
+pub fn is_worktree_eligible(record: &Record) -> bool {
+    record.record_type == RecordType::Task
+        && record.status == RecordStatus::InProgress
+        && record.project_slugs.len() == 1
+}
+
+/// Derives the only path Forge may use for a Record's Managed Worktree.
+#[must_use]
+pub fn managed_worktree_path(root: &Path, project_slug: &str, record_id: u64) -> PathBuf {
+    root.join(project_slug).join(record_id.to_string())
+}
+
+/// Persistence boundary for managed-worktree configuration and claims.
+#[allow(clippy::missing_errors_doc)]
+pub trait ManagedWorktreeRepository: RecordRepository {
+    /// Sets or clears the absolute user-wide Worktree Root.
+    fn set_worktree_root(&self, root: Option<&Path>) -> Result<(), RegistrationError>;
+    /// Returns the configured user-wide Worktree Root.
+    fn worktree_root(&self) -> Result<Option<PathBuf>, RegistrationError>;
+    /// Sets or clears a Project Setup Hook.
+    fn set_project_setup_hook(
+        &self,
+        project_slug: &str,
+        hook: Option<&str>,
+    ) -> Result<(), RegistrationError>;
+    /// Returns a Project's Setup Hook.
+    fn project_setup_hook(&self, project_slug: &str) -> Result<Option<String>, RegistrationError>;
+    /// Atomically reserves the sole Claim for an eligible Record.
+    fn reserve_worktree_claim(&self, record_id: u64) -> Result<WorktreeClaim, RegistrationError>;
+    /// Marks a reserved Claim active after its Managed Worktree exists.
+    fn activate_worktree_claim(&self, record_id: u64) -> Result<WorktreeClaim, RegistrationError>;
+    /// Marks a Claim for recovery-oriented cleanup without deleting its evidence.
+    fn require_worktree_claim_cleanup(
+        &self,
+        record_id: u64,
+    ) -> Result<WorktreeClaim, RegistrationError>;
+    /// Returns one Claim, including Claims retained after Record completion.
+    fn worktree_claim(&self, record_id: u64) -> Result<Option<WorktreeClaim>, RegistrationError>;
+    /// Lists Claims which need recovery work.
+    fn worktree_claims_requiring_cleanup(&self) -> Result<Vec<WorktreeClaim>, RegistrationError>;
 }
 
 /// Persistence operations for generic Records.
@@ -1821,6 +1883,29 @@ mod tests {
             }),
             Box::new(Inspector),
         )
+    }
+
+    #[test]
+    fn worktree_eligibility_requires_an_in_progress_single_project_task() {
+        let mut record = Record {
+            id: 7,
+            record_type: RecordType::Task,
+            body: "task".into(),
+            project_slugs: vec!["alpha".into()],
+            status: RecordStatus::InProgress,
+            completion_resolution: None,
+            relationships: vec![],
+        };
+        assert!(is_worktree_eligible(&record));
+        assert_eq!(
+            managed_worktree_path(Path::new("/worktrees"), "alpha", record.id),
+            PathBuf::from("/worktrees/alpha/7")
+        );
+        record.status = RecordStatus::Done;
+        assert!(!is_worktree_eligible(&record));
+        record.status = RecordStatus::InProgress;
+        record.project_slugs.push("beta".into());
+        assert!(!is_worktree_eligible(&record));
     }
 
     #[test]

@@ -9,11 +9,12 @@ use std::{
 use forge_app::{
     AgentAssignment, AgentAssignmentClosureReason, AgentAssignmentResource, AgentAssignmentState,
     AgentDispatchRepository, AgentProfile, AssignmentAuthorizationAudit,
-    AssignmentAuthorizationOperation, AssignmentAuthorizationOutcome, NewAgentAssignment,
-    NewAgentAssignmentResource, NewRecord, NewTypedRecord, Project, ProjectRepository, Record,
-    RecordComment, RecordCommentId, RecordListFilter, RecordRelationship, RecordRelationshipKind,
-    RecordRepository, RecordStatus, RecordType, RecordUpdate, RecordUpdateId, RecordUpdateKind,
-    RegistrationError,
+    AssignmentAuthorizationOperation, AssignmentAuthorizationOutcome, ManagedWorktreeRepository,
+    NewAgentAssignment, NewAgentAssignmentResource, NewRecord, NewTypedRecord, Project,
+    ProjectRepository, Record, RecordComment, RecordCommentId, RecordListFilter,
+    RecordRelationship, RecordRelationshipKind, RecordRepository, RecordStatus, RecordType,
+    RecordUpdate, RecordUpdateId, RecordUpdateKind, RegistrationError, WorktreeClaim,
+    WorktreeClaimState, is_worktree_eligible, managed_worktree_path,
 };
 use rusqlite::{Connection, ErrorCode, OptionalExtension, params};
 
@@ -136,6 +137,22 @@ impl SqliteProjectRepository {
                 reason TEXT NOT NULL,
                 correlation_id TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS managed_worktree_configuration (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                worktree_root TEXT
+            );
+            CREATE TABLE IF NOT EXISTS project_managed_worktree_configuration (
+                project_slug TEXT PRIMARY KEY NOT NULL REFERENCES projects(slug),
+                setup_hook TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS worktree_claims (
+                record_id INTEGER PRIMARY KEY NOT NULL REFERENCES records(id),
+                project_slug TEXT NOT NULL REFERENCES projects(slug),
+                path TEXT NOT NULL UNIQUE,
+                state TEXT NOT NULL CHECK (state IN ('reserving', 'active', 'cleanup-required'))
+            );
+            CREATE INDEX IF NOT EXISTS worktree_claims_requiring_cleanup
+                ON worktree_claims(state) WHERE state = 'cleanup-required';
             CREATE TABLE IF NOT EXISTS agent_dispatch_configuration (
                 singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                 herdr_socket_path TEXT,
@@ -152,6 +169,7 @@ impl SqliteProjectRepository {
         migrate_record_type_schema(&connection)?;
         migrate_record_updates_schema(&connection)?;
         migrate_agent_assignment_schema(&connection)?;
+        migrate_managed_worktree_schema(&connection)?;
         seed_task_agent_profile(&connection)?;
         Ok(Self {
             connection: Mutex::new(connection),
@@ -274,6 +292,188 @@ impl ProjectRepository for SqliteProjectRepository {
                     ),
                 )
             })
+    }
+}
+
+impl ManagedWorktreeRepository for SqliteProjectRepository {
+    fn set_worktree_root(&self, root: Option<&Path>) -> Result<(), RegistrationError> {
+        if root.is_some_and(|root| !root.is_absolute()) {
+            return Err(RegistrationError::new(
+                "invalid-worktree-root",
+                "Worktree Root must be an absolute path",
+            ));
+        }
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        connection.execute(
+            "INSERT INTO managed_worktree_configuration (singleton, worktree_root) VALUES (1, ?1) ON CONFLICT(singleton) DO UPDATE SET worktree_root = excluded.worktree_root",
+            [root.map(|path| path.to_string_lossy().into_owned())],
+        ).map_err(storage_error)?;
+        Ok(())
+    }
+
+    fn worktree_root(&self) -> Result<Option<PathBuf>, RegistrationError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        connection
+            .query_row(
+                "SELECT worktree_root FROM managed_worktree_configuration WHERE singleton = 1",
+                [],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map_err(storage_error)
+            .map(|root| root.flatten().map(PathBuf::from))
+    }
+
+    fn set_project_setup_hook(
+        &self,
+        project_slug: &str,
+        hook: Option<&str>,
+    ) -> Result<(), RegistrationError> {
+        if hook.is_some_and(|hook| hook.trim().is_empty()) {
+            return Err(RegistrationError::new(
+                "invalid-setup-hook",
+                "Project Setup Hook must not be blank",
+            ));
+        }
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        let exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM projects WHERE slug = ?1)",
+                [project_slug],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        if !exists {
+            return Err(RegistrationError::new(
+                "project-not-found",
+                "Project does not exist",
+            ));
+        }
+        if let Some(hook) = hook {
+            connection.execute("INSERT INTO project_managed_worktree_configuration (project_slug, setup_hook) VALUES (?1, ?2) ON CONFLICT(project_slug) DO UPDATE SET setup_hook = excluded.setup_hook", params![project_slug, hook]).map_err(storage_error)?;
+        } else {
+            connection
+                .execute(
+                    "DELETE FROM project_managed_worktree_configuration WHERE project_slug = ?1",
+                    [project_slug],
+                )
+                .map_err(storage_error)?;
+        }
+        Ok(())
+    }
+
+    fn project_setup_hook(&self, project_slug: &str) -> Result<Option<String>, RegistrationError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        let exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM projects WHERE slug = ?1)",
+                [project_slug],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        if !exists {
+            return Err(RegistrationError::new(
+                "project-not-found",
+                "Project does not exist",
+            ));
+        }
+        connection.query_row("SELECT setup_hook FROM project_managed_worktree_configuration WHERE project_slug = ?1", [project_slug], |row| row.get(0)).optional().map_err(storage_error)
+    }
+
+    fn reserve_worktree_claim(&self, record_id: u64) -> Result<WorktreeClaim, RegistrationError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        let transaction = connection.transaction().map_err(storage_error)?;
+        if let Some(claim) = load_worktree_claim(&transaction, record_id)? {
+            return Ok(claim);
+        }
+        let record = load_record(&transaction, record_id)?;
+        if !is_worktree_eligible(&record) {
+            return Err(RegistrationError::new(
+                "worktree-ineligible-record",
+                "a Managed Worktree requires an In Progress Task scoped to exactly one Project",
+            ));
+        }
+        let root: Option<String> = transaction
+            .query_row(
+                "SELECT worktree_root FROM managed_worktree_configuration WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage_error)?
+            .flatten();
+        let root = root.ok_or_else(|| {
+            RegistrationError::new(
+                "worktree-root-unset",
+                "configure a Worktree Root before creating a Managed Worktree",
+            )
+        })?;
+        let project_slug = record
+            .project_slugs
+            .into_iter()
+            .next()
+            .expect("eligible Record has one Project");
+        let path = managed_worktree_path(Path::new(&root), &project_slug, record_id);
+        transaction.execute("INSERT INTO worktree_claims (record_id, project_slug, path, state) VALUES (?1, ?2, ?3, 'reserving')", params![record_id.cast_signed(), project_slug, path.to_string_lossy()]).map_err(|error| if matches!(error.sqlite_error_code(), Some(ErrorCode::ConstraintViolation)) { RegistrationError::new("worktree-claim-exists", "Record already has a Worktree Claim") } else { storage_error(error) })?;
+        let claim =
+            load_worktree_claim(&transaction, record_id)?.expect("inserted Claim is visible");
+        transaction.commit().map_err(storage_error)?;
+        Ok(claim)
+    }
+
+    fn activate_worktree_claim(&self, record_id: u64) -> Result<WorktreeClaim, RegistrationError> {
+        transition_worktree_claim(&self.connection, record_id, "reserving", "active")
+    }
+
+    fn require_worktree_claim_cleanup(
+        &self,
+        record_id: u64,
+    ) -> Result<WorktreeClaim, RegistrationError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        let changed = connection.execute("UPDATE worktree_claims SET state = 'cleanup-required' WHERE record_id = ?1 AND state != 'cleanup-required'", [record_id.cast_signed()]).map_err(storage_error)?;
+        if changed == 0 && load_worktree_claim(&connection, record_id)?.is_none() {
+            return Err(RegistrationError::new(
+                "worktree-claim-not-found",
+                "Record has no Worktree Claim",
+            ));
+        }
+        load_worktree_claim(&connection, record_id)?.ok_or_else(|| {
+            RegistrationError::new("worktree-claim-not-found", "Record has no Worktree Claim")
+        })
+    }
+
+    fn worktree_claim(&self, record_id: u64) -> Result<Option<WorktreeClaim>, RegistrationError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        load_worktree_claim(&connection, record_id)
+    }
+
+    fn worktree_claims_requiring_cleanup(&self) -> Result<Vec<WorktreeClaim>, RegistrationError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        connection.prepare("SELECT record_id, project_slug, path, state FROM worktree_claims WHERE state = 'cleanup-required' ORDER BY record_id").map_err(storage_error)?.query_map([], worktree_claim_from_row).map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)
     }
 }
 
@@ -671,6 +871,86 @@ impl RecordRepository for SqliteProjectRepository {
             .collect::<Result<Vec<_>, _>>()
             .map_err(storage_error)
     }
+}
+
+fn worktree_claim_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorktreeClaim> {
+    let state: String = row.get(3)?;
+    let state = match state.as_str() {
+        "reserving" => WorktreeClaimState::Reserving,
+        "active" => WorktreeClaimState::Active,
+        "cleanup-required" => WorktreeClaimState::CleanupRequired,
+        _ => return Err(rusqlite::Error::InvalidQuery),
+    };
+    Ok(WorktreeClaim {
+        record_id: row.get::<_, i64>(0)?.cast_unsigned(),
+        project_slug: row.get(1)?,
+        path: PathBuf::from(row.get::<_, String>(2)?),
+        state,
+    })
+}
+
+fn load_worktree_claim(
+    connection: &Connection,
+    record_id: u64,
+) -> Result<Option<WorktreeClaim>, RegistrationError> {
+    connection
+        .query_row(
+            "SELECT record_id, project_slug, path, state FROM worktree_claims WHERE record_id = ?1",
+            [record_id.cast_signed()],
+            worktree_claim_from_row,
+        )
+        .optional()
+        .map_err(storage_error)
+}
+
+fn transition_worktree_claim(
+    connection: &Mutex<Connection>,
+    record_id: u64,
+    expected: &str,
+    next: &str,
+) -> Result<WorktreeClaim, RegistrationError> {
+    let connection = connection
+        .lock()
+        .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+    let changed = connection
+        .execute(
+            "UPDATE worktree_claims SET state = ?1 WHERE record_id = ?2 AND state = ?3",
+            params![next, record_id.cast_signed(), expected],
+        )
+        .map_err(storage_error)?;
+    if changed == 0 {
+        let claim = load_worktree_claim(&connection, record_id)?;
+        return match claim {
+            None => Err(RegistrationError::new(
+                "worktree-claim-not-found",
+                "Record has no Worktree Claim",
+            )),
+            Some(_) => Err(RegistrationError::new(
+                "invalid-worktree-claim-transition",
+                "Worktree Claim is not in the required state",
+            )),
+        };
+    }
+    load_worktree_claim(&connection, record_id)?.ok_or_else(|| {
+        RegistrationError::new("worktree-claim-not-found", "Record has no Worktree Claim")
+    })
+}
+
+fn migrate_managed_worktree_schema(connection: &Connection) -> Result<(), RegistrationError> {
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS managed_worktree_configuration (
+            singleton INTEGER PRIMARY KEY CHECK (singleton = 1), worktree_root TEXT
+        );
+        CREATE TABLE IF NOT EXISTS project_managed_worktree_configuration (
+            project_slug TEXT PRIMARY KEY NOT NULL REFERENCES projects(slug), setup_hook TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS worktree_claims (
+            record_id INTEGER PRIMARY KEY NOT NULL REFERENCES records(id),
+            project_slug TEXT NOT NULL REFERENCES projects(slug), path TEXT NOT NULL UNIQUE,
+            state TEXT NOT NULL CHECK (state IN ('reserving', 'active', 'cleanup-required'))
+        );
+        CREATE INDEX IF NOT EXISTS worktree_claims_requiring_cleanup ON worktree_claims(state) WHERE state = 'cleanup-required';",
+    ).map_err(storage_error)
 }
 
 fn migrate_agent_assignment_schema(connection: &Connection) -> Result<(), RegistrationError> {
@@ -1759,10 +2039,10 @@ fn storage_error(error: rusqlite::Error) -> RegistrationError {
 mod tests {
     use super::SqliteProjectRepository;
     use forge_app::{
-        AgentDispatchRepository, NewAgentAssignment, NewAgentAssignmentResource, NewRecord,
-        NewTypedRecord, Project, ProjectRepository, RecordListFilter, RecordRepository,
-        RecordStatus, RecordType, RecordUpdateKind, assignment_add_comment,
-        assignment_complete_task, assignment_context,
+        AgentDispatchRepository, ManagedWorktreeRepository, NewAgentAssignment,
+        NewAgentAssignmentResource, NewRecord, NewTypedRecord, Project, ProjectRepository,
+        RecordListFilter, RecordRepository, RecordStatus, RecordType, RecordUpdateKind,
+        assignment_add_comment, assignment_complete_task, assignment_context,
     };
     use std::{
         path::{Path, PathBuf},
@@ -2322,6 +2602,74 @@ mod tests {
                 .unwrap_err()
                 .code,
             "invalid-socket-path"
+        );
+    }
+
+    #[test]
+    fn persists_worktree_configuration_and_claim_lifecycle() {
+        let store = SqliteProjectRepository::in_memory().unwrap();
+        store.register(&project("alpha", "/repos/alpha")).unwrap();
+        assert_eq!(
+            store
+                .set_worktree_root(Some(Path::new("relative")))
+                .unwrap_err()
+                .code,
+            "invalid-worktree-root"
+        );
+        store
+            .set_worktree_root(Some(Path::new("/worktrees")))
+            .unwrap();
+        store
+            .set_project_setup_hook("alpha", Some("cargo test"))
+            .unwrap();
+        assert_eq!(
+            store.worktree_root().unwrap(),
+            Some(PathBuf::from("/worktrees"))
+        );
+        assert_eq!(
+            store.project_setup_hook("alpha").unwrap().as_deref(),
+            Some("cargo test")
+        );
+
+        let task = store
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Task,
+                body: "task".into(),
+                project_slugs: vec!["alpha".into()],
+            })
+            .unwrap();
+        assert_eq!(
+            store.reserve_worktree_claim(task.id).unwrap_err().code,
+            "worktree-ineligible-record"
+        );
+        store.start_record(task.id).unwrap();
+        let reserved = store.reserve_worktree_claim(task.id).unwrap();
+        assert_eq!(
+            reserved.path,
+            PathBuf::from(format!("/worktrees/alpha/{}", task.id))
+        );
+        assert_eq!(reserved.state, forge_app::WorktreeClaimState::Reserving);
+        assert_eq!(
+            store.reserve_worktree_claim(task.id).unwrap(),
+            reserved,
+            "reservation is recovery-safe"
+        );
+        let active = store.activate_worktree_claim(task.id).unwrap();
+        assert_eq!(active.state, forge_app::WorktreeClaimState::Active);
+        let cleanup = store.require_worktree_claim_cleanup(task.id).unwrap();
+        assert_eq!(
+            cleanup.state,
+            forge_app::WorktreeClaimState::CleanupRequired
+        );
+        assert_eq!(
+            store.worktree_claims_requiring_cleanup().unwrap(),
+            vec![cleanup.clone()]
+        );
+        store.done_record(task.id, None).unwrap();
+        assert_eq!(
+            store.worktree_claim(task.id).unwrap(),
+            Some(cleanup),
+            "completed Task claims are retained"
         );
     }
 
