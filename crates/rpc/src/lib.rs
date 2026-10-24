@@ -643,16 +643,18 @@ pub struct DoneRecordRequest {
     pub id: u64,
     pub completion_resolution: Option<String>,
 }
-/// Links or unlinks `child_id` to/from `parent_id` using the sole supported kind.
+/// Links or unlinks a typed directional Record Relationship.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RelateRecordRequest {
-    pub child_id: u64,
-    pub parent_id: u64,
+    pub from_id: u64,
+    pub to_id: u64,
     pub kind: String,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RecordRelationshipResponse {
     pub kind: String,
+    pub from_id: u64,
+    pub to_id: u64,
     pub parent_id: u64,
     pub child_id: u64,
 }
@@ -683,8 +685,11 @@ impl From<Record> for RecordResponse {
                 .map(|relationship| RecordRelationshipResponse {
                     kind: match relationship.kind {
                         RecordRelationshipKind::ParentChild => "parent-child",
+                        RecordRelationshipKind::DependsOn => "depends-on",
                     }
                     .into(),
+                    from_id: relationship.from_id,
+                    to_id: relationship.to_id,
                     parent_id: relationship.parent_id,
                     child_id: relationship.child_id,
                 })

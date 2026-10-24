@@ -268,9 +268,9 @@ enum RecordCommand {
     Start(RecordIdArgs),
     /// Complete an in-progress Record.
     Done(DoneRecordArgs),
-    /// Link a child Record to a parent with `--kind child-of`.
+    /// Link Records with `--kind child-of` or `--kind depends-on`.
     Relate(RelationshipArgs),
-    /// Remove a child Record's link to a parent with `--kind child-of`.
+    /// Remove a Record Relationship with `--kind child-of` or `--kind depends-on`.
     Unrelate(RelationshipArgs),
     /// Add an immutable Comment to a Record.
     Comment(AddRecordCommentArgs),
@@ -346,11 +346,11 @@ struct DoneRecordArgs {
 }
 #[derive(Args, Debug)]
 struct RelationshipArgs {
-    child_id: u64,
-    #[arg(long, value_parser = ["child-of"])]
+    from_id: u64,
+    #[arg(long, value_parser = ["child-of", "depends-on"])]
     kind: String,
     #[arg(long = "to")]
-    parent_id: u64,
+    to_id: u64,
     #[arg(long, value_name = "URL")]
     server_url: Option<String>,
     #[arg(long)]
@@ -470,8 +470,8 @@ async fn main() {
                 args.json,
                 request_relate_record(
                     &resolve_endpoint(args.server_url.as_deref()).await,
-                    args.child_id,
-                    args.parent_id,
+                    args.from_id,
+                    args.to_id,
                     args.kind,
                 )
                 .await,
@@ -481,8 +481,8 @@ async fn main() {
                 args.json,
                 request_unrelate_record(
                     &resolve_endpoint(args.server_url.as_deref()).await,
-                    args.child_id,
-                    args.parent_id,
+                    args.from_id,
+                    args.to_id,
                     args.kind,
                 )
                 .await,

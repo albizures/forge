@@ -971,9 +971,9 @@ impl RecordApiServer for Daemon {
     }
 
     async fn relate(&self, request: RelateRecordRequest) -> RpcResult<RecordResponse> {
-        relationship_kind(&request.kind)?;
+        let kind = relationship_kind(&request.kind)?;
         self.application
-            .relate_records(request.child_id, request.parent_id)
+            .relate_records(request.from_id, request.to_id, kind)
             .map(|record| {
                 self.delivery.publish(&self.application);
                 record.into()
@@ -982,9 +982,9 @@ impl RecordApiServer for Daemon {
     }
 
     async fn unrelate(&self, request: RelateRecordRequest) -> RpcResult<RecordResponse> {
-        relationship_kind(&request.kind)?;
+        let kind = relationship_kind(&request.kind)?;
         self.application
-            .unrelate_records(request.child_id, request.parent_id)
+            .unrelate_records(request.from_id, request.to_id, kind)
             .map(|record| {
                 self.delivery.publish(&self.application);
                 record.into()
@@ -1071,14 +1071,14 @@ fn record_type(record_type: &str) -> RpcResult<RecordType> {
     }
 }
 
-fn relationship_kind(kind: &str) -> RpcResult<()> {
-    if kind == "child-of" {
-        Ok(())
-    } else {
-        Err(rpc_error(RegistrationError::new(
+fn relationship_kind(kind: &str) -> RpcResult<forge_app::RecordRelationshipKind> {
+    match kind {
+        "child-of" => Ok(forge_app::RecordRelationshipKind::ParentChild),
+        "depends-on" => Ok(forge_app::RecordRelationshipKind::DependsOn),
+        _ => Err(rpc_error(RegistrationError::new(
             "unsupported-relationship-kind",
-            "only the child-of Relationship mutation kind is supported",
-        )))
+            "Relationship kind must be child-of or depends-on",
+        ))),
     }
 }
 

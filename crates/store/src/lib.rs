@@ -67,10 +67,12 @@ impl SqliteProjectRepository {
                 PRIMARY KEY (record_id, project_slug)
             );
             CREATE TABLE IF NOT EXISTS record_relationships (
-                parent_id INTEGER NOT NULL REFERENCES records(id),
-                child_id INTEGER NOT NULL REFERENCES records(id) UNIQUE,
-                kind TEXT NOT NULL CHECK (kind IN ('parent-child')),
-                PRIMARY KEY (parent_id, child_id)
+                from_id INTEGER NOT NULL REFERENCES records(id),
+                to_id INTEGER NOT NULL REFERENCES records(id),
+                parent_id INTEGER REFERENCES records(id),
+                child_id INTEGER REFERENCES records(id) UNIQUE,
+                kind TEXT NOT NULL CHECK (kind IN ('parent-child', 'depends-on')),
+                PRIMARY KEY (from_id, to_id, kind)
             );
             CREATE TABLE IF NOT EXISTS record_updates (
                 id INTEGER PRIMARY KEY NOT NULL,
@@ -192,6 +194,7 @@ impl SqliteProjectRepository {
             .map_err(storage_error)?;
         migrate_record_status_schema(&connection)?;
         migrate_record_type_schema(&connection)?;
+        migrate_record_relationship_schema(&connection)?;
         migrate_record_updates_schema(&connection)?;
         migrate_agent_assignment_schema(&connection)?;
         migrate_assignment_authorization_audit_schema(&connection)?;
@@ -640,8 +643,8 @@ impl RecordRepository for SqliteProjectRepository {
             .map_err(storage_error)?;
         transaction
             .execute(
-                "INSERT INTO record_relationships (parent_id, child_id, kind) VALUES (?1, ?2, 'parent-child')",
-                params![spec_id.cast_signed(), task_id.cast_signed()],
+                "INSERT INTO record_relationships (from_id, to_id, parent_id, child_id, kind) VALUES (?1, ?2, ?2, ?1, 'parent-child')",
+                params![task_id.cast_signed(), spec_id.cast_signed()],
             )
             .map_err(storage_error)?;
         insert_update(&transaction, task_id, RecordUpdateKind::Created)?;
@@ -650,6 +653,13 @@ impl RecordRepository for SqliteProjectRepository {
             task_id,
             RecordUpdateKind::RelationshipAdded {
                 related_record_id: spec_id,
+            },
+        )?;
+        insert_update(
+            &transaction,
+            spec_id,
+            RecordUpdateKind::RelationshipAdded {
+                related_record_id: task_id,
             },
         )?;
         let task = load_record(&transaction, task_id)?;
@@ -752,11 +762,16 @@ impl RecordRepository for SqliteProjectRepository {
         Ok(record)
     }
 
-    fn relate_records(&self, child_id: u64, parent_id: u64) -> Result<Record, RegistrationError> {
+    fn relate_records(
+        &self,
+        child_id: u64,
+        parent_id: u64,
+        kind: RecordRelationshipKind,
+    ) -> Result<Record, RegistrationError> {
         if child_id == parent_id {
             return Err(RegistrationError::new(
                 "invalid-relationship",
-                "a Record cannot be its own parent",
+                "a Record cannot relate to itself",
             ));
         }
         let mut connection = self
@@ -766,34 +781,61 @@ impl RecordRepository for SqliteProjectRepository {
         let transaction = connection.transaction().map_err(storage_error)?;
         let child = load_record(&transaction, child_id)?;
         let parent = load_record(&transaction, parent_id)?;
-        if child.record_type != RecordType::Generic
-            || !matches!(parent.record_type, RecordType::Generic | RecordType::Task)
-        {
-            return Err(RegistrationError::new(
-                "invalid-relationship",
-                "only a Generic Record may be attached to a Generic or Task parent after opening",
-            ));
-        }
-        if child.project_slugs != parent.project_slugs {
-            return Err(RegistrationError::new(
-                "scope-mismatch",
-                "parent and child Records must have identical Project Scopes",
-            ));
-        }
-        let cycle: bool = transaction.query_row(
-            "WITH RECURSIVE descendants(id) AS (SELECT child_id FROM record_relationships WHERE parent_id = ?1 UNION SELECT relationship.child_id FROM record_relationships relationship JOIN descendants ON relationship.parent_id = descendants.id) SELECT EXISTS(SELECT 1 FROM descendants WHERE id = ?2)",
-            params![child_id.cast_signed(), parent_id.cast_signed()], |row| row.get(0)
-        ).map_err(storage_error)?;
-        if cycle {
-            return Err(RegistrationError::new(
-                "relationship-cycle",
-                "parent/child Relationships cannot form a cycle",
-            ));
-        }
-        match transaction.execute("INSERT INTO record_relationships (parent_id, child_id, kind) VALUES (?1, ?2, 'parent-child')", params![parent_id.cast_signed(), child_id.cast_signed()]) {
-            Ok(_) => {},
-            Err(error) if matches!(error.sqlite_error_code(), Some(ErrorCode::ConstraintViolation)) => return Err(RegistrationError::new("child-already-related", "a child Record can have only one parent")),
-            Err(error) => return Err(storage_error(error)),
+        match kind {
+            RecordRelationshipKind::ParentChild => {
+                if child.record_type != RecordType::Generic
+                    || !matches!(parent.record_type, RecordType::Generic | RecordType::Task)
+                {
+                    return Err(RegistrationError::new(
+                        "invalid-relationship",
+                        "only a Generic Record may be attached to a Generic or Task parent after opening",
+                    ));
+                }
+                if child.project_slugs != parent.project_slugs {
+                    return Err(RegistrationError::new(
+                        "scope-mismatch",
+                        "parent and child Records must have identical Project Scopes",
+                    ));
+                }
+                let cycle: bool = transaction.query_row(
+                    "WITH RECURSIVE descendants(id) AS (SELECT child_id FROM record_relationships WHERE kind = 'parent-child' AND parent_id = ?1 UNION SELECT relationship.child_id FROM record_relationships relationship JOIN descendants ON relationship.parent_id = descendants.id WHERE relationship.kind = 'parent-child') SELECT EXISTS(SELECT 1 FROM descendants WHERE id = ?2)",
+                    params![child_id.cast_signed(), parent_id.cast_signed()], |row| row.get(0)
+                ).map_err(storage_error)?;
+                if cycle {
+                    return Err(RegistrationError::new(
+                        "relationship-cycle",
+                        "parent/child Relationships cannot form a cycle",
+                    ));
+                }
+                transaction.execute("INSERT INTO record_relationships (from_id, to_id, parent_id, child_id, kind) VALUES (?1, ?2, ?2, ?1, 'parent-child')", params![child_id.cast_signed(), parent_id.cast_signed()]).map_err(|error| if matches!(error.sqlite_error_code(), Some(ErrorCode::ConstraintViolation)) { RegistrationError::new("child-already-related", "a child Record can have only one parent") } else { storage_error(error) })?;
+            }
+            RecordRelationshipKind::DependsOn => {
+                if child.status != RecordStatus::Open {
+                    return Err(RegistrationError::new(
+                        "blocked-record-not-open",
+                        "a dependency may change only while its blocked Record is Open",
+                    ));
+                }
+                if child.record_type != parent.record_type
+                    || !matches!(child.record_type, RecordType::Task | RecordType::Spec)
+                {
+                    return Err(RegistrationError::new(
+                        "invalid-relationship",
+                        "depends-on requires same-type Task or Spec Records",
+                    ));
+                }
+                let cycle: bool = transaction.query_row(
+                    "WITH RECURSIVE prerequisites(id) AS (SELECT to_id FROM record_relationships WHERE kind = 'depends-on' AND from_id = ?1 UNION SELECT relationship.to_id FROM record_relationships relationship JOIN prerequisites ON relationship.from_id = prerequisites.id WHERE relationship.kind = 'depends-on') SELECT EXISTS(SELECT 1 FROM prerequisites WHERE id = ?2)",
+                    params![parent_id.cast_signed(), child_id.cast_signed()], |row| row.get(0)
+                ).map_err(storage_error)?;
+                if cycle {
+                    return Err(RegistrationError::new(
+                        "relationship-cycle",
+                        "dependency Relationships cannot form a cycle",
+                    ));
+                }
+                transaction.execute("INSERT INTO record_relationships (from_id, to_id, kind) VALUES (?1, ?2, 'depends-on')", params![child_id.cast_signed(), parent_id.cast_signed()]).map_err(|error| if matches!(error.sqlite_error_code(), Some(ErrorCode::ConstraintViolation)) { RegistrationError::new("duplicate-relationship", "Relationship already exists") } else { storage_error(error) })?;
+            }
         }
         insert_update(
             &transaction,
@@ -802,12 +844,24 @@ impl RecordRepository for SqliteProjectRepository {
                 related_record_id: parent_id,
             },
         )?;
+        insert_update(
+            &transaction,
+            parent_id,
+            RecordUpdateKind::RelationshipAdded {
+                related_record_id: child_id,
+            },
+        )?;
         let record = load_record(&transaction, child_id)?;
         transaction.commit().map_err(storage_error)?;
         Ok(record)
     }
 
-    fn unrelate_records(&self, child_id: u64, parent_id: u64) -> Result<Record, RegistrationError> {
+    fn unrelate_records(
+        &self,
+        child_id: u64,
+        parent_id: u64,
+        kind: RecordRelationshipKind,
+    ) -> Result<Record, RegistrationError> {
         let mut connection = self
             .connection
             .lock()
@@ -815,22 +869,47 @@ impl RecordRepository for SqliteProjectRepository {
         let transaction = connection.transaction().map_err(storage_error)?;
         let child = load_record(&transaction, child_id)?;
         let parent = load_record(&transaction, parent_id)?;
-        if child.record_type != RecordType::Generic || parent.record_type != RecordType::Generic {
-            return Err(RegistrationError::new(
-                "invalid-relationship",
-                "only Generic Record Relationships may be removed",
-            ));
+        match kind {
+            RecordRelationshipKind::ParentChild
+                if child.record_type != RecordType::Generic
+                    || parent.record_type != RecordType::Generic =>
+            {
+                return Err(RegistrationError::new(
+                    "invalid-relationship",
+                    "only Generic Record Relationships may be removed",
+                ));
+            }
+            RecordRelationshipKind::DependsOn if child.status != RecordStatus::Open => {
+                return Err(RegistrationError::new(
+                    "blocked-record-not-open",
+                    "a dependency may change only while its blocked Record is Open",
+                ));
+            }
+            RecordRelationshipKind::DependsOn
+                if child.record_type != parent.record_type
+                    || !matches!(child.record_type, RecordType::Task | RecordType::Spec) =>
+            {
+                return Err(RegistrationError::new(
+                    "invalid-relationship",
+                    "depends-on requires same-type Task or Spec Records",
+                ));
+            }
+            _ => {}
         }
+        let kind_name = match kind {
+            RecordRelationshipKind::ParentChild => "parent-child",
+            RecordRelationshipKind::DependsOn => "depends-on",
+        };
         let deleted = transaction
             .execute(
-                "DELETE FROM record_relationships WHERE parent_id = ?1 AND child_id = ?2",
-                params![parent_id.cast_signed(), child_id.cast_signed()],
+                "DELETE FROM record_relationships WHERE from_id = ?1 AND to_id = ?2 AND kind = ?3",
+                params![child_id.cast_signed(), parent_id.cast_signed(), kind_name],
             )
             .map_err(storage_error)?;
         if deleted == 0 {
             return Err(RegistrationError::new(
                 "relationship-not-found",
-                "parent/child Relationship does not exist",
+                "Relationship does not exist",
             ));
         }
         insert_update(
@@ -838,6 +917,13 @@ impl RecordRepository for SqliteProjectRepository {
             child_id,
             RecordUpdateKind::RelationshipRemoved {
                 related_record_id: parent_id,
+            },
+        )?;
+        insert_update(
+            &transaction,
+            parent_id,
+            RecordUpdateKind::RelationshipRemoved {
+                related_record_id: child_id,
             },
         )?;
         let record = load_record(&transaction, child_id)?;
@@ -2333,15 +2419,16 @@ fn load_record(connection: &Connection, id: u64) -> Result<Record, RegistrationE
         }
     };
     let relationships = connection
-        .prepare("SELECT parent_id, child_id, kind FROM record_relationships WHERE parent_id = ?1 OR child_id = ?1 ORDER BY parent_id, child_id")
+        .prepare("SELECT from_id, to_id, parent_id, child_id, kind FROM record_relationships WHERE from_id = ?1 OR to_id = ?1 ORDER BY from_id, to_id, kind")
         .map_err(storage_error)?
         .query_map([id.cast_signed()], |row| {
-            let kind: String = row.get(2)?;
-            Ok((row.get::<_, i64>(0)?.cast_unsigned(), row.get::<_, i64>(1)?.cast_unsigned(), kind))
+            let kind: String = row.get(4)?;
+            Ok((row.get::<_, i64>(0)?.cast_unsigned(), row.get::<_, i64>(1)?.cast_unsigned(), row.get::<_, Option<i64>>(2)?.map(i64::cast_unsigned), row.get::<_, Option<i64>>(3)?.map(i64::cast_unsigned), kind))
         })
         .map_err(storage_error)?
         .map(|row| match row.map_err(storage_error)? {
-            (parent_id, child_id, kind) if kind == "parent-child" => Ok(RecordRelationship { kind: RecordRelationshipKind::ParentChild, parent_id, child_id }),
+            (from_id, to_id, Some(parent_id), Some(child_id), kind) if kind == "parent-child" => Ok(RecordRelationship { kind: RecordRelationshipKind::ParentChild, from_id, to_id, parent_id, child_id }),
+            (from_id, to_id, None, None, kind) if kind == "depends-on" => Ok(RecordRelationship { kind: RecordRelationshipKind::DependsOn, from_id, to_id, parent_id: 0, child_id: 0 }),
             _ => Err(RegistrationError::new("storage", "stored Record has an invalid Relationship kind")),
         })
         .collect::<Result<Vec<_>, RegistrationError>>()?;
@@ -2383,6 +2470,30 @@ fn migrate_record_type_schema(connection: &Connection) -> Result<(), Registratio
             .map_err(storage_error)?;
     }
     Ok(())
+}
+
+fn migrate_record_relationship_schema(connection: &Connection) -> Result<(), RegistrationError> {
+    let schema: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'record_relationships'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(storage_error)?;
+    if schema.contains("from_id") {
+        return Ok(());
+    }
+    connection.execute_batch("PRAGMA foreign_keys = OFF;
+        ALTER TABLE record_relationships RENAME TO record_relationships_old;
+        CREATE TABLE record_relationships (
+            from_id INTEGER NOT NULL REFERENCES records(id), to_id INTEGER NOT NULL REFERENCES records(id),
+            parent_id INTEGER REFERENCES records(id), child_id INTEGER REFERENCES records(id) UNIQUE,
+            kind TEXT NOT NULL CHECK (kind IN ('parent-child', 'depends-on')), PRIMARY KEY (from_id, to_id, kind)
+        );
+        INSERT INTO record_relationships (from_id, to_id, parent_id, child_id, kind)
+            SELECT child_id, parent_id, parent_id, child_id, kind FROM record_relationships_old;
+        DROP TABLE record_relationships_old;
+        PRAGMA foreign_keys = ON;").map_err(storage_error)
 }
 
 fn migrate_record_updates_schema(connection: &Connection) -> Result<(), RegistrationError> {
@@ -2441,11 +2552,11 @@ mod tests {
     use forge_app::{
         AgentDispatchRepository, ManagedWorktreeRepository, NewAgentAssignment,
         NewAgentAssignmentResource, NewRecord, NewRecordUpdateSubscription, NewTypedRecord,
-        Project, ProjectRepository, RecordListFilter, RecordRepository, RecordStatus, RecordType,
-        RecordUpdateKind, RecordUpdateKindFilter, RecordUpdateSubscriptionRepository,
-        assignment_add_comment, assignment_complete_task, assignment_context,
-        assignment_create_record_update_subscription, assignment_delete_record_update_subscription,
-        assignment_renew_record_update_subscription,
+        Project, ProjectRepository, RecordListFilter, RecordRelationshipKind, RecordRepository,
+        RecordStatus, RecordType, RecordUpdateKind, RecordUpdateKindFilter,
+        RecordUpdateSubscriptionRepository, assignment_add_comment, assignment_complete_task,
+        assignment_context, assignment_create_record_update_subscription,
+        assignment_delete_record_update_subscription, assignment_renew_record_update_subscription,
     };
     use std::{
         path::{Path, PathBuf},
@@ -2457,6 +2568,78 @@ mod tests {
             registered_folder: PathBuf::from(folder),
             origin_url: "https://example.test/repo.git".into(),
         }
+    }
+
+    #[test]
+    fn persists_directional_task_dependencies_and_notifies_both_endpoints() {
+        let store = SqliteProjectRepository::in_memory().unwrap();
+        store.register(&project("alpha", "/repos/alpha")).unwrap();
+        let task = |body: &str| NewTypedRecord {
+            record_type: RecordType::Task,
+            body: body.into(),
+            project_slugs: vec!["alpha".into()],
+        };
+        let blocked = store.open_typed_record(&task("blocked")).unwrap();
+        let prerequisite = store.open_typed_record(&task("prerequisite")).unwrap();
+        let other = store.open_typed_record(&task("other")).unwrap();
+
+        let related = store
+            .relate_records(
+                blocked.id,
+                prerequisite.id,
+                RecordRelationshipKind::DependsOn,
+            )
+            .unwrap();
+        assert!(related.relationships.iter().any(|relationship| matches!(
+            relationship.kind,
+            RecordRelationshipKind::DependsOn
+        ) && relationship.from_id
+            == blocked.id
+            && relationship.to_id == prerequisite.id));
+        assert!(
+            matches!(store.list_record_updates(prerequisite.id).unwrap()[0].kind, RecordUpdateKind::RelationshipAdded { related_record_id } if related_record_id == blocked.id)
+        );
+        assert_eq!(
+            store
+                .relate_records(
+                    blocked.id,
+                    prerequisite.id,
+                    RecordRelationshipKind::DependsOn
+                )
+                .unwrap_err()
+                .code,
+            "duplicate-relationship"
+        );
+        assert_eq!(
+            store
+                .relate_records(
+                    prerequisite.id,
+                    blocked.id,
+                    RecordRelationshipKind::DependsOn
+                )
+                .unwrap_err()
+                .code,
+            "relationship-cycle"
+        );
+        store.start_record(blocked.id).unwrap();
+        assert_eq!(
+            store
+                .unrelate_records(
+                    blocked.id,
+                    prerequisite.id,
+                    RecordRelationshipKind::DependsOn
+                )
+                .unwrap_err()
+                .code,
+            "blocked-record-not-open"
+        );
+        assert_eq!(
+            store
+                .relate_records(blocked.id, other.id, RecordRelationshipKind::DependsOn)
+                .unwrap_err()
+                .code,
+            "blocked-record-not-open"
+        );
     }
 
     #[test]
@@ -2617,16 +2800,22 @@ mod tests {
             .unwrap();
         assert_eq!(
             store
-                .relate_records(child.id, parent.id)
+                .relate_records(child.id, parent.id, RecordRelationshipKind::ParentChild)
                 .unwrap()
                 .relationships
                 .len(),
             1
         );
-        store.relate_records(grandchild.id, child.id).unwrap();
+        store
+            .relate_records(grandchild.id, child.id, RecordRelationshipKind::ParentChild)
+            .unwrap();
         assert_eq!(
             store
-                .relate_records(parent.id, grandchild.id)
+                .relate_records(
+                    parent.id,
+                    grandchild.id,
+                    RecordRelationshipKind::ParentChild
+                )
                 .unwrap_err()
                 .code,
             "relationship-cycle"
@@ -2646,7 +2835,7 @@ mod tests {
         );
         assert_eq!(
             store
-                .unrelate_records(child.id, parent.id)
+                .unrelate_records(child.id, parent.id, RecordRelationshipKind::ParentChild)
                 .unwrap()
                 .relationships
                 .len(),
@@ -2677,8 +2866,12 @@ mod tests {
         store.edit_record(child.id, "edited").unwrap();
         store.start_record(child.id).unwrap();
         store.done_record(child.id, None).unwrap();
-        store.relate_records(child.id, parent.id).unwrap();
-        store.unrelate_records(child.id, parent.id).unwrap();
+        store
+            .relate_records(child.id, parent.id, RecordRelationshipKind::ParentChild)
+            .unwrap();
+        store
+            .unrelate_records(child.id, parent.id, RecordRelationshipKind::ParentChild)
+            .unwrap();
 
         let updates = store.list_record_updates(child.id).unwrap();
         assert_eq!(updates.len(), 6);
@@ -2838,11 +3031,17 @@ mod tests {
             2
         );
         assert_eq!(
-            store.relate_records(task.id, spec.id).unwrap_err().code,
+            store
+                .relate_records(task.id, spec.id, RecordRelationshipKind::ParentChild)
+                .unwrap_err()
+                .code,
             "invalid-relationship"
         );
         assert_eq!(
-            store.unrelate_records(task.id, spec.id).unwrap_err().code,
+            store
+                .unrelate_records(task.id, spec.id, RecordRelationshipKind::ParentChild)
+                .unwrap_err()
+                .code,
             "invalid-relationship"
         );
     }
@@ -3018,9 +3217,15 @@ mod tests {
                 project_slugs: vec!["alpha".into()],
             })
             .unwrap();
-        store.relate_records(child.id, parent.id).unwrap();
-        store.relate_records(sibling.id, parent.id).unwrap();
-        store.relate_records(grandchild.id, child.id).unwrap();
+        store
+            .relate_records(child.id, parent.id, RecordRelationshipKind::ParentChild)
+            .unwrap();
+        store
+            .relate_records(sibling.id, parent.id, RecordRelationshipKind::ParentChild)
+            .unwrap();
+        store
+            .relate_records(grandchild.id, child.id, RecordRelationshipKind::ParentChild)
+            .unwrap();
         store
             .create_agent_assignment(&NewAgentAssignment {
                 id: "owner".into(),

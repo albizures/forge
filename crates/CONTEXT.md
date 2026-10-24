@@ -193,8 +193,20 @@ The required, non-blank free-text, usually Markdown, content describing the work
 _Avoid_: description
 
 **Record Relationship**:
-A typed association between two Records. Parent/child is the initial Relationship kind; its permitted changes and participant types are constrained by Record Type, and future kinds may be introduced.
+A typed association between two Records. Parent/child and dependency are Relationship kinds; their permitted changes and participant types are constrained by Record Type.
 _Avoid_: link
+
+**Dependency Relationship**:
+A directed Record Relationship from a Blocked Record to a Prerequisite Record. A Blocked Record cannot become In Progress until every prerequisite is Done.
+_Avoid_: blocker, prerequisite link
+
+**Blocked Record**:
+The dependent endpoint of a Dependency Relationship. It remains ineligible to become In Progress while any direct Prerequisite Record is not Done.
+_Avoid_: dependent task, blocked task
+
+**Prerequisite Record**:
+The required endpoint of a Dependency Relationship. Its completion satisfies that dependency for the Blocked Record.
+_Avoid_: dependency, blocker
 
 **Completion Resolution**:
 An optional immutable, non-blank free-text explanation recorded when a Record becomes Done.

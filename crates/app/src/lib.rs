@@ -25,13 +25,20 @@ pub enum RecordStatus {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RecordRelationshipKind {
     ParentChild,
+    DependsOn,
 }
 
 /// An endpoint-neutral typed Relationship between two Records.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecordRelationship {
     pub kind: RecordRelationshipKind,
+    /// The directional source. For `DependsOn`, this is the blocked Record.
+    pub from_id: u64,
+    /// The directional target. For `DependsOn`, this is the prerequisite Record.
+    pub to_id: u64,
+    /// Hierarchy compatibility field, populated only for `ParentChild`.
     pub parent_id: u64,
+    /// Hierarchy compatibility field, populated only for `ParentChild`.
     pub child_id: u64,
 }
 
@@ -385,18 +392,28 @@ pub trait RecordRepository: ProjectRepository {
         id: u64,
         completion_resolution: Option<&str>,
     ) -> Result<Record, RegistrationError>;
-    /// Links `child_id` beneath `parent_id` as a parent/child Relationship.
+    /// Adds a typed directional Relationship from `from_id` to `to_id`.
     ///
     /// # Errors
     ///
-    /// Returns a user-facing error for invalid hierarchy changes.
-    fn relate_records(&self, child_id: u64, parent_id: u64) -> Result<Record, RegistrationError>;
-    /// Removes the parent/child Relationship from `child_id` to `parent_id`.
+    /// Returns a user-facing error for invalid Relationship changes.
+    fn relate_records(
+        &self,
+        from_id: u64,
+        to_id: u64,
+        kind: RecordRelationshipKind,
+    ) -> Result<Record, RegistrationError>;
+    /// Removes a typed directional Relationship from `from_id` to `to_id`.
     ///
     /// # Errors
     ///
     /// Returns a user-facing error when the requested Relationship is absent.
-    fn unrelate_records(&self, child_id: u64, parent_id: u64) -> Result<Record, RegistrationError>;
+    fn unrelate_records(
+        &self,
+        from_id: u64,
+        to_id: u64,
+        kind: RecordRelationshipKind,
+    ) -> Result<Record, RegistrationError>;
     /// Lists the Record's updates newest first, using identity to break timestamp ties.
     ///
     /// # Errors
@@ -1994,46 +2011,32 @@ impl Application {
         self.records.done_record(id, completion_resolution)
     }
 
-    /// Links a child Record to a parent Record.
+    /// Adds a typed directional Relationship.
     ///
     /// # Errors
     ///
-    /// Returns a user-facing error for invalid hierarchy changes.
+    /// Returns a user-facing error for invalid Relationship changes.
     pub fn relate_records(
         &self,
-        child_id: u64,
-        parent_id: u64,
+        from_id: u64,
+        to_id: u64,
+        kind: RecordRelationshipKind,
     ) -> Result<Record, RegistrationError> {
-        let child = self.records.show_record(child_id)?;
-        let parent = self.records.show_record(parent_id)?;
-        if child.record_type != RecordType::Generic || parent.record_type != RecordType::Generic {
-            return Err(RegistrationError::new(
-                "invalid-relationship",
-                "only Generic Records may be related after opening",
-            ));
-        }
-        self.records.relate_records(child_id, parent_id)
+        self.records.relate_records(from_id, to_id, kind)
     }
 
-    /// Removes a child Record from a parent Record.
+    /// Removes a typed directional Relationship.
     ///
     /// # Errors
     ///
     /// Returns a user-facing error when the requested Relationship is absent.
     pub fn unrelate_records(
         &self,
-        child_id: u64,
-        parent_id: u64,
+        from_id: u64,
+        to_id: u64,
+        kind: RecordRelationshipKind,
     ) -> Result<Record, RegistrationError> {
-        let child = self.records.show_record(child_id)?;
-        let parent = self.records.show_record(parent_id)?;
-        if child.record_type != RecordType::Generic || parent.record_type != RecordType::Generic {
-            return Err(RegistrationError::new(
-                "invalid-relationship",
-                "only Generic Record Relationships may be removed",
-            ));
-        }
-        self.records.unrelate_records(child_id, parent_id)
+        self.records.unrelate_records(from_id, to_id, kind)
     }
 
     fn require_body(body: &str) -> Result<(), RegistrationError> {
@@ -2199,6 +2202,8 @@ mod tests {
             let task_id = (records.len() + 1) as u64;
             let relationship = RecordRelationship {
                 kind: RecordRelationshipKind::ParentChild,
+                from_id: task_id,
+                to_id: spec_id,
                 parent_id: spec_id,
                 child_id: task_id,
             };
@@ -2323,7 +2328,14 @@ mod tests {
             &self,
             child_id: u64,
             parent_id: u64,
+            kind: RecordRelationshipKind,
         ) -> Result<Record, RegistrationError> {
+            if kind != RecordRelationshipKind::ParentChild {
+                return Err(RegistrationError::new(
+                    "invalid-relationship",
+                    "test repository supports parent/child only",
+                ));
+            }
             if child_id == parent_id {
                 return Err(RegistrationError::new(
                     "invalid-relationship",
@@ -2343,6 +2355,17 @@ mod tests {
                 .ok_or_else(|| {
                     RegistrationError::new("record-not-found", "Record does not exist")
                 })?;
+            if records[child].record_type != RecordType::Generic
+                || !matches!(
+                    records[parent].record_type,
+                    RecordType::Generic | RecordType::Task
+                )
+            {
+                return Err(RegistrationError::new(
+                    "invalid-relationship",
+                    "only a Generic Record may be attached to a Generic or Task parent after opening",
+                ));
+            }
             if records[child].project_slugs != records[parent].project_slugs {
                 return Err(RegistrationError::new(
                     "scope-mismatch",
@@ -2378,6 +2401,8 @@ mod tests {
             }
             let relationship = RecordRelationship {
                 kind: RecordRelationshipKind::ParentChild,
+                from_id: child_id,
+                to_id: parent_id,
                 parent_id,
                 child_id,
             };
@@ -2389,7 +2414,14 @@ mod tests {
             &self,
             child_id: u64,
             parent_id: u64,
+            kind: RecordRelationshipKind,
         ) -> Result<Record, RegistrationError> {
+            if kind != RecordRelationshipKind::ParentChild {
+                return Err(RegistrationError::new(
+                    "invalid-relationship",
+                    "test repository supports parent/child only",
+                ));
+            }
             let mut records = self.records.lock().unwrap();
             let child = records
                 .iter()
@@ -2403,6 +2435,14 @@ mod tests {
                 .ok_or_else(|| {
                     RegistrationError::new("record-not-found", "Record does not exist")
                 })?;
+            if records[child].record_type != RecordType::Generic
+                || records[parent].record_type != RecordType::Generic
+            {
+                return Err(RegistrationError::new(
+                    "invalid-relationship",
+                    "only Generic Record Relationships may be removed",
+                ));
+            }
             let exists = records[child].relationships.iter().any(|relationship| {
                 relationship.parent_id == parent_id && relationship.child_id == child_id
             });
@@ -2544,11 +2584,15 @@ mod tests {
             "invalid-parent-type"
         );
         assert_eq!(
-            app.relate_records(task.id, spec.id).unwrap_err().code,
+            app.relate_records(task.id, spec.id, RecordRelationshipKind::ParentChild)
+                .unwrap_err()
+                .code,
             "invalid-relationship"
         );
         assert_eq!(
-            app.unrelate_records(task.id, spec.id).unwrap_err().code,
+            app.unrelate_records(task.id, spec.id, RecordRelationshipKind::ParentChild)
+                .unwrap_err()
+                .code,
             "invalid-relationship"
         );
 
@@ -2627,17 +2671,22 @@ mod tests {
         let child = app.open_record("child", vec![]).unwrap();
         let grandchild = app.open_record("grandchild", vec![]).unwrap();
         assert_eq!(
-            app.relate_records(child.id, parent.id)
+            app.relate_records(child.id, parent.id, RecordRelationshipKind::ParentChild)
                 .unwrap()
                 .relationships
                 .len(),
             1
         );
-        app.relate_records(grandchild.id, child.id).unwrap();
+        app.relate_records(grandchild.id, child.id, RecordRelationshipKind::ParentChild)
+            .unwrap();
         assert_eq!(
-            app.relate_records(parent.id, grandchild.id)
-                .unwrap_err()
-                .code,
+            app.relate_records(
+                parent.id,
+                grandchild.id,
+                RecordRelationshipKind::ParentChild
+            )
+            .unwrap_err()
+            .code,
             "relationship-cycle"
         );
         app.start_record(parent.id).unwrap();
@@ -2654,7 +2703,7 @@ mod tests {
             RecordStatus::Done
         );
         assert_eq!(
-            app.unrelate_records(child.id, parent.id)
+            app.unrelate_records(child.id, parent.id, RecordRelationshipKind::ParentChild)
                 .unwrap()
                 .relationships
                 .len(),

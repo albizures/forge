@@ -527,41 +527,41 @@ pub async fn request_done_record(
         .await
         .map_err(record_error("done"))
 }
-/// Links a child Record to a parent Record through the daemon.
+/// Links a directional Record Relationship through the daemon.
 ///
 /// # Errors
 ///
 /// Returns an endpoint or daemon validation error.
 pub async fn request_relate_record(
     url: &str,
-    child_id: u64,
-    parent_id: u64,
+    from_id: u64,
+    to_id: u64,
     kind: String,
 ) -> Result<RecordResponse, String> {
     client(url)?
         .relate(RelateRecordRequest {
-            child_id,
-            parent_id,
+            from_id,
+            to_id,
             kind,
         })
         .await
         .map_err(record_error("relate"))
 }
-/// Removes a child-to-parent Relationship through the daemon.
+/// Removes a directional Record Relationship through the daemon.
 ///
 /// # Errors
 ///
 /// Returns an endpoint or daemon validation error.
 pub async fn request_unrelate_record(
     url: &str,
-    child_id: u64,
-    parent_id: u64,
+    from_id: u64,
+    to_id: u64,
     kind: String,
 ) -> Result<RecordResponse, String> {
     client(url)?
         .unrelate(RelateRecordRequest {
-            child_id,
-            parent_id,
+            from_id,
+            to_id,
             kind,
         })
         .await
