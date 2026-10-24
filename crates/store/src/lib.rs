@@ -740,6 +740,88 @@ impl RecordRepository for SqliteProjectRepository {
         Ok(task)
     }
 
+    fn open_grilling_under_wayfinder(
+        &self,
+        body: &str,
+        wayfinder_id: u64,
+        project_slugs: Option<Vec<String>>,
+    ) -> Result<Record, RegistrationError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        let transaction = connection.transaction().map_err(storage_error)?;
+        let wayfinder = load_record(&transaction, wayfinder_id)?;
+        if wayfinder.record_type != RecordType::Wayfinder {
+            return Err(RegistrationError::new(
+                "invalid-parent-type",
+                "a Grilling may be opened under a Wayfinder only",
+            ));
+        }
+        let mut project_slugs = project_slugs.unwrap_or(wayfinder.project_slugs.clone());
+        project_slugs.sort();
+        if project_slugs.is_empty() {
+            return Err(RegistrationError::new(
+                "empty-project-scope",
+                "a Grilling must have at least one Project in its scope",
+            ));
+        }
+        if project_slugs.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(RegistrationError::new(
+                "duplicate-project",
+                "Grilling Project Scope must not contain duplicate Project slugs",
+            ));
+        }
+        if project_slugs
+            .iter()
+            .any(|slug| !wayfinder.project_slugs.contains(slug))
+        {
+            return Err(RegistrationError::new(
+                "scope-mismatch",
+                "Grilling Project Scope must be a subset of the Wayfinder scope",
+            ));
+        }
+        transaction
+            .execute(
+                "INSERT INTO records (record_type, body, status) VALUES ('grilling', ?1, 'open')",
+                [body],
+            )
+            .map_err(storage_error)?;
+        let grilling_id = transaction.last_insert_rowid().cast_unsigned();
+        for project_slug in &project_slugs {
+            transaction
+                .execute(
+                    "INSERT INTO record_projects (record_id, project_slug) VALUES (?1, ?2)",
+                    params![grilling_id.cast_signed(), project_slug],
+                )
+                .map_err(storage_error)?;
+        }
+        transaction
+            .execute(
+                "INSERT INTO record_relationships (from_id, to_id, parent_id, child_id, kind) VALUES (?1, ?2, ?2, ?1, 'parent-child')",
+                params![grilling_id.cast_signed(), wayfinder_id.cast_signed()],
+            )
+            .map_err(storage_error)?;
+        insert_update(&transaction, grilling_id, RecordUpdateKind::Created)?;
+        insert_update(
+            &transaction,
+            grilling_id,
+            RecordUpdateKind::RelationshipAdded {
+                related_record_id: wayfinder_id,
+            },
+        )?;
+        insert_update(
+            &transaction,
+            wayfinder_id,
+            RecordUpdateKind::RelationshipAdded {
+                related_record_id: grilling_id,
+            },
+        )?;
+        let grilling = load_record(&transaction, grilling_id)?;
+        transaction.commit().map_err(storage_error)?;
+        Ok(grilling)
+    }
+
     fn list_records(&self, filter: &RecordListFilter) -> Result<Vec<Record>, RegistrationError> {
         let connection = self
             .connection
@@ -917,12 +999,16 @@ impl RecordRepository for SqliteProjectRepository {
                         "a dependency may change only while its blocked Record is Open",
                     ));
                 }
-                if child.record_type != parent.record_type
-                    || !matches!(child.record_type, RecordType::Task | RecordType::Spec)
-                {
+                let valid_dependency = child.record_type == parent.record_type
+                    && matches!(child.record_type, RecordType::Task | RecordType::Spec)
+                    || child.record_type == RecordType::Task
+                        && parent.record_type == RecordType::Grilling
+                        && child.project_slugs.len() == 1
+                        && parent.project_slugs.contains(&child.project_slugs[0]);
+                if !valid_dependency {
                     return Err(RegistrationError::new(
                         "invalid-relationship",
-                        "depends-on requires same-type Task or Spec Records",
+                        "depends-on requires same-type Task or Spec Records, or a Task scoped within a Grilling",
                     ));
                 }
                 let cycle: bool = transaction.query_row(
@@ -987,12 +1073,16 @@ impl RecordRepository for SqliteProjectRepository {
                 ));
             }
             RecordRelationshipKind::DependsOn
-                if child.record_type != parent.record_type
-                    || !matches!(child.record_type, RecordType::Task | RecordType::Spec) =>
+                if !(child.record_type == parent.record_type
+                    && matches!(child.record_type, RecordType::Task | RecordType::Spec)
+                    || child.record_type == RecordType::Task
+                        && parent.record_type == RecordType::Grilling
+                        && child.project_slugs.len() == 1
+                        && parent.project_slugs.contains(&child.project_slugs[0])) =>
             {
                 return Err(RegistrationError::new(
                     "invalid-relationship",
-                    "depends-on requires same-type Task or Spec Records",
+                    "depends-on requires same-type Task or Spec Records, or a Task scoped within a Grilling",
                 ));
             }
             _ => {}
@@ -3224,6 +3314,101 @@ mod tests {
                 .unwrap_err()
                 .code,
             "invalid-relationship"
+        );
+    }
+
+    #[test]
+    fn opens_scoped_grillings_and_gates_tasks_on_them() {
+        let store = SqliteProjectRepository::in_memory().unwrap();
+        store.register(&project("alpha", "/repos/alpha")).unwrap();
+        store.register(&project("beta", "/repos/beta")).unwrap();
+        store.register(&project("gamma", "/repos/gamma")).unwrap();
+        let wayfinder = store
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Wayfinder,
+                body: "wayfinder".into(),
+                project_slugs: vec!["alpha".into(), "beta".into()],
+            })
+            .unwrap();
+        let full_scope = store
+            .open_grilling_under_wayfinder("full", wayfinder.id, None)
+            .unwrap();
+        assert_eq!(full_scope.record_type, RecordType::Grilling);
+        assert_eq!(full_scope.project_slugs, ["alpha", "beta"]);
+        assert_eq!(
+            store
+                .open_grilling_under_wayfinder("subset", wayfinder.id, Some(vec!["beta".into()]),)
+                .unwrap()
+                .project_slugs,
+            ["beta"]
+        );
+        assert_eq!(
+            store
+                .open_grilling_under_wayfinder("empty", wayfinder.id, Some(vec![]))
+                .unwrap_err()
+                .code,
+            "empty-project-scope"
+        );
+        assert_eq!(
+            store
+                .open_grilling_under_wayfinder("outside", wayfinder.id, Some(vec!["gamma".into()]),)
+                .unwrap_err()
+                .code,
+            "scope-mismatch"
+        );
+        assert_eq!(
+            store
+                .list_records(&RecordListFilter {
+                    project_slug: None,
+                    status: None,
+                    record_type: Some(RecordType::Grilling),
+                })
+                .unwrap()
+                .len(),
+            2
+        );
+        let alpha_task = store
+            .open_task_under_wayfinder("alpha task", wayfinder.id, Some("alpha".into()))
+            .unwrap();
+        store
+            .relate_records(
+                alpha_task.id,
+                full_scope.id,
+                RecordRelationshipKind::DependsOn,
+            )
+            .unwrap();
+        assert_eq!(
+            store.start_record(alpha_task.id).unwrap_err().code,
+            "dependencies-not-done"
+        );
+        let gamma_task = store
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Task,
+                body: "gamma task".into(),
+                project_slugs: vec!["gamma".into()],
+            })
+            .unwrap();
+        assert_eq!(
+            store
+                .relate_records(
+                    gamma_task.id,
+                    full_scope.id,
+                    RecordRelationshipKind::DependsOn,
+                )
+                .unwrap_err()
+                .code,
+            "invalid-relationship"
+        );
+        store.start_record(full_scope.id).unwrap();
+        store.done_record(full_scope.id, None).unwrap();
+        assert_eq!(
+            store.start_record(alpha_task.id).unwrap().status,
+            RecordStatus::InProgress
+        );
+        store.start_record(wayfinder.id).unwrap();
+        assert_eq!(
+            store.done_record(wayfinder.id, None).unwrap_err().code,
+            "children-not-done"
         );
     }
 

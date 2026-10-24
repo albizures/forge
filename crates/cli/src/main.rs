@@ -8,11 +8,12 @@ use forge_cli::{
     request_agent_dispatch_status, request_delete_record_comment, request_done_record,
     request_edit_record, request_list_records, request_managed_worktree_create,
     request_managed_worktree_doctor, request_managed_worktree_info, request_managed_worktree_list,
-    request_managed_worktree_remove, request_open_record, request_open_spec, request_open_task,
-    request_open_task_under_spec, request_open_task_under_wayfinder, request_open_wayfinder,
-    request_project_here, request_project_setup_hook, request_record_comments,
-    request_record_updates, request_register_project, request_relate_record, request_show_record,
-    request_start_record, request_status, request_unrelate_record, request_worktree_root,
+    request_managed_worktree_remove, request_open_grilling_under_wayfinder, request_open_record,
+    request_open_spec, request_open_task, request_open_task_under_spec,
+    request_open_task_under_wayfinder, request_open_wayfinder, request_project_here,
+    request_project_setup_hook, request_record_comments, request_record_updates,
+    request_register_project, request_relate_record, request_show_record, request_start_record,
+    request_status, request_unrelate_record, request_worktree_root,
     resolve_endpoint as resolve_managed_endpoint,
 };
 use std::io::Read;
@@ -56,6 +57,11 @@ enum Command {
     Wayfinder {
         #[command(subcommand)]
         command: WayfinderCommand,
+    },
+    /// Manage Grillings.
+    Grilling {
+        #[command(subcommand)]
+        command: GrillingCommand,
     },
     /// Manage Tasks.
     Task {
@@ -210,6 +216,11 @@ enum SpecCommand {
 enum WayfinderCommand {
     /// Open a Wayfinder with one or more Projects.
     Open(OpenWayfinderArgs),
+}
+#[derive(Debug, Subcommand)]
+enum GrillingCommand {
+    /// Open a Grilling beneath a Wayfinder, inheriting or selecting its Project Scope.
+    Open(OpenGrillingUnderWayfinderArgs),
 }
 #[derive(Debug, Subcommand)]
 enum TaskCommand {
@@ -422,6 +433,22 @@ struct OpenTaskUnderSpecArgs {
     json: bool,
 }
 #[derive(Args, Debug)]
+struct OpenGrillingUnderWayfinderArgs {
+    /// Markdown body, or - to read it from standard input.
+    #[arg(long)]
+    body: String,
+    /// The parent Wayfinder's ID.
+    #[arg(long)]
+    wayfinder: u64,
+    /// A Project in the Grilling's scope. Omit to inherit the whole Wayfinder scope.
+    #[arg(long = "project", value_name = "SLUG")]
+    project: Option<Vec<String>>,
+    #[arg(long, value_name = "URL")]
+    server_url: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Args, Debug)]
 struct OpenTaskUnderWayfinderArgs {
     /// Markdown body, or - to read it from standard input.
     #[arg(long)]
@@ -539,6 +566,9 @@ async fn main() {
         },
         Command::Wayfinder { command } => match command {
             WayfinderCommand::Open(args) => open_wayfinder(args).await,
+        },
+        Command::Grilling { command } => match command {
+            GrillingCommand::Open(args) => open_grilling_under_wayfinder(args).await,
         },
         Command::Task { command } => match command {
             TaskCommand::Open(args) => open_task(args).await,
@@ -1082,6 +1112,24 @@ async fn open_task_under_spec(args: OpenTaskUnderSpecArgs) -> i32 {
             &resolve_endpoint(args.server_url.as_deref()).await,
             &body,
             args.spec,
+        )
+        .await,
+    )
+}
+
+async fn open_grilling_under_wayfinder(args: OpenGrillingUnderWayfinderArgs) -> i32 {
+    let body = match read_body(args.body, "grilling open") {
+        Ok(body) => body,
+        Err(exit_code) => return exit_code,
+    };
+    open_typed_result(
+        "grilling open",
+        args.json,
+        request_open_grilling_under_wayfinder(
+            &resolve_endpoint(args.server_url.as_deref()).await,
+            &body,
+            args.wayfinder,
+            args.project,
         )
         .await,
     )

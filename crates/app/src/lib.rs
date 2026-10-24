@@ -371,6 +371,17 @@ pub trait RecordRepository: ProjectRepository {
         wayfinder_id: u64,
         project_slug: Option<String>,
     ) -> Result<Record, RegistrationError>;
+    /// Opens a Grilling beneath a Wayfinder, inheriting or selecting its Project Scope.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-facing error when the parent or selected scope is invalid.
+    fn open_grilling_under_wayfinder(
+        &self,
+        body: &str,
+        wayfinder_id: u64,
+        project_slugs: Option<Vec<String>>,
+    ) -> Result<Record, RegistrationError>;
     /// Lists Records matching Project Scope membership and lifecycle status.
     ///
     /// # Errors
@@ -1991,6 +2002,22 @@ impl Application {
             .open_task_under_wayfinder(body, wayfinder_id, project_slug)
     }
 
+    /// Opens a Grilling beneath a Wayfinder, inheriting or selecting its Project Scope.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-facing error for a blank body, invalid parent, or invalid scope.
+    pub fn open_grilling_under_wayfinder(
+        &self,
+        body: &str,
+        wayfinder_id: u64,
+        project_slugs: Option<Vec<String>>,
+    ) -> Result<Record, RegistrationError> {
+        Self::require_body(body)?;
+        self.records
+            .open_grilling_under_wayfinder(body, wayfinder_id, project_slugs)
+    }
+
     /// Lists Records matching the supplied optional discovery filters.
     ///
     /// # Errors
@@ -2328,6 +2355,69 @@ mod tests {
             parent.relationships.push(relationship);
             records.push(task.clone());
             Ok(task)
+        }
+        fn open_grilling_under_wayfinder(
+            &self,
+            body: &str,
+            wayfinder_id: u64,
+            project_slugs: Option<Vec<String>>,
+        ) -> Result<Record, RegistrationError> {
+            let wayfinder = self.show_record(wayfinder_id)?;
+            if wayfinder.record_type != RecordType::Wayfinder {
+                return Err(RegistrationError::new(
+                    "invalid-parent-type",
+                    "a Grilling may be opened under a Wayfinder only",
+                ));
+            }
+            let mut project_slugs = project_slugs.unwrap_or(wayfinder.project_slugs.clone());
+            project_slugs.sort();
+            if project_slugs.is_empty() {
+                return Err(RegistrationError::new(
+                    "empty-project-scope",
+                    "a Grilling must have at least one Project in its scope",
+                ));
+            }
+            if project_slugs.windows(2).any(|pair| pair[0] == pair[1]) {
+                return Err(RegistrationError::new(
+                    "duplicate-project",
+                    "Grilling Project Scope must not contain duplicate Project slugs",
+                ));
+            }
+            if project_slugs
+                .iter()
+                .any(|slug| !wayfinder.project_slugs.contains(slug))
+            {
+                return Err(RegistrationError::new(
+                    "scope-mismatch",
+                    "Grilling Project Scope must be a subset of the Wayfinder scope",
+                ));
+            }
+            let mut records = self.records.lock().unwrap();
+            let grilling_id = (records.len() + 1) as u64;
+            let relationship = RecordRelationship {
+                kind: RecordRelationshipKind::ParentChild,
+                from_id: grilling_id,
+                to_id: wayfinder_id,
+                parent_id: wayfinder_id,
+                child_id: grilling_id,
+            };
+            let grilling = Record {
+                id: grilling_id,
+                record_type: RecordType::Grilling,
+                body: body.to_owned(),
+                project_slugs,
+                status: RecordStatus::Open,
+                completion_resolution: None,
+                relationships: vec![relationship.clone()],
+            };
+            records
+                .iter_mut()
+                .find(|record| record.id == wayfinder_id)
+                .expect("shown Wayfinder must remain present while the repository lock is held")
+                .relationships
+                .push(relationship);
+            records.push(grilling.clone());
+            Ok(grilling)
         }
         fn list_records(
             &self,

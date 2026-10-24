@@ -5,8 +5,8 @@ use forge_rpc::{
     AgentDispatchReconcileResponse, AgentDispatchStatusRequest, AgentDispatchStatusResponse,
     DeleteRecordCommentRequest, DoneRecordRequest, EditRecordRequest, ListManagedWorktreesResponse,
     ListRecordCommentsResponse, ListRecordUpdatesResponse, ListRecordsRequest, ListRecordsResponse,
-    ManagedWorktreeResponse, OpenRecordRequest, OpenSpecRequest, OpenTaskRequest,
-    OpenTaskUnderSpecRequest, OpenTaskUnderWayfinderRequest, OpenWayfinderRequest,
+    ManagedWorktreeResponse, OpenGrillingUnderWayfinderRequest, OpenRecordRequest, OpenSpecRequest,
+    OpenTaskRequest, OpenTaskUnderSpecRequest, OpenTaskUnderWayfinderRequest, OpenWayfinderRequest,
     ProjectApiClient, ProjectHereRequest, ProjectHereResponse, ProjectScopeRequest,
     RecordApiClient, RecordIdRequest, RecordResponse, RegisterProjectRequest,
     RegisterProjectResponse, RelateRecordRequest, SystemApiClient, SystemStatusResponse,
@@ -495,6 +495,27 @@ pub async fn request_open_task_under_wayfinder(
         })
         .await
         .map_err(record_error("open Task under Wayfinder"))
+}
+
+/// Opens a Grilling under a Wayfinder through the daemon.
+///
+/// # Errors
+///
+/// Returns an endpoint or daemon validation error.
+pub async fn request_open_grilling_under_wayfinder(
+    url: &str,
+    body: &str,
+    wayfinder_id: u64,
+    project_slugs: Option<Vec<String>>,
+) -> Result<RecordResponse, String> {
+    client(url)?
+        .open_grilling_under_wayfinder(OpenGrillingUnderWayfinderRequest {
+            body: body.into(),
+            wayfinder_id,
+            project_scope: project_slugs.map(|project_slugs| ProjectScopeRequest { project_slugs }),
+        })
+        .await
+        .map_err(record_error("open Grilling under Wayfinder"))
 }
 
 /// Lists Records through the daemon using optional scope, status, and type filters.

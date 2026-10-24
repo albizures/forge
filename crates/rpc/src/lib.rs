@@ -145,6 +145,11 @@ pub trait RecordApi {
         &self,
         request: OpenTaskUnderWayfinderRequest,
     ) -> RpcResult<RecordResponse>;
+    #[method(name = "openGrillingUnderWayfinder")]
+    async fn open_grilling_under_wayfinder(
+        &self,
+        request: OpenGrillingUnderWayfinderRequest,
+    ) -> RpcResult<RecordResponse>;
     #[method(name = "show")]
     async fn show(&self, request: RecordIdRequest) -> RpcResult<RecordResponse>;
     #[method(name = "list")]
@@ -526,6 +531,13 @@ pub struct OpenTaskUnderWayfinderRequest {
     pub body: String,
     pub wayfinder_id: u64,
     pub project_slug: Option<String>,
+}
+/// Opens a Grilling under a Wayfinder, inheriting its scope unless a subset is selected.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct OpenGrillingUnderWayfinderRequest {
+    pub body: String,
+    pub wayfinder_id: u64,
+    pub project_scope: Option<ProjectScopeRequest>,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProjectScopeRequest {

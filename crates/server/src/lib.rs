@@ -46,14 +46,15 @@ use forge_rpc::{
     DeleteRecordCommentRequest, DoctorManagedWorktreesRequest, DoneRecordRequest,
     EditRecordRequest, ListManagedWorktreesRequest, ListManagedWorktreesResponse,
     ListRecordCommentsResponse, ListRecordUpdatesResponse, ListRecordsRequest, ListRecordsResponse,
-    ManageAgentSubscriptionRequest, ManagedWorktreeResponse, ManagementStatus, OpenRecordRequest,
-    OpenSpecRequest, OpenTaskRequest, OpenTaskUnderSpecRequest, OpenTaskUnderWayfinderRequest,
-    OpenWayfinderRequest, ProjectApiServer, ProjectHereRequest, ProjectHereResponse,
-    RecordApiServer, RecordIdRequest, RecordResponse, RecordUpdateSubscriptionResponse,
-    RegisterProjectRequest, RegisterProjectResponse, RelateRecordRequest,
-    RemoveManagedWorktreeRequest, RevisionIdentity, SetAgentDispatchEndpointRequest,
-    SetAgentDispatchProjectRequest, SetProjectSetupHookRequest, SetWorktreeRootRequest,
-    SystemApiServer, SystemStatusResponse, WorktreeApiServer, WorktreeRootResponse,
+    ManageAgentSubscriptionRequest, ManagedWorktreeResponse, ManagementStatus,
+    OpenGrillingUnderWayfinderRequest, OpenRecordRequest, OpenSpecRequest, OpenTaskRequest,
+    OpenTaskUnderSpecRequest, OpenTaskUnderWayfinderRequest, OpenWayfinderRequest,
+    ProjectApiServer, ProjectHereRequest, ProjectHereResponse, RecordApiServer, RecordIdRequest,
+    RecordResponse, RecordUpdateSubscriptionResponse, RegisterProjectRequest,
+    RegisterProjectResponse, RelateRecordRequest, RemoveManagedWorktreeRequest, RevisionIdentity,
+    SetAgentDispatchEndpointRequest, SetAgentDispatchProjectRequest, SetProjectSetupHookRequest,
+    SetWorktreeRootRequest, SystemApiServer, SystemStatusResponse, WorktreeApiServer,
+    WorktreeRootResponse,
 };
 use forge_store::SqliteProjectRepository;
 use futures_util::StreamExt as FuturesStreamExt;
@@ -941,6 +942,23 @@ impl RecordApiServer for Daemon {
             .map_err(rpc_error)
     }
 
+    async fn open_grilling_under_wayfinder(
+        &self,
+        request: OpenGrillingUnderWayfinderRequest,
+    ) -> RpcResult<RecordResponse> {
+        self.application
+            .open_grilling_under_wayfinder(
+                &request.body,
+                request.wayfinder_id,
+                request.project_scope.map(|scope| scope.project_slugs),
+            )
+            .map(|record| {
+                self.delivery.publish(&self.application);
+                record.into()
+            })
+            .map_err(rpc_error)
+    }
+
     async fn show(&self, request: RecordIdRequest) -> RpcResult<RecordResponse> {
         self.application
             .show_record(request.id)
@@ -1709,10 +1727,11 @@ mod tests {
         RegistrationError, RepositoryInspector,
     };
     use forge_rpc::{
-        DoneRecordRequest, EditRecordRequest, ListRecordsRequest, OpenRecordRequest,
-        OpenSpecRequest, OpenTaskRequest, OpenTaskUnderSpecRequest, OpenTaskUnderWayfinderRequest,
-        OpenWayfinderRequest, ProjectApiClient, ProjectHereRequest, ProjectScopeRequest,
-        RecordApiClient, RecordIdRequest, RegisterProjectRequest, SystemApiClient, SystemApiServer,
+        DoneRecordRequest, EditRecordRequest, ListRecordsRequest,
+        OpenGrillingUnderWayfinderRequest, OpenRecordRequest, OpenSpecRequest, OpenTaskRequest,
+        OpenTaskUnderSpecRequest, OpenTaskUnderWayfinderRequest, OpenWayfinderRequest,
+        ProjectApiClient, ProjectHereRequest, ProjectScopeRequest, RecordApiClient,
+        RecordIdRequest, RegisterProjectRequest, SystemApiClient, SystemApiServer,
     };
     use forge_store::SqliteProjectRepository;
     use futures_util::StreamExt;
@@ -2232,6 +2251,17 @@ mod tests {
         assert_eq!(wayfinder.record_type, "wayfinder");
         assert_eq!(wayfinder_task.project_scope, wayfinder.project_scope);
         assert_eq!(wayfinder_task.relationships[0].parent_id, wayfinder.id);
+        let grilling = client
+            .open_grilling_under_wayfinder(OpenGrillingUnderWayfinderRequest {
+                body: "A daemon-backed Grilling".into(),
+                wayfinder_id: wayfinder.id,
+                project_scope: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(grilling.record_type, "grilling");
+        assert_eq!(grilling.project_scope, wayfinder.project_scope);
+        assert_eq!(grilling.relationships[0].parent_id, wayfinder.id);
         let wayfinders = client
             .list(ListRecordsRequest {
                 project_slug: Some("server-test-project".into()),
