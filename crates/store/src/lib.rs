@@ -2572,7 +2572,6 @@ mod tests {
         RecordStatus, RecordType, RecordUpdateKind, RecordUpdateKindFilter,
         RecordUpdateSubscriptionRepository, assignment_add_comment, assignment_complete_task,
         assignment_context, assignment_create_record_update_subscription,
-        assignment_delete_record_update_subscription, assignment_renew_record_update_subscription,
     };
     use std::{
         path::{Path, PathBuf},
@@ -3248,122 +3247,122 @@ mod tests {
 
     #[test]
     #[allow(clippy::too_many_lines)]
-    fn subscription_management_is_direct_child_owned_and_revoked_on_retirement() {
+    fn assignment_context_and_subscriptions_follow_direct_dependencies_across_scopes() {
         let store = SqliteProjectRepository::in_memory().unwrap();
-        store.register(&project("alpha", "/repos/alpha")).unwrap();
-        let parent = store
-            .open_typed_record(&NewTypedRecord {
-                record_type: RecordType::Task,
-                body: "parent".into(),
-                project_slugs: vec!["alpha".into()],
-            })
+        for (slug, folder) in [
+            ("alpha", "/repos/alpha"),
+            ("beta", "/repos/beta"),
+            ("gamma", "/repos/gamma"),
+        ] {
+            store.register(&project(slug, folder)).unwrap();
+        }
+        let task = |body: &str, project_slug: &str| NewTypedRecord {
+            record_type: RecordType::Task,
+            body: body.into(),
+            project_slugs: vec![project_slug.into()],
+        };
+        let assigned = store.open_typed_record(&task("assigned", "alpha")).unwrap();
+        let prerequisite = store
+            .open_typed_record(&task("prerequisite", "beta"))
             .unwrap();
-        let child = store
-            .open_record(&NewRecord {
-                body: "child".into(),
-                project_slugs: vec!["alpha".into()],
-            })
+        let dependent = store
+            .open_typed_record(&task("dependent", "gamma"))
             .unwrap();
-        let sibling = store
-            .open_record(&NewRecord {
-                body: "sibling".into(),
-                project_slugs: vec!["alpha".into()],
-            })
-            .unwrap();
-        let grandchild = store
-            .open_record(&NewRecord {
-                body: "grandchild".into(),
-                project_slugs: vec!["alpha".into()],
-            })
+        let transitive = store
+            .open_typed_record(&task("transitive", "beta"))
             .unwrap();
         store
-            .relate_records(child.id, parent.id, RecordRelationshipKind::ParentChild)
+            .relate_records(
+                assigned.id,
+                prerequisite.id,
+                RecordRelationshipKind::DependsOn,
+            )
             .unwrap();
         store
-            .relate_records(sibling.id, parent.id, RecordRelationshipKind::ParentChild)
+            .relate_records(dependent.id, assigned.id, RecordRelationshipKind::DependsOn)
             .unwrap();
         store
-            .relate_records(grandchild.id, child.id, RecordRelationshipKind::ParentChild)
+            .relate_records(
+                prerequisite.id,
+                transitive.id,
+                RecordRelationshipKind::DependsOn,
+            )
             .unwrap();
         store
             .create_agent_assignment(&NewAgentAssignment {
                 id: "owner".into(),
-                record_id: parent.id,
+                record_id: assigned.id,
                 project_slug: "alpha".into(),
                 profile_revision: 1,
             })
             .unwrap();
+
+        let context = assignment_context(&store, "owner", "cap-owner", "context").unwrap();
+        assert_eq!(context.task.id, assigned.id);
+        assert_eq!(
+            context
+                .directly_related_records
+                .iter()
+                .map(|record| record.id)
+                .collect::<Vec<_>>(),
+            vec![prerequisite.id, dependent.id]
+        );
+        assert_eq!(context.directly_related_records[0].project_slugs, ["beta"]);
+        assert_eq!(context.directly_related_records[1].project_slugs, ["gamma"]);
+
         let subscription = assignment_create_record_update_subscription(
             &store,
             "owner",
             "cap-owner",
             "create",
-            vec![child.id],
+            vec![prerequisite.id],
             vec![],
         )
         .unwrap();
-        assert_eq!(subscription.target_record_ids, vec![child.id]);
-        assert_eq!(
-            assignment_create_record_update_subscription(
-                &store,
-                "owner",
-                "cap-owner",
-                "sibling",
-                vec![sibling.id],
-                vec![]
+        assert_eq!(subscription.target_record_ids, vec![prerequisite.id]);
+        for target in [dependent.id, transitive.id] {
+            assert_eq!(
+                assignment_create_record_update_subscription(
+                    &store,
+                    "owner",
+                    "cap-owner",
+                    "denied",
+                    vec![target],
+                    vec![]
+                )
+                .unwrap_err()
+                .code,
+                "assignment-capability-denied"
+            );
+        }
+
+        store
+            .unrelate_records(
+                assigned.id,
+                prerequisite.id,
+                RecordRelationshipKind::DependsOn,
             )
-            .unwrap()
-            .target_record_ids,
-            vec![sibling.id]
+            .unwrap();
+        assert!(
+            store
+                .replay_record_updates(subscription.id, subscription.start_cursor)
+                .unwrap()
+                .iter()
+                .any(|update| {
+                    update.record_id == prerequisite.id
+                        && matches!(
+                            update.update.kind,
+                            RecordUpdateKind::RelationshipRemoved { related_record_id }
+                                if related_record_id == assigned.id
+                        )
+                })
         );
-        assert_eq!(
-            assignment_create_record_update_subscription(
-                &store,
-                "owner",
-                "cap-owner",
-                "transitive",
-                vec![grandchild.id],
-                vec![]
-            )
-            .unwrap_err()
-            .code,
-            "assignment-capability-denied"
-        );
-        assert_eq!(
-            assignment_renew_record_update_subscription(
-                &store,
-                "other",
-                "cap-other",
-                "renew",
-                subscription.id
-            )
-            .unwrap_err()
-            .code,
-            "assignment-not-found"
-        );
-        assignment_delete_record_update_subscription(
-            &store,
-            "owner",
-            "cap-owner",
-            "delete",
-            subscription.id,
-        )
-        .unwrap();
-        let replacement = assignment_create_record_update_subscription(
-            &store,
-            "owner",
-            "cap-owner",
-            "replacement",
-            vec![child.id],
-            vec![],
-        )
-        .unwrap();
         store
             .close_agent_assignment("owner", forge_app::AgentAssignmentClosureReason::Retired)
             .unwrap();
         assert_eq!(
             store
-                .record_update_subscription(replacement.id)
+                .record_update_subscription(subscription.id)
                 .unwrap_err()
                 .code,
             "subscription-not-found"

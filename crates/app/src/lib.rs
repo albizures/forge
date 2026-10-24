@@ -1082,9 +1082,9 @@ pub fn assignment_context<R: AgentDispatchRepository>(
         .relationships
         .iter()
         .filter_map(|relationship| {
-            (relationship.child_id == task.id)
-                .then_some(relationship.parent_id)
-                .or_else(|| (relationship.parent_id == task.id).then_some(relationship.child_id))
+            (relationship.from_id == task.id)
+                .then_some(relationship.to_id)
+                .or_else(|| (relationship.to_id == task.id).then_some(relationship.from_id))
         })
         .map(|id| repository.show_record(id))
         .collect::<Result<Vec<_>, _>>()?;
@@ -1158,7 +1158,7 @@ pub fn assignment_complete_task<R: AgentDispatchRepository>(
     repository.done_record(task_id, resolution)
 }
 
-/// Authorizes creation of a Subscription for explicit direct children of the assigned Record.
+/// Authorizes creation of a Subscription for explicit direct prerequisites of the assigned Record.
 #[allow(clippy::missing_errors_doc)]
 pub fn assignment_create_record_update_subscription<
     R: RecordUpdateSubscriptionRepository + ?Sized,
@@ -1176,8 +1176,9 @@ pub fn assignment_create_record_update_subscription<
         && target_record_ids.iter().all(|target_id| {
             repository.show_record(*target_id).is_ok_and(|target| {
                 target.relationships.iter().any(|relationship| {
-                    relationship.parent_id == assignment.record_id
-                        && relationship.child_id == *target_id
+                    relationship.kind == RecordRelationshipKind::DependsOn
+                        && relationship.from_id == assignment.record_id
+                        && relationship.to_id == *target_id
                 })
             })
         });
