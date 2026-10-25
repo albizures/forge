@@ -9,12 +9,12 @@ use std::{
 use forge_app::{
     AgentAssignment, AgentAssignmentClosureReason, AgentAssignmentResource, AgentAssignmentState,
     AgentDispatchRepository, AgentProfile, AssignmentAuthorizationAudit,
-    AssignmentAuthorizationOperation, AssignmentAuthorizationOutcome, ManagedWorktreeRepository,
-    NewAgentAssignment, NewAgentAssignmentResource, NewRecord, NewRecordUpdateSubscription,
-    NewTypedRecord, Project, ProjectRepository, Record, RecordComment, RecordCommentId,
-    RecordListFilter, RecordRelationship, RecordRelationshipKind, RecordRepository, RecordStatus,
-    RecordType, RecordUpdate, RecordUpdateEnvelope, RecordUpdateId, RecordUpdateKind,
-    RecordUpdateKindFilter, RecordUpdateSubscription, RecordUpdateSubscriptionId,
+    AssignmentAuthorizationOperation, AssignmentAuthorizationOutcome, DispatchWorkspace,
+    ManagedWorktreeRepository, NewAgentAssignment, NewAgentAssignmentResource, NewRecord,
+    NewRecordUpdateSubscription, NewTypedRecord, Project, ProjectRepository, Record, RecordComment,
+    RecordCommentId, RecordListFilter, RecordRelationship, RecordRelationshipKind,
+    RecordRepository, RecordStatus, RecordType, RecordUpdate, RecordUpdateEnvelope, RecordUpdateId,
+    RecordUpdateKind, RecordUpdateKindFilter, RecordUpdateSubscription, RecordUpdateSubscriptionId,
     RecordUpdateSubscriptionRepository, RegistrationError, TaskKind, WorktreeClaim,
     WorktreeClaimState, is_worktree_eligible, managed_worktree_path,
 };
@@ -185,6 +185,8 @@ impl SqliteProjectRepository {
             CREATE TABLE IF NOT EXISTS agent_dispatch_configuration (
                 singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                 herdr_socket_path TEXT,
+                dispatch_workspace_id TEXT,
+                dispatch_workspace_root TEXT,
                 scan_lease_owner TEXT,
                 scan_lease_until_millis INTEGER
             );
@@ -1357,9 +1359,25 @@ fn migrate_agent_assignment_schema(connection: &Connection) -> Result<(), Regist
             )
             .map_err(storage_error)?;
     }
-    connection.execute_batch("ALTER TABLE agent_dispatch_configuration ADD COLUMN scan_lease_owner TEXT; ALTER TABLE agent_dispatch_configuration ADD COLUMN scan_lease_until_millis INTEGER;").or_else(|error| {
-        if error.to_string().contains("duplicate column name") { Ok(()) } else { Err(error) }
-    }).map_err(storage_error)?;
+    for column in [
+        "scan_lease_owner TEXT",
+        "scan_lease_until_millis INTEGER",
+        "dispatch_workspace_id TEXT",
+        "dispatch_workspace_root TEXT",
+    ] {
+        connection
+            .execute_batch(&format!(
+                "ALTER TABLE agent_dispatch_configuration ADD COLUMN {column};"
+            ))
+            .or_else(|error| {
+                if error.to_string().contains("duplicate column name") {
+                    Ok(())
+                } else {
+                    Err(error)
+                }
+            })
+            .map_err(storage_error)?;
+    }
     connection.execute_batch("CREATE TABLE IF NOT EXISTS dispatch_holds (record_id INTEGER PRIMARY KEY NOT NULL REFERENCES records(id), reason TEXT NOT NULL CHECK (length(trim(reason)) > 0)); CREATE TABLE IF NOT EXISTS task_base_commits (record_id INTEGER PRIMARY KEY NOT NULL REFERENCES records(id), base_commit TEXT NOT NULL CHECK (length(trim(base_commit)) > 0));").map_err(storage_error)?;
     Ok(())
 }
@@ -1994,6 +2012,80 @@ impl AgentDispatchRepository for SqliteProjectRepository {
                 let outcome = match row.get::<_, String>(5)?.as_str() { "allowed" => AssignmentAuthorizationOutcome::Allowed, "denied" => AssignmentAuthorizationOutcome::Denied, _ => return Err(rusqlite::Error::InvalidQuery) };
                 Ok(AssignmentAuthorizationAudit { assignment_id: row.get(0)?, capability_id: row.get(1)?, created_at_millis: row.get::<_, i64>(2)?.cast_unsigned(), operation, target_record_id: row.get::<_, i64>(4)?.cast_unsigned(), outcome, reason: row.get(6)?, correlation_id: row.get(7)? })
             }).map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)
+    }
+
+    fn agent_workspace(&self, record_id: u64) -> Result<Option<PathBuf>, RegistrationError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        connection
+            .query_row(
+                "SELECT path FROM worktree_claims WHERE record_id = ?1 AND state = 'active'",
+                [record_id.cast_signed()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(storage_error)
+            .map(|path| path.map(PathBuf::from))
+    }
+
+    fn dispatch_workspace(&self) -> Result<Option<DispatchWorkspace>, RegistrationError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        connection
+            .query_row(
+                "SELECT dispatch_workspace_id, dispatch_workspace_root FROM agent_dispatch_configuration WHERE singleton = 1",
+                [],
+                |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()
+            .map_err(storage_error)
+            .and_then(|workspace| match workspace {
+                Some((Some(id), Some(root))) => Ok(Some(DispatchWorkspace { id, root: root.into() })),
+                Some((None, None)) | None => Ok(None),
+                _ => Err(RegistrationError::new("storage", "stored dispatch workspace is incomplete")),
+            })
+    }
+
+    fn retain_dispatch_workspace(
+        &self,
+        workspace: &DispatchWorkspace,
+    ) -> Result<DispatchWorkspace, RegistrationError> {
+        if workspace.id.trim().is_empty() || !workspace.root.is_absolute() {
+            return Err(RegistrationError::new(
+                "invalid-dispatch-workspace",
+                "dispatch workspace requires an ID and absolute root",
+            ));
+        }
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        connection.execute(
+            "INSERT INTO agent_dispatch_configuration (singleton, dispatch_workspace_id, dispatch_workspace_root) VALUES (1, ?1, ?2) ON CONFLICT(singleton) DO NOTHING",
+            params![workspace.id, workspace.root.to_string_lossy()],
+        ).map_err(storage_error)?;
+        let retained = connection.query_row(
+            "SELECT dispatch_workspace_id, dispatch_workspace_root FROM agent_dispatch_configuration WHERE singleton = 1",
+            [],
+            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?)),
+        ).map_err(storage_error)?;
+        match retained {
+            (Some(id), Some(root)) if id == workspace.id && Path::new(&root) == workspace.root => {
+                Ok(workspace.clone())
+            }
+            (Some(_), Some(_)) => Err(RegistrationError::new(
+                "dispatch-workspace-conflict",
+                "a different Forge Dispatch Workspace is already retained",
+            )),
+            _ => Err(RegistrationError::new(
+                "storage",
+                "stored dispatch workspace is incomplete",
+            )),
+        }
     }
 
     fn set_herdr_socket_path(&self, path: Option<&Path>) -> Result<(), RegistrationError> {
@@ -4286,6 +4378,27 @@ mod tests {
         assert_eq!(profile.agent_kind, "pi");
         assert_eq!(profile.model, "gpt-5.6-terra");
         assert_eq!(store.agent_profile(RecordType::Task, 1).unwrap(), profile);
+
+        let workspace = forge_app::DispatchWorkspace {
+            id: "shared-workspace".into(),
+            root: "/forge-data/herdr-dispatch-workspace".into(),
+        };
+        assert_eq!(store.dispatch_workspace().unwrap(), None);
+        assert_eq!(
+            store.retain_dispatch_workspace(&workspace).unwrap(),
+            workspace
+        );
+        assert_eq!(store.dispatch_workspace().unwrap(), Some(workspace.clone()));
+        assert_eq!(
+            store
+                .retain_dispatch_workspace(&forge_app::DispatchWorkspace {
+                    id: "other-workspace".into(),
+                    root: "/forge-data/other".into(),
+                })
+                .unwrap_err()
+                .code,
+            "dispatch-workspace-conflict"
+        );
 
         let assignment = store
             .create_agent_assignment(&NewAgentAssignment {

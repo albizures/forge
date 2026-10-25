@@ -2,7 +2,7 @@
 
 **Question:** What exact provider-neutral contract and Herdr Socket API sequence should Forge use for a V1 Task assignment?
 
-**Decision:** implement one `HerdrAdapter` behind Forge's provider-neutral dispatch port. It provisions one dedicated **tab** and **pane** inside the registered Project's existing Herdr workspace; it never creates or closes that Project workspace. Every external call is made by the Forge daemon, not by the CLI.
+**Decision:** implement one `HerdrAdapter` behind Forge's provider-neutral dispatch port. Forge creates and durably retains one reusable **Forge Dispatch Workspace** at a neutral root under Forge user data. It provisions one dedicated **tab** and **pane** per Assignment in that workspace; the tab cwd is the Assignment's prepared Task Managed Worktree, so Pi starts there. Every external call is made by the Forge daemon, not by the CLI.
 
 ## Sources and compatibility boundary
 
@@ -44,7 +44,7 @@ agent name: forge-dispatch-A
 
 The exact safe encoding is `forge-dispatch-` plus the assignment's opaque ASCII identifier; reject/encode any character Herdr does not accept rather than truncating into a collision. The adapter treats the assignment's persisted resource IDs as authority. Labels/names are recovery hints only: another pane with the same text is not adoptable.
 
-`projectWorkspace` is found from the registered Project folder by `session.snapshot` / `workspace.list`: it must be a workspace whose `cwd` is the validated Project folder. Zero matches is a per-assignment provisioning failure; multiple matches is a conflict diagnostic. Forge must not use focus-dependent optional targets or create a replacement workspace. The selected workspace ID is persisted before later resources.
+The Forge Dispatch Workspace has a neutral absolute root under Forge user data, never a Project folder or Task workspace. Forge persists its returned workspace ID and root immediately after `workspace.create`. On later attempts it calls `workspace.get` and requires the persisted ID and root to match exactly. A missing, ambiguous, or mismatched retained workspace is a provisioning failure: Forge never adopts a label-only workspace or creates a replacement while an identity is retained.
 
 For recovery, read `agent.get` using the persisted agent name and require its returned `workspace_id`, `tab_id`, and `pane_id` to equal the persisted IDs. If name lookup is unavailable or ambiguous, use `agent.list` and match the complete persisted tuple. Read `tab.get` and `pane.get` where needed to classify a partial resource set. A resource found in another workspace/tab/pane is a conflict, not an owned agent.
 
@@ -54,8 +54,8 @@ The daemon owns a provision lease from #437; all steps are idempotent by recover
 
 | Step | Socket method and parameters | Persist / recovery rule |
 |---|---|---|
-| Discover | `session.snapshot`, then `workspace.list`/`workspace.get` as needed | Find and persist the existing Project `workspace_id`; never call `workspace.create`. |
-| Dedicated tab | `tab.create { workspace_id, label: "forge-dispatch-A", cwd: projectFolder, focus: false }` | Persist returned `tab_id`. Before create, recover only a tab ID already persisted for A; do not adopt a label-only tab. |
+| Shared workspace | `workspace.create { cwd: forgeDataRoot, focus: false }`, once when no durable identity exists | Persist its returned `workspace_id` and neutral root immediately. Reconcile retained identity with `workspace.get`; never adopt by label or create a replacement for a retained identity. |
+| Dedicated tab | `tab.create { workspace_id, label: "forge-dispatch-A", cwd: taskManagedWorktree, focus: false }` | Persist returned `tab_id`. Pi inherits this prepared Task Managed Worktree cwd. Before create, recover only a tab ID already persisted for A; do not adopt a label-only tab. |
 | Dedicated pane | `pane.split { target_pane_id: <an existing pane in the new tab>, workspace_id, direction: "right", focus: false }` | Persist returned `pane_id`. This makes Forge's pane dedicated rather than taking over the tab's root pane. The root pane remains part of the dedicated tab and is closed with that tab at retirement. |
 | Start Pi | `agent.start { name: "forge-dispatch-A", kind: "pi", pane_id, args: <the immutable Task profile arguments>, timeout_ms: <profile startup timeout> }` | Persist `agent-name` (and re-read `agent.get` to confirm the returned identity tuple). `name`, `kind`, and `pane_id` are required by protocol 22. |
 | Submit initial work | `agent.prompt { target: "forge-dispatch-A", text: initialPrompt }` | A successful response means prompt admission, not Task completion. No `wait` option is used by reconciliation. |
@@ -87,7 +87,7 @@ Retirement is repeatable and records each outcome in `agent_assignment_resources
 1. Re-observe/recover the durable tuple. If the pane still identifies `forge-dispatch-A`, call `pane.release_agent { pane_id, source: "forge-agent-dispatch", agent: "forge-dispatch-A", seq: <next adapter sequence> }`. A not-found release is already-clean evidence; a conflict is not.
 2. Call `pane.close { pane_id }` for Forge's dedicated split pane. If already absent, record it retired. Never close a pane unless its persisted ID is in the assignment's dedicated tab and recovery confirms ownership.
 3. Call `tab.close { tab_id }`, which removes the dedicated tab and its remaining root pane. Persist the tab/pane retirement facts.
-4. Do **not** call `workspace.close`: the workspace is Project-owned, not assignment-owned.
+4. Do **not** call `workspace.close`: the Forge Dispatch Workspace is shared and retained for later Assignments, not assignment-owned.
 
 Protocol 22 has no agent-delete/close API. `pane.release_agent`, `pane.close`, and `tab.close` are therefore the concrete release sequence. If cleanup is temporarily unavailable, leave resources and retry on a later reconciliation. If it is conclusively abandoned, retain all facts and use #437's `cleanup-abandoned` closure reason.
 
@@ -95,4 +95,4 @@ Protocol 22 has no agent-delete/close API. `pane.release_agent`, `pane.close`, a
 
 Socket responses use an error envelope with string `code` and `message`; retain the code in redacted diagnostics. Map connection failure, malformed response, and incompatible snapshot/protocol to `endpoint`; timeouts/disconnects after a healthy probe to `transient`; missing persisted resources to `not-found`; wrong tuple/name or unexpected existing resource to `conflict`; validation failures and `agentblocked` to `invalid-request` (with `agentblocked` handled as a normal blocked observation where possible). A cleanup call failure is `cleanup` and does not erase resources or justify a duplicate provision.
 
-This contract preserves #437's key properties: external calls occur outside the SQLite claim transaction; durable assignment/resource state makes them idempotent; authoritative reads—not event delivery—drive state; retained idle/blocked attempts consume capacity; and only Forge-created tab/pane resources are cleaned up.
+This contract preserves #437's key properties: external calls occur outside the SQLite claim transaction; durable shared-workspace and assignment-resource state makes them idempotent; authoritative reads—not event delivery—drive state; retained idle/blocked attempts consume capacity; and only Forge-created assignment tab/pane resources are cleaned up.

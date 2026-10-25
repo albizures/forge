@@ -612,6 +612,9 @@ pub enum AgentObservation {
 pub struct AgentDispatchContext {
     pub assignment: AgentAssignment,
     pub registered_project_folder: PathBuf,
+    /// The prepared active Managed Worktree in which this Task's Pi process runs.
+    pub agent_workspace: Option<PathBuf>,
+    pub dispatch_workspace: Option<DispatchWorkspace>,
     pub rendered_initial_prompt: String,
     /// Capability delivery is intentionally opaque to the provider. A later capability issuer
     /// supplies this value without exposing its secret in assignment persistence.
@@ -925,6 +928,8 @@ fn agent_dispatch_context(
     Ok(AgentDispatchContext {
         assignment: assignment.clone(),
         registered_project_folder: project.registered_folder,
+        agent_workspace: repository.agent_workspace(assignment.record_id)?,
+        dispatch_workspace: repository.dispatch_workspace()?,
         rendered_initial_prompt: format!(
             "{}\n\n{}",
             assignment.profile.prompt_template, record.body
@@ -1044,6 +1049,13 @@ pub trait RecordUpdateSubscriptionRepository: AgentDispatchRepository {
     ) -> Result<Vec<RecordUpdateEnvelope>, RegistrationError>;
 }
 
+/// The Forge-owned reusable provider workspace shared by dispatched Agents.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DispatchWorkspace {
+    pub id: String,
+    pub root: PathBuf,
+}
+
 /// A durable operator-cleared block on automatic Task dispatch.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DispatchHold {
@@ -1143,6 +1155,15 @@ pub trait AgentDispatchRepository: RecordRepository {
         &self,
         assignment_id: &str,
     ) -> Result<Vec<AgentAssignmentResource>, RegistrationError>;
+    /// Returns the prepared active Managed Worktree used as the Agent's process cwd.
+    fn agent_workspace(&self, record_id: u64) -> Result<Option<PathBuf>, RegistrationError>;
+    /// Returns the durable identity of Forge's shared dispatch workspace.
+    fn dispatch_workspace(&self) -> Result<Option<DispatchWorkspace>, RegistrationError>;
+    /// Persists the shared workspace identity immediately after it is created.
+    fn retain_dispatch_workspace(
+        &self,
+        workspace: &DispatchWorkspace,
+    ) -> Result<DispatchWorkspace, RegistrationError>;
     /// Sets or clears the daemon-wide absolute Herdr Unix socket path.
     fn set_herdr_socket_path(&self, path: Option<&Path>) -> Result<(), RegistrationError>;
     /// Returns the configured daemon-wide Herdr Unix socket path.

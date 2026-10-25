@@ -3,7 +3,7 @@
 use std::{
     fmt::Write as _,
     io::{BufRead, BufReader, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::Duration,
 };
 
@@ -15,7 +15,8 @@ use tokio::{
 
 use forge_app::{
     AgentAdapterError, AgentAssignmentResource, AgentDispatchAdapter, AgentDispatchContext,
-    AgentDispatchRepository, AgentObservation, AgentProfile, NewAgentAssignmentResource,
+    AgentDispatchRepository, AgentObservation, AgentProfile, DispatchWorkspace,
+    NewAgentAssignmentResource,
 };
 use forge_store::SqliteProjectRepository;
 use serde_json::{Value, json};
@@ -62,13 +63,32 @@ impl HerdrAdapterFactory {
         .ok_or_else(|| {
             AgentAdapterError::Endpoint("Herdr Unix socket endpoint is not configured".into())
         })?;
-        Ok(HerdrAdapter { socket_path })
+        let store_root = self
+            .configuration_store
+            .as_deref()
+            .and_then(Path::parent)
+            .unwrap_or_else(|| Path::new("."));
+        let data_root = if store_root.is_absolute() {
+            store_root.to_owned()
+        } else {
+            std::env::current_dir()
+                .map_err(|_| {
+                    AgentAdapterError::Endpoint("could not resolve Forge data root".into())
+                })?
+                .join(store_root)
+        };
+        Ok(HerdrAdapter {
+            socket_path,
+            dispatch_root: data_root.join("herdr-dispatch-workspace"),
+        })
     }
 }
 
 /// A synchronous, one-request-per-connection Herdr protocol-22 client.
 pub struct HerdrAdapter {
     socket_path: PathBuf,
+    /// Neutral Forge-owned data root, never a Project or Task workspace.
+    dispatch_root: PathBuf,
 }
 
 /// Runs the long-lived event side of Herdr observation. Events only enqueue a wake; the
@@ -382,48 +402,72 @@ impl HerdrAdapter {
             })
     }
 
-    fn workspace_id(&self, context: &AgentDispatchContext) -> Result<String, AgentAdapterError> {
-        let snapshot = self.snapshot()?;
-        let folder = context.registered_project_folder.to_string_lossy();
-        let workspaces = snapshot
-            .get("workspaces")
-            .and_then(Value::as_array)
-            .ok_or_else(|| {
-                AgentAdapterError::Endpoint("Herdr snapshot has no workspaces".into())
-            })?;
-        let panes = snapshot
-            .get("panes")
-            .and_then(Value::as_array)
-            .map_or(&[][..], Vec::as_slice);
-        let matches: Vec<_> = workspaces
-            .iter()
-            .filter(|workspace| {
-                workspace.get("cwd").and_then(Value::as_str) == Some(folder.as_ref())
-                    || workspace
-                        .get("workspace_id")
-                        .and_then(Value::as_str)
-                        .is_some_and(|id| {
-                            panes.iter().any(|pane| {
-                                pane.get("workspace_id").and_then(Value::as_str) == Some(id)
-                                    && pane.get("cwd").and_then(Value::as_str)
-                                        == Some(folder.as_ref())
-                            })
-                        })
-            })
-            .collect();
-        match matches.as_slice() {
-            [workspace] => workspace
-                .get("workspace_id")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-                .ok_or_else(|| AgentAdapterError::Endpoint("Herdr workspace has no ID".into())),
-            [] => Err(AgentAdapterError::InvalidRequest(
-                "no Herdr workspace matches the registered Project folder".into(),
-            )),
-            _ => Err(AgentAdapterError::Conflict(
-                "multiple Herdr workspaces match the registered Project folder".into(),
-            )),
+    fn dispatch_workspace(
+        &self,
+        resources: &dyn AgentDispatchRepository,
+    ) -> Result<String, AgentAdapterError> {
+        if let Some(workspace) = resources.dispatch_workspace().map_err(|error| {
+            AgentAdapterError::Transient(format!(
+                "could not read dispatch workspace: {}",
+                error.code
+            ))
+        })? {
+            let found = self.request("workspace.get", json!({"workspace_id": workspace.id}))?;
+            Self::matching_resource(
+                &found,
+                "workspace",
+                &[
+                    ("workspace_id", &workspace.id),
+                    ("cwd", &workspace.root.to_string_lossy()),
+                ],
+            )?;
+            return Ok(workspace.id);
         }
+        std::fs::create_dir_all(&self.dispatch_root).map_err(|_| {
+            AgentAdapterError::Endpoint(
+                "could not create neutral Forge Dispatch Workspace root".into(),
+            )
+        })?;
+        let result = self.request(
+            "workspace.create",
+            json!({"cwd": self.dispatch_root, "focus": false}),
+        )?;
+        let id = result
+            .pointer("/workspace/workspace_id")
+            .or_else(|| result.get("workspace_id"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                AgentAdapterError::Endpoint("workspace.create did not return workspace_id".into())
+            })?;
+        resources
+            .retain_dispatch_workspace(&DispatchWorkspace {
+                id: id.into(),
+                root: self.dispatch_root.clone(),
+            })
+            .map_err(|error| {
+                AgentAdapterError::Conflict(format!(
+                    "could not retain Forge Dispatch Workspace: {}",
+                    error.code
+                ))
+            })?;
+        Ok(id.into())
+    }
+
+    fn dispatch_workspace_from_context(
+        &self,
+        context: &AgentDispatchContext,
+    ) -> Result<String, AgentAdapterError> {
+        let workspace = context.dispatch_workspace.as_ref().ok_or_else(|| {
+            AgentAdapterError::Conflict("Forge Dispatch Workspace identity was not retained".into())
+        })?;
+        let root = workspace.root.to_string_lossy();
+        let found = self.request("workspace.get", json!({"workspace_id": workspace.id}))?;
+        Self::matching_resource(
+            &found,
+            "workspace",
+            &[("workspace_id", &workspace.id), ("cwd", root.as_ref())],
+        )?;
+        Ok(workspace.id.clone())
     }
 
     fn root_pane(&self, workspace: &str, tab: &str) -> Result<String, AgentAdapterError> {
@@ -573,17 +617,16 @@ impl AgentDispatchAdapter for HerdrAdapter {
     ) -> Result<(), AgentAdapterError> {
         self.probe()?;
         let label = Self::label(context)?;
-        let workspace = if let Some(id) = Self::active(&context.resources, "workspace") {
-            id.to_owned()
-        } else {
-            let id = self.workspace_id(context)?;
-            Self::retain(resources, context, "workspace", &id)?;
-            id
-        };
+        let agent_workspace = context.agent_workspace.as_ref().ok_or_else(|| {
+            AgentAdapterError::InvalidRequest(
+                "Task has no prepared active Managed Worktree for Agent dispatch".into(),
+            )
+        })?;
+        let workspace = self.dispatch_workspace(resources)?;
         let (tab, root) = if let Some(id) = Self::active(&context.resources, "tab") {
             (id.to_owned(), None)
         } else {
-            let result = self.request("tab.create", json!({"workspace_id": workspace, "label": label, "cwd": context.registered_project_folder, "focus": false}))?;
+            let result = self.request("tab.create", json!({"workspace_id": workspace, "label": label, "cwd": agent_workspace, "focus": false}))?;
             let id = result
                 .pointer("/tab/tab_id")
                 .or_else(|| result.get("tab_id"))
@@ -640,15 +683,15 @@ impl AgentDispatchAdapter for HerdrAdapter {
         &self,
         context: &AgentDispatchContext,
     ) -> Result<AgentObservation, AgentAdapterError> {
-        let (Some(workspace), Some(tab), Some(pane), Some(agent)) = (
-            Self::active(&context.resources, "workspace"),
+        let workspace = self.dispatch_workspace_from_context(context)?;
+        let (Some(tab), Some(pane), Some(agent)) = (
             Self::active(&context.resources, "tab"),
             Self::active(&context.resources, "pane"),
             Self::active(&context.resources, "agent-name"),
         ) else {
             return Ok(AgentObservation::Absent);
         };
-        self.agent_observation(agent, (workspace, tab, pane))
+        self.agent_observation(agent, (&workspace, tab, pane))
     }
 
     fn recover(
@@ -663,11 +706,7 @@ impl AgentDispatchAdapter for HerdrAdapter {
         context: &AgentDispatchContext,
         resources: &dyn AgentDispatchRepository,
     ) -> Result<(), AgentAdapterError> {
-        let Some(workspace) = Self::resource_is_active(context, "workspace") else {
-            return Err(AgentAdapterError::Conflict(
-                "cannot retire Herdr resources without a persisted workspace ID".into(),
-            ));
-        };
+        let workspace = self.dispatch_workspace_from_context(context)?;
         let tab = Self::resource_is_active(context, "tab");
         let pane = Self::resource_is_active(context, "pane");
         let agent = Self::resource_is_active(context, "agent-name");
@@ -801,6 +840,7 @@ mod tests {
         });
         let adapter = super::HerdrAdapter {
             socket_path: path.clone(),
+            dispatch_root: std::env::temp_dir().join("forge-dispatch-workspace"),
         };
         adapter.probe().unwrap();
         server.join().unwrap();
@@ -853,6 +893,7 @@ mod tests {
         });
         let adapter = super::HerdrAdapter {
             socket_path: path.clone(),
+            dispatch_root: std::env::temp_dir().join("forge-dispatch-workspace"),
         };
         assert_eq!(
             adapter
@@ -907,7 +948,6 @@ mod tests {
             })
             .unwrap();
         for (kind, id) in [
-            ("workspace", "workspace"),
             ("tab", "tab"),
             ("pane", "pane"),
             ("agent-name", "forge-dispatch-assignment"),
@@ -920,11 +960,22 @@ mod tests {
                 })
                 .unwrap();
         }
+        repository
+            .retain_dispatch_workspace(&forge_app::DispatchWorkspace {
+                id: "workspace".into(),
+                root: "/forge-data/herdr-dispatch-workspace".into(),
+            })
+            .unwrap();
         let context = AgentDispatchContext {
             assignment: assignment.clone(),
             registered_project_folder: "/project".into(),
+            agent_workspace: Some("/worktree".into()),
             rendered_initial_prompt: String::new(),
             capability_delivery: None,
+            dispatch_workspace: Some(forge_app::DispatchWorkspace {
+                id: "workspace".into(),
+                root: "/forge-data/herdr-dispatch-workspace".into(),
+            }),
             resources: repository
                 .list_agent_assignment_resources(&assignment.id)
                 .unwrap(),
@@ -940,6 +991,10 @@ mod tests {
         let listener = UnixListener::bind(&path).unwrap();
         let server = thread::spawn(move || {
             for (method, response) in [
+                (
+                    "workspace.get",
+                    serde_json::json!({"result":{"workspace":{"workspace_id":"workspace","cwd":"/forge-data/herdr-dispatch-workspace"}}}),
+                ),
                 (
                     "tab.get",
                     serde_json::json!({"result":{"tab":{"tab_id":"tab","workspace_id":"workspace"}}}),
@@ -974,6 +1029,7 @@ mod tests {
         });
         let adapter = super::HerdrAdapter {
             socket_path: path.clone(),
+            dispatch_root: std::env::temp_dir().join("forge-dispatch-workspace"),
         };
         adapter.retire(&context, &repository).unwrap();
         server.join().unwrap();
@@ -983,15 +1039,6 @@ mod tests {
         assert!(
             resources
                 .iter()
-                .find(|resource| resource.resource_kind == "workspace")
-                .unwrap()
-                .retired_at_millis
-                .is_none()
-        );
-        assert!(
-            resources
-                .iter()
-                .filter(|resource| resource.resource_kind != "workspace")
                 .all(|resource| resource.retired_at_millis.is_some())
         );
         std::fs::remove_file(path).unwrap();
