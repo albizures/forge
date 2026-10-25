@@ -30,6 +30,10 @@ pub const AGENT_DISPATCH_PROFILE_METHOD: &str = "agentDispatch.profile";
 pub const AGENT_DISPATCH_PROJECT_SET_METHOD: &str = "agentDispatch.projectSet";
 pub const AGENT_DISPATCH_STATUS_METHOD: &str = "agentDispatch.status";
 pub const AGENT_DISPATCH_RECONCILE_METHOD: &str = "agentDispatch.reconcile";
+pub const AGENT_DISPATCH_TASK_START_METHOD: &str = "agentDispatch.taskStart";
+pub const AGENT_DISPATCH_TASK_REOPEN_METHOD: &str = "agentDispatch.taskReopen";
+pub const AGENT_DISPATCH_RESUME_METHOD: &str = "agentDispatch.resume";
+pub const AGENT_DISPATCH_ASSIGNMENT_RETIRE_METHOD: &str = "agentDispatch.assignmentRetire";
 pub const AGENT_SUBSCRIPTION_CREATE_METHOD: &str = "agentSubscription.create";
 pub const AGENT_SUBSCRIPTION_RENEW_METHOD: &str = "agentSubscription.renew";
 pub const AGENT_SUBSCRIPTION_DELETE_METHOD: &str = "agentSubscription.delete";
@@ -78,6 +82,14 @@ pub trait AgentDispatchApi {
     ) -> RpcResult<AgentDispatchStatusResponse>;
     #[method(name = "reconcile")]
     async fn reconcile(&self) -> RpcResult<AgentDispatchReconcileResponse>;
+    #[method(name = "taskStart")]
+    async fn task_start(&self, request: StartAssignmentTaskRequest) -> RpcResult<RecordResponse>;
+    #[method(name = "taskReopen")]
+    async fn task_reopen(&self, request: RecordIdRequest) -> RpcResult<RecordResponse>;
+    #[method(name = "resume")]
+    async fn resume(&self, request: RecordIdRequest) -> RpcResult<()>;
+    #[method(name = "assignmentRetire")]
+    async fn assignment_retire(&self, request: RetireAgentAssignmentRequest) -> RpcResult<()>;
 }
 
 #[rpc(client, server, namespace = "agentSubscription")]
@@ -337,6 +349,18 @@ impl From<AgentProfile> for AgentDispatchProfileResponse {
         }
     }
 }
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct StartAssignmentTaskRequest {
+    pub assignment_id: String,
+    pub capability_id: String,
+    pub correlation_id: String,
+    pub task_id: u64,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RetireAgentAssignmentRequest {
+    pub assignment_id: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AgentDispatchReconcileResponse {
     pub acquired_lease: bool,

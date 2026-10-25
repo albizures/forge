@@ -464,6 +464,14 @@ pub trait RecordRepository: ProjectRepository {
     ///
     /// Returns a user-facing error for an invalid transition, absent Record, or storage failure.
     fn start_record(&self, id: u64) -> Result<Record, RegistrationError>;
+    /// Returns an In Progress Task to Open so it can become dispatch-eligible again.
+    fn reopen_record(&self, id: u64) -> Result<Record, RegistrationError> {
+        let _ = id;
+        Err(RegistrationError::new(
+            "reopen-unavailable",
+            "Task reopen persistence is unavailable",
+        ))
+    }
     /// Advances a Record from In Progress to Done.
     ///
     /// # Errors
@@ -996,6 +1004,7 @@ pub enum AssignmentAuthorizationOperation {
     ReadContext,
     AddComment,
     CompleteTask,
+    StartTask,
     CreateSubscription,
     RenewSubscription,
     DeleteSubscription,
@@ -1268,6 +1277,37 @@ pub fn assignment_add_comment<R: AgentDispatchRepository>(
         ));
     }
     repository.add_record_comment(task_id, body, None)
+}
+
+/// Authorizes idempotent capability-authenticated start of its bound Open Task.
+#[allow(clippy::missing_errors_doc)]
+pub fn assignment_start_task<R: AgentDispatchRepository + ?Sized>(
+    repository: &R,
+    assignment_id: &str,
+    capability_id: &str,
+    correlation_id: &str,
+    task_id: u64,
+) -> Result<Record, RegistrationError> {
+    let assignment = repository.agent_assignment(assignment_id)?;
+    let task = repository.show_record(task_id)?;
+    let allowed = assignment.closed_at_millis.is_none()
+        && assignment.record_id == task_id
+        && task.record_type == RecordType::Task
+        && matches!(task.status, RecordStatus::Open | RecordStatus::InProgress);
+    authorize_assignment_operation(
+        repository,
+        &assignment,
+        capability_id,
+        correlation_id,
+        AssignmentAuthorizationOperation::StartTask,
+        task_id,
+        allowed,
+    )?;
+    if task.status == RecordStatus::Open {
+        repository.start_record(task_id)
+    } else {
+        Ok(task)
+    }
 }
 
 /// Authorizes capability-authenticated completion of its bound Task and records its decision.
@@ -1583,6 +1623,100 @@ impl Application {
     /// Returns configuration or persistence failures.
     pub fn task_agent_profile(&self) -> Result<AgentProfile, RegistrationError> {
         self.dispatch()?.agent_profile(RecordType::Task, 1)
+    }
+
+    /// Starts an Assignment's bound Task through its delivered capability.
+    ///
+    /// Repeating this operation returns the already In Progress Task rather than creating a
+    /// second lifecycle transition.
+    ///
+    /// # Errors
+    ///
+    /// Returns authorization or lifecycle failures.
+    pub fn start_assignment_task(
+        &self,
+        assignment_id: &str,
+        capability_id: &str,
+        correlation_id: &str,
+        task_id: u64,
+    ) -> Result<Record, RegistrationError> {
+        assignment_start_task(
+            self.dispatch()?,
+            assignment_id,
+            capability_id,
+            correlation_id,
+            task_id,
+        )
+    }
+
+    /// Reopens an unassigned In Progress Task without clearing any Dispatch Hold.
+    ///
+    /// # Errors
+    ///
+    /// Returns lifecycle, assignment, or persistence failures.
+    pub fn reopen_task(&self, task_id: u64) -> Result<Record, RegistrationError> {
+        let dispatch = self.dispatch()?;
+        let task = dispatch.show_record(task_id)?;
+        if task.record_type != RecordType::Task {
+            return Err(RegistrationError::new(
+                "not-task",
+                "only Tasks may be reopened",
+            ));
+        }
+        if dispatch
+            .list_agent_assignments(task_id)?
+            .iter()
+            .any(|assignment| assignment.closed_at_millis.is_none())
+        {
+            return Err(RegistrationError::new(
+                "task-assignment-active",
+                "retire the active Assignment before reopening this Task",
+            ));
+        }
+        dispatch.reopen_record(task_id)
+    }
+
+    /// Clears the operator-controlled automatic-dispatch hold for a Task.
+    ///
+    /// # Errors
+    ///
+    /// Returns persistence failures.
+    pub fn resume_task_dispatch(&self, task_id: u64) -> Result<(), RegistrationError> {
+        self.dispatch()?.resume_dispatch(task_id)
+    }
+
+    /// Retires an Assignment after best-effort provider cleanup, preserving all Git evidence.
+    ///
+    /// A Dispatch Hold is installed before cleanup so no replacement can consume released
+    /// capacity between provider retirement and durable Assignment closure.
+    ///
+    /// # Errors
+    ///
+    /// Returns adapter, storage, or lifecycle failures.
+    pub fn retire_agent_assignment(
+        &self,
+        assignment_id: &str,
+    ) -> Result<AgentAssignment, RegistrationError> {
+        let dispatch = self.dispatch()?;
+        let assignment = dispatch.agent_assignment(assignment_id)?;
+        if assignment.closed_at_millis.is_some() {
+            return Ok(assignment);
+        }
+        dispatch.hold_dispatch(
+            assignment.record_id,
+            "Assignment retirement requested; resume dispatch explicitly after recovery review.",
+        )?;
+        let context = agent_dispatch_context(dispatch, &assignment)?;
+        let adapter = self
+            .adapter_factory()?
+            .adapter_for(&assignment.profile)
+            .map_err(|error| {
+                RegistrationError::new("agent-retirement-unavailable", format!("{error:?}"))
+            })?;
+        adapter.retire(&context, dispatch).map_err(|error| {
+            RegistrationError::new("agent-retirement-failed", format!("{error:?}"))
+        })?;
+        dispatch.close_agent_assignment(assignment_id, AgentAssignmentClosureReason::Retired)
     }
 
     /// Creates an Assignment-authorized durable Record Update Subscription.

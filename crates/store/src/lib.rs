@@ -160,7 +160,7 @@ impl SqliteProjectRepository {
                 assignment_id TEXT NOT NULL REFERENCES agent_assignments(id),
                 capability_id TEXT NOT NULL,
                 created_at_millis INTEGER NOT NULL,
-                operation TEXT NOT NULL CHECK (operation IN ('read-context', 'add-comment', 'complete-task', 'create-subscription', 'renew-subscription', 'delete-subscription')),
+                operation TEXT NOT NULL CHECK (operation IN ('read-context', 'add-comment', 'complete-task', 'start-task', 'create-subscription', 'renew-subscription', 'delete-subscription')),
                 target_record_id INTEGER NOT NULL REFERENCES records(id),
                 outcome TEXT NOT NULL CHECK (outcome IN ('allowed', 'denied')),
                 reason TEXT NOT NULL,
@@ -989,6 +989,34 @@ impl RecordRepository for SqliteProjectRepository {
         Ok(record)
     }
 
+    fn reopen_record(&self, id: u64) -> Result<Record, RegistrationError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        let transaction = connection.transaction().map_err(storage_error)?;
+        let updated = transaction
+            .execute(
+                "UPDATE records SET status = 'open' WHERE id = ?1 AND record_type = 'task' AND status = 'in_progress'",
+                [id.cast_signed()],
+            )
+            .map_err(storage_error)?;
+        if updated == 0 {
+            return record_or_transition_error(&transaction, id);
+        }
+        insert_update(
+            &transaction,
+            id,
+            RecordUpdateKind::StatusTransition {
+                from: RecordStatus::InProgress,
+                to: RecordStatus::Open,
+            },
+        )?;
+        let record = load_record(&transaction, id)?;
+        transaction.commit().map_err(storage_error)?;
+        Ok(record)
+    }
+
     fn done_record(
         &self,
         id: u64,
@@ -1392,7 +1420,7 @@ fn migrate_assignment_authorization_audit_schema(
             |row| row.get(0),
         )
         .map_err(storage_error)?;
-    if schema.contains("create-subscription") {
+    if schema.contains("start-task") {
         return Ok(());
     }
     connection.execute_batch(
@@ -1402,7 +1430,7 @@ fn migrate_assignment_authorization_audit_schema(
             assignment_id TEXT NOT NULL REFERENCES agent_assignments(id),
             capability_id TEXT NOT NULL,
             created_at_millis INTEGER NOT NULL,
-            operation TEXT NOT NULL CHECK (operation IN ('read-context', 'add-comment', 'complete-task', 'create-subscription', 'renew-subscription', 'delete-subscription')),
+            operation TEXT NOT NULL CHECK (operation IN ('read-context', 'add-comment', 'complete-task', 'start-task', 'create-subscription', 'renew-subscription', 'delete-subscription')),
             target_record_id INTEGER NOT NULL REFERENCES records(id),
             outcome TEXT NOT NULL CHECK (outcome IN ('allowed', 'denied')),
             reason TEXT NOT NULL,
@@ -1986,6 +2014,7 @@ impl AgentDispatchRepository for SqliteProjectRepository {
             AssignmentAuthorizationOperation::ReadContext => "read-context",
             AssignmentAuthorizationOperation::AddComment => "add-comment",
             AssignmentAuthorizationOperation::CompleteTask => "complete-task",
+            AssignmentAuthorizationOperation::StartTask => "start-task",
             AssignmentAuthorizationOperation::CreateSubscription => "create-subscription",
             AssignmentAuthorizationOperation::RenewSubscription => "renew-subscription",
             AssignmentAuthorizationOperation::DeleteSubscription => "delete-subscription",
@@ -2008,7 +2037,7 @@ impl AgentDispatchRepository for SqliteProjectRepository {
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
         connection.prepare("SELECT assignment_id, capability_id, created_at_millis, operation, target_record_id, outcome, reason, correlation_id FROM assignment_authorization_audits WHERE assignment_id = ?1 ORDER BY id").map_err(storage_error)?
             .query_map([assignment_id], |row| {
-                let operation = match row.get::<_, String>(3)?.as_str() { "read-context" => AssignmentAuthorizationOperation::ReadContext, "add-comment" => AssignmentAuthorizationOperation::AddComment, "complete-task" => AssignmentAuthorizationOperation::CompleteTask, "create-subscription" => AssignmentAuthorizationOperation::CreateSubscription, "renew-subscription" => AssignmentAuthorizationOperation::RenewSubscription, "delete-subscription" => AssignmentAuthorizationOperation::DeleteSubscription, _ => return Err(rusqlite::Error::InvalidQuery) };
+                let operation = match row.get::<_, String>(3)?.as_str() { "read-context" => AssignmentAuthorizationOperation::ReadContext, "add-comment" => AssignmentAuthorizationOperation::AddComment, "complete-task" => AssignmentAuthorizationOperation::CompleteTask, "start-task" => AssignmentAuthorizationOperation::StartTask, "create-subscription" => AssignmentAuthorizationOperation::CreateSubscription, "renew-subscription" => AssignmentAuthorizationOperation::RenewSubscription, "delete-subscription" => AssignmentAuthorizationOperation::DeleteSubscription, _ => return Err(rusqlite::Error::InvalidQuery) };
                 let outcome = match row.get::<_, String>(5)?.as_str() { "allowed" => AssignmentAuthorizationOutcome::Allowed, "denied" => AssignmentAuthorizationOutcome::Denied, _ => return Err(rusqlite::Error::InvalidQuery) };
                 Ok(AssignmentAuthorizationAudit { assignment_id: row.get(0)?, capability_id: row.get(1)?, created_at_millis: row.get::<_, i64>(2)?.cast_unsigned(), operation, target_record_id: row.get::<_, i64>(4)?.cast_unsigned(), outcome, reason: row.get(6)?, correlation_id: row.get(7)? })
             }).map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)
@@ -3196,12 +3225,13 @@ fn storage_error(error: rusqlite::Error) -> RegistrationError {
 mod tests {
     use super::SqliteProjectRepository;
     use forge_app::{
-        AgentDispatchRepository, ManagedWorktreeRepository, NewAgentAssignment,
-        NewAgentAssignmentResource, NewRecord, NewRecordUpdateSubscription, NewTypedRecord,
-        Project, ProjectRepository, Record, RecordListFilter, RecordRelationshipKind,
-        RecordRepository, RecordStatus, RecordType, RecordUpdateKind, RecordUpdateKindFilter,
-        RecordUpdateSubscriptionRepository, TaskKind, assignment_add_comment,
-        assignment_complete_task, assignment_context, assignment_create_record_update_subscription,
+        AgentDispatchRepository, AssignmentAuthorizationOperation, ManagedWorktreeRepository,
+        NewAgentAssignment, NewAgentAssignmentResource, NewRecord, NewRecordUpdateSubscription,
+        NewTypedRecord, Project, ProjectRepository, Record, RecordListFilter,
+        RecordRelationshipKind, RecordRepository, RecordStatus, RecordType, RecordUpdateKind,
+        RecordUpdateKindFilter, RecordUpdateSubscriptionRepository, TaskKind,
+        assignment_add_comment, assignment_complete_task, assignment_context,
+        assignment_create_record_update_subscription, assignment_start_task,
     };
     use std::{
         path::{Path, PathBuf},
@@ -4803,6 +4833,66 @@ mod tests {
             .expect("a closed attempt permits a replacement");
         assert_eq!(retry.record_id, first.id);
         assert_eq!(retry.attempt_number, 2);
+    }
+
+    #[test]
+    fn bound_assignment_capability_starts_its_open_task_idempotently() {
+        let store = SqliteProjectRepository::in_memory().unwrap();
+        store.register(&project("alpha", "/repos/alpha")).unwrap();
+        let spec = store
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Spec,
+                task_kind: None,
+                body: "spec".into(),
+                project_slugs: vec!["alpha".into()],
+                generated_by_ids: vec![],
+            })
+            .unwrap();
+        let task = store
+            .open_task_under_spec("task", spec.id, None, vec![])
+            .unwrap();
+        let sibling = store
+            .open_task_under_spec("sibling", spec.id, None, vec![])
+            .unwrap();
+        store
+            .create_agent_assignment(&NewAgentAssignment {
+                id: "attempt".into(),
+                record_id: task.id,
+                project_slug: "alpha".into(),
+                profile_revision: 1,
+            })
+            .unwrap();
+
+        assert_eq!(
+            assignment_start_task(&store, "attempt", "cap", "first", task.id)
+                .unwrap()
+                .status,
+            RecordStatus::InProgress
+        );
+        assert_eq!(
+            assignment_start_task(&store, "attempt", "cap", "retry", task.id)
+                .unwrap()
+                .status,
+            RecordStatus::InProgress
+        );
+        assert_eq!(
+            assignment_start_task(&store, "attempt", "cap", "wrong", sibling.id)
+                .unwrap_err()
+                .code,
+            "assignment-capability-denied"
+        );
+        assert_eq!(
+            store
+                .list_assignment_authorization_audits("attempt")
+                .unwrap()
+                .iter()
+                .filter(|audit| matches!(
+                    audit.operation,
+                    AssignmentAuthorizationOperation::StartTask
+                ))
+                .count(),
+            3
+        );
     }
 
     #[test]

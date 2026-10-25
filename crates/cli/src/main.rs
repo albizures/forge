@@ -12,9 +12,10 @@ use forge_cli::{
     request_open_spec, request_open_task, request_open_task_under_spec,
     request_open_task_under_wayfinder, request_open_wayfinder, request_project_here,
     request_project_setup_hook, request_record_comments, request_record_updates,
-    request_register_project, request_relate_record, request_show_record, request_start_record,
-    request_status, request_unrelate_record, request_worktree_root,
-    resolve_endpoint as resolve_managed_endpoint,
+    request_register_project, request_relate_record, request_reopen_dispatch_task,
+    request_resume_dispatch_task, request_retire_agent_assignment, request_show_record,
+    request_start_assignment_task, request_start_record, request_status, request_unrelate_record,
+    request_worktree_root, resolve_endpoint as resolve_managed_endpoint,
 };
 use std::io::Read;
 
@@ -238,6 +239,14 @@ enum AgentDispatchCommand {
     Project(AgentDispatchProjectArgs),
     Status(AgentDispatchStatusArgs),
     Reconcile(AgentDispatchRequestArgs),
+    /// Start the Task bound to an Assignment Capability.
+    TaskStart(AssignmentTaskStartArgs),
+    /// Return an unassigned In Progress Task to Open.
+    TaskReopen(DispatchTaskArgs),
+    /// Clear an operator-controlled Dispatch Hold.
+    Resume(DispatchTaskArgs),
+    /// Retire an Assignment after provider cleanup.
+    AssignmentRetire(AssignmentRetireArgs),
 }
 #[derive(Args, Debug)]
 struct AgentDispatchEndpointArgs {
@@ -272,6 +281,36 @@ struct AgentDispatchStatusArgs {
 }
 #[derive(Args, Debug)]
 struct AgentDispatchRequestArgs {
+    #[arg(long, value_name = "URL")]
+    server_url: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Args, Debug)]
+struct DispatchTaskArgs {
+    task_id: u64,
+    #[arg(long, value_name = "URL")]
+    server_url: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Args, Debug)]
+struct AssignmentTaskStartArgs {
+    task_id: u64,
+    #[arg(long)]
+    assignment_id: String,
+    #[arg(long)]
+    capability_id: String,
+    #[arg(long)]
+    correlation_id: String,
+    #[arg(long, value_name = "URL")]
+    server_url: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Args, Debug)]
+struct AssignmentRetireArgs {
+    assignment_id: String,
     #[arg(long, value_name = "URL")]
     server_url: Option<String>,
     #[arg(long)]
@@ -783,6 +822,45 @@ async fn agent_dispatch(command: AgentDispatchCommand) -> i32 {
             request_agent_dispatch_reconcile(&resolve_endpoint(args.server_url.as_deref()).await)
                 .await
                 .map(|value| serde_json::to_value(value).unwrap()),
+            args.json,
+        ),
+        AgentDispatchCommand::TaskStart(args) => (
+            request_start_assignment_task(
+                &resolve_endpoint(args.server_url.as_deref()).await,
+                args.assignment_id,
+                args.capability_id,
+                args.correlation_id,
+                args.task_id,
+            )
+            .await
+            .map(|value| serde_json::to_value(value).unwrap()),
+            args.json,
+        ),
+        AgentDispatchCommand::TaskReopen(args) => (
+            request_reopen_dispatch_task(
+                &resolve_endpoint(args.server_url.as_deref()).await,
+                args.task_id,
+            )
+            .await
+            .map(|value| serde_json::to_value(value).unwrap()),
+            args.json,
+        ),
+        AgentDispatchCommand::Resume(args) => (
+            request_resume_dispatch_task(
+                &resolve_endpoint(args.server_url.as_deref()).await,
+                args.task_id,
+            )
+            .await
+            .map(|()| serde_json::Value::Null),
+            args.json,
+        ),
+        AgentDispatchCommand::AssignmentRetire(args) => (
+            request_retire_agent_assignment(
+                &resolve_endpoint(args.server_url.as_deref()).await,
+                args.assignment_id,
+            )
+            .await
+            .map(|()| serde_json::Value::Null),
             args.json,
         ),
     };

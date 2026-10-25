@@ -52,9 +52,10 @@ use forge_rpc::{
     OpenTaskUnderSpecRequest, OpenTaskUnderWayfinderRequest, OpenWayfinderRequest,
     ProjectApiServer, ProjectHereRequest, ProjectHereResponse, RecordApiServer, RecordIdRequest,
     RecordResponse, RecordUpdateSubscriptionResponse, RegisterProjectRequest,
-    RegisterProjectResponse, RelateRecordRequest, RemoveManagedWorktreeRequest, RevisionIdentity,
-    SetAgentDispatchEndpointRequest, SetAgentDispatchProjectRequest, SetProjectSetupHookRequest,
-    SetWorktreeRootRequest, SystemApiServer, SystemStatusResponse, WorktreeApiServer,
+    RegisterProjectResponse, RelateRecordRequest, RemoveManagedWorktreeRequest,
+    RetireAgentAssignmentRequest, RevisionIdentity, SetAgentDispatchEndpointRequest,
+    SetAgentDispatchProjectRequest, SetProjectSetupHookRequest, SetWorktreeRootRequest,
+    StartAssignmentTaskRequest, SystemApiServer, SystemStatusResponse, WorktreeApiServer,
     WorktreeRootResponse,
 };
 use forge_store::SqliteProjectRepository;
@@ -749,6 +750,38 @@ impl AgentDispatchApiServer for Daemon {
         self.application
             .reconcile_agent_dispatch(daemon_id, now_millis)
             .map(Into::into)
+            .map_err(rpc_error)
+    }
+
+    async fn task_start(&self, request: StartAssignmentTaskRequest) -> RpcResult<RecordResponse> {
+        self.application
+            .start_assignment_task(
+                &request.assignment_id,
+                &request.capability_id,
+                &request.correlation_id,
+                request.task_id,
+            )
+            .map(Into::into)
+            .map_err(rpc_error)
+    }
+
+    async fn task_reopen(&self, request: RecordIdRequest) -> RpcResult<RecordResponse> {
+        self.application
+            .reopen_task(request.id)
+            .map(Into::into)
+            .map_err(rpc_error)
+    }
+
+    async fn resume(&self, request: RecordIdRequest) -> RpcResult<()> {
+        self.application
+            .resume_task_dispatch(request.id)
+            .map_err(rpc_error)
+    }
+
+    async fn assignment_retire(&self, request: RetireAgentAssignmentRequest) -> RpcResult<()> {
+        self.application
+            .retire_agent_assignment(&request.assignment_id)
+            .map(|_| ())
             .map_err(rpc_error)
     }
 }

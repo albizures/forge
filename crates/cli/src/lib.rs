@@ -9,8 +9,9 @@ use forge_rpc::{
     OpenTaskRequest, OpenTaskUnderSpecRequest, OpenTaskUnderWayfinderRequest, OpenWayfinderRequest,
     ProjectApiClient, ProjectHereRequest, ProjectHereResponse, ProjectScopeRequest,
     RecordApiClient, RecordIdRequest, RecordResponse, RegisterProjectRequest,
-    RegisterProjectResponse, RelateRecordRequest, SystemApiClient, SystemStatusResponse,
-    WorktreeApiClient, WorktreeRootResponse,
+    RegisterProjectResponse, RelateRecordRequest, RetireAgentAssignmentRequest,
+    StartAssignmentTaskRequest, SystemApiClient, SystemStatusResponse, WorktreeApiClient,
+    WorktreeRootResponse,
 };
 use jsonrpsee::http_client::HttpClientBuilder;
 use sha2::{Digest, Sha256};
@@ -187,6 +188,55 @@ pub async fn request_agent_dispatch_reconcile(
     client(url)?.reconcile().await.map_err(|error| {
         format!("could not request Agent Dispatch reconciliation through Forge daemon: {error}")
     })
+}
+
+/// Starts the Task bound to an Assignment Capability.
+pub async fn request_start_assignment_task(
+    url: &str,
+    assignment_id: String,
+    capability_id: String,
+    correlation_id: String,
+    task_id: u64,
+) -> Result<RecordResponse, String> {
+    client(url)?
+        .task_start(StartAssignmentTaskRequest {
+            assignment_id,
+            capability_id,
+            correlation_id,
+            task_id,
+        })
+        .await
+        .map_err(|error| format!("could not start Assignment Task through Forge daemon: {error}"))
+}
+
+/// Returns an unassigned Task to Open.
+pub async fn request_reopen_dispatch_task(
+    url: &str,
+    task_id: u64,
+) -> Result<RecordResponse, String> {
+    client(url)?
+        .task_reopen(RecordIdRequest { id: task_id })
+        .await
+        .map_err(|error| format!("could not reopen Task through Forge daemon: {error}"))
+}
+
+/// Clears a Task's Dispatch Hold.
+pub async fn request_resume_dispatch_task(url: &str, task_id: u64) -> Result<(), String> {
+    client(url)?
+        .resume(RecordIdRequest { id: task_id })
+        .await
+        .map_err(|error| format!("could not resume Task dispatch through Forge daemon: {error}"))
+}
+
+/// Retires an Assignment and its provider resources.
+pub async fn request_retire_agent_assignment(
+    url: &str,
+    assignment_id: String,
+) -> Result<(), String> {
+    client(url)?
+        .assignment_retire(RetireAgentAssignmentRequest { assignment_id })
+        .await
+        .map_err(|error| format!("could not retire Agent Assignment through Forge daemon: {error}"))
 }
 
 #[must_use]
