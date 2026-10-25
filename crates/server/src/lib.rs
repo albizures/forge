@@ -21,6 +21,7 @@ use std::{
 use tokio::{
     io::AsyncReadExt,
     sync::{mpsc, watch},
+    time::{self, MissedTickBehavior},
 };
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -1623,20 +1624,19 @@ pub async fn serve(config: DaemonConfig) -> Result<(), std::io::Error> {
     let reconciliation_daemon = daemon.clone();
     let reconciliation_worker = tokio::spawn(async move {
         let mut shutdown = observer_shutdown_receiver;
+        // The observer makes provider status changes prompt; this bounded fallback also picks up
+        // Task, dependency, and capacity mutations made through any transport or while Herdr is
+        // disconnected.
+        let mut periodic_reconcile = time::interval(Duration::from_secs(5));
+        periodic_reconcile.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
             tokio::select! {
                 wake = reconcile_wakes.recv() => {
                     if wake.is_none() { return; }
-                    let daemon = reconciliation_daemon.clone();
-                    let _ = tokio::task::spawn_blocking(move || {
-                        let now_millis = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_millis()
-                            .try_into()
-                            .unwrap_or(u64::MAX);
-                        daemon.application.reconcile_agent_dispatch("herdr-observer", now_millis)
-                    }).await;
+                    reconcile_daemon(&reconciliation_daemon).await;
+                }
+                _ = periodic_reconcile.tick() => {
+                    reconcile_daemon(&reconciliation_daemon).await;
                 }
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() { return; }
@@ -1658,6 +1658,22 @@ pub async fn serve(config: DaemonConfig) -> Result<(), std::io::Error> {
     let _ = observer.await;
     let _ = reconciliation_worker.await;
     result
+}
+
+async fn reconcile_daemon(daemon: &Daemon) {
+    let daemon = daemon.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        let now_millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        daemon
+            .application
+            .reconcile_agent_dispatch("herdr-observer", now_millis)
+    })
+    .await;
 }
 
 async fn wait_for_shutdown(lifecycle_shutdown: Option<LifecycleControl>) {

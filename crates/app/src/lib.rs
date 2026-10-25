@@ -1,6 +1,11 @@
 //! Application-owned operations and persistence contracts.
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 /// A Project registered with Forge.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1498,6 +1503,17 @@ pub struct AgentDispatchReconcileResult {
     pub reconciled_assignments: usize,
 }
 
+static DISPATCH_ASSIGNMENT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn next_dispatch_assignment_id() -> String {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let sequence = DISPATCH_ASSIGNMENT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!("dispatch-{millis}-{sequence}")
+}
+
 impl Application {
     /// Creates an application from its infrastructure boundaries.
     #[must_use]
@@ -1894,10 +1910,41 @@ impl Application {
                 scan_lease_millis: 30_000,
             },
         )?;
+        if scan.acquired_lease {
+            self.schedule_agent_dispatch()?;
+        }
         Ok(AgentDispatchReconcileResult {
             acquired_lease: scan.acquired_lease,
             reconciled_assignments: scan.reconciled.len(),
         })
+    }
+
+    /// Claims every currently available Project dispatch slot, then prepares each claimed Task's
+    /// checkout. Claims are persisted before Git is touched, so a crash or preparation failure
+    /// remains visible to the normal reconciliation and recovery path rather than duplicating work.
+    fn schedule_agent_dispatch(&self) -> Result<(), RegistrationError> {
+        let dispatch = self.dispatch()?;
+        let projects: BTreeSet<_> = dispatch
+            .list_records(&RecordListFilter {
+                project_slug: None,
+                status: Some(RecordStatus::Open),
+                record_type: Some(RecordType::Task),
+                task_kind: None,
+            })?
+            .into_iter()
+            .filter(|record| record.project_slugs.len() == 1)
+            .map(|record| record.project_slugs[0].clone())
+            .collect();
+        for project_slug in projects {
+            while let Some(assignment) = dispatch
+                .claim_next_agent_assignment(&project_slug, &next_dispatch_assignment_id())?
+            {
+                // Preparation deliberately happens outside the claim transaction. Its durable
+                // cleanup-required evidence is reconciled on a later bounded scan.
+                let _ = self.prepare_dispatch_worktree(assignment.record_id);
+            }
+        }
+        Ok(())
     }
 
     /// Prepares the deterministic dispatcher-owned checkout for an eligible Task.
