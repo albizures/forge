@@ -823,10 +823,12 @@ impl AgentDispatchApiServer for Daemon {
             .daemon_instance_id
             .as_deref()
             .unwrap_or("manual-daemon");
-        self.application
-            .reconcile_agent_dispatch(daemon_id, now_millis)
-            .map(Into::into)
-            .map_err(rpc_error)
+        let result = self
+            .application
+            .reconcile_agent_dispatch(daemon_id, now_millis);
+        // Reconciliation can commit a dispatch failure Comment before returning an error.
+        self.delivery.publish(&self.application);
+        result.map(Into::into).map_err(rpc_error)
     }
 
     async fn task_start(&self, request: StartAssignmentTaskRequest) -> RpcResult<RecordResponse> {
@@ -837,14 +839,20 @@ impl AgentDispatchApiServer for Daemon {
                 &request.correlation_id,
                 request.task_id,
             )
-            .map(Into::into)
+            .map(|record| {
+                self.delivery.publish(&self.application);
+                record.into()
+            })
             .map_err(rpc_error)
     }
 
     async fn task_reopen(&self, request: RecordIdRequest) -> RpcResult<RecordResponse> {
         self.application
             .reopen_task(request.id)
-            .map(Into::into)
+            .map(|record| {
+                self.delivery.publish(&self.application);
+                record.into()
+            })
             .map_err(rpc_error)
     }
 
@@ -891,11 +899,13 @@ impl WorktreeApiServer for Daemon {
         &self,
         request: CreateManagedWorktreeRequest,
     ) -> RpcResult<ManagedWorktreeResponse> {
-        self.application
+        let result = self
+            .application
             .create_managed_worktree(request.record_id, &request.branch, &request.base)
-            .and_then(|_| self.application.managed_worktree_info(request.record_id))
-            .map(Into::into)
-            .map_err(rpc_error)
+            .and_then(|_| self.application.managed_worktree_info(request.record_id));
+        // Preparation failure can commit a durable Task Comment while returning its error.
+        self.delivery.publish(&self.application);
+        result.map(Into::into).map_err(rpc_error)
     }
     async fn info(&self, request: RecordIdRequest) -> RpcResult<ManagedWorktreeResponse> {
         self.application
@@ -1785,9 +1795,11 @@ async fn reconcile_daemon(daemon: &Daemon) {
             .as_millis()
             .try_into()
             .unwrap_or(u64::MAX);
-        daemon
+        let result = daemon
             .application
-            .reconcile_agent_dispatch("herdr-observer", now_millis)
+            .reconcile_agent_dispatch("herdr-observer", now_millis);
+        daemon.delivery.publish(&daemon.application);
+        result
     })
     .await;
 }
@@ -1969,19 +1981,20 @@ mod tests {
         response::{IntoResponse, Sse},
     };
     use forge_app::{
-        AgentDispatchRepository, Application, NewAgentAssignment, NewRecord,
-        NewRecordUpdateSubscription, NewTypedRecord, Project, ProjectRepository,
-        RecordRelationshipKind, RecordRepository, RecordStatus, RecordType, RecordUpdate,
-        RecordUpdateEnvelope, RecordUpdateId, RecordUpdateKind, RecordUpdateSubscriptionId,
-        RecordUpdateSubscriptionRepository, RegistrationError, RepositoryInspector,
+        AgentDispatchRepository, Application, NewAgentAssignment, NewRecordUpdateSubscription,
+        NewTypedRecord, Project, ProjectRepository, RecordRelationshipKind, RecordRepository,
+        RecordStatus, RecordType, RecordUpdate, RecordUpdateEnvelope, RecordUpdateId,
+        RecordUpdateKind, RecordUpdateSubscriptionId, RecordUpdateSubscriptionRepository,
+        RegistrationError, RepositoryInspector,
     };
     use forge_rpc::{
-        AgentSubscriptionApiServer, CreateAgentSubscriptionRequest, DoneRecordRequest,
-        EditRecordRequest, ListRecordsRequest, OpenGrillingUnderWayfinderRequest,
-        OpenRecordRequest, OpenSpecRequest, OpenTaskRequest, OpenTaskUnderSpecRequest,
-        OpenTaskUnderWayfinderRequest, OpenWayfinderRequest, ProjectApiClient, ProjectHereRequest,
-        ProjectScopeRequest, RecordApiClient, RecordIdRequest, RegisterProjectRequest,
-        SystemApiClient, SystemApiServer,
+        AgentDispatchApiServer, AgentSubscriptionApiServer, CreateAgentSubscriptionRequest,
+        DoneRecordRequest, EditRecordRequest, ListRecordsRequest,
+        OpenGrillingUnderWayfinderRequest, OpenRecordRequest, OpenSpecRequest, OpenTaskRequest,
+        OpenTaskUnderSpecRequest, OpenTaskUnderWayfinderRequest, OpenWayfinderRequest,
+        ProjectApiClient, ProjectHereRequest, ProjectScopeRequest, RecordApiClient,
+        RecordIdRequest, RegisterProjectRequest, StartAssignmentTaskRequest, SystemApiClient,
+        SystemApiServer,
     };
     use forge_store::SqliteProjectRepository;
     use futures_util::StreamExt;
@@ -2097,7 +2110,7 @@ mod tests {
         }
     }
 
-    fn subscription_test_daemon() -> (SubscriptionTestDaemon, String, u64, u64) {
+    fn subscription_test_daemon() -> (SubscriptionTestDaemon, String, u64, u64, u64) {
         let database_path = std::env::temp_dir().join(format!(
             "forge-subscription-endpoint-{}-{}.sqlite3",
             std::process::id(),
@@ -2124,16 +2137,29 @@ mod tests {
             })
             .unwrap();
         let target = store
-            .open_record(&NewRecord {
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Task,
+                task_kind: None,
                 body: "target".into(),
                 project_slugs: vec!["alpha".into()],
                 generated_by_ids: vec![],
             })
             .unwrap();
         store
+            .relate_records(owner.id, target.id, RecordRelationshipKind::DependsOn)
+            .unwrap();
+        store
             .create_agent_assignment(&NewAgentAssignment {
                 id: "owner-assignment".into(),
                 record_id: owner.id,
+                project_slug: "alpha".into(),
+                profile_revision: 1,
+            })
+            .unwrap();
+        store
+            .create_agent_assignment(&NewAgentAssignment {
+                id: "target-assignment".into(),
+                record_id: target.id,
                 project_slug: "alpha".into(),
                 profile_revision: 1,
             })
@@ -2166,6 +2192,7 @@ mod tests {
             "owner-assignment".into(),
             subscription.id.0,
             subscription.start_cursor.0,
+            target.id,
         )
     }
 
@@ -2707,7 +2734,7 @@ mod tests {
 
     #[tokio::test]
     async fn subscription_endpoint_replays_framed_updates_and_enforces_cursor_guards() {
-        let (fixture, assignment_id, subscription_id, start_cursor) = subscription_test_daemon();
+        let (fixture, assignment_id, subscription_id, start_cursor, _) = subscription_test_daemon();
         let daemon = fixture.daemon();
         let endpoint = format!(
             "/v1/agent-assignments/{assignment_id}/record-update-subscriptions/{subscription_id}/events"
@@ -2767,8 +2794,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn active_delivery_publishes_assignment_task_start_and_reopen_updates() {
+        let (fixture, assignment_id, subscription_id, _, target_id) = subscription_test_daemon();
+        let daemon = fixture.daemon();
+        let endpoint = format!(
+            "/v1/agent-assignments/{assignment_id}/record-update-subscriptions/{subscription_id}/events"
+        );
+        let response = router(daemon.clone())
+            .oneshot(loopback_request(endpoint))
+            .await
+            .unwrap();
+        let mut stream = response.into_body().into_data_stream();
+        let _ = stream.next().await.unwrap().unwrap();
+        let _ = stream.next().await.unwrap().unwrap();
+
+        AgentDispatchApiServer::task_start(
+            &daemon,
+            StartAssignmentTaskRequest {
+                assignment_id: "target-assignment".into(),
+                capability_id: "target-capability".into(),
+                correlation_id: "start-target".into(),
+                task_id: target_id,
+            },
+        )
+        .await
+        .unwrap();
+        let started = String::from_utf8(stream.next().await.unwrap().unwrap().to_vec()).unwrap();
+        assert!(started.contains("\"kind\":\"status-transition\""));
+
+        let store = SqliteProjectRepository::open(&fixture.database_path).unwrap();
+        store
+            .close_agent_assignment(
+                "target-assignment",
+                forge_app::AgentAssignmentClosureReason::Retired,
+            )
+            .unwrap();
+        drop(store);
+        AgentDispatchApiServer::task_reopen(&daemon, RecordIdRequest { id: target_id })
+            .await
+            .unwrap();
+        let reopened = String::from_utf8(stream.next().await.unwrap().unwrap().to_vec()).unwrap();
+        assert!(reopened.contains("\"kind\":\"status-transition\""));
+    }
+
+    #[tokio::test]
     async fn active_subscription_delivery_ends_at_its_renewed_lease_deadline() {
-        let (fixture, assignment_id, subscription_id, _) = subscription_test_daemon();
+        let (fixture, assignment_id, subscription_id, _, _) = subscription_test_daemon();
         let daemon = fixture.daemon();
         let endpoint = format!(
             "/v1/agent-assignments/{assignment_id}/record-update-subscriptions/{subscription_id}/events"
@@ -2804,7 +2875,7 @@ mod tests {
 
     #[tokio::test]
     async fn subscription_endpoint_rejects_non_loopback_peers_before_delivery() {
-        let (fixture, assignment_id, subscription_id, _) = subscription_test_daemon();
+        let (fixture, assignment_id, subscription_id, _, _) = subscription_test_daemon();
         let daemon = fixture.daemon();
         let mut request = Request::builder()
             .uri(format!(
