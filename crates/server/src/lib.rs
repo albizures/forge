@@ -14,8 +14,11 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     str::FromStr,
-    sync::{Arc, Mutex},
-    time::Duration,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use tokio::{
@@ -215,17 +218,23 @@ pub struct Daemon {
 #[derive(Default)]
 struct SubscriptionDelivery {
     connections: Mutex<HashMap<RecordUpdateSubscriptionId, DeliveryConnection>>,
+    next_connection_id: AtomicU64,
 }
 
 struct DeliveryConnection {
+    connection_id: u64,
+    assignment_id: String,
     sender: mpsc::Sender<RecordUpdateEnvelope>,
     cancelled: watch::Sender<bool>,
+    lease_expires_at_millis: watch::Sender<u64>,
     cursor: RecordUpdateId,
 }
 
 type DeliveryConnectionStart = (
+    u64,
     mpsc::Receiver<RecordUpdateEnvelope>,
     watch::Receiver<bool>,
+    watch::Receiver<u64>,
     Vec<RecordUpdateEnvelope>,
 );
 
@@ -235,11 +244,14 @@ impl SubscriptionDelivery {
     fn connect_and_replay(
         &self,
         application: &Application,
-        id: RecordUpdateSubscriptionId,
+        subscription: &forge_app::RecordUpdateSubscription,
         cursor: RecordUpdateId,
     ) -> Result<DeliveryConnectionStart, RegistrationError> {
         let (sender, receiver) = mpsc::channel(256);
         let (cancelled, cancellation) = watch::channel(false);
+        let (lease_expires_at_millis, lease) = watch::channel(subscription.lease_expires_at_millis);
+        let id = subscription.id;
+        let connection_id = self.next_connection_id.fetch_add(1, Ordering::Relaxed);
         let mut connections = self
             .connections
             .lock()
@@ -247,21 +259,84 @@ impl SubscriptionDelivery {
         if let Some(previous) = connections.insert(
             id,
             DeliveryConnection {
+                connection_id,
+                assignment_id: subscription.assignment_id.clone(),
                 sender,
                 cancelled,
+                lease_expires_at_millis,
                 cursor,
             },
         ) {
             let _ = previous.cancelled.send(true);
         }
-        let replay = application.replay_assignment_subscription_updates(id, cursor)?;
+        let replay = match application.replay_assignment_subscription_updates(id, cursor) {
+            Ok(replay) => replay,
+            Err(error) => {
+                connections.remove(&id);
+                return Err(error);
+            }
+        };
         if let Some(last) = replay.last() {
             connections
                 .get_mut(&id)
                 .expect("new delivery connection is retained")
                 .cursor = last.update.id;
         }
-        Ok((receiver, cancellation, replay))
+        Ok((connection_id, receiver, cancellation, lease, replay))
+    }
+
+    fn cancel_current_connection(&self, id: RecordUpdateSubscriptionId, connection_id: u64) {
+        let mut connections = self
+            .connections
+            .lock()
+            .expect("delivery lock is not poisoned");
+        if connections
+            .get(&id)
+            .is_some_and(|connection| connection.connection_id == connection_id)
+        {
+            if let Some(connection) = connections.remove(&id) {
+                let _ = connection.cancelled.send(true);
+            }
+        }
+    }
+
+    fn cancel_subscription(&self, id: RecordUpdateSubscriptionId) {
+        if let Some(connection) = self
+            .connections
+            .lock()
+            .expect("delivery lock is not poisoned")
+            .remove(&id)
+        {
+            let _ = connection.cancelled.send(true);
+        }
+    }
+
+    fn cancel_assignment(&self, assignment_id: &str) {
+        let mut connections = self
+            .connections
+            .lock()
+            .expect("delivery lock is not poisoned");
+        connections.retain(|_, connection| {
+            if connection.assignment_id == assignment_id {
+                let _ = connection.cancelled.send(true);
+                false
+            } else {
+                true
+            }
+        });
+    }
+
+    fn renew_subscription(&self, id: RecordUpdateSubscriptionId, lease_expires_at_millis: u64) {
+        if let Some(connection) = self
+            .connections
+            .lock()
+            .expect("delivery lock is not poisoned")
+            .get(&id)
+        {
+            let _ = connection
+                .lease_expires_at_millis
+                .send(lease_expires_at_millis);
+        }
     }
 
     fn publish(&self, application: &Application) {
@@ -782,6 +857,7 @@ impl AgentDispatchApiServer for Daemon {
     async fn assignment_retire(&self, request: RetireAgentAssignmentRequest) -> RpcResult<()> {
         self.application
             .retire_agent_assignment(&request.assignment_id)
+            .inspect(|_| self.delivery.cancel_assignment(&request.assignment_id))
             .map(|_| ())
             .map_err(rpc_error)
     }
@@ -895,25 +971,32 @@ impl AgentSubscriptionApiServer for Daemon {
         &self,
         request: ManageAgentSubscriptionRequest,
     ) -> RpcResult<RecordUpdateSubscriptionResponse> {
+        let id = RecordUpdateSubscriptionId(request.subscription_id);
         self.application
             .renew_assignment_subscription(
                 &request.assignment_id,
                 &request.capability_id,
                 &request.correlation_id,
-                RecordUpdateSubscriptionId(request.subscription_id),
+                id,
             )
-            .map(Into::into)
+            .map(|subscription| {
+                self.delivery
+                    .renew_subscription(id, subscription.lease_expires_at_millis);
+                subscription.into()
+            })
             .map_err(rpc_error)
     }
 
     async fn delete(&self, request: ManageAgentSubscriptionRequest) -> RpcResult<()> {
+        let id = RecordUpdateSubscriptionId(request.subscription_id);
         self.application
             .delete_assignment_subscription(
                 &request.assignment_id,
                 &request.capability_id,
                 &request.correlation_id,
-                RecordUpdateSubscriptionId(request.subscription_id),
+                id,
             )
+            .inspect(|()| self.delivery.cancel_subscription(id))
             .map_err(rpc_error)
     }
 }
@@ -1291,10 +1374,10 @@ async fn subscription_events(
             Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         };
     }
-    let (receiver, mut cancellation, replay) =
+    let (connection_id, receiver, mut cancellation, mut lease_expires_at_millis, replay) =
         match daemon
             .delivery
-            .connect_and_replay(&daemon.application, id, cursor)
+            .connect_and_replay(&daemon.application, &subscription, cursor)
         {
             Ok(connection) => connection,
             Err(error) if error.code == "invalid-cursor" => {
@@ -1320,8 +1403,32 @@ async fn subscription_events(
         .chain(
             ReceiverStream::new(receiver).map(move |update| Ok(record_update_event(id, &update))),
         )
-        .take_until(async move {
-            let _ = cancellation.changed().await;
+        .take_until({
+            let delivery = daemon.delivery.clone();
+            async move {
+                loop {
+                    let deadline = Duration::from_millis(
+                        lease_expires_at_millis
+                            .borrow()
+                            .saturating_sub(now_millis()),
+                    );
+                    tokio::select! {
+                        () = time::sleep(deadline) => {
+                            delivery.cancel_current_connection(id, connection_id);
+                            return;
+                        }
+                        changed = cancellation.changed() => {
+                            let _ = changed;
+                            return;
+                        }
+                        changed = lease_expires_at_millis.changed() => {
+                            if changed.is_err() {
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
         });
     let mut response = Sse::new(stream)
         .keep_alive(
@@ -1338,6 +1445,15 @@ async fn subscription_events(
         .headers_mut()
         .insert("x-accel-buffering", header::HeaderValue::from_static("no"));
     response
+}
+
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
 }
 
 fn resync_required(
@@ -2648,6 +2764,42 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::CONFLICT);
         assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+    }
+
+    #[tokio::test]
+    async fn active_subscription_delivery_ends_at_its_renewed_lease_deadline() {
+        let (fixture, assignment_id, subscription_id, _) = subscription_test_daemon();
+        let daemon = fixture.daemon();
+        let endpoint = format!(
+            "/v1/agent-assignments/{assignment_id}/record-update-subscriptions/{subscription_id}/events"
+        );
+        let response = router(daemon.clone())
+            .oneshot(loopback_request(endpoint))
+            .await
+            .unwrap();
+        let mut stream = response.into_body().into_data_stream();
+        let _ = stream.next().await.unwrap().unwrap();
+        let _ = stream.next().await.unwrap().unwrap();
+
+        daemon.delivery.renew_subscription(
+            RecordUpdateSubscriptionId(subscription_id),
+            super::now_millis() + 20,
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), stream.next())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            daemon
+                .delivery
+                .connections
+                .lock()
+                .unwrap()
+                .get(&RecordUpdateSubscriptionId(subscription_id))
+                .is_none()
+        );
     }
 
     #[tokio::test]
