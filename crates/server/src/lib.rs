@@ -375,6 +375,15 @@ impl RepositoryInspector for GitInspector {
             origin_url,
         })
     }
+
+    fn head_commit(&self, folder: &Path) -> Result<String, RegistrationError> {
+        git(folder, &["rev-parse", "HEAD"]).map_err(|()| {
+            RegistrationError::new(
+                "base-commit-unavailable",
+                "could not resolve Project Registered Folder HEAD",
+            )
+        })
+    }
 }
 
 fn git(folder: &Path, arguments: &[&str]) -> Result<String, ()> {
@@ -1866,6 +1875,10 @@ mod tests {
                 registered_folder: PathBuf::from(folder),
                 origin_url: "https://example.test/origin.git".into(),
             })
+        }
+
+        fn head_commit(&self, _: &Path) -> Result<String, RegistrationError> {
+            Ok("test-base".into())
         }
     }
 

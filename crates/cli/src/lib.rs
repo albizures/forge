@@ -824,6 +824,10 @@ mod tests {
                 origin_url: "https://example.test/origin.git".into(),
             })
         }
+
+        fn head_commit(&self, _: &Path) -> Result<String, RegistrationError> {
+            Ok("test-base".into())
+        }
     }
 
     fn test_application() -> Application {

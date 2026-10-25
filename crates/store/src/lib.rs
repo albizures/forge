@@ -191,6 +191,14 @@ impl SqliteProjectRepository {
             CREATE TABLE IF NOT EXISTS project_agent_dispatch_configuration (
                 project_slug TEXT PRIMARY KEY NOT NULL REFERENCES projects(slug),
                 task_concurrency_limit INTEGER NOT NULL CHECK (task_concurrency_limit BETWEEN 1 AND 1024)
+            );
+            CREATE TABLE IF NOT EXISTS dispatch_holds (
+                record_id INTEGER PRIMARY KEY NOT NULL REFERENCES records(id),
+                reason TEXT NOT NULL CHECK (length(trim(reason)) > 0)
+            );
+            CREATE TABLE IF NOT EXISTS task_base_commits (
+                record_id INTEGER PRIMARY KEY NOT NULL REFERENCES records(id),
+                base_commit TEXT NOT NULL CHECK (length(trim(base_commit)) > 0)
             );",
             )
             .map_err(storage_error)?;
@@ -437,7 +445,7 @@ impl ManagedWorktreeRepository for SqliteProjectRepository {
         if !is_worktree_eligible(&record) {
             return Err(RegistrationError::new(
                 "worktree-ineligible-record",
-                "a Managed Worktree requires an In Progress Task scoped to exactly one Project",
+                "a Dispatcher Managed Worktree requires an Open Task scoped to exactly one Project",
             ));
         }
         let root: Option<String> = transaction
@@ -539,6 +547,58 @@ impl ManagedWorktreeRepository for SqliteProjectRepository {
 }
 
 impl RecordRepository for SqliteProjectRepository {
+    fn set_task_base_commit(&self, record_id: u64, commit: &str) -> Result<(), RegistrationError> {
+        if commit.trim().is_empty() {
+            return Err(RegistrationError::new(
+                "invalid-base-commit",
+                "Task Base Commit must not be blank",
+            ));
+        }
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        let record = load_record(&connection, record_id)?;
+        if record.record_type != RecordType::Task || record.project_slugs.len() != 1 {
+            return Err(RegistrationError::new(
+                "invalid-base-commit",
+                "only a single-Project Task has a Task Base Commit",
+            ));
+        }
+        connection
+            .execute(
+                "INSERT INTO task_base_commits (record_id, base_commit) VALUES (?1, ?2)",
+                params![record_id.cast_signed(), commit],
+            )
+            .map_err(|error| {
+                if matches!(
+                    error.sqlite_error_code(),
+                    Some(ErrorCode::ConstraintViolation)
+                ) {
+                    RegistrationError::new("base-commit-exists", "Task Base Commit is immutable")
+                } else {
+                    storage_error(error)
+                }
+            })?;
+        Ok(())
+    }
+
+    fn task_base_commit(&self, record_id: u64) -> Result<Option<String>, RegistrationError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        load_record(&connection, record_id)?;
+        connection
+            .query_row(
+                "SELECT base_commit FROM task_base_commits WHERE record_id = ?1",
+                [record_id.cast_signed()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage_error)
+    }
+
     fn open_record(&self, record: &NewRecord) -> Result<Record, RegistrationError> {
         let mut connection = self
             .connection
@@ -1300,6 +1360,7 @@ fn migrate_agent_assignment_schema(connection: &Connection) -> Result<(), Regist
     connection.execute_batch("ALTER TABLE agent_dispatch_configuration ADD COLUMN scan_lease_owner TEXT; ALTER TABLE agent_dispatch_configuration ADD COLUMN scan_lease_until_millis INTEGER;").or_else(|error| {
         if error.to_string().contains("duplicate column name") { Ok(()) } else { Err(error) }
     }).map_err(storage_error)?;
+    connection.execute_batch("CREATE TABLE IF NOT EXISTS dispatch_holds (record_id INTEGER PRIMARY KEY NOT NULL REFERENCES records(id), reason TEXT NOT NULL CHECK (length(trim(reason)) > 0)); CREATE TABLE IF NOT EXISTS task_base_commits (record_id INTEGER PRIMARY KEY NOT NULL REFERENCES records(id), base_commit TEXT NOT NULL CHECK (length(trim(base_commit)) > 0));").map_err(storage_error)?;
     Ok(())
 }
 
@@ -1474,6 +1535,75 @@ fn effective_limit(connection: &Connection, project_slug: &str) -> Result<u16, R
 }
 
 impl AgentDispatchRepository for SqliteProjectRepository {
+    fn dispatch_hold(
+        &self,
+        record_id: u64,
+    ) -> Result<Option<forge_app::DispatchHold>, RegistrationError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        connection
+            .query_row(
+                "SELECT record_id, reason FROM dispatch_holds WHERE record_id = ?1",
+                [record_id.cast_signed()],
+                |row| {
+                    Ok(forge_app::DispatchHold {
+                        record_id: row.get::<_, i64>(0)?.cast_unsigned(),
+                        reason: row.get(1)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(storage_error)
+    }
+
+    fn hold_dispatch(
+        &self,
+        record_id: u64,
+        reason: &str,
+    ) -> Result<forge_app::DispatchHold, RegistrationError> {
+        if reason.trim().is_empty() {
+            return Err(RegistrationError::new(
+                "invalid-dispatch-hold",
+                "Dispatch Hold reason must not be blank",
+            ));
+        }
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        let record = load_record(&connection, record_id)?;
+        if record.record_type != RecordType::Task {
+            return Err(RegistrationError::new(
+                "invalid-dispatch-hold",
+                "only a Task may have a Dispatch Hold",
+            ));
+        }
+        connection.execute(
+            "INSERT INTO dispatch_holds (record_id, reason) VALUES (?1, ?2) ON CONFLICT(record_id) DO UPDATE SET reason = excluded.reason",
+            params![record_id.cast_signed(), reason],
+        ).map_err(storage_error)?;
+        Ok(forge_app::DispatchHold {
+            record_id,
+            reason: reason.into(),
+        })
+    }
+
+    fn resume_dispatch(&self, record_id: u64) -> Result<(), RegistrationError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        connection
+            .execute(
+                "DELETE FROM dispatch_holds WHERE record_id = ?1",
+                [record_id.cast_signed()],
+            )
+            .map_err(storage_error)?;
+        Ok(())
+    }
+
     fn agent_profile(
         &self,
         record_type: RecordType,
@@ -1627,7 +1757,7 @@ impl AgentDispatchRepository for SqliteProjectRepository {
             if used >= limit {
                 return Ok(None);
             }
-            let record_id = connection.query_row("SELECT record.id FROM records record JOIN record_projects scope ON scope.record_id = record.id WHERE record.record_type = 'task' AND (record.status = 'open' OR (record.status = 'in_progress' AND EXISTS (SELECT 1 FROM agent_assignments prior WHERE prior.record_id = record.id AND prior.closed_at_millis IS NOT NULL))) AND scope.project_slug = ?1 AND (SELECT COUNT(*) FROM record_projects only_scope WHERE only_scope.record_id = record.id) = 1 AND NOT EXISTS (SELECT 1 FROM agent_assignments assignment WHERE assignment.record_id = record.id AND assignment.closed_at_millis IS NULL) AND NOT EXISTS (SELECT 1 FROM record_relationships dependency JOIN records prerequisite ON prerequisite.id = dependency.to_id WHERE dependency.from_id = record.id AND dependency.kind = 'depends-on' AND prerequisite.status != 'done') ORDER BY record.id LIMIT 1", [project_slug], |row| row.get::<_, i64>(0).map(i64::cast_unsigned)).optional().map_err(storage_error)?;
+            let record_id = connection.query_row("SELECT record.id FROM records record JOIN record_projects scope ON scope.record_id = record.id WHERE record.record_type = 'task' AND record.status = 'open' AND scope.project_slug = ?1 AND (SELECT COUNT(*) FROM record_projects only_scope WHERE only_scope.record_id = record.id) = 1 AND NOT EXISTS (SELECT 1 FROM dispatch_holds hold WHERE hold.record_id = record.id) AND NOT EXISTS (SELECT 1 FROM agent_assignments assignment WHERE assignment.record_id = record.id AND assignment.closed_at_millis IS NULL) AND NOT EXISTS (SELECT 1 FROM record_relationships dependency JOIN records prerequisite ON prerequisite.id = dependency.to_id WHERE dependency.from_id = record.id AND dependency.kind = 'depends-on' AND prerequisite.status != 'done') ORDER BY record.id LIMIT 1", [project_slug], |row| row.get::<_, i64>(0).map(i64::cast_unsigned)).optional().map_err(storage_error)?;
             let Some(record_id) = record_id else {
                 return Ok(None);
             };
@@ -1635,28 +1765,6 @@ impl AgentDispatchRepository for SqliteProjectRepository {
             let attempt: u32 = connection.query_row("SELECT COALESCE(MAX(attempt_number), 0) + 1 FROM agent_assignments WHERE record_id = ?1", [record_id.cast_signed()], |row| row.get::<_, i64>(0)).map_err(storage_error)?.cast_unsigned().try_into().expect("attempt number fits u32");
             let claimed_at_millis = now_millis()?;
             connection.execute("INSERT INTO agent_assignments (id, record_id, project_slug, profile_record_type, profile_revision, attempt_number, claimed_at_millis, state, state_changed_at_millis) VALUES (?1, ?2, ?3, 'task', 1, ?4, ?5, 'provisioning', ?5)", params![assignment_id, record_id.cast_signed(), project_slug, attempt, claimed_at_millis]).map_err(|error| if matches!(error.sqlite_error_code(), Some(ErrorCode::ConstraintViolation)) { RegistrationError::new("assignment-conflict", "Agent Assignment already exists or Task is assigned") } else { storage_error(error) })?;
-            let changed = connection
-                .execute(
-                    "UPDATE records SET status = 'in_progress' WHERE id = ?1 AND status = 'open'",
-                    [record_id.cast_signed()],
-                )
-                .map_err(storage_error)?;
-            if changed > 1 {
-                return Err(RegistrationError::new(
-                    "claim-conflict",
-                    "Task was no longer eligible to claim",
-                ));
-            }
-            if changed == 1 {
-                insert_update(
-                    &connection,
-                    record_id,
-                    RecordUpdateKind::StatusTransition {
-                        from: RecordStatus::Open,
-                        to: RecordStatus::InProgress,
-                    },
-                )?;
-            }
             Ok(Some(AgentAssignment {
                 id: assignment_id.into(),
                 record_id,
@@ -2357,11 +2465,24 @@ fn insert_relationship(
             transaction.execute("INSERT INTO record_relationships (from_id, to_id, parent_id, child_id, kind) VALUES (?1, ?2, ?2, ?1, 'parent-child')", params![child.id.cast_signed(), parent.id.cast_signed()]).map_err(|error| if matches!(error.sqlite_error_code(), Some(ErrorCode::ConstraintViolation)) { RegistrationError::new("child-already-related", "a child Record can have only one parent") } else { storage_error(error) })?;
         }
         RecordRelationshipKind::DependsOn => {
-            if child.status != RecordStatus::Open {
+            if child.status == RecordStatus::Done {
                 return Err(RegistrationError::new(
                     "blocked-record-not-open",
                     "a dependency may change only while its blocked Record is Open",
                 ));
+            }
+            if child.status == RecordStatus::InProgress {
+                let agent_owned: bool = transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM agent_assignments WHERE record_id = ?1 AND closed_at_millis IS NULL)",
+                    [child.id.cast_signed()],
+                    |row| row.get(0),
+                ).map_err(storage_error)?;
+                if agent_owned {
+                    return Err(RegistrationError::new(
+                        "agent-owned-task",
+                        "a dependency cannot be added to an agent-owned In Progress Task",
+                    ));
+                }
             }
             let valid_dependency = child.record_type == parent.record_type
                 && matches!(child.record_type, RecordType::Task | RecordType::Spec)
@@ -3072,6 +3193,7 @@ mod tests {
         let blocked = store.open_typed_record(&task("blocked")).unwrap();
         let prerequisite = store.open_typed_record(&task("prerequisite")).unwrap();
         let other = store.open_typed_record(&task("other")).unwrap();
+        let later = store.open_typed_record(&task("later")).unwrap();
 
         let related = store
             .relate_records(
@@ -3125,13 +3247,25 @@ mod tests {
                 .code,
             "blocked-record-not-open"
         );
+        store
+            .relate_records(blocked.id, other.id, RecordRelationshipKind::DependsOn)
+            .unwrap();
+        let assigned = store
+            .create_agent_assignment(&NewAgentAssignment {
+                id: "assigned".into(),
+                record_id: blocked.id,
+                project_slug: "alpha".into(),
+                profile_revision: 1,
+            })
+            .unwrap();
         assert_eq!(
             store
-                .relate_records(blocked.id, other.id, RecordRelationshipKind::DependsOn)
+                .relate_records(blocked.id, later.id, RecordRelationshipKind::DependsOn)
                 .unwrap_err()
                 .code,
-            "blocked-record-not-open"
+            "agent-owned-task"
         );
+        assert_eq!(assigned.record_id, blocked.id);
     }
 
     #[test]
@@ -4134,6 +4268,18 @@ mod tests {
                 generated_by_ids: vec![],
             })
             .unwrap();
+        store.set_task_base_commit(task.id, "base-commit").unwrap();
+        assert_eq!(
+            store.task_base_commit(task.id).unwrap().as_deref(),
+            Some("base-commit")
+        );
+        assert_eq!(
+            store
+                .set_task_base_commit(task.id, "replacement")
+                .unwrap_err()
+                .code,
+            "base-commit-exists"
+        );
 
         let profile = store.agent_profile(RecordType::Task, 1).unwrap();
         assert_eq!(profile.provider, "herdr");
@@ -4279,11 +4425,6 @@ mod tests {
                 generated_by_ids: vec![],
             })
             .unwrap();
-        assert_eq!(
-            store.reserve_worktree_claim(task.id).unwrap_err().code,
-            "worktree-ineligible-record"
-        );
-        store.start_record(task.id).unwrap();
         let reserved = store.reserve_worktree_claim(task.id).unwrap();
         assert_eq!(
             reserved.path,
@@ -4306,6 +4447,7 @@ mod tests {
             store.worktree_claims_requiring_cleanup().unwrap(),
             vec![cleanup.clone()]
         );
+        store.start_record(task.id).unwrap();
         store.done_record(task.id, None).unwrap();
         assert_eq!(
             store.worktree_claim(task.id).unwrap(),
@@ -4406,7 +4548,15 @@ mod tests {
             forge_app::reconcile_agent_dispatch(&store, &failing, "daemon-a", now, policy).unwrap();
         }
         let assignment = store.list_agent_assignments(task.id).unwrap().remove(0);
-        assert_eq!(assignment.retry_count, 5);
+        assert_eq!(assignment.retry_count, 3);
+        assert_eq!(
+            assignment.closure_reason,
+            Some(forge_app::AgentAssignmentClosureReason::Crashed)
+        );
+        assert_eq!(
+            store.dispatch_hold(task.id).unwrap().unwrap().reason,
+            "automatic dispatch stopped after three failed provisioning attempts"
+        );
         assert_eq!(
             store.list_record_comments(task.id).unwrap().len(),
             1,
@@ -4425,10 +4575,8 @@ mod tests {
             forge_app::reconcile_agent_dispatch(&store, &working, "daemon-a", 5_000, policy)
                 .unwrap();
         assert!(result.acquired_lease);
-        assert_eq!(
-            store.list_agent_assignments(task.id).unwrap()[0].state,
-            forge_app::AgentAssignmentState::Working
-        );
+        assert!(result.reconciled.is_empty());
+        assert!(store.dispatch_hold(task.id).unwrap().is_some());
     }
 
     #[test]
@@ -4502,7 +4650,7 @@ mod tests {
         );
         assert_eq!(
             store.show_record(first.id).unwrap().status,
-            RecordStatus::InProgress
+            RecordStatus::Open
         );
         assert_eq!(
             store

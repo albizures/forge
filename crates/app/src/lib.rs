@@ -239,6 +239,14 @@ pub trait RepositoryInspector: Send + Sync {
     ///
     /// Returns a user-facing error when the folder is not eligible.
     fn inspect(&self, folder: &Path) -> Result<Project, RegistrationError>;
+    /// Resolves the immutable Git `HEAD` commit for a registered Project folder.
+    fn head_commit(&self, folder: &Path) -> Result<String, RegistrationError> {
+        let _ = folder;
+        Err(RegistrationError::new(
+            "head-unavailable",
+            "the configured repository inspector cannot resolve a Task Base Commit",
+        ))
+    }
 }
 
 /// Persistence boundary owned by the application.
@@ -277,11 +285,13 @@ pub struct WorktreeClaim {
     pub state: WorktreeClaimState,
 }
 
-/// Returns whether a Record may own a Managed Worktree.
+/// Returns whether a Record may own a Dispatcher-created Managed Worktree.
+///
+/// A Provisioning Assignment owns dispatch capacity while its Task deliberately remains Open.
 #[must_use]
 pub fn is_worktree_eligible(record: &Record) -> bool {
     record.record_type == RecordType::Task
-        && record.status == RecordStatus::InProgress
+        && record.status == RecordStatus::Open
         && record.project_slugs.len() == 1
 }
 
@@ -377,6 +387,22 @@ pub trait RecordRepository: ProjectRepository {
     ///
     /// Returns a user-facing validation or storage failure.
     fn open_typed_record(&self, record: &NewTypedRecord) -> Result<Record, RegistrationError>;
+    /// Persists the immutable Task Base Commit captured when the Task opens.
+    fn set_task_base_commit(&self, record_id: u64, commit: &str) -> Result<(), RegistrationError> {
+        let _ = (record_id, commit);
+        Err(RegistrationError::new(
+            "base-commit-unavailable",
+            "Task Base Commit persistence is unavailable",
+        ))
+    }
+    /// Returns the immutable Task Base Commit, if the Task has Project scope.
+    fn task_base_commit(&self, record_id: u64) -> Result<Option<String>, RegistrationError> {
+        let _ = record_id;
+        Err(RegistrationError::new(
+            "base-commit-unavailable",
+            "Task Base Commit persistence is unavailable",
+        ))
+    }
     /// Opens a Task beneath a Spec, assigning the Spec's scope and membership atomically.
     ///
     /// # Errors
@@ -792,19 +818,7 @@ pub fn reconcile_agent_dispatch<F: AgentDispatchAdapterFactory + ?Sized>(
             Err(error) => {
                 let retry_count = assignment.retry_count.saturating_add(1);
                 let next_retry = now_millis.saturating_add(assignment.profile.retry_backoff_millis);
-                if repository.schedule_agent_assignment_retry(
-                    &assignment.id,
-                    assignment.state,
-                    next_retry,
-                    retry_count,
-                )? && retry_count == assignment.profile.retry_limit.saturating_add(1)
-                {
-                    repository.add_record_comment(
-                        assignment.record_id,
-                        "Agent dispatch reconciliation retries exhausted; Task remains In Progress for human recovery.",
-                        Some("agent-dispatch"),
-                    )?;
-                }
+                record_dispatch_failure(repository, &assignment, next_retry, retry_count)?;
                 reconciled.push(AssignmentReconciliation::Retained(retention_from_error(
                     &error,
                 )));
@@ -819,19 +833,7 @@ pub fn reconcile_agent_dispatch<F: AgentDispatchAdapterFactory + ?Sized>(
         if matches!(outcome, AssignmentReconciliation::Retained(_)) {
             let retry_count = assignment.retry_count.saturating_add(1);
             let next_retry = now_millis.saturating_add(assignment.profile.retry_backoff_millis);
-            if repository.schedule_agent_assignment_retry(
-                &assignment.id,
-                assignment.state,
-                next_retry,
-                retry_count,
-            )? && retry_count == assignment.profile.retry_limit.saturating_add(1)
-            {
-                repository.add_record_comment(
-                    assignment.record_id,
-                    "Agent dispatch reconciliation retries exhausted; Task remains In Progress for human recovery.",
-                    Some("agent-dispatch"),
-                )?;
-            }
+            record_dispatch_failure(repository, &assignment, next_retry, retry_count)?;
         }
         reconciled.push(outcome);
     }
@@ -839,6 +841,38 @@ pub fn reconcile_agent_dispatch<F: AgentDispatchAdapterFactory + ?Sized>(
         acquired_lease: true,
         reconciled,
     })
+}
+
+fn record_dispatch_failure(
+    repository: &dyn AgentDispatchRepository,
+    assignment: &AgentAssignment,
+    next_retry_at_millis: u64,
+    retry_count: u32,
+) -> Result<(), RegistrationError> {
+    if !repository.schedule_agent_assignment_retry(
+        &assignment.id,
+        assignment.state,
+        next_retry_at_millis,
+        retry_count,
+    )? || retry_count < 3
+    {
+        return Ok(());
+    }
+    repository.hold_dispatch(
+        assignment.record_id,
+        "automatic dispatch stopped after three failed provisioning attempts",
+    )?;
+    let _ = repository.compare_and_close_agent_assignment(
+        &assignment.id,
+        assignment.state,
+        AgentAssignmentClosureReason::Crashed,
+    )?;
+    repository.add_record_comment(
+        assignment.record_id,
+        "Automatic dispatch stopped after three failed provisioning attempts; a Dispatch Hold requires explicit operator resume.",
+        Some("agent-dispatch"),
+    )
+    .map(|_| ())
 }
 
 fn reconcile_recovery<A: AgentDispatchAdapter + ?Sized>(
@@ -1010,9 +1044,26 @@ pub trait RecordUpdateSubscriptionRepository: AgentDispatchRepository {
     ) -> Result<Vec<RecordUpdateEnvelope>, RegistrationError>;
 }
 
+/// A durable operator-cleared block on automatic Task dispatch.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DispatchHold {
+    pub record_id: u64,
+    pub reason: String,
+}
+
 /// Durable persistence boundary for provider-neutral dispatch foundations.
 #[allow(clippy::missing_errors_doc)]
 pub trait AgentDispatchRepository: RecordRepository {
+    /// Returns the operator-cleared automatic-dispatch block, if any.
+    fn dispatch_hold(&self, record_id: u64) -> Result<Option<DispatchHold>, RegistrationError>;
+    /// Creates or replaces the durable block on automatic dispatch.
+    fn hold_dispatch(
+        &self,
+        record_id: u64,
+        reason: &str,
+    ) -> Result<DispatchHold, RegistrationError>;
+    /// Clears a durable automatic-dispatch block.
+    fn resume_dispatch(&self, record_id: u64) -> Result<(), RegistrationError>;
     /// Returns an immutable seeded Agent Profile revision.
     fn agent_profile(
         &self,
@@ -1694,11 +1745,43 @@ impl Application {
         })
     }
 
-    /// Creates and activates a Managed Worktree for an In Progress Task.
+    /// Prepares the deterministic dispatcher-owned checkout for an eligible Task.
+    ///
+    /// The persisted Base Commit is the only permitted checkout base and the Task Branch is
+    /// derived solely from the Record identity. A failed preparation retains its Claim and
+    /// checkout evidence for operator recovery; it never removes or resets Git state.
     ///
     /// # Errors
     ///
-    /// Returns a stable lifecycle, hook, or Git failure.
+    /// Returns a stable lifecycle, base-commit, hook, or Git failure.
+    pub fn prepare_dispatch_worktree(
+        &self,
+        record_id: u64,
+    ) -> Result<WorktreeClaim, RegistrationError> {
+        let managed = self.managed_worktrees()?;
+        let base = managed.task_base_commit(record_id)?.ok_or_else(|| {
+            let error = RegistrationError::new(
+                "task-base-commit-unavailable",
+                "Task has no persisted Base Commit for Managed Worktree preparation",
+            );
+            let _ = managed.add_record_comment(
+                record_id,
+                "Managed Worktree preparation failed: Task has no persisted Base Commit.",
+                Some("agent-dispatch"),
+            );
+            error
+        })?;
+        self.create_managed_worktree(record_id, &format!("feat/forge-{record_id}"), &base)
+    }
+
+    /// Creates and activates a Managed Worktree for an eligible open Task.
+    ///
+    /// Dispatcher callers should use [`Self::prepare_dispatch_worktree`] so branch and base
+    /// evidence cannot be selected by the caller.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable lifecycle, hook, or Git failure while retaining failure evidence.
     pub fn create_managed_worktree(
         &self,
         record_id: u64,
@@ -1710,73 +1793,74 @@ impl Application {
         let record = managed.show_record(record_id)?;
         if !is_worktree_eligible(&record) {
             return Err(RegistrationError::new(
-                "task-not-in-progress",
-                "a Managed Worktree requires an In Progress Task scoped to exactly one Project",
+                "task-not-open",
+                "a Managed Worktree requires an Open Task scoped to exactly one Project",
             ));
         }
-        if managed.worktree_claim(record_id)?.is_some() {
-            return Err(RegistrationError::new(
-                "claim-exists",
-                "Task already has a Managed Worktree Claim",
-            ));
+        if let Some(claim) = managed.worktree_claim(record_id)? {
+            return match claim.state {
+                WorktreeClaimState::Active => Ok(claim),
+                WorktreeClaimState::Reserving | WorktreeClaimState::CleanupRequired => {
+                    Err(RegistrationError::new(
+                        "claim-requires-recovery",
+                        "Task Managed Worktree preparation requires explicit operator recovery",
+                    ))
+                }
+            };
         }
         let claim = managed.reserve_worktree_claim(record_id)?;
         let project = match managed.project(&claim.project_slug) {
             Ok(project) => project,
-            Err(error) => return self.rollback_worktree_claim(&claim, error),
+            Err(error) => return self.retain_worktree_preparation_failure(&claim, error),
         };
         if let Err(error) = adapter.create(&project.registered_folder, &claim.path, branch, base) {
-            return self.rollback_worktree_claim(&claim, error);
+            return self.retain_worktree_preparation_failure(&claim, error);
         }
-        if let Some(hook) = managed.project_setup_hook(&claim.project_slug)?
-            && adapter
-                .run_setup_hook(
-                    &claim.path,
-                    &hook,
-                    &claim.project_slug,
-                    record_id,
-                    branch,
-                    base,
-                )
-                .is_err()
+        let hook = match managed.project_setup_hook(&claim.project_slug) {
+            Ok(hook) => hook,
+            Err(error) => return self.retain_worktree_preparation_failure(&claim, error),
+        };
+        if let Some(hook) = hook
+            && let Err(error) = adapter.run_setup_hook(
+                &claim.path,
+                &hook,
+                &claim.project_slug,
+                record_id,
+                branch,
+                base,
+            )
         {
-            let error = RegistrationError::new("setup-hook-failed", "Project Setup Hook failed");
-            return self.rollback_checkout_and_claim(&claim, error);
+            return self.retain_worktree_preparation_failure(&claim, error);
+        }
+        let assessment = adapter.assess(&claim.path);
+        if assessment
+            .facts
+            .iter()
+            .any(|fact| matches!(fact.as_str(), "checkout-missing" | "git-metadata-invalid"))
+        {
+            return self.retain_worktree_preparation_failure(
+                &claim,
+                RegistrationError::new(
+                    "managed-worktree-invalid",
+                    "Managed Worktree checkout is missing or invalid after preparation",
+                ),
+            );
         }
         managed.activate_worktree_claim(record_id)
     }
 
-    fn rollback_worktree_claim(
+    fn retain_worktree_preparation_failure(
         &self,
         claim: &WorktreeClaim,
         error: RegistrationError,
     ) -> Result<WorktreeClaim, RegistrationError> {
-        if self
-            .managed_worktrees()?
-            .delete_worktree_claim(claim.record_id)
-            .is_err()
-        {
-            self.managed_worktrees()?
-                .require_worktree_claim_cleanup(claim.record_id)?;
-        }
-        Err(error)
-    }
-
-    fn rollback_checkout_and_claim(
-        &self,
-        claim: &WorktreeClaim,
-        error: RegistrationError,
-    ) -> Result<WorktreeClaim, RegistrationError> {
-        if self.worktree_adapter()?.remove(&claim.path, true).is_ok()
-            && self
-                .managed_worktrees()?
-                .delete_worktree_claim(claim.record_id)
-                .is_ok()
-        {
-            return Err(error);
-        }
-        self.managed_worktrees()?
-            .require_worktree_claim_cleanup(claim.record_id)?;
+        let managed = self.managed_worktrees()?;
+        managed.require_worktree_claim_cleanup(claim.record_id)?;
+        let _ = managed.add_record_comment(
+            claim.record_id,
+            &format!("Managed Worktree preparation failed: {}", error.message),
+            Some("agent-dispatch"),
+        );
         Err(error)
     }
 
@@ -2046,8 +2130,15 @@ impl Application {
         generated_by_ids: Vec<u64>,
     ) -> Result<Record, RegistrationError> {
         Self::require_body(body)?;
-        self.records
-            .open_task_under_spec(body, spec_id, task_kind, generated_by_ids)
+        let spec = self.records.show_record(spec_id)?;
+        let base_commit = self.task_base_commit_for_scope(&spec.project_slugs)?;
+        let task = self
+            .records
+            .open_task_under_spec(body, spec_id, task_kind, generated_by_ids)?;
+        if let Some(base_commit) = base_commit {
+            self.records.set_task_base_commit(task.id, &base_commit)?;
+        }
+        Ok(task)
     }
 
     /// Opens a Task under a Wayfinder, selecting one Project from its scope.
@@ -2064,13 +2155,22 @@ impl Application {
         generated_by_ids: Vec<u64>,
     ) -> Result<Record, RegistrationError> {
         Self::require_body(body)?;
-        self.records.open_task_under_wayfinder(
+        let scope = match &project_slug {
+            Some(project_slug) => vec![project_slug.clone()],
+            None => self.records.show_record(wayfinder_id)?.project_slugs,
+        };
+        let base_commit = self.task_base_commit_for_scope(&scope)?;
+        let task = self.records.open_task_under_wayfinder(
             body,
             wayfinder_id,
             project_slug,
             task_kind,
             generated_by_ids,
-        )
+        )?;
+        if let Some(base_commit) = base_commit {
+            self.records.set_task_base_commit(task.id, &base_commit)?;
+        }
+        Ok(task)
     }
 
     /// Opens a Grilling beneath a Wayfinder, inheriting or selecting its Project Scope.
@@ -2230,13 +2330,36 @@ impl Application {
         generated_by_ids: Vec<u64>,
     ) -> Result<Record, RegistrationError> {
         Self::require_body(body)?;
-        self.records.open_typed_record(&NewTypedRecord {
+        let base_commit = (record_type == RecordType::Task)
+            .then(|| self.task_base_commit_for_scope(&project_slugs))
+            .transpose()?;
+        let record = self.records.open_typed_record(&NewTypedRecord {
             record_type,
             task_kind,
             body: body.to_owned(),
             project_slugs,
             generated_by_ids,
-        })
+        })?;
+        if let Some(Some(base_commit)) = base_commit {
+            self.records.set_task_base_commit(record.id, &base_commit)?;
+        }
+        Ok(record)
+    }
+
+    fn task_base_commit_for_scope(
+        &self,
+        project_slugs: &[String],
+    ) -> Result<Option<String>, RegistrationError> {
+        match project_slugs {
+            [] => Ok(None),
+            [project_slug] => {
+                let project = self.records.project(project_slug)?;
+                self.inspector
+                    .head_commit(&project.registered_folder)
+                    .map(Some)
+            }
+            _ => Ok(None),
+        }
     }
 
     /// Lists a Record's Forge-authored Update Log newest first.
@@ -2320,10 +2443,15 @@ mod tests {
     struct Repository {
         records: Mutex<Vec<Record>>,
         comments: Mutex<Vec<RecordComment>>,
+        claims: Mutex<Vec<WorktreeClaim>>,
     }
     impl ProjectRepository for Repository {
-        fn project(&self, _: &str) -> Result<Project, RegistrationError> {
-            unreachable!()
+        fn project(&self, slug: &str) -> Result<Project, RegistrationError> {
+            Ok(Project {
+                slug: slug.into(),
+                registered_folder: PathBuf::from("/test-project"),
+                origin_url: "test".into(),
+            })
         }
 
         fn register(&self, project: &Project) -> Result<Project, RegistrationError> {
@@ -2364,6 +2492,14 @@ mod tests {
             records.push(record.clone());
             Ok(record)
         }
+        fn set_task_base_commit(&self, _: u64, _: &str) -> Result<(), RegistrationError> {
+            Ok(())
+        }
+
+        fn task_base_commit(&self, _: u64) -> Result<Option<String>, RegistrationError> {
+            Ok(Some("test-base".into()))
+        }
+
         fn open_task_under_spec(
             &self,
             body: &str,
@@ -2868,10 +3004,128 @@ mod tests {
             Ok(())
         }
     }
+    impl ManagedWorktreeRepository for Repository {
+        fn set_worktree_root(&self, _: Option<&Path>) -> Result<(), RegistrationError> {
+            Ok(())
+        }
+
+        fn worktree_root(&self) -> Result<Option<PathBuf>, RegistrationError> {
+            Ok(Some(PathBuf::from("/worktrees")))
+        }
+
+        fn set_project_setup_hook(
+            &self,
+            _: &str,
+            _: Option<&str>,
+        ) -> Result<(), RegistrationError> {
+            Ok(())
+        }
+
+        fn project_setup_hook(&self, _: &str) -> Result<Option<String>, RegistrationError> {
+            Ok(None)
+        }
+
+        fn reserve_worktree_claim(
+            &self,
+            record_id: u64,
+        ) -> Result<WorktreeClaim, RegistrationError> {
+            if let Some(claim) = self.worktree_claim(record_id)? {
+                return Ok(claim);
+            }
+            let record = self.show_record(record_id)?;
+            if !is_worktree_eligible(&record) {
+                return Err(RegistrationError::new(
+                    "worktree-ineligible-record",
+                    "ineligible",
+                ));
+            }
+            let claim = WorktreeClaim {
+                record_id,
+                project_slug: record.project_slugs[0].clone(),
+                path: managed_worktree_path(
+                    Path::new("/worktrees"),
+                    &record.project_slugs[0],
+                    record_id,
+                ),
+                state: WorktreeClaimState::Reserving,
+            };
+            self.claims.lock().unwrap().push(claim.clone());
+            Ok(claim)
+        }
+
+        fn activate_worktree_claim(
+            &self,
+            record_id: u64,
+        ) -> Result<WorktreeClaim, RegistrationError> {
+            let mut claims = self.claims.lock().unwrap();
+            let claim = claims
+                .iter_mut()
+                .find(|claim| claim.record_id == record_id)
+                .ok_or_else(|| RegistrationError::new("worktree-claim-not-found", "missing"))?;
+            claim.state = WorktreeClaimState::Active;
+            Ok(claim.clone())
+        }
+
+        fn require_worktree_claim_cleanup(
+            &self,
+            record_id: u64,
+        ) -> Result<WorktreeClaim, RegistrationError> {
+            let mut claims = self.claims.lock().unwrap();
+            let claim = claims
+                .iter_mut()
+                .find(|claim| claim.record_id == record_id)
+                .ok_or_else(|| RegistrationError::new("worktree-claim-not-found", "missing"))?;
+            claim.state = WorktreeClaimState::CleanupRequired;
+            Ok(claim.clone())
+        }
+
+        fn worktree_claim(
+            &self,
+            record_id: u64,
+        ) -> Result<Option<WorktreeClaim>, RegistrationError> {
+            Ok(self
+                .claims
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|claim| claim.record_id == record_id)
+                .cloned())
+        }
+
+        fn worktree_claims(&self) -> Result<Vec<WorktreeClaim>, RegistrationError> {
+            Ok(self.claims.lock().unwrap().clone())
+        }
+
+        fn worktree_claims_requiring_cleanup(
+            &self,
+        ) -> Result<Vec<WorktreeClaim>, RegistrationError> {
+            Ok(self
+                .claims
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|claim| claim.state == WorktreeClaimState::CleanupRequired)
+                .cloned()
+                .collect())
+        }
+
+        fn delete_worktree_claim(&self, record_id: u64) -> Result<(), RegistrationError> {
+            self.claims
+                .lock()
+                .unwrap()
+                .retain(|claim| claim.record_id != record_id);
+            Ok(())
+        }
+    }
+
     struct Inspector;
     impl RepositoryInspector for Inspector {
         fn inspect(&self, _: &Path) -> Result<Project, RegistrationError> {
             unreachable!()
+        }
+
+        fn head_commit(&self, _: &Path) -> Result<String, RegistrationError> {
+            Ok("test-base".into())
         }
     }
     fn application() -> Application {
@@ -2879,20 +3133,133 @@ mod tests {
             Box::new(Repository {
                 records: Mutex::new(vec![]),
                 comments: Mutex::new(vec![]),
+                claims: Mutex::new(vec![]),
             }),
             Box::new(Inspector),
         )
     }
 
+    struct TestWorktreeAdapter {
+        calls: Mutex<Vec<(String, String)>>,
+        create_fails: bool,
+    }
+
+    impl ManagedWorktreeAdapter for TestWorktreeAdapter {
+        fn create(
+            &self,
+            _: &Path,
+            _: &Path,
+            branch: &str,
+            base: &str,
+        ) -> Result<(), RegistrationError> {
+            assert_eq!(branch, "feat/forge-7");
+            assert_eq!(base, "test-base");
+            self.calls
+                .lock()
+                .unwrap()
+                .push((branch.into(), base.into()));
+            if self.create_fails {
+                Err(RegistrationError::new(
+                    "managed-worktree-invalid",
+                    "branch collision",
+                ))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn remove(&self, _: &Path, _: bool) -> Result<(), RegistrationError> {
+            panic!("preparation must not remove retained checkout evidence")
+        }
+
+        fn assess(&self, _: &Path) -> WorktreeSafetyAssessment {
+            WorktreeSafetyAssessment {
+                facts: vec!["clean".into()],
+                blockers: vec![],
+                removable: true,
+            }
+        }
+
+        fn run_setup_hook(
+            &self,
+            _: &Path,
+            _: &str,
+            _: &str,
+            _: u64,
+            _: &str,
+            _: &str,
+        ) -> Result<(), RegistrationError> {
+            Ok(())
+        }
+    }
+
+    fn task_repository() -> Repository {
+        Repository {
+            records: Mutex::new(vec![Record {
+                id: 7,
+                record_type: RecordType::Task,
+                task_kind: None,
+                body: "task".into(),
+                project_slugs: vec!["alpha".into()],
+                status: RecordStatus::Open,
+                completion_resolution: None,
+                relationships: vec![],
+            }]),
+            comments: Mutex::new(vec![]),
+            claims: Mutex::new(vec![]),
+        }
+    }
+
     #[test]
-    fn worktree_eligibility_requires_an_in_progress_single_project_task() {
+    fn dispatcher_preparation_derives_and_retains_the_task_checkout() {
+        let adapter = TestWorktreeAdapter {
+            calls: Mutex::new(vec![]),
+            create_fails: false,
+        };
+        let app = Application::with_managed_worktrees(
+            Box::new(task_repository()),
+            Box::new(task_repository()),
+            Box::new(adapter),
+            Box::new(Inspector),
+        );
+
+        let claim = app.prepare_dispatch_worktree(7).unwrap();
+        assert_eq!(claim.state, WorktreeClaimState::Active);
+        assert_eq!(claim.path, PathBuf::from("/worktrees/alpha/7"));
+        assert_eq!(app.prepare_dispatch_worktree(7).unwrap(), claim);
+    }
+
+    #[test]
+    fn failed_dispatcher_preparation_requires_recovery_without_retrying_git() {
+        let app = Application::with_managed_worktrees(
+            Box::new(task_repository()),
+            Box::new(task_repository()),
+            Box::new(TestWorktreeAdapter {
+                calls: Mutex::new(vec![]),
+                create_fails: true,
+            }),
+            Box::new(Inspector),
+        );
+
+        assert_eq!(
+            app.prepare_dispatch_worktree(7).unwrap_err().code,
+            "managed-worktree-invalid"
+        );
+        assert_eq!(
+            app.prepare_dispatch_worktree(7).unwrap_err().code,
+            "claim-requires-recovery"
+        );
+    }
+
+    #[test]
+    fn worktree_eligibility_requires_an_open_single_project_task() {
         let mut record = Record {
             id: 7,
             record_type: RecordType::Task,
             task_kind: None,
             body: "task".into(),
             project_slugs: vec!["alpha".into()],
-            status: RecordStatus::InProgress,
+            status: RecordStatus::Open,
             completion_resolution: None,
             relationships: vec![],
         };
@@ -2903,7 +3270,7 @@ mod tests {
         );
         record.status = RecordStatus::Done;
         assert!(!is_worktree_eligible(&record));
-        record.status = RecordStatus::InProgress;
+        record.status = RecordStatus::Open;
         record.project_slugs.push("beta".into());
         assert!(!is_worktree_eligible(&record));
     }

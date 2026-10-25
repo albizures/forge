@@ -73,20 +73,32 @@ A checked-out folder of a Repository. Only a main Worktree may be registered as 
 _Avoid_: project folder
 
 **Managed Worktree**:
-A Worktree created and durably tracked by Forge for an eligible Record under its Project.
+A Worktree created and durably tracked by the Dispatcher for an eligible Task under its Project. Forge does not automatically remove it while its Task has an open Agent Assignment or after the Task is Done.
 _Avoid_: task checkout, Forge workspace
 
 **Worktree Claim**:
 Forge's exclusive durable association of one eligible Record with one Managed Worktree. The claim prevents a second Managed Worktree for that Record.
 _Avoid_: worktree assignment, checkout lock
 
+**Task Branch**:
+The deterministic Forge-owned Git branch for a Task’s Managed Worktree, named `feat/forge-<record-id>` and created from the Task's Base Commit.
+_Avoid_: feature branch, worktree branch
+
+**Base Commit**:
+The immutable commit recorded for a Task from its Project Registered Folder's `HEAD` when the Task opens; its Task Branch is created from it.
+_Avoid_: dispatch base, checkout evidence
+
 **Worktree Root**:
 The user-configured folder beneath which Forge places Managed Worktrees by Project Slug and Record Identifier.
 _Avoid_: worktree base, checkout directory
 
 **Project Setup Hook**:
-An optional Project-configured shell command run in a newly created Managed Worktree.
+An optional Project-configured shell command run in a newly created Managed Worktree. A failed hook leaves the worktree for explicit operator repair and prevents automatic dispatch retry.
 _Avoid_: install command, bootstrap script
+
+**Dispatch Hold**:
+A durable operator-cleared block on automatic dispatch of a Task, retaining its diagnostic and Git evidence.
+_Avoid_: pause, suspension
 
 **Worktree Safety Assessment**:
 Forge's local, offline evaluation of whether a Managed Worktree can be ordinarily removed and the facts supporting that result.
@@ -137,11 +149,15 @@ A human-in-the-loop decision Record type that is a leaf child of one Wayfinder. 
 _Avoid_: question, approval
 
 **Agent Assignment**:
-A Forge-owned, durable association between one Record and an externally managed Agent. It records the provider-facing identity and lifecycle of one work attempt; assignments remain as history after an Agent is removed or replaced.
+A Forge-owned, durable association between one Record and an externally managed Agent. Its identifier is the stable external-provisioning identity for one work attempt; its bound Agent starts its Open Task after provisioning when necessary, and assignments remain as history after an Agent is removed or replaced.
 _Avoid_: record agent metadata, agent link
 
+**Dispatcher**:
+Forge’s scheduling and dispatch application service that selects eligible Tasks, creates their Managed Worktrees when needed, and provisions their Agent Assignments.
+_Avoid_: agent dispatcher, Herdr dispatcher
+
 **Assignment Capability**:
-An opaque, revocable credential Forge issues for one open Agent Assignment. It grants only that Assignment's permitted agent-initiated operations through the Forge daemon, which is the sole authorization gateway; it is not protection against a hostile process running as the same OS user.
+An opaque, revocable credential Forge issues for one open Agent Assignment. It grants only that Assignment's permitted agent-initiated operations through the Forge daemon, including starting its bound Open Task; the daemon is the sole authorization gateway, and the credential is not protection against a hostile process running as the same OS user.
 _Avoid_: agent token, agent credential
 
 **Record Update Subscription**:
@@ -169,8 +185,12 @@ A versioned Forge-owned configuration selected by exactly one Record Type that s
 _Avoid_: agent configuration, record profile
 
 **Agent Workspace**:
-The filesystem folder in which an Agent works for an Agent Assignment. V1 uses the scoped Project’s Registered Folder; a future revision will use a task-specific managed Worktree.
+The filesystem folder in which an Agent works for an Agent Assignment. A Task Agent Assignment requires and uses its bound Task’s active Managed Worktree.
 _Avoid_: agent project, agent checkout
+
+**Forge Dispatch Workspace**:
+The Forge-created reusable Herdr Workspace shared by Forge-dispatched Agents. Its durable Forge-owned identity and each assignment's provider resource identities permit reconciliation; its neutral root folder is under Forge user data, and Forge provisions one dedicated assignment tab and pane in it per Agent Assignment.
+_Avoid_: Project workspace, task workspace
 
 **Comment**:
 A non-blank free-text entry on a Record, optionally attributed to a free-text author. Its content cannot be edited, any Forge client may delete it, and it may be added even after its Record is Done.
@@ -196,6 +216,10 @@ _Avoid_: history, audit log
 A Record’s lifecycle state: Open, In Progress, or Done. A Record opens as Open and in the initial model advances only from Open to In Progress to Done; future Record types may add constraints.
 _Avoid_: state
 
+**Manual In Progress Task**:
+An In Progress Task without an Agent Assignment. It is outside automatic dispatch and must be explicitly reopened before becoming eligible for dispatch.
+_Avoid_: unassigned active task
+
 **Record Metadata**:
 The structured attributes associated with a Record, conceptually analogous to a Markdown document’s frontmatter and distinct from its Body.
 _Avoid_: frontmatter
@@ -209,7 +233,7 @@ A typed association between two Records. Parent/child and dependency are Relatio
 _Avoid_: link
 
 **Dependency Relationship**:
-A directed Record Relationship from a Blocked Record to a Prerequisite Record. A Blocked Record cannot become In Progress until every prerequisite is Done.
+A directed Record Relationship from a Blocked Record to a Prerequisite Record. A Blocked Record cannot become In Progress until every prerequisite is Done; an agent-owned In Progress Task cannot gain a new dependency.
 _Avoid_: blocker, prerequisite link
 
 **Generated-By Relationship**:
