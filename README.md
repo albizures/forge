@@ -205,7 +205,9 @@ should tolerate its absence for migrated legacy events. Assignment Context
 includes directly incident provenance Records, but subscription authorization
 remains limited to direct prerequisites.
 
-## Herdr/Pi dispatch provider handoff
+## Superseded pre-autonomous dispatch handoff
+
+> **Superseded by the autonomous-dispatch release notes below.** This section records the earlier provider model and must not be used as operational guidance for new dispatches.
 
 This release provides a durable, daemon-owned **Herdr/Pi dispatch provider**
 behind the Agent Dispatch Core. The daemon, rather than the CLI, connects to
@@ -258,7 +260,7 @@ forge agent-dispatch project --project alpha
 Use `forge agent-dispatch profile` to inspect the immutable seeded Task profile
 (the `herdr` provider, `pi` agent kind, model, and prompt template).
 
-### V1 ownership and safety boundary
+### Superseded V1 ownership and safety boundary
 
 For an eligible Task, Forge finds exactly one existing Herdr workspace matching
 the registered Project folder. It never creates, adopts by label, or closes a
@@ -285,7 +287,35 @@ done, or other observed agent states only drive durable assignment
 reconciliation. Completion remains an explicit Forge Task action authorized by
 the assignment capability or a human workflow action.
 
-## Managed Worktree release handoff
+## Autonomous Task-agent dispatch release handoff
+
+This release supersedes the pre-autonomous provider guidance above. Forge selects the oldest dependency-ready, single-Project **Open** Task while Project capacity is available (default: one), atomically creates a durable Provisioning Assignment to hold that capacity, and prepares `feat/forge-<task-id>` in a Task Managed Worktree. The immutable Base Commit is captured from the Project Registered Folder `HEAD` when the Task opens; dispatch never runs Pi in that Registered Folder.
+
+Forge retains the Task Branch, Managed Worktree claim, Assignment, provider-resource identities, diagnostics, Dispatch Holds, and shared Forge Dispatch Workspace in SQLite. Existing databases migrate these durable facts automatically; back up production data under the normal upgrade policy. No data rewrite or adoption of legacy workspace/worktree state is supported.
+
+Herdr is a daemon-only provider adapter. Forge creates and retains one neutral-root Forge Dispatch Workspace, then a dedicated tab and split pane for each Assignment whose cwd is the prepared Task Managed Worktree. It persists every returned resource identity immediately, recovers only matching persisted tuples, and never adopts lookalike user resources. The complete protocol-22 contract and retirement sequence are in [`docs/research/herdr-adapter-socket-contract.md`](docs/research/herdr-adapter-socket-contract.md); the architectural decision is [`ADR-005`](crates/docs/adr/0005-autonomous-task-dispatch-recovery.md).
+
+### Operators and recovery
+
+Configure the worktree root and Herdr socket, then use bounded reconciliation:
+
+```sh
+forge config set worktreeRoot "$HOME/.forge/worktrees"
+forge agent-dispatch endpoint --socket-path /absolute/path/to/herdr.sock
+forge agent-dispatch reconcile
+```
+
+Use `forge agent-dispatch status --project <slug>` for capacity/configuration and `forge worktree info <task>` or `forge worktree doctor` for retained checkout evidence. Correct the endpoint, provider state, or Git checkout before an explicit recovery action. After resolving a Dispatch Hold, run `forge agent-dispatch resume <task-id>`; to retire an assignment's provider resources while retaining its Git evidence, run `forge agent-dispatch assignment-retire <assignment-id>`; and use `forge agent-dispatch task-reopen <task-id>` only for an unassigned manual In Progress Task.
+
+Forge does **not** reset, rebase, delete, recreate, or automatically repair a dispatcher-created worktree/branch; does not adopt unknown provider resources; does not infer Task completion from a provider state; and does not automatically retire an assignment merely because its checkout is missing or invalid. A failed setup hook, branch collision, unavailable base, invalid checkout, or provider/workspace failure retains diagnostics and requires operator investigation. After three failed provisioning attempts Forge creates a durable hold; capacity is released only after the failed attempt is durably closed or explicit retirement finishes.
+
+### Intentionally deferred V1 limits
+
+This release does not provide automated Git evidence cleanup/repair, automatic provider-resource adoption or replacement, a mutable agent profile/prompt/model override, user-initiated cancellation semantics beyond assignment retirement, or automated resolution of conflicting/missing shared-workspace state. Events are wake signals only; authoritative reconciliation remains the source of truth. Final task completion and broader integration/release policy remain explicit Forge workflow actions.
+
+## Manual Managed Worktree release handoff
+
+This surface is for explicitly requested, non-dispatch worktrees. Dispatcher-created Task Managed Worktrees follow the autonomous handoff above and are never automatically rolled back or repaired.
 
 This release replaces the unsupported deployed legacy worktree surface. Do not
 use its `--path` or `--copy-manifest` arguments and do not migrate its existing
@@ -321,7 +351,7 @@ diverged status is informational. Inspect the ordered `blockers` and
 `removable` fields from `info`, `list`, or `doctor`; use `remove --force` only
 after deliberately accepting the reported risk.
 
-A Project Setup Hook is optional and runs in the new checkout through the
+For a manually created checkout, a Project Setup Hook is optional and runs in the new checkout through the
 platform shell. It receives `FORGE_PROJECT_SLUG`, `FORGE_RECORD_ID`,
 `FORGE_WORKTREE_PATH`, `FORGE_BRANCH`, and `FORGE_BASE`. A nonzero exit rolls
 back the checkout and claim; hook output is not persisted. Configure or remove
