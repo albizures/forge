@@ -11,6 +11,7 @@ forge-app = { path = "../app" }
 forge-build-info = { path = "../build-info" }
 forge-rpc = { path = "../rpc" }
 forge-store = { path = "../store" }
+fs2.workspace = true
 futures-util = "0.3.34"
 askama = "0.14.0"
 axum = "0.8.8"

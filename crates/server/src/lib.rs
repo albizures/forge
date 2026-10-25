@@ -63,6 +63,7 @@ use forge_rpc::{
     WorktreeRootResponse,
 };
 use forge_store::SqliteProjectRepository;
+use fs2::FileExt;
 use futures_util::StreamExt as FuturesStreamExt;
 use herdr::{HerdrAdapterFactory, observe_status_changes};
 use jsonrpsee::{
@@ -1725,8 +1726,10 @@ fn status_fragment(status: &ApplicationStatus) -> Result<Html<String>, StatusCod
 ///
 /// # Errors
 ///
-/// Returns an error when the listener cannot bind or serve connections.
+/// Returns an error when another daemon owns the configured store, or when the
+/// listener cannot bind or serve connections.
 pub async fn serve(config: DaemonConfig) -> Result<(), std::io::Error> {
+    let _store_lock = StoreOwnershipLock::acquire(&config.store_path)?;
     let listener = tokio::net::TcpListener::bind(config.bind_addr).await?;
     let address = listener.local_addr()?;
     if !address.ip().is_loopback() {
@@ -1784,6 +1787,39 @@ pub async fn serve(config: DaemonConfig) -> Result<(), std::io::Error> {
     let _ = observer.await;
     let _ = reconciliation_worker.await;
     result
+}
+
+/// Retains the exclusive advisory lock that gives a daemon sole ownership of a store.
+///
+/// The lock is intentionally separate from SQLite itself: direct SQLite writers remain
+/// possible, while a second Forge daemon is rejected before it can bind a listener.
+#[derive(Debug)]
+struct StoreOwnershipLock {
+    _file: fs::File,
+}
+
+impl StoreOwnershipLock {
+    fn acquire(store_path: &Path) -> io::Result<Self> {
+        let mut lock_path = store_path.as_os_str().to_os_string();
+        lock_path.push(".lock");
+        let lock_path = PathBuf::from(lock_path);
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&lock_path)?;
+        file.try_lock_exclusive().map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "could not acquire exclusive daemon ownership lock `{}` for store `{}`: {error}",
+                    lock_path.display(),
+                    store_path.display()
+                ),
+            )
+        })?;
+        Ok(Self { _file: file })
+    }
 }
 
 async fn reconcile_daemon(daemon: &Daemon) {
@@ -2002,8 +2038,8 @@ mod tests {
     use tower::ServiceExt;
 
     use super::{
-        DEFAULT_BIND_ADDR, Daemon, DaemonConfig, ManagedLaunchInputs, router, serve,
-        write_assignment_capability_secret,
+        DEFAULT_BIND_ADDR, Daemon, DaemonConfig, ManagedLaunchInputs, StoreOwnershipLock, router,
+        serve, write_assignment_capability_secret,
     };
 
     #[test]
@@ -2286,6 +2322,63 @@ mod tests {
         );
         drop(daemon);
         std::fs::remove_file(database_path).unwrap();
+    }
+
+    #[test]
+    fn store_ownership_lock_rejects_a_second_owner_and_releases_for_a_later_one() {
+        let store_path = std::env::temp_dir().join(format!(
+            "forge-daemon-ownership-{}-{}.sqlite3",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let first = StoreOwnershipLock::acquire(&store_path).unwrap();
+        let error = StoreOwnershipLock::acquire(&store_path).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("exclusive daemon ownership lock")
+        );
+        drop(first);
+        let later_owner = StoreOwnershipLock::acquire(&store_path).unwrap();
+        drop(later_owner);
+        std::fs::remove_file(format!("{}.lock", store_path.display())).unwrap();
+    }
+
+    #[tokio::test]
+    async fn duplicate_store_owner_is_rejected_before_listener_binding() {
+        let store_path = std::env::temp_dir().join(format!(
+            "forge-daemon-startup-{}-{}.sqlite3",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let first = StoreOwnershipLock::acquire(&store_path).unwrap();
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let bind_addr = probe.local_addr().unwrap();
+        drop(probe);
+
+        let error = serve(DaemonConfig {
+            bind_addr,
+            store_path: store_path.clone(),
+            managed: None,
+        })
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("exclusive daemon ownership lock")
+        );
+        let listener = std::net::TcpListener::bind(bind_addr)
+            .expect("rejected daemon must not bind its listener");
+        drop(listener);
+        drop(first);
+        std::fs::remove_file(format!("{}.lock", store_path.display())).unwrap();
     }
 
     #[test]

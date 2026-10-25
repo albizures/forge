@@ -95,7 +95,11 @@ non-Git folder, a linked (non-main) worktree, a repository without `origin`,
 or conflicting Project slug or Registered Folder identities.
 
 The daemon persists registrations in SQLite. By default it uses `forge.sqlite3`
-in its working directory; set `FORGE_STORE_PATH` to choose another path.
+in its working directory; set `FORGE_STORE_PATH` to choose another path. One
+Forge daemon owns a store at a time: startup holds a non-blocking exclusive
+advisory sidecar lock and rejects a second daemon before listener binding. This
+is a daemon-ownership boundary only; it does not prevent deliberate direct
+SQLite access.
 
 ## Manage generic Records
 

@@ -18,9 +18,9 @@ loopback listener and validates the named open assignment and subscription
 ownership. Closing or retiring the owner revokes access and removes or makes
 its subscriptions unreadable.
 
-An assignment may create subscriptions only for direct Child Records of its
-assigned Parent Record. Targets are explicit normalized Record IDs; they do not follow later
-relationship changes and are never derived transitively. A subscription has a
+An assignment may create subscriptions only for its explicit direct prerequisites.
+Targets are explicit normalized Record IDs; they do not follow later relationship
+changes and are never derived transitively. A subscription has a
 target set, optional normalized Record Update-kind filter, a captured starting
 cursor, and a renewable 30-minute lease.
 
@@ -77,8 +77,10 @@ reconciles from its last dispatched cursor.
 
 Forge publishes only after the Record mutation commits. The in-process delivery
 adapter is a wake mechanism; durable cursor replay closes publish/replay races.
-V1 supports one daemon process against a store. Queue state and fanout are not
-shared between processes.
+V1 supports one daemon process against a store. Daemon startup holds a
+non-blocking exclusive advisory sidecar lock for that store, rejecting another
+daemon before it binds its listener; the lock does not restrict direct SQLite
+writers. Queue state and fanout are not shared between processes.
 
 ## V1 boundaries
 
