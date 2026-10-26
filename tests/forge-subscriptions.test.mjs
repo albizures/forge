@@ -155,6 +155,61 @@ test("waits for bounded ordered SSE batches and returns recovery outcomes", asyn
 	}
 });
 
+test("boots an Assignment Capability Delivery session through subscription creation to a committed-update wake", async () => {
+	const root = await mkdtemp(join(tmpdir(), "forge-subscriptions-e2e-test-"));
+	const secretFile = join(root, "assignment-capability");
+	let subscriptionCreated;
+	const created = new Promise((resolve) => { subscriptionCreated = resolve; });
+	const server = createServer(async (request, response) => {
+		if (request.method === "POST") {
+			let raw = "";
+			for await (const chunk of request) raw += chunk;
+			const body = JSON.parse(raw);
+			assert.equal(body.method, "agentSubscription.create");
+			assert.deepEqual(body.params, {
+				assignment_id: "assignment-dispatched-by-forge",
+				capability_id: "capability-delivered-outside-the-workspace",
+				correlation_id: body.params.correlation_id,
+				target_record_ids: [41],
+				kind_filters: [],
+			});
+			response.setHeader("content-type", "application/json");
+			response.end(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { id: 72, assignment_id: body.params.assignment_id, target_record_ids: [41], kind_filters: [], start_cursor: 100, lease_expires_at_millis: 999 } }));
+			subscriptionCreated();
+			return;
+		}
+		assert.equal(request.method, "GET");
+		assert.equal(request.url, "/v1/agent-assignments/assignment-dispatched-by-forge/record-update-subscriptions/72/events");
+		assert.equal(request.headers["last-event-id"], "100");
+		response.writeHead(200, { "content-type": "text/event-stream" });
+		response.end("id: 101\nevent: record-update\ndata: {\"subscription_id\":72,\"record_update_id\":101,\"record_id\":41,\"kind\":\"body-edited\"}\n\n");
+	});
+	await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+	const address = server.address();
+	try {
+		await writeFile(secretFile, "capability-delivered-outside-the-workspace\n");
+		Object.assign(process.env, {
+			FORGE_ASSIGNMENT_ID: "assignment-dispatched-by-forge",
+			FORGE_ASSIGNMENT_DAEMON_URL: `http://127.0.0.1:${address.port}`,
+			FORGE_ASSIGNMENT_CAPABILITY_SECRET_FILE: secretFile,
+		});
+		const { tools } = install();
+		const subscription = await tools.get("forge_subscribe").execute("call", { target_record_ids: [41] });
+		assert.equal(subscription.details.start_cursor, 100);
+		await created;
+		const wake = await tools.get("forge_wait_for_updates").execute("call", { subscription_id: 72, after: subscription.details.start_cursor });
+		assert.deepEqual(wake.details, {
+			outcome: "updates",
+			updates: [{ subscription_id: 72, record_update_id: 101, record_id: 41, kind: "body-edited" }],
+			next_cursor: 101,
+		});
+	} finally {
+		await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+		await rm(root, { recursive: true, force: true });
+		for (const name of environmentNames) delete process.env[name];
+	}
+});
+
 test("returns typed authorization and expiry outcomes but rejects malformed RPC responses", async () => {
 	const root = await mkdtemp(join(tmpdir(), "forge-subscriptions-test-"));
 	const secretFile = join(root, "capability");

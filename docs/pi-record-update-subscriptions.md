@@ -1,39 +1,48 @@
 # Pi Record Update Subscription Extension
 
-> **Status:** Planned V1 integration. This document records the agreed extension behavior; it does not claim the extension or its Forge capability-delivery prerequisite is implemented.
+> **Status:** Implemented V1 integration guide.
 
-The Forge project extension is available only to a Pi process launched for an open Agent Assignment. It provides durable Record Update Subscription management and SSE wake delivery; it does not provide authoritative Record reads.
+The Forge project extension lets a Pi process launched for an open Agent Assignment manage durable Record Update Subscriptions and receive their SSE wake notifications. It does **not** read authoritative Record state: a wake is a prompt to reconcile through the Assignment's authorized Forge read capability.
 
-## Assignment configuration
+The wire-level lifecycle, SSE framing, authorization, cursor validation, and recovery rules are separately normative in the [Record Update Subscription SSE replay and recovery contract](research/record-update-subscription-sse-contract.md). This guide describes the Pi launch and consumer boundary.
 
-Forge dispatch supplies these session environment variables:
+## Prerequisite: Forge-launched Pi Assignment
+
+Configure Forge's dispatch provider and reconcile it as described in the [dispatch operator guide](../README.md#operators-and-recovery). Forge launches Pi in the Assignment's Agent Workspace and supplies this process environment:
 
 - `FORGE_ASSIGNMENT_ID`
-- `FORGE_ASSIGNMENT_DAEMON_URL` — the daemon root URL; the extension derives its JSON-RPC and SSE routes.
-- `FORGE_ASSIGNMENT_CAPABILITY_SECRET_FILE` — an absolute owner-only file containing the Assignment Capability.
+- `FORGE_ASSIGNMENT_DAEMON_URL` — daemon root URL; the extension derives JSON-RPC and SSE URLs.
+- `FORGE_ASSIGNMENT_CAPABILITY_SECRET_FILE` — absolute path to an owner-only Assignment Capability file outside the Agent Workspace.
 
-The extension reads the secret file immediately before a management request and never caches, displays, or writes the capability value. If configuration is absent or invalid, it hides the model-callable subscription tools. The `/forge-subscriptions` command reports safe configuration diagnostics without exposing credentials.
+The capability value is never in the prompt or an environment variable. The extension reads its file immediately before each management request, never caches, displays, or writes its value. If configuration is absent or invalid, no model-callable subscription tools are registered. `/forge-subscriptions` reports only safe availability diagnostics.
 
-## Tools and workflow
+## Agent workflow
 
-The extension exposes four model-callable tools to configured Assignment sessions:
+The configured session exposes four model-callable tools:
 
-1. `forge_subscribe` creates or returns the idempotent subscription for explicit target Record IDs and optional update-kind filters. Its result contains the subscription ID, captured `start_cursor`, lease expiry, and `reconcile_required: true`.
-2. The Agent reads the selected Records through an authorized Forge read capability. SSE notifications are not Record state.
-3. `forge_wait_for_updates(subscription_id, after, max_events?, timeout_ms?)` connects with `Last-Event-ID: after`. It returns every received envelope in global Record Update ID order and a `next_cursor`. Defaults are 50 events and 30 seconds; requests are capped at 256 events and five minutes.
-4. After a non-empty batch, the Agent reconciles the affected Records and waits again with `next_cursor`.
-5. `forge_renew_subscription` explicitly extends the 30-minute subscription lease when needed. `forge_delete_subscription` explicitly removes it.
+1. `forge_subscribe` creates or returns the idempotent subscription for explicit target Record IDs and optional update-kind filters. Record `subscription_id`, `start_cursor`, and lease expiry from its result. Its `reconcile_required: true` result is mandatory: read the selected Records through authorized Forge reads before treating a later notification as useful.
+2. `forge_wait_for_updates(subscription_id, after, max_events?, timeout_ms?)` performs one bounded SSE wait. Pass an explicit durable cursor in `after`; the defaults are 50 envelopes and 30 seconds, with maxima of 256 envelopes and five minutes. The extension retains no cursor, reconnect, or renewal state.
+3. For every non-empty `updates` result, reconcile the affected Records authoritatively, then wait again with `next_cursor`. SSE envelopes are immutable notifications, not Record state, and may be duplicated across reconnects.
+4. `forge_renew_subscription` explicitly extends the 30-minute lease when needed. `forge_delete_subscription` explicitly removes it when wake delivery is no longer needed.
 
-The extension maintains no hidden cursor or renewal state. Subscriptions survive Pi reload and shutdown until their lease expires, their owner retires, or the Agent deletes them.
+Subscriptions survive Pi reload and shutdown until their lease expires, their owner retires, or the Agent deletes them. Only one local wait may be active per subscription; this avoids replacing an earlier wait under Forge's last-connected-wins delivery rule.
 
-## Recovery and concurrency
+## Recovery outcomes
 
-Only one wait may be active locally for a subscription. This prevents Forge's last-connected-wins SSE rule from replacing an earlier sibling call.
+`forge_wait_for_updates` returns typed normal outcomes rather than silently recovering:
 
-Expected wait results are typed: `updates`, `timeout`, `connection_lost`, `resync_required`, `subscription_expired`, and `subscription_deleted`. A connection loss never triggers a hidden reconnect: the Agent reconciles first, then opens a new wait. A `resync_required` result carries Forge cursor facts, including `head`; after reconciliation, the Agent resumes from the applicable returned cursor.
+- `updates` — reconcile the affected Records and continue from `next_cursor`.
+- `timeout` — no update arrived during this bounded wait; retry deliberately from `next_cursor`.
+- `connection_lost` — reconcile first, then open a new wait from the returned cursor; the extension never reconnects itself.
+- `resync_required` — reconcile first; use its returned cursor facts, including `head`, to choose the next explicit cursor.
+- `subscription_expired` or `subscription_deleted` — stop waiting; create a new subscription only when the Assignment still needs one.
 
-Management tools likewise return typed expected outcomes such as `not_configured`, `authorization_denied`, `subscription_expired`, and `subscription_deleted`. Malformed responses and unexpected transport failures are tool errors.
+Management tools similarly return expected outcomes such as `not_configured`, `authorization_denied`, `subscription_expired`, and `subscription_deleted`. Malformed daemon responses and unexpected transport failures are tool errors, not recoverable notification results.
 
 ## Verification
 
-V1 acceptance requires Forge tests for capability-file creation and Herdr environment delivery, extension tests against a local fake RPC/SSE server, and an end-to-end local bootstrap-to-SSE-wake test.
+The V1 coverage includes:
+
+- Forge tests for owner-only capability-file creation and Herdr's exact Pi environment delivery;
+- extension tests against a local JSON-RPC/SSE server for management, cursors, bounds, recovery, and capability non-disclosure; and
+- a local end-to-end harness that boots the extension from Assignment Capability Delivery configuration, creates a subscription for Record `41`, then receives its matching committed Record Update as an SSE wake.
