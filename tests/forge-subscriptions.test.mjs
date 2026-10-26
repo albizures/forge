@@ -86,6 +86,75 @@ test("uses JSON-RPC, rereads the capability file, normalizes results, and never 
 	}
 });
 
+test("waits for bounded ordered SSE batches and returns recovery outcomes", async () => {
+	const root = await mkdtemp(join(tmpdir(), "forge-subscriptions-wait-test-"));
+	const secretFile = join(root, "capability");
+	const requests = [];
+	let firstWaitOpened;
+	const firstWait = new Promise((resolve) => { firstWaitOpened = resolve; });
+	const server = createServer((request, response) => {
+		requests.push(request);
+		const id = Number(request.url.split("/").at(-2));
+		if (id === 58) {
+			response.writeHead(409, { "content-type": "application/json" });
+			response.end(JSON.stringify({ code: "resync-required", subscription_id: 58, retention_floor: 0, start_after_update_id: 8, head: 12 }));
+			return;
+		}
+		if (id === 59) return response.writeHead(410).end();
+		if (id === 60) return response.writeHead(404).end();
+		response.writeHead(200, { "content-type": "text/event-stream; charset=utf-8" });
+		if (id === 55) {
+			response.write("retry: 1000\n\n");
+			response.write("id: 11\nevent: record-update\ndata: {\"subscription_id\":55,\"record_update_id\":11,\"record_id\":41,\"kind\":\"body-edited\"}\n\n");
+			response.write("id: 12\nevent: record-update\ndata: {\"subscription_id\":55,\"record_update_id\":12,\"record_id\":41,\"kind\":\"comment-added\"}\n\n");
+			return;
+		}
+		if (id === 57) return response.end();
+		if (id === 61) firstWaitOpened(response);
+	});
+	await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+	const address = server.address();
+	try {
+		await writeFile(secretFile, "secret");
+		Object.assign(process.env, {
+			FORGE_ASSIGNMENT_ID: "assignment-1",
+			FORGE_ASSIGNMENT_DAEMON_URL: `http://127.0.0.1:${address.port}`,
+			FORGE_ASSIGNMENT_CAPABILITY_SECRET_FILE: secretFile,
+		});
+		const { tools } = install();
+		const wait = tools.get("forge_wait_for_updates");
+		assert.equal(wait.parameters.properties.max_events.minimum, 1);
+		assert.equal(wait.parameters.properties.max_events.maximum, 256);
+		assert.equal(wait.parameters.properties.max_events.default, 50);
+		assert.equal(wait.parameters.properties.timeout_ms.maximum, 300_000);
+		assert.equal(wait.parameters.properties.timeout_ms.default, 30_000);
+		const batch = await wait.execute("call", { subscription_id: 55, after: 10, max_events: 2, timeout_ms: 1_000 });
+		assert.deepEqual(batch.details, {
+			outcome: "updates",
+			updates: [
+				{ subscription_id: 55, record_update_id: 11, record_id: 41, kind: "body-edited" },
+				{ subscription_id: 55, record_update_id: 12, record_id: 41, kind: "comment-added" },
+			],
+			next_cursor: 12,
+		});
+		assert.equal(requests[0].headers["last-event-id"], "10");
+		assert.deepEqual((await wait.execute("call", { subscription_id: 56, after: 12, timeout_ms: 10 })).details, { outcome: "timeout", next_cursor: 12 });
+		assert.deepEqual((await wait.execute("call", { subscription_id: 57, after: 12, timeout_ms: 1_000 })).details, { outcome: "connection_lost", next_cursor: 12 });
+		assert.deepEqual((await wait.execute("call", { subscription_id: 58, after: 12 })).details, { outcome: "resync_required", code: "resync-required", subscription_id: 58, retention_floor: 0, start_after_update_id: 8, head: 12, next_cursor: 12 });
+		assert.deepEqual((await wait.execute("call", { subscription_id: 59, after: 12 })).details, { outcome: "subscription_expired", next_cursor: 12 });
+		assert.deepEqual((await wait.execute("call", { subscription_id: 60, after: 12 })).details, { outcome: "subscription_deleted", next_cursor: 12 });
+		const running = wait.execute("call", { subscription_id: 61, after: 12, timeout_ms: 1_000 });
+		const heldResponse = await firstWait;
+		await assert.rejects(() => wait.execute("call", { subscription_id: 61, after: 12 }), /already in flight/);
+		heldResponse.end();
+		assert.deepEqual((await running).details, { outcome: "connection_lost", next_cursor: 12 });
+	} finally {
+		await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+		await rm(root, { recursive: true, force: true });
+		for (const name of environmentNames) delete process.env[name];
+	}
+});
+
 test("returns typed authorization and expiry outcomes but rejects malformed RPC responses", async () => {
 	const root = await mkdtemp(join(tmpdir(), "forge-subscriptions-test-"));
 	const secretFile = join(root, "capability");
