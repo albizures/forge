@@ -1,7 +1,6 @@
 //! Protocol-22 client for the local Herdr Unix-socket API.
 
 use std::{
-    fmt::Write as _,
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     time::Duration,
@@ -24,6 +23,18 @@ use serde_json::{Value, json};
 const PROTOCOL: u64 = 22;
 const SCHEMA_VERSION: u64 = 1;
 const PREFIX: &str = "forge-dispatch-";
+
+/// The complete non-secret Pi launch contract. The bearer stays in the referenced file.
+fn capability_launch_environment(
+    assignment_id: &str,
+    capability: &forge_app::AssignmentCapabilityDelivery,
+) -> Value {
+    json!({
+        "FORGE_ASSIGNMENT_ID": assignment_id,
+        "FORGE_ASSIGNMENT_DAEMON_URL": capability.endpoint,
+        "FORGE_ASSIGNMENT_CAPABILITY_SECRET_FILE": capability.secret_file,
+    })
+}
 
 /// Constructs Herdr adapters from the configured Unix socket endpoint.
 pub struct HerdrAdapterFactory {
@@ -626,7 +637,12 @@ impl AgentDispatchAdapter for HerdrAdapter {
         let (tab, root) = if let Some(id) = Self::active(&context.resources, "tab") {
             (id.to_owned(), None)
         } else {
-            let result = self.request("tab.create", json!({"workspace_id": workspace, "label": label, "cwd": agent_workspace, "focus": false}))?;
+            let mut tab_request = json!({"workspace_id": workspace, "label": label, "cwd": agent_workspace, "focus": false});
+            if let Some(capability) = &context.capability_delivery {
+                tab_request["env"] =
+                    capability_launch_environment(&context.assignment.id, capability);
+            }
+            let result = self.request("tab.create", tab_request)?;
             let id = result
                 .pointer("/tab/tab_id")
                 .or_else(|| result.get("tab_id"))
@@ -662,17 +678,10 @@ impl AgentDispatchAdapter for HerdrAdapter {
             self.request("agent.start", json!({"name": label, "kind": "pi", "pane_id": pane, "args": ["--model", context.assignment.profile.model], "timeout_ms": context.assignment.profile.startup_timeout_millis}))?;
             Self::retain(resources, context, "agent-name", &label)?;
         }
-        let mut prompt = context.rendered_initial_prompt.clone();
-        if let Some(capability) = &context.capability_delivery {
-            write!(
-                prompt,
-                "\n\nForge capability endpoint: {}\nForge capability secret file: {}",
-                capability.endpoint,
-                capability.secret_file.display()
-            )
-            .expect("writing to String cannot fail");
-        }
-        match self.request("agent.prompt", json!({"target": label, "text": prompt})) {
+        match self.request(
+            "agent.prompt",
+            json!({"target": label, "text": context.rendered_initial_prompt}),
+        ) {
             Ok(_) => Ok(()),
             Err(AgentAdapterError::InvalidRequest(message)) if message == "agentblocked" => Ok(()),
             Err(error) => Err(error),
@@ -800,6 +809,22 @@ impl AgentDispatchAdapter for HerdrAdapter {
 mod tests {
     #[cfg(unix)]
     use forge_app::AgentDispatchAdapter;
+
+    #[test]
+    fn capability_delivery_is_exactly_the_non_secret_pi_launch_contract() {
+        let delivery = forge_app::AssignmentCapabilityDelivery {
+            endpoint: "http://127.0.0.1:45003".into(),
+            secret_file: std::path::PathBuf::from("/forge-data/assignment-capabilities/a-1"),
+        };
+        assert_eq!(
+            super::capability_launch_environment("a-1", &delivery),
+            serde_json::json!({
+                "FORGE_ASSIGNMENT_ID": "a-1",
+                "FORGE_ASSIGNMENT_DAEMON_URL": "http://127.0.0.1:45003",
+                "FORGE_ASSIGNMENT_CAPABILITY_SECRET_FILE": "/forge-data/assignment-capabilities/a-1",
+            })
+        );
+    }
 
     #[cfg(unix)]
     #[test]

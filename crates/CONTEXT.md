@@ -160,6 +160,10 @@ _Avoid_: agent dispatcher, Herdr dispatcher
 An opaque, revocable credential Forge issues for one open Agent Assignment. It grants only that Assignment's permitted agent-initiated operations through the Forge daemon, including starting its bound Open Task; the daemon is the sole authorization gateway, and the credential is not protection against a hostile process running as the same OS user.
 _Avoid_: agent token, agent credential
 
+**Assignment Capability Delivery**:
+The session-scoped endpoint, Assignment Identifier, and owner-only secret-file path through which Forge makes an Assignment Capability available to its bound Agent. The capability secret itself is not placed in the Agent's prompt or environment.
+_Avoid_: capability injection, agent token environment
+
 **Record Update Subscription**:
 A durable, leased request owned and authorized by one Agent Assignment to be notified when matching Record Updates are written for explicitly named Records. It survives a transient delivery-connection loss but is removed when its lease expires or its owning Agent Assignment is retired.
 _Avoid_: event subscription, agent session subscription

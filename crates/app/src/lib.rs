@@ -636,10 +636,20 @@ pub struct AgentDispatchContext {
 }
 
 /// Opaque launch input through which an Assignment Capability is delivered to an Agent.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct AssignmentCapabilityDelivery {
     pub endpoint: String,
     pub secret_file: PathBuf,
+}
+
+impl std::fmt::Debug for AssignmentCapabilityDelivery {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AssignmentCapabilityDelivery")
+            .field("endpoint", &self.endpoint)
+            .field("secret_file", &self.secret_file)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Port implemented by a concrete agent provider; it deliberately exposes no provider semantics.

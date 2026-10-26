@@ -38,11 +38,11 @@ use axum::{
     routing::{get, post},
 };
 use forge_app::{
-    AgentDispatchAdapter, AgentDispatchAdapterFactory, AgentProfile, Application,
-    ApplicationStatus, ManagedWorktreeAdapter, Project, RecordStatus, RecordType,
-    RecordUpdateEnvelope, RecordUpdateId, RecordUpdateKind, RecordUpdateKindFilter,
-    RecordUpdateSubscriptionId, RegistrationError, RepositoryInspector, TaskKind,
-    WorktreeSafetyAssessment,
+    AgentDispatchAdapter, AgentDispatchAdapterFactory, AgentDispatchContext, AgentProfile,
+    Application, ApplicationStatus, AssignmentCapabilityDelivery, ManagedWorktreeAdapter, Project,
+    RecordStatus, RecordType, RecordUpdateEnvelope, RecordUpdateId, RecordUpdateKind,
+    RecordUpdateKindFilter, RecordUpdateSubscriptionId, RegistrationError, RepositoryInspector,
+    TaskKind, WorktreeSafetyAssessment,
 };
 use forge_rpc::{
     AddRecordCommentRequest, AgentDispatchApiServer, AgentDispatchProfileResponse,
@@ -716,6 +716,8 @@ pub fn write_assignment_capability_secret(
 
 struct ServerAgentDispatchAdapterFactory {
     herdr: HerdrAdapterFactory,
+    daemon_url: String,
+    capability_secret_root: PathBuf,
 }
 
 impl AgentDispatchAdapterFactory for ServerAgentDispatchAdapterFactory {
@@ -723,13 +725,110 @@ impl AgentDispatchAdapterFactory for ServerAgentDispatchAdapterFactory {
         &self,
         profile: &AgentProfile,
     ) -> Result<Box<dyn AgentDispatchAdapter>, forge_app::AgentAdapterError> {
-        self.herdr
-            .adapter_for(profile)
-            .map(|adapter| Box::new(adapter) as Box<dyn AgentDispatchAdapter>)
+        self.herdr.adapter_for(profile).map(|adapter| {
+            Box::new(CapabilityDeliveryAdapter {
+                inner: adapter,
+                daemon_url: self.daemon_url.clone(),
+                capability_secret_root: self.capability_secret_root.clone(),
+            }) as Box<dyn AgentDispatchAdapter>
+        })
+    }
+}
+
+/// Adds the server-owned, non-persistent capability delivery to the provider context.
+/// The bearer is created once in an owner-only file; only its path reaches the provider.
+struct CapabilityDeliveryAdapter {
+    inner: herdr::HerdrAdapter,
+    daemon_url: String,
+    capability_secret_root: PathBuf,
+}
+
+impl CapabilityDeliveryAdapter {
+    fn context(
+        &self,
+        context: &AgentDispatchContext,
+    ) -> Result<AgentDispatchContext, forge_app::AgentAdapterError> {
+        let secret_file = self.capability_secret_root.join(&context.assignment.id);
+        if !secret_file.exists() {
+            let mut bytes = [0_u8; 32];
+            getrandom::fill(&mut bytes).map_err(|_| {
+                forge_app::AgentAdapterError::Endpoint(
+                    "could not issue Assignment Capability".into(),
+                )
+            })?;
+            let secret = bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            let workspace = context.agent_workspace.as_deref().ok_or_else(|| {
+                forge_app::AgentAdapterError::InvalidRequest(
+                    "Assignment has no Agent Workspace".into(),
+                )
+            })?;
+            write_assignment_capability_secret(&secret_file, workspace, &secret).map_err(
+                |error| {
+                    forge_app::AgentAdapterError::Endpoint(format!(
+                        "could not issue Assignment Capability: {}",
+                        error.code
+                    ))
+                },
+            )?;
+        }
+        let mut delivered = context.clone();
+        delivered.capability_delivery = Some(AssignmentCapabilityDelivery {
+            endpoint: self.daemon_url.clone(),
+            secret_file,
+        });
+        Ok(delivered)
+    }
+}
+
+impl AgentDispatchAdapter for CapabilityDeliveryAdapter {
+    fn probe(&self) -> Result<(), forge_app::AgentAdapterError> {
+        self.inner.probe()
+    }
+
+    fn provision(
+        &self,
+        context: &AgentDispatchContext,
+        resources: &dyn forge_app::AgentDispatchRepository,
+    ) -> Result<(), forge_app::AgentAdapterError> {
+        self.inner.provision(&self.context(context)?, resources)
+    }
+
+    fn observe(
+        &self,
+        context: &AgentDispatchContext,
+    ) -> Result<forge_app::AgentObservation, forge_app::AgentAdapterError> {
+        self.inner.observe(context)
+    }
+
+    fn recover(
+        &self,
+        context: &AgentDispatchContext,
+    ) -> Result<forge_app::AgentObservation, forge_app::AgentAdapterError> {
+        self.inner.recover(context)
+    }
+
+    fn retire(
+        &self,
+        context: &AgentDispatchContext,
+        resources: &dyn forge_app::AgentDispatchRepository,
+    ) -> Result<(), forge_app::AgentAdapterError> {
+        self.inner.retire(context, resources)
     }
 }
 
 fn application_from_config(config: &DaemonConfig) -> Result<Application, String> {
+    let store_root = config.store_path.parent().unwrap_or_else(|| Path::new("."));
+    let capability_secret_root = if store_root.is_absolute() {
+        store_root.to_owned()
+    } else {
+        env::current_dir()
+            .map_err(|error| format!("could not resolve Forge data root: {error}"))?
+            .join(store_root)
+    }
+    .join("assignment-capabilities");
     let records =
         SqliteProjectRepository::open(&config.store_path).map_err(|error| error.message)?;
     let dispatch =
@@ -743,6 +842,8 @@ fn application_from_config(config: &DaemonConfig) -> Result<Application, String>
         Box::new(dispatch),
         Box::new(ServerAgentDispatchAdapterFactory {
             herdr: HerdrAdapterFactory::from_configuration_store(config.store_path.clone()),
+            daemon_url: format!("http://{}", config.bind_addr),
+            capability_secret_root,
         }),
         Box::new(GitInspector),
     ))
@@ -2220,6 +2321,9 @@ mod tests {
                         herdr: super::HerdrAdapterFactory::from_configuration_store(
                             database_path.clone(),
                         ),
+                        daemon_url: "http://127.0.0.1:45003".into(),
+                        capability_secret_root: std::env::temp_dir()
+                            .join("forge-test-capabilities"),
                     }),
                     Box::new(TestInspector),
                 )),
@@ -2296,6 +2400,8 @@ mod tests {
             Box::new(SqliteProjectRepository::open(&database_path).unwrap()),
             Box::new(super::ServerAgentDispatchAdapterFactory {
                 herdr: super::HerdrAdapterFactory::from_configuration_store(database_path.clone()),
+                daemon_url: "http://127.0.0.1:45003".into(),
+                capability_secret_root: std::env::temp_dir().join("forge-test-capabilities"),
             }),
             Box::new(TestInspector),
         ));
