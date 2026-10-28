@@ -1349,7 +1349,7 @@ pub fn assignment_complete_task<R: AgentDispatchRepository>(
     repository.done_record(task_id, resolution)
 }
 
-/// Authorizes creation of a Subscription for explicit direct prerequisites of the assigned Record.
+/// Authorizes creation for a Task's direct prerequisites or a Spec's direct children.
 #[allow(clippy::missing_errors_doc)]
 pub fn assignment_create_record_update_subscription<
     R: RecordUpdateSubscriptionRepository + ?Sized,
@@ -1362,15 +1362,27 @@ pub fn assignment_create_record_update_subscription<
     kind_filters: Vec<RecordUpdateKindFilter>,
 ) -> Result<RecordUpdateSubscription, RegistrationError> {
     let assignment = repository.agent_assignment(assignment_id)?;
+    let assigned_record = repository.show_record(assignment.record_id)?;
     let allowed = assignment.closed_at_millis.is_none()
         && !target_record_ids.is_empty()
         && target_record_ids.iter().all(|target_id| {
             repository.show_record(*target_id).is_ok_and(|target| {
-                target.relationships.iter().any(|relationship| {
-                    relationship.kind == RecordRelationshipKind::DependsOn
-                        && relationship.from_id == assignment.record_id
-                        && relationship.to_id == *target_id
-                })
+                target
+                    .relationships
+                    .iter()
+                    .any(|relationship| match assigned_record.record_type {
+                        RecordType::Spec => {
+                            relationship.kind == RecordRelationshipKind::ParentChild
+                                && relationship.parent_id == assignment.record_id
+                                && relationship.child_id == *target_id
+                        }
+                        RecordType::Task => {
+                            relationship.kind == RecordRelationshipKind::DependsOn
+                                && relationship.from_id == assignment.record_id
+                                && relationship.to_id == *target_id
+                        }
+                        _ => false,
+                    })
             })
         });
     authorize_assignment_operation(

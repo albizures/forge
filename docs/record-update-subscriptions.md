@@ -18,8 +18,9 @@ loopback listener and validates the named open assignment and subscription
 ownership. Closing or retiring the owner revokes access and removes or makes
 its subscriptions unreadable.
 
-An assignment may create subscriptions only for its explicit direct prerequisites.
-Targets are explicit normalized Record IDs; they do not follow later relationship
+A Task assignment may create subscriptions only for its explicit direct
+prerequisites. A Spec assignment may create subscriptions only for its direct
+child records. Targets are explicit normalized Record IDs; they do not follow later relationship
 changes and are never derived transitively. A subscription has a
 target set, optional normalized Record Update-kind filter, a captured starting
 cursor, and a renewable 30-minute lease.

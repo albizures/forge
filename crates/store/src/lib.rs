@@ -117,7 +117,7 @@ impl SqliteProjectRepository {
             CREATE INDEX IF NOT EXISTS record_update_subscriptions_expiry
                 ON record_update_subscriptions(lease_expires_at_millis);
             CREATE TABLE IF NOT EXISTS agent_profiles (
-                record_type TEXT NOT NULL CHECK (record_type IN ('task')),
+                record_type TEXT NOT NULL CHECK (record_type IN ('spec', 'task')),
                 revision INTEGER NOT NULL CHECK (revision > 0),
                 provider TEXT NOT NULL,
                 agent_kind TEXT NOT NULL,
@@ -210,9 +210,10 @@ impl SqliteProjectRepository {
         migrate_record_relationship_schema(&connection)?;
         migrate_record_updates_schema(&connection)?;
         migrate_agent_assignment_schema(&connection)?;
+        migrate_agent_profile_schema(&connection)?;
         migrate_assignment_authorization_audit_schema(&connection)?;
         migrate_managed_worktree_schema(&connection)?;
-        seed_task_agent_profile(&connection)?;
+        seed_agent_profiles(&connection)?;
         Ok(Self {
             connection: Mutex::new(connection),
         })
@@ -1441,11 +1442,49 @@ fn migrate_assignment_authorization_audit_schema(
     ).map_err(storage_error)
 }
 
-fn seed_task_agent_profile(connection: &Connection) -> Result<(), RegistrationError> {
-    connection.execute(
-        "INSERT OR IGNORE INTO agent_profiles (record_type, revision, provider, agent_kind, model, prompt_template, retry_limit, retry_backoff_millis, startup_timeout_millis, unknown_state_grace_millis) VALUES ('task', 1, 'herdr', 'pi', 'gpt-5.6-terra', 'agent-dispatch/task/v1', 3, 1000, 30000, 60000)",
-        [],
-    ).map_err(storage_error)?;
+fn migrate_agent_profile_schema(connection: &Connection) -> Result<(), RegistrationError> {
+    let schema: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'agent_profiles'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(storage_error)?;
+    if schema.contains("'spec'") {
+        return Ok(());
+    }
+    connection
+        .execute_batch(
+            "ALTER TABLE agent_profiles RENAME TO agent_profiles_old;
+        CREATE TABLE agent_profiles (
+            record_type TEXT NOT NULL CHECK (record_type IN ('spec', 'task')),
+            revision INTEGER NOT NULL CHECK (revision > 0),
+            provider TEXT NOT NULL,
+            agent_kind TEXT NOT NULL,
+            model TEXT NOT NULL,
+            prompt_template TEXT NOT NULL,
+            retry_limit INTEGER NOT NULL,
+            retry_backoff_millis INTEGER NOT NULL,
+            startup_timeout_millis INTEGER NOT NULL,
+            unknown_state_grace_millis INTEGER NOT NULL,
+            PRIMARY KEY (record_type, revision)
+        );
+        INSERT INTO agent_profiles SELECT * FROM agent_profiles_old;
+        DROP TABLE agent_profiles_old;",
+        )
+        .map_err(storage_error)
+}
+
+fn seed_agent_profiles(connection: &Connection) -> Result<(), RegistrationError> {
+    for (record_type, prompt_template) in [
+        ("spec", "agent-dispatch/spec/v1"),
+        ("task", "agent-dispatch/task/v1"),
+    ] {
+        connection.execute(
+            "INSERT OR IGNORE INTO agent_profiles (record_type, revision, provider, agent_kind, model, prompt_template, retry_limit, retry_backoff_millis, startup_timeout_millis, unknown_state_grace_millis) VALUES (?1, 1, 'herdr', 'pi', 'gpt-5.6-terra', ?2, 3, 1000, 30000, 60000)",
+            params![record_type, prompt_template],
+        ).map_err(storage_error)?;
+    }
     Ok(())
 }
 
@@ -1459,6 +1498,7 @@ fn load_agent_profile(
         params![record_type_name(profile_record_type), revision],
         |row| Ok(AgentProfile {
             record_type: match row.get::<_, String>(0)?.as_str() {
+                "spec" => RecordType::Spec,
                 "task" => RecordType::Task,
                 _ => return Err(rusqlite::Error::InvalidQuery),
             },
@@ -1678,24 +1718,27 @@ impl AgentDispatchRepository for SqliteProjectRepository {
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
         let transaction = connection.transaction().map_err(storage_error)?;
         let record = load_record(&transaction, assignment.record_id)?;
-        if record.record_type != RecordType::Task
+        if !matches!(record.record_type, RecordType::Spec | RecordType::Task)
             || record.project_slugs.as_slice() != [assignment.project_slug.as_str()]
         {
             return Err(RegistrationError::new(
                 "invalid-assignment-record",
-                "an Assignment requires a Task scoped to its Project",
+                "an Assignment requires a single-Project Spec or Task",
             ));
         }
-        let profile =
-            load_agent_profile(&transaction, RecordType::Task, assignment.profile_revision)?;
+        let profile = load_agent_profile(
+            &transaction,
+            record.record_type,
+            assignment.profile_revision,
+        )?;
         let attempt_number: u32 = transaction.query_row(
             "SELECT COALESCE(MAX(attempt_number), 0) + 1 FROM agent_assignments WHERE record_id = ?1",
             [assignment.record_id.cast_signed()], |row| row.get::<_, i64>(0),
         ).map_err(storage_error)?.cast_unsigned().try_into().expect("attempt number fits u32");
         let claimed_at_millis = now_millis()?;
         match transaction.execute(
-            "INSERT INTO agent_assignments (id, record_id, project_slug, profile_record_type, profile_revision, attempt_number, claimed_at_millis, state_changed_at_millis) VALUES (?1, ?2, ?3, 'task', ?4, ?5, ?6, ?6)",
-            params![assignment.id, assignment.record_id.cast_signed(), assignment.project_slug, assignment.profile_revision, attempt_number, claimed_at_millis],
+            "INSERT INTO agent_assignments (id, record_id, project_slug, profile_record_type, profile_revision, attempt_number, claimed_at_millis, state_changed_at_millis) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+            params![assignment.id, assignment.record_id.cast_signed(), assignment.project_slug, record_type_name(record.record_type), assignment.profile_revision, attempt_number, claimed_at_millis],
         ) {
             Ok(_) => {},
             Err(error) if matches!(error.sqlite_error_code(), Some(ErrorCode::ConstraintViolation)) => return Err(RegistrationError::new("open-assignment-exists", "Record already has an open Agent Assignment")),
@@ -4213,7 +4256,8 @@ mod tests {
 
     #[test]
     #[allow(clippy::too_many_lines)]
-    fn assignment_context_includes_direct_provenance_but_subscriptions_only_allow_prerequisites() {
+    fn assignment_context_includes_direct_provenance_and_authorizes_only_direct_subscription_targets()
+     {
         let store = SqliteProjectRepository::in_memory().unwrap();
         for (slug, folder) in [
             ("alpha", "/repos/alpha"),
@@ -4229,6 +4273,56 @@ mod tests {
             project_slugs: vec![project_slug.into()],
             generated_by_ids: vec![],
         };
+        let spec = store
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Spec,
+                task_kind: None,
+                body: "spec".into(),
+                project_slugs: vec!["alpha".into()],
+                generated_by_ids: vec![],
+            })
+            .unwrap();
+        let direct_child = store
+            .open_task_under_spec("direct child", spec.id, None, vec![])
+            .unwrap();
+        let unrelated = store
+            .open_typed_record(&task("unrelated", "alpha"))
+            .unwrap();
+        store
+            .create_agent_assignment(&NewAgentAssignment {
+                id: "spec-owner".into(),
+                record_id: spec.id,
+                project_slug: "alpha".into(),
+                profile_revision: 1,
+            })
+            .unwrap();
+        assert_eq!(
+            assignment_create_record_update_subscription(
+                &store,
+                "spec-owner",
+                "cap-spec-owner",
+                "create-child",
+                vec![direct_child.id],
+                vec![],
+            )
+            .unwrap()
+            .target_record_ids,
+            vec![direct_child.id]
+        );
+        assert_eq!(
+            assignment_create_record_update_subscription(
+                &store,
+                "spec-owner",
+                "cap-spec-owner",
+                "deny-unrelated",
+                vec![unrelated.id],
+                vec![],
+            )
+            .unwrap_err()
+            .code,
+            "assignment-capability-denied"
+        );
+
         let assigned = store.open_typed_record(&task("assigned", "alpha")).unwrap();
         let prerequisite = store
             .open_typed_record(&task("prerequisite", "beta"))

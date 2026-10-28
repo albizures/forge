@@ -2346,7 +2346,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn subscription_rpc_only_authorizes_direct_prerequisites_not_provenance() {
+    async fn subscription_rpc_authorizes_task_prerequisites_and_spec_children_only() {
         let database_path = std::env::temp_dir().join(format!(
             "forge-provenance-subscription-{}-{}.sqlite3",
             std::process::id(),
@@ -2393,6 +2393,26 @@ mod tests {
                 profile_revision: 1,
             })
             .unwrap();
+        let spec = store
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Spec,
+                task_kind: None,
+                body: "spec".into(),
+                project_slugs: vec!["alpha".into()],
+                generated_by_ids: vec![],
+            })
+            .unwrap();
+        let child = store
+            .open_task_under_spec("child", spec.id, None, vec![])
+            .unwrap();
+        store
+            .create_agent_assignment(&NewAgentAssignment {
+                id: "spec-assignment".into(),
+                record_id: spec.id,
+                project_slug: "alpha".into(),
+                profile_revision: 1,
+            })
+            .unwrap();
         drop(store);
 
         let daemon = Daemon::new(Application::with_agent_dispatch(
@@ -2405,26 +2425,46 @@ mod tests {
             }),
             Box::new(TestInspector),
         ));
-        let request = |target_record_id| CreateAgentSubscriptionRequest {
-            assignment_id: "owner-assignment".into(),
+        let request = |assignment_id: &str, target_record_id| CreateAgentSubscriptionRequest {
+            assignment_id: assignment_id.into(),
             capability_id: "cap-owner".into(),
             correlation_id: "subscription".into(),
             target_record_ids: vec![target_record_id],
             kind_filters: vec![],
         };
         assert_eq!(
-            AgentSubscriptionApiServer::create(&daemon, request(prerequisite.id))
-                .await
-                .unwrap()
-                .target_record_ids,
+            AgentSubscriptionApiServer::create(
+                &daemon,
+                request("owner-assignment", prerequisite.id)
+            )
+            .await
+            .unwrap()
+            .target_record_ids,
             vec![prerequisite.id]
         );
         assert!(
-            AgentSubscriptionApiServer::create(&daemon, request(generated.id))
+            AgentSubscriptionApiServer::create(&daemon, request("owner-assignment", generated.id))
                 .await
                 .unwrap_err()
                 .to_string()
                 .contains("assignment-capability-denied")
+        );
+        assert_eq!(
+            AgentSubscriptionApiServer::create(&daemon, request("spec-assignment", child.id))
+                .await
+                .unwrap()
+                .target_record_ids,
+            vec![child.id]
+        );
+        assert!(
+            AgentSubscriptionApiServer::create(
+                &daemon,
+                request("spec-assignment", prerequisite.id)
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("assignment-capability-denied")
         );
         drop(daemon);
         std::fs::remove_file(database_path).unwrap();
