@@ -45,12 +45,13 @@ use forge_app::{
     TaskKind, WorktreeSafetyAssessment,
 };
 use forge_rpc::{
-    AddRecordCommentRequest, AgentDispatchApiServer, AgentDispatchProfileResponse,
-    AgentDispatchReconcileResponse, AgentDispatchStatusRequest, AgentDispatchStatusResponse,
-    AgentSubscriptionApiServer, CreateAgentSubscriptionRequest, CreateManagedWorktreeRequest,
-    DeleteRecordCommentRequest, DoctorManagedWorktreesRequest, DoneRecordRequest,
-    EditRecordRequest, ListManagedWorktreesRequest, ListManagedWorktreesResponse,
-    ListRecordCommentsResponse, ListRecordUpdatesResponse, ListRecordsRequest, ListRecordsResponse,
+    AddRecordCommentRequest, AgentAssignmentResponse, AgentDispatchApiServer,
+    AgentDispatchProfileResponse, AgentDispatchReconcileResponse, AgentDispatchStatusRequest,
+    AgentDispatchStatusResponse, AgentSubscriptionApiServer, CreateAgentSubscriptionRequest,
+    CreateManagedWorktreeRequest, DeleteRecordCommentRequest, DispatchGrillingRequest,
+    DoctorManagedWorktreesRequest, DoneRecordRequest, EditRecordRequest,
+    ListManagedWorktreesRequest, ListManagedWorktreesResponse, ListRecordCommentsResponse,
+    ListRecordUpdatesResponse, ListRecordsRequest, ListRecordsResponse,
     ManageAgentSubscriptionRequest, ManagedWorktreeResponse, ManagementStatus,
     OpenGrillingUnderWayfinderRequest, OpenRecordRequest, OpenSpecRequest, OpenTaskRequest,
     OpenTaskUnderSpecRequest, OpenTaskUnderWayfinderRequest, OpenWayfinderRequest,
@@ -760,11 +761,20 @@ impl CapabilityDeliveryAdapter {
                 .iter()
                 .map(|byte| format!("{byte:02x}"))
                 .collect::<String>();
-            let workspace = context.agent_workspace.as_deref().ok_or_else(|| {
-                forge_app::AgentAdapterError::InvalidRequest(
-                    "Assignment has no Agent Workspace".into(),
-                )
-            })?;
+            let workspace = context
+                .agent_workspace
+                .as_deref()
+                .or_else(|| {
+                    context
+                        .dispatch_workspace
+                        .as_ref()
+                        .map(|workspace| workspace.root.as_path())
+                })
+                .ok_or_else(|| {
+                    forge_app::AgentAdapterError::InvalidRequest(
+                        "Assignment has no Agent Workspace".into(),
+                    )
+                })?;
             write_assignment_capability_secret(&secret_file, workspace, &secret).map_err(
                 |error| {
                     forge_app::AgentAdapterError::Endpoint(format!(
@@ -931,6 +941,19 @@ impl AgentDispatchApiServer for Daemon {
         // Reconciliation can commit a dispatch failure Comment before returning an error.
         self.delivery.publish(&self.application);
         result.map(Into::into).map_err(rpc_error)
+    }
+
+    async fn grilling_dispatch(
+        &self,
+        request: DispatchGrillingRequest,
+    ) -> RpcResult<AgentAssignmentResponse> {
+        self.application
+            .dispatch_grilling(request.grilling_id)
+            .map(|assignment| {
+                self.delivery.publish(&self.application);
+                assignment.into()
+            })
+            .map_err(rpc_error)
     }
 
     async fn task_start(&self, request: StartAssignmentTaskRequest) -> RpcResult<RecordResponse> {

@@ -559,7 +559,7 @@ pub struct AgentProfile {
     pub unknown_state_grace_millis: u64,
 }
 
-/// A durable attempt to dispatch one Task to an external Agent.
+/// A durable attempt to dispatch one Task or interactive Grilling to an external Agent.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentAssignment {
     pub id: String,
@@ -1080,7 +1080,7 @@ pub struct DispatchWorkspace {
     pub root: PathBuf,
 }
 
-/// A durable operator-cleared block on automatic Task dispatch.
+/// A durable operator-cleared block on Agent dispatch.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DispatchHold {
     pub record_id: u64,
@@ -1661,6 +1661,57 @@ impl Application {
     /// Returns configuration or persistence failures.
     pub fn task_agent_profile(&self) -> Result<AgentProfile, RegistrationError> {
         self.dispatch()?.agent_profile(RecordType::Task, 1)
+    }
+
+    /// Dispatches one ready, single-Project Grilling without creating a Managed Worktree.
+    ///
+    /// # Errors
+    ///
+    /// Returns lifecycle, provider, or persistence failures.
+    pub fn dispatch_grilling(
+        &self,
+        grilling_id: u64,
+    ) -> Result<AgentAssignment, RegistrationError> {
+        let dispatch = self.dispatch()?;
+        let grilling = dispatch.show_record(grilling_id)?;
+        if grilling.record_type != RecordType::Grilling
+            || grilling.status != RecordStatus::Open
+            || grilling.project_slugs.len() != 1
+            || grilling.relationships.iter().any(|relationship| {
+                relationship.kind == RecordRelationshipKind::DependsOn
+                    && relationship.from_id == grilling_id
+                    && dispatch
+                        .show_record(relationship.to_id)
+                        .map_or(true, |prerequisite| {
+                            prerequisite.status != RecordStatus::Done
+                        })
+            })
+        {
+            return Err(RegistrationError::new(
+                "grilling-not-ready",
+                "an interactive Assignment requires a ready Grilling scoped to exactly one Project",
+            ));
+        }
+        if dispatch.dispatch_hold(grilling_id)?.is_some() {
+            return Err(RegistrationError::new(
+                "dispatch-held",
+                "interactive Grilling dispatch requires explicit operator resume",
+            ));
+        }
+        let assignment = dispatch.create_agent_assignment(&NewAgentAssignment {
+            id: next_dispatch_assignment_id(),
+            record_id: grilling_id,
+            project_slug: grilling.project_slugs[0].clone(),
+            profile_revision: 1,
+        })?;
+        let adapter = self
+            .adapter_factory()?
+            .adapter_for(&assignment.profile)
+            .map_err(|error| {
+                RegistrationError::new("agent-dispatch-unavailable", format!("{error:?}"))
+            })?;
+        let _ = reconcile_agent_assignment(dispatch, adapter.as_ref(), &assignment)?;
+        dispatch.agent_assignment(&assignment.id)
     }
 
     /// Starts an Assignment's bound Task through its delivered capability.

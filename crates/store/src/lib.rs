@@ -117,7 +117,7 @@ impl SqliteProjectRepository {
             CREATE INDEX IF NOT EXISTS record_update_subscriptions_expiry
                 ON record_update_subscriptions(lease_expires_at_millis);
             CREATE TABLE IF NOT EXISTS agent_profiles (
-                record_type TEXT NOT NULL CHECK (record_type IN ('spec', 'task')),
+                record_type TEXT NOT NULL CHECK (record_type IN ('spec', 'task', 'grilling')),
                 revision INTEGER NOT NULL CHECK (revision > 0),
                 provider TEXT NOT NULL,
                 agent_kind TEXT NOT NULL,
@@ -1450,14 +1450,14 @@ fn migrate_agent_profile_schema(connection: &Connection) -> Result<(), Registrat
             |row| row.get(0),
         )
         .map_err(storage_error)?;
-    if schema.contains("'spec'") {
+    if schema.contains("'grilling'") {
         return Ok(());
     }
     connection
         .execute_batch(
             "ALTER TABLE agent_profiles RENAME TO agent_profiles_old;
         CREATE TABLE agent_profiles (
-            record_type TEXT NOT NULL CHECK (record_type IN ('spec', 'task')),
+            record_type TEXT NOT NULL CHECK (record_type IN ('spec', 'task', 'grilling')),
             revision INTEGER NOT NULL CHECK (revision > 0),
             provider TEXT NOT NULL,
             agent_kind TEXT NOT NULL,
@@ -1479,6 +1479,7 @@ fn seed_agent_profiles(connection: &Connection) -> Result<(), RegistrationError>
     for (record_type, prompt_template) in [
         ("spec", "agent-dispatch/spec/v1"),
         ("task", "agent-dispatch/task/v1"),
+        ("grilling", "agent-dispatch/grilling/v1"),
     ] {
         connection.execute(
             "INSERT OR IGNORE INTO agent_profiles (record_type, revision, provider, agent_kind, model, prompt_template, retry_limit, retry_backoff_millis, startup_timeout_millis, unknown_state_grace_millis) VALUES (?1, 1, 'herdr', 'pi', 'gpt-5.6-terra', ?2, 3, 1000, 30000, 60000)",
@@ -1500,6 +1501,7 @@ fn load_agent_profile(
             record_type: match row.get::<_, String>(0)?.as_str() {
                 "spec" => RecordType::Spec,
                 "task" => RecordType::Task,
+                "grilling" => RecordType::Grilling,
                 _ => return Err(rusqlite::Error::InvalidQuery),
             },
             revision: row.get::<_, i64>(1)?.cast_unsigned().try_into().expect("profile revision fits u32"),
@@ -1660,10 +1662,10 @@ impl AgentDispatchRepository for SqliteProjectRepository {
             .lock()
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
         let record = load_record(&connection, record_id)?;
-        if record.record_type != RecordType::Task {
+        if !matches!(record.record_type, RecordType::Task | RecordType::Grilling) {
             return Err(RegistrationError::new(
                 "invalid-dispatch-hold",
-                "only a Task may have a Dispatch Hold",
+                "only a Task or Grilling may have a Dispatch Hold",
             ));
         }
         connection.execute(
@@ -1718,8 +1720,10 @@ impl AgentDispatchRepository for SqliteProjectRepository {
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
         let transaction = connection.transaction().map_err(storage_error)?;
         let record = load_record(&transaction, assignment.record_id)?;
-        if !matches!(record.record_type, RecordType::Spec | RecordType::Task)
-            || record.project_slugs.as_slice() != [assignment.project_slug.as_str()]
+        if !matches!(
+            record.record_type,
+            RecordType::Spec | RecordType::Task | RecordType::Grilling
+        ) || record.project_slugs.as_slice() != [assignment.project_slug.as_str()]
         {
             return Err(RegistrationError::new(
                 "invalid-assignment-record",
@@ -4468,6 +4472,45 @@ mod tests {
                 .unwrap_err()
                 .code,
             "subscription-not-found"
+        );
+    }
+
+    #[test]
+    fn persists_interactive_grilling_assignments_and_dispatch_holds() {
+        let store = SqliteProjectRepository::in_memory().unwrap();
+        store.register(&project("alpha", "/repos/alpha")).unwrap();
+        let grilling = store
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Grilling,
+                task_kind: None,
+                body: "review this".into(),
+                project_slugs: vec!["alpha".into()],
+                generated_by_ids: vec![],
+            })
+            .unwrap();
+
+        assert_eq!(
+            store
+                .agent_profile(RecordType::Grilling, 1)
+                .unwrap()
+                .prompt_template,
+            "agent-dispatch/grilling/v1"
+        );
+        let assignment = store
+            .create_agent_assignment(&NewAgentAssignment {
+                id: "grilling-attempt".into(),
+                record_id: grilling.id,
+                project_slug: "alpha".into(),
+                profile_revision: 1,
+            })
+            .unwrap();
+        assert_eq!(assignment.profile.record_type, RecordType::Grilling);
+        store
+            .hold_dispatch(grilling.id, "waiting for operator")
+            .unwrap();
+        assert_eq!(
+            store.dispatch_hold(grilling.id).unwrap().unwrap().reason,
+            "waiting for operator"
         );
     }
 
