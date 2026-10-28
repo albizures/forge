@@ -39,10 +39,33 @@ Subscriptions survive Pi reload and shutdown until their lease expires, their ow
 
 Management tools similarly return expected outcomes such as `not_configured`, `authorization_denied`, `subscription_expired`, and `subscription_deleted`. Malformed daemon responses and unexpected transport failures are tool errors, not recoverable notification results.
 
-## Verification
+## Release handoff
 
-The V1 coverage includes:
+### Release note
 
-- Forge tests for owner-only capability-file creation and Herdr's exact Pi environment delivery;
-- extension tests against a local JSON-RPC/SSE server for management, cursors, bounds, recovery, and capability non-disclosure; and
-- a local end-to-end harness that boots the extension from Assignment Capability Delivery configuration, creates a subscription for Record `41`, then receives its matching committed Record Update as an SSE wake.
+Forge now includes a Pi project extension for assignment-owned Record Update Subscription wakeups. It is available only to Pi sessions launched by Forge for an open Agent Assignment; it is not a general-purpose remote notification channel. Wakes are at-least-once hints, so agents must reconcile through authorized Forge reads before acting on them.
+
+### Operator preflight
+
+1. Configure and reconcile the Forge dispatch provider as described in the [dispatch operator guide](../README.md#operators-and-recovery). Do not manually set the extension's launch variables or copy a capability value into a prompt, shell environment, or workspace.
+2. Confirm the launched Pi process has all three launch variables listed above and that the secret-file path is absolute, outside its Agent Workspace, and owner-only. Forge creates, owns, and cleans up that file.
+3. Confirm `/forge-subscriptions` reports configured availability without revealing a capability. Absence of model-callable tools outside this launch context is expected.
+4. Ensure consumers retain an explicit cursor, use one bounded wait at a time per subscription, renew a lease deliberately, and reconcile after every wake or recovery outcome.
+
+### Support and recovery
+
+- `not_configured` means the session was not launched with a valid Assignment Capability Delivery contract; correct dispatch configuration and relaunch rather than supplying credentials manually.
+- `authorization_denied`, `subscription_expired`, and `subscription_deleted` are lifecycle outcomes. Recreate a subscription only while the Assignment still needs it and remains authorized.
+- On `connection_lost` or `resync_required`, reconcile authoritative Record state before opening another wait from the returned cursor facts. Do not treat an SSE envelope as current Record state.
+- Malformed daemon responses and unexpected transport failures are errors to investigate at the daemon/extension boundary; they are not notification recovery outcomes.
+
+### Verified release evidence
+
+The release gate passed `cargo fmt --check`, `cargo test --workspace`, `git diff --check`, and the local extension harness:
+
+```sh
+NODE_PATH=/home/a/.volta/tools/image/packages/@earendil-works/pi-coding-agent/lib/node_modules/@earendil-works/pi-coding-agent/node_modules \
+  node --test tests/forge-subscriptions.test.mjs
+```
+
+That harness covers launch configuration, tool gating, capability rotation and non-disclosure, JSON-RPC lifecycle management, bounded SSE waits and recovery, and assignment launch through committed-update wakeup. Workspace Clippy with warnings denied remains blocked by five pre-existing, unrelated `forge-app` lint violations (four missing `# Errors` docs and one `match_same_arms`); no integration defect was found.
