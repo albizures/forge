@@ -1,12 +1,13 @@
 //! Command-line adapter that calls the running Forge daemon.
 
 use forge_rpc::{
-    AddRecordCommentRequest, AgentDispatchApiClient, AgentDispatchProfileResponse,
-    AgentDispatchReconcileResponse, AgentDispatchStatusRequest, AgentDispatchStatusResponse,
-    DeleteRecordCommentRequest, DoneRecordRequest, EditRecordRequest, ListManagedWorktreesResponse,
-    ListRecordCommentsResponse, ListRecordUpdatesResponse, ListRecordsRequest, ListRecordsResponse,
-    ManagedWorktreeResponse, OpenGrillingUnderWayfinderRequest, OpenRecordRequest, OpenSpecRequest,
-    OpenTaskRequest, OpenTaskUnderSpecRequest, OpenTaskUnderWayfinderRequest, OpenWayfinderRequest,
+    AddRecordCommentRequest, AgentAssignmentResponse, AgentDispatchApiClient,
+    AgentDispatchProfileResponse, AgentDispatchReconcileResponse, AgentDispatchStatusRequest,
+    AgentDispatchStatusResponse, DeleteRecordCommentRequest, DispatchGrillingRequest,
+    DoneRecordRequest, EditRecordRequest, ListManagedWorktreesResponse, ListRecordCommentsResponse,
+    ListRecordUpdatesResponse, ListRecordsRequest, ListRecordsResponse, ManagedWorktreeResponse,
+    OpenGrillingUnderWayfinderRequest, OpenRecordRequest, OpenSpecRequest, OpenTaskRequest,
+    OpenTaskUnderSpecRequest, OpenTaskUnderWayfinderRequest, OpenWayfinderRequest,
     ProjectApiClient, ProjectHereRequest, ProjectHereResponse, ProjectScopeRequest,
     RecordApiClient, RecordIdRequest, RecordResponse, RegisterProjectRequest,
     RegisterProjectResponse, RelateRecordRequest, RetireAgentAssignmentRequest,
@@ -188,6 +189,17 @@ pub async fn request_agent_dispatch_reconcile(
     client(url)?.reconcile().await.map_err(|error| {
         format!("could not request Agent Dispatch reconciliation through Forge daemon: {error}")
     })
+}
+
+/// Dispatches one ready interactive Grilling Assignment.
+pub async fn request_dispatch_grilling(
+    url: &str,
+    grilling_id: u64,
+) -> Result<AgentAssignmentResponse, String> {
+    client(url)?
+        .grilling_dispatch(DispatchGrillingRequest { grilling_id })
+        .await
+        .map_err(|error| format!("could not dispatch Grilling through Forge daemon: {error}"))
 }
 
 /// Starts the Task bound to an Assignment Capability.

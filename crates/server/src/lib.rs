@@ -45,12 +45,13 @@ use forge_app::{
     TaskKind, WorktreeSafetyAssessment,
 };
 use forge_rpc::{
-    AddRecordCommentRequest, AgentDispatchApiServer, AgentDispatchProfileResponse,
-    AgentDispatchReconcileResponse, AgentDispatchStatusRequest, AgentDispatchStatusResponse,
-    AgentSubscriptionApiServer, CreateAgentSubscriptionRequest, CreateManagedWorktreeRequest,
-    DeleteRecordCommentRequest, DoctorManagedWorktreesRequest, DoneRecordRequest,
-    EditRecordRequest, ListManagedWorktreesRequest, ListManagedWorktreesResponse,
-    ListRecordCommentsResponse, ListRecordUpdatesResponse, ListRecordsRequest, ListRecordsResponse,
+    AddRecordCommentRequest, AgentAssignmentResponse, AgentDispatchApiServer,
+    AgentDispatchProfileResponse, AgentDispatchReconcileResponse, AgentDispatchStatusRequest,
+    AgentDispatchStatusResponse, AgentSubscriptionApiServer, CreateAgentSubscriptionRequest,
+    CreateManagedWorktreeRequest, DeleteRecordCommentRequest, DispatchGrillingRequest,
+    DoctorManagedWorktreesRequest, DoneRecordRequest, EditRecordRequest,
+    ListManagedWorktreesRequest, ListManagedWorktreesResponse, ListRecordCommentsResponse,
+    ListRecordUpdatesResponse, ListRecordsRequest, ListRecordsResponse,
     ManageAgentSubscriptionRequest, ManagedWorktreeResponse, ManagementStatus,
     OpenGrillingUnderWayfinderRequest, OpenRecordRequest, OpenSpecRequest, OpenTaskRequest,
     OpenTaskUnderSpecRequest, OpenTaskUnderWayfinderRequest, OpenWayfinderRequest,
@@ -760,11 +761,20 @@ impl CapabilityDeliveryAdapter {
                 .iter()
                 .map(|byte| format!("{byte:02x}"))
                 .collect::<String>();
-            let workspace = context.agent_workspace.as_deref().ok_or_else(|| {
-                forge_app::AgentAdapterError::InvalidRequest(
-                    "Assignment has no Agent Workspace".into(),
-                )
-            })?;
+            let workspace = context
+                .agent_workspace
+                .as_deref()
+                .or_else(|| {
+                    context
+                        .dispatch_workspace
+                        .as_ref()
+                        .map(|workspace| workspace.root.as_path())
+                })
+                .ok_or_else(|| {
+                    forge_app::AgentAdapterError::InvalidRequest(
+                        "Assignment has no Agent Workspace".into(),
+                    )
+                })?;
             write_assignment_capability_secret(&secret_file, workspace, &secret).map_err(
                 |error| {
                     forge_app::AgentAdapterError::Endpoint(format!(
@@ -931,6 +941,19 @@ impl AgentDispatchApiServer for Daemon {
         // Reconciliation can commit a dispatch failure Comment before returning an error.
         self.delivery.publish(&self.application);
         result.map(Into::into).map_err(rpc_error)
+    }
+
+    async fn grilling_dispatch(
+        &self,
+        request: DispatchGrillingRequest,
+    ) -> RpcResult<AgentAssignmentResponse> {
+        self.application
+            .dispatch_grilling(request.grilling_id)
+            .map(|assignment| {
+                self.delivery.publish(&self.application);
+                assignment.into()
+            })
+            .map_err(rpc_error)
     }
 
     async fn task_start(&self, request: StartAssignmentTaskRequest) -> RpcResult<RecordResponse> {
@@ -2346,7 +2369,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn subscription_rpc_only_authorizes_direct_prerequisites_not_provenance() {
+    async fn subscription_rpc_authorizes_task_prerequisites_and_spec_children_only() {
         let database_path = std::env::temp_dir().join(format!(
             "forge-provenance-subscription-{}-{}.sqlite3",
             std::process::id(),
@@ -2393,6 +2416,26 @@ mod tests {
                 profile_revision: 1,
             })
             .unwrap();
+        let spec = store
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Spec,
+                task_kind: None,
+                body: "spec".into(),
+                project_slugs: vec!["alpha".into()],
+                generated_by_ids: vec![],
+            })
+            .unwrap();
+        let child = store
+            .open_task_under_spec("child", spec.id, None, vec![])
+            .unwrap();
+        store
+            .create_agent_assignment(&NewAgentAssignment {
+                id: "spec-assignment".into(),
+                record_id: spec.id,
+                project_slug: "alpha".into(),
+                profile_revision: 1,
+            })
+            .unwrap();
         drop(store);
 
         let daemon = Daemon::new(Application::with_agent_dispatch(
@@ -2405,26 +2448,46 @@ mod tests {
             }),
             Box::new(TestInspector),
         ));
-        let request = |target_record_id| CreateAgentSubscriptionRequest {
-            assignment_id: "owner-assignment".into(),
+        let request = |assignment_id: &str, target_record_id| CreateAgentSubscriptionRequest {
+            assignment_id: assignment_id.into(),
             capability_id: "cap-owner".into(),
             correlation_id: "subscription".into(),
             target_record_ids: vec![target_record_id],
             kind_filters: vec![],
         };
         assert_eq!(
-            AgentSubscriptionApiServer::create(&daemon, request(prerequisite.id))
-                .await
-                .unwrap()
-                .target_record_ids,
+            AgentSubscriptionApiServer::create(
+                &daemon,
+                request("owner-assignment", prerequisite.id)
+            )
+            .await
+            .unwrap()
+            .target_record_ids,
             vec![prerequisite.id]
         );
         assert!(
-            AgentSubscriptionApiServer::create(&daemon, request(generated.id))
+            AgentSubscriptionApiServer::create(&daemon, request("owner-assignment", generated.id))
                 .await
                 .unwrap_err()
                 .to_string()
                 .contains("assignment-capability-denied")
+        );
+        assert_eq!(
+            AgentSubscriptionApiServer::create(&daemon, request("spec-assignment", child.id))
+                .await
+                .unwrap()
+                .target_record_ids,
+            vec![child.id]
+        );
+        assert!(
+            AgentSubscriptionApiServer::create(
+                &daemon,
+                request("spec-assignment", prerequisite.id)
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("assignment-capability-denied")
         );
         drop(daemon);
         std::fs::remove_file(database_path).unwrap();

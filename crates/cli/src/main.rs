@@ -5,17 +5,18 @@ use forge_cli::{
     render_record_comments, render_record_list, render_record_opened, render_record_updates,
     request_add_record_comment, request_agent_dispatch_endpoint, request_agent_dispatch_profile,
     request_agent_dispatch_project, request_agent_dispatch_reconcile,
-    request_agent_dispatch_status, request_delete_record_comment, request_done_record,
-    request_edit_record, request_list_records, request_managed_worktree_create,
-    request_managed_worktree_doctor, request_managed_worktree_info, request_managed_worktree_list,
-    request_managed_worktree_remove, request_open_grilling_under_wayfinder, request_open_record,
-    request_open_spec, request_open_task, request_open_task_under_spec,
-    request_open_task_under_wayfinder, request_open_wayfinder, request_project_here,
-    request_project_setup_hook, request_record_comments, request_record_updates,
-    request_register_project, request_relate_record, request_reopen_dispatch_task,
-    request_resume_dispatch_task, request_retire_agent_assignment, request_show_record,
-    request_start_assignment_task, request_start_record, request_status, request_unrelate_record,
-    request_worktree_root, resolve_endpoint as resolve_managed_endpoint,
+    request_agent_dispatch_status, request_delete_record_comment, request_dispatch_grilling,
+    request_done_record, request_edit_record, request_list_records,
+    request_managed_worktree_create, request_managed_worktree_doctor,
+    request_managed_worktree_info, request_managed_worktree_list, request_managed_worktree_remove,
+    request_open_grilling_under_wayfinder, request_open_record, request_open_spec,
+    request_open_task, request_open_task_under_spec, request_open_task_under_wayfinder,
+    request_open_wayfinder, request_project_here, request_project_setup_hook,
+    request_record_comments, request_record_updates, request_register_project,
+    request_relate_record, request_reopen_dispatch_task, request_resume_dispatch_task,
+    request_retire_agent_assignment, request_show_record, request_start_assignment_task,
+    request_start_record, request_status, request_unrelate_record, request_worktree_root,
+    resolve_endpoint as resolve_managed_endpoint,
 };
 use std::io::Read;
 
@@ -239,6 +240,8 @@ enum AgentDispatchCommand {
     Project(AgentDispatchProjectArgs),
     Status(AgentDispatchStatusArgs),
     Reconcile(AgentDispatchRequestArgs),
+    /// Dispatch one ready Grilling to an interactive Agent without a Managed Worktree.
+    GrillingDispatch(DispatchGrillingArgs),
     /// Start the Task bound to an Assignment Capability.
     TaskStart(AssignmentTaskStartArgs),
     /// Return an unassigned In Progress Task to Open.
@@ -281,6 +284,14 @@ struct AgentDispatchStatusArgs {
 }
 #[derive(Args, Debug)]
 struct AgentDispatchRequestArgs {
+    #[arg(long, value_name = "URL")]
+    server_url: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Args, Debug)]
+struct DispatchGrillingArgs {
+    grilling_id: u64,
     #[arg(long, value_name = "URL")]
     server_url: Option<String>,
     #[arg(long)]
@@ -822,6 +833,15 @@ async fn agent_dispatch(command: AgentDispatchCommand) -> i32 {
             request_agent_dispatch_reconcile(&resolve_endpoint(args.server_url.as_deref()).await)
                 .await
                 .map(|value| serde_json::to_value(value).unwrap()),
+            args.json,
+        ),
+        AgentDispatchCommand::GrillingDispatch(args) => (
+            request_dispatch_grilling(
+                &resolve_endpoint(args.server_url.as_deref()).await,
+                args.grilling_id,
+            )
+            .await
+            .map(|value| serde_json::to_value(value).unwrap()),
             args.json,
         ),
         AgentDispatchCommand::TaskStart(args) => (

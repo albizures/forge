@@ -82,6 +82,11 @@ pub trait AgentDispatchApi {
     ) -> RpcResult<AgentDispatchStatusResponse>;
     #[method(name = "reconcile")]
     async fn reconcile(&self) -> RpcResult<AgentDispatchReconcileResponse>;
+    #[method(name = "grillingDispatch")]
+    async fn grilling_dispatch(
+        &self,
+        request: DispatchGrillingRequest,
+    ) -> RpcResult<AgentAssignmentResponse>;
     #[method(name = "taskStart")]
     async fn task_start(&self, request: StartAssignmentTaskRequest) -> RpcResult<RecordResponse>;
     #[method(name = "taskReopen")]
@@ -349,6 +354,27 @@ impl From<AgentProfile> for AgentDispatchProfileResponse {
         }
     }
 }
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DispatchGrillingRequest {
+    pub grilling_id: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AgentAssignmentResponse {
+    pub id: String,
+    pub record_id: u64,
+    pub state: String,
+}
+impl From<forge_app::AgentAssignment> for AgentAssignmentResponse {
+    fn from(value: forge_app::AgentAssignment) -> Self {
+        Self {
+            id: value.id,
+            record_id: value.record_id,
+            state: format!("{:?}", value.state).to_lowercase(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct StartAssignmentTaskRequest {
     pub assignment_id: String,

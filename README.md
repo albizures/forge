@@ -206,8 +206,9 @@ For API and CLI clients, record-opening commands accept repeatable
 generated Record is Open. New relationship add/remove updates and subscription
 payloads include their relationship kind; clients consuming update events
 should tolerate its absence for migrated legacy events. Assignment Context
-includes directly incident provenance Records, but subscription authorization
-remains limited to direct prerequisites.
+includes directly incident provenance Records. Subscription authorization is
+limited to direct prerequisites for Task Assignments and direct children for Spec
+Assignments.
 
 ## Superseded pre-autonomous dispatch handoff
 

@@ -628,12 +628,11 @@ impl AgentDispatchAdapter for HerdrAdapter {
     ) -> Result<(), AgentAdapterError> {
         self.probe()?;
         let label = Self::label(context)?;
-        let agent_workspace = context.agent_workspace.as_ref().ok_or_else(|| {
-            AgentAdapterError::InvalidRequest(
-                "Task has no prepared active Managed Worktree for Agent dispatch".into(),
-            )
-        })?;
         let workspace = self.dispatch_workspace(resources)?;
+        let agent_workspace = context
+            .agent_workspace
+            .as_deref()
+            .unwrap_or(&self.dispatch_root);
         let (tab, root) = if let Some(id) = Self::active(&context.resources, "tab") {
             (id.to_owned(), None)
         } else {
