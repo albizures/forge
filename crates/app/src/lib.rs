@@ -321,6 +321,17 @@ pub trait ManagedWorktreeRepository: RecordRepository {
     ) -> Result<(), RegistrationError>;
     /// Returns a Project's Setup Hook.
     fn project_setup_hook(&self, project_slug: &str) -> Result<Option<String>, RegistrationError>;
+    /// Atomically claim a validated existing checkout while dispatch is held.
+    fn recover_worktree_claim(
+        &self,
+        _record_id: u64,
+        _path: &Path,
+    ) -> Result<WorktreeClaim, RegistrationError> {
+        Err(RegistrationError::new(
+            "recovery-unavailable",
+            "Worktree recovery is unavailable",
+        ))
+    }
     /// Atomically reserves the sole Claim for an eligible Record.
     fn reserve_worktree_claim(&self, record_id: u64) -> Result<WorktreeClaim, RegistrationError>;
     /// Marks a reserved Claim active after its Managed Worktree exists.
@@ -351,6 +362,18 @@ pub struct WorktreeSafetyAssessment {
 /// Server-owned Git and platform-shell operations for Managed Worktrees.
 #[allow(clippy::missing_errors_doc)]
 pub trait ManagedWorktreeAdapter: Send + Sync {
+    fn validate_recovery(
+        &self,
+        _repository: &Path,
+        _path: &Path,
+        _branch: &str,
+        _base: &str,
+    ) -> Result<(), RegistrationError> {
+        Err(RegistrationError::new(
+            "recovery-unavailable",
+            "Worktree recovery validation is unavailable",
+        ))
+    }
     fn create(
         &self,
         repository: &Path,
@@ -609,6 +632,79 @@ pub enum AgentAdapterError {
     Cleanup(String),
 }
 
+// Adapter messages may contain provider-controlled data or credentials. Only emit explicitly
+// reviewed static messages; never write arbitrary adapter payloads to daemon logs.
+fn log_adapter_failure(assignment: &AgentAssignment, operation: &str, error: &AgentAdapterError) {
+    let (category, message) = match error {
+        AgentAdapterError::Endpoint(message) => ("endpoint", message),
+        AgentAdapterError::Transient(message) => ("transient", message),
+        AgentAdapterError::NotFound(message) => ("not-found", message),
+        AgentAdapterError::Conflict(message) => ("conflict", message),
+        AgentAdapterError::InvalidRequest(message) => ("invalid-request", message),
+        AgentAdapterError::Cleanup(message) => ("cleanup", message),
+    };
+    tracing::warn!(record_id = assignment.record_id, assignment_id = %assignment.id, operation, category,
+        detail = %safe_adapter_detail(message), "agent dispatch adapter failed");
+}
+
+fn safe_adapter_detail(message: &str) -> String {
+    if let Some((method, code)) = message
+        .strip_prefix("Herdr ")
+        .and_then(|s| s.split_once(": "))
+    {
+        if matches!(
+            method,
+            "ping"
+                | "state.get"
+                | "workspace.create"
+                | "workspace.get"
+                | "tab.create"
+                | "tab.get"
+                | "pane.split"
+                | "pane.get"
+                | "agent.start"
+                | "agent.prompt"
+                | "agent.get"
+                | "agent.list"
+                | "agent.stop"
+                | "tab.close"
+                | "pane.close"
+        ) && matches!(
+            code,
+            "not_found"
+                | "not-found"
+                | "conflict"
+                | "already_exists"
+                | "already-exists"
+                | "unavailable"
+                | "timeout"
+                | "temporarily_unavailable"
+                | "unknown"
+        ) {
+            return format!("Herdr {method}: {code}");
+        }
+    }
+    match message {
+        "Assignment has no Agent Workspace" => "Assignment has no Agent Workspace",
+        "assignment ID cannot safely name a Herdr resource" => {
+            "assignment ID cannot safely name a Herdr resource"
+        }
+        "assignment ID is too long for a Herdr agent name" => {
+            "assignment ID is too long for a Herdr agent name"
+        }
+        "Herdr Unix socket endpoint is not configured" => {
+            "Herdr Unix socket endpoint is not configured"
+        }
+        "could not connect to Herdr Unix socket" => "could not connect to Herdr Unix socket",
+        "could not issue Assignment Capability" => "could not issue Assignment Capability",
+        "could not resolve Forge data root" => "could not resolve Forge data root",
+        "malformed Herdr response" => "malformed Herdr response",
+        "Herdr response has no result" => "Herdr response has no result",
+        _ => "details withheld; adapter message is not allowlisted",
+    }
+    .to_owned()
+}
+
 /// Provider-neutral observation of externally managed work.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentObservation {
@@ -728,6 +824,12 @@ pub fn reconcile_agent_assignment<A: AgentDispatchAdapter + ?Sized>(
     let observation = match observed {
         Ok(observation) => observation,
         Err(error) => {
+            let operation = if assignment.state == AgentAssignmentState::Provisioning {
+                "provision"
+            } else {
+                "observe"
+            };
+            log_adapter_failure(assignment, operation, &error);
             return Ok(AssignmentReconciliation::Retained(match error {
                 AgentAdapterError::Endpoint(_) => AdapterRetention::Endpoint,
                 AgentAdapterError::Transient(_) => AdapterRetention::Transient,
@@ -753,6 +855,7 @@ pub fn reconcile_agent_assignment<A: AgentDispatchAdapter + ?Sized>(
         }
         AgentObservation::Done | AgentObservation::Absent => {
             if let Err(error) = adapter.retire(&context, repository) {
+                log_adapter_failure(assignment, "retire", &error);
                 return Ok(AssignmentReconciliation::Retained(match error {
                     AgentAdapterError::Endpoint(_) => AdapterRetention::Endpoint,
                     AgentAdapterError::Transient(_) => AdapterRetention::Transient,
@@ -842,6 +945,7 @@ pub fn reconcile_agent_dispatch<F: AgentDispatchAdapterFactory + ?Sized>(
         let adapter = match factory.adapter_for(&assignment.profile) {
             Ok(adapter) => adapter,
             Err(error) => {
+                log_adapter_failure(&assignment, "select-adapter", &error);
                 let retry_count = assignment.retry_count.saturating_add(1);
                 let next_retry = now_millis.saturating_add(assignment.profile.retry_backoff_millis);
                 record_dispatch_failure(repository, &assignment, next_retry, retry_count)?;
@@ -919,6 +1023,7 @@ fn reconcile_recovery<A: AgentDispatchAdapter + ?Sized>(
         }
         Ok(AgentObservation::Unknown | AgentObservation::Done | AgentObservation::Absent) => {
             if let Err(error) = adapter.retire(&context, repository) {
+                log_adapter_failure(assignment, "recover-retire", &error);
                 return Ok(AssignmentReconciliation::Retained(retention_from_error(
                     &error,
                 )));
@@ -936,9 +1041,12 @@ fn reconcile_recovery<A: AgentDispatchAdapter + ?Sized>(
                     )
                 })
         }
-        Err(error) => Ok(AssignmentReconciliation::Retained(retention_from_error(
-            &error,
-        ))),
+        Err(error) => {
+            log_adapter_failure(assignment, "recover", &error);
+            Ok(AssignmentReconciliation::Retained(retention_from_error(
+                &error,
+            )))
+        }
     }
 }
 
@@ -948,14 +1056,21 @@ fn agent_dispatch_context(
 ) -> Result<AgentDispatchContext, RegistrationError> {
     let project = repository.project(&assignment.project_slug)?;
     let record = repository.show_record(assignment.record_id)?;
+    let agent_workspace = repository.agent_workspace(assignment.record_id)?;
+    let worktree_instruction = agent_workspace.as_ref().map_or_else(String::new, |path| {
+        format!(
+            "\n\nYour assigned Managed Worktree is {}. Perform Task work only in this worktree.",
+            path.display()
+        )
+    });
     Ok(AgentDispatchContext {
         assignment: assignment.clone(),
         registered_project_folder: project.registered_folder,
-        agent_workspace: repository.agent_workspace(assignment.record_id)?,
+        agent_workspace,
         dispatch_workspace: repository.dispatch_workspace()?,
         rendered_initial_prompt: format!(
-            "{}\n\n{}",
-            assignment.profile.prompt_template, record.body
+            "{}\n\n{}{}",
+            assignment.profile.prompt_template, record.body, worktree_instruction
         ),
         capability_delivery: None,
         resources: repository.list_agent_assignment_resources(&assignment.id)?,
@@ -1533,7 +1648,7 @@ fn next_dispatch_assignment_id() -> String {
         .unwrap_or_default()
         .as_millis();
     let sequence = DISPATCH_ASSIGNMENT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    format!("dispatch-{millis}-{sequence}")
+    format!("{millis:x}-{sequence:x}")
 }
 
 impl Application {
@@ -1982,9 +2097,24 @@ impl Application {
             AgentDispatchReconciliationPolicy {
                 scan_lease_millis: 30_000,
             },
-        )?;
+        )
+        .map_err(|error| {
+            tracing::warn!(
+                phase = "reconcile-assignments",
+                code = error.code,
+                "agent dispatch phase failed"
+            );
+            error
+        })?;
         if scan.acquired_lease {
-            self.schedule_agent_dispatch()?;
+            self.schedule_agent_dispatch().map_err(|error| {
+                tracing::warn!(
+                    phase = "schedule-tasks",
+                    code = error.code,
+                    "agent dispatch phase failed"
+                );
+                error
+            })?;
         }
         Ok(AgentDispatchReconcileResult {
             acquired_lease: scan.acquired_lease,
@@ -2003,6 +2133,14 @@ impl Application {
                 status: Some(RecordStatus::Open),
                 record_type: Some(RecordType::Task),
                 task_kind: None,
+            })
+            .map_err(|error| {
+                tracing::warn!(
+                    operation = "list-open-tasks",
+                    code = error.code,
+                    "agent dispatch scheduling failed"
+                );
+                error
             })?
             .into_iter()
             .filter(|record| record.project_slugs.len() == 1)
@@ -2010,11 +2148,18 @@ impl Application {
             .collect();
         for project_slug in projects {
             while let Some(assignment) = dispatch
-                .claim_next_agent_assignment(&project_slug, &next_dispatch_assignment_id())?
+                .claim_next_agent_assignment(&project_slug, &next_dispatch_assignment_id())
+                .map_err(|error| {
+                    tracing::warn!(operation = "claim-assignment", project = %project_slug, code = error.code, "agent dispatch scheduling failed");
+                    error
+                })?
             {
                 // Preparation deliberately happens outside the claim transaction. Its durable
                 // cleanup-required evidence is reconciled on a later bounded scan.
-                let _ = self.prepare_dispatch_worktree(assignment.record_id);
+                if let Err(error) = self.prepare_dispatch_worktree(assignment.record_id) {
+                    tracing::warn!(record_id = assignment.record_id, assignment_id = %assignment.id,
+                        code = error.code, "agent dispatch worktree preparation failed");
+                }
             }
         }
         Ok(())
@@ -2137,6 +2282,57 @@ impl Application {
             Some("agent-dispatch"),
         );
         Err(error)
+    }
+
+    /// Recover an unclaimed checkout after explicit operator confirmation.
+    ///
+    /// # Errors
+    /// Returns validation, assignment, or persistence errors; the dispatch hold is retained.
+    pub fn recover_managed_worktree(
+        &self,
+        record_id: u64,
+        confirmed: bool,
+    ) -> Result<WorktreeClaim, RegistrationError> {
+        if !confirmed {
+            return Err(RegistrationError::new(
+                "confirmation-required",
+                "Confirm no old agent is active before recovery",
+            ));
+        }
+        let managed = self.managed_worktrees()?;
+        let dispatch = self.dispatch()?;
+        let record = managed.show_record(record_id)?;
+        if !is_worktree_eligible(&record) {
+            return Err(RegistrationError::new(
+                "task-not-open",
+                "Recovery requires an Open single-Project Task",
+            ));
+        }
+        dispatch.hold_dispatch(
+            record_id,
+            "Operator worktree recovery; resume only after verification",
+        )?;
+        let root = managed.worktree_root()?.ok_or_else(|| {
+            RegistrationError::new(
+                "worktree-root-unset",
+                "configure a Worktree Root before recovery",
+            )
+        })?;
+        let project = managed.project(&record.project_slugs[0])?;
+        let path = managed_worktree_path(&root, &project.slug, record_id);
+        let base = managed.task_base_commit(record_id)?.ok_or_else(|| {
+            RegistrationError::new(
+                "task-base-commit-unavailable",
+                "Task has no persisted Base Commit",
+            )
+        })?;
+        self.worktree_adapter()?.validate_recovery(
+            &project.registered_folder,
+            &path,
+            &format!("feat/forge-{record_id}"),
+            &base,
+        )?;
+        managed.recover_worktree_claim(record_id, &path)
     }
 
     /// Configures the absolute user-wide Worktree Root.
@@ -2714,6 +2910,40 @@ pub struct ApplicationStatus {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    #[test]
+    fn generated_assignment_ids_fit_herdr_agent_names() {
+        let id = next_dispatch_assignment_id();
+        assert!(format!("forge-dispatch-{id}").len() <= 32);
+        assert!(
+            id.bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        );
+    }
+
+    #[test]
+    fn dispatch_diagnostics_only_expose_reviewed_adapter_details() {
+        assert_eq!(
+            safe_adapter_detail("Assignment has no Agent Workspace"),
+            "Assignment has no Agent Workspace"
+        );
+        assert_eq!(
+            safe_adapter_detail("assignment ID is too long for a Herdr agent name"),
+            "assignment ID is too long for a Herdr agent name"
+        );
+        assert_eq!(
+            safe_adapter_detail("Herdr tab.create: conflict"),
+            "Herdr tab.create: conflict"
+        );
+        assert_eq!(
+            safe_adapter_detail("Herdr tab.create: secret-token"),
+            "details withheld; adapter message is not allowlisted"
+        );
+        assert_eq!(
+            safe_adapter_detail("Assignment has no Agent Workspace secret-token"),
+            "details withheld; adapter message is not allowlisted"
+        );
+    }
 
     struct Repository {
         records: Mutex<Vec<Record>>,

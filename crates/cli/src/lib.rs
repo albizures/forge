@@ -347,6 +347,23 @@ pub async fn request_managed_worktree_create(
         .await
         .map_err(record_error("create Managed Worktree"))
 }
+/// Recovers an existing unclaimed Managed Worktree after operator confirmation.
+///
+/// # Errors
+/// Returns endpoint, validation, or persistence failures.
+pub async fn request_managed_worktree_recover(
+    url: &str,
+    record_id: u64,
+    confirmed: bool,
+) -> Result<ManagedWorktreeResponse, String> {
+    client(url)?
+        .recover(forge_rpc::RecoverManagedWorktreeRequest {
+            record_id,
+            confirm_no_active_agent: confirmed,
+        })
+        .await
+        .map_err(record_error("recover Managed Worktree"))
+}
 /// Inspects one Managed Worktree through the daemon.
 ///
 /// # Errors

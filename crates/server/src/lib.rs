@@ -483,6 +483,45 @@ fn git(folder: &Path, arguments: &[&str]) -> Result<String, ()> {
 pub struct GitWorktreeAdapter;
 
 impl ManagedWorktreeAdapter for GitWorktreeAdapter {
+    fn validate_recovery(
+        &self,
+        repository: &Path,
+        path: &Path,
+        branch: &str,
+        base: &str,
+    ) -> Result<(), RegistrationError> {
+        let invalid = || {
+            RegistrationError::new(
+                "worktree-recovery-invalid",
+                "Existing worktree does not match the expected repository, path, branch, and base commit",
+            )
+        };
+        let actual_path = fs::canonicalize(path).map_err(|_| invalid())?;
+        let root = git(path, &["rev-parse", "--show-toplevel"]).map_err(|()| invalid())?;
+        if fs::canonicalize(root).map_err(|_| invalid())? != actual_path {
+            return Err(invalid());
+        }
+        let repo_common = git(
+            repository,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        )
+        .map_err(|()| invalid())?;
+        let tree_common = git(
+            path,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        )
+        .map_err(|()| invalid())?;
+        if fs::canonicalize(repo_common).map_err(|_| invalid())?
+            != fs::canonicalize(tree_common).map_err(|_| invalid())?
+        {
+            return Err(invalid());
+        }
+        if git(path, &["symbolic-ref", "--short", "HEAD"]).map_err(|()| invalid())? != branch {
+            return Err(invalid());
+        }
+        git(path, &["merge-base", "--is-ancestor", base, "HEAD"]).map_err(|()| invalid())?;
+        Ok(())
+    }
     fn create(
         &self,
         repository: &Path,
@@ -1031,6 +1070,16 @@ impl WorktreeApiServer for Daemon {
         // Preparation failure can commit a durable Task Comment while returning its error.
         self.delivery.publish(&self.application);
         result.map(Into::into).map_err(rpc_error)
+    }
+    async fn recover(
+        &self,
+        request: forge_rpc::RecoverManagedWorktreeRequest,
+    ) -> RpcResult<ManagedWorktreeResponse> {
+        self.application
+            .recover_managed_worktree(request.record_id, request.confirm_no_active_agent)
+            .and_then(|_| self.application.managed_worktree_info(request.record_id))
+            .map(Into::into)
+            .map_err(rpc_error)
     }
     async fn info(&self, request: RecordIdRequest) -> RpcResult<ManagedWorktreeResponse> {
         self.application
@@ -1948,7 +1997,7 @@ impl StoreOwnershipLock {
 
 async fn reconcile_daemon(daemon: &Daemon) {
     let daemon = daemon.clone();
-    let _ = tokio::task::spawn_blocking(move || {
+    let result = tokio::task::spawn_blocking(move || {
         let now_millis = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -1962,6 +2011,11 @@ async fn reconcile_daemon(daemon: &Daemon) {
         result
     })
     .await;
+    match result {
+        Ok(Err(error)) => warn!(code = error.code, "agent dispatch reconciliation failed"),
+        Err(_) => warn!("agent dispatch reconciliation task failed"),
+        Ok(Ok(_)) => {}
+    }
 }
 
 async fn wait_for_shutdown(lifecycle_shutdown: Option<LifecycleControl>) {
@@ -2218,6 +2272,69 @@ mod tests {
         fn head_commit(&self, _: &Path) -> Result<String, RegistrationError> {
             Ok("test-base".into())
         }
+    }
+
+    #[test]
+    fn recovery_validates_repository_branch_path_and_base() {
+        use forge_app::ManagedWorktreeAdapter;
+        let root = std::env::temp_dir().join(format!(
+            "forge-recovery-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let repo = root.join("repo");
+        let tree = root.join("tree");
+        std::fs::create_dir_all(&repo).unwrap();
+        super::git(&repo, &["init"]).unwrap();
+        super::git(
+            &repo,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "base",
+            ],
+        )
+        .unwrap();
+        let base = super::git(&repo, &["rev-parse", "HEAD"]).unwrap();
+        super::git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feat/forge-2",
+                tree.to_str().unwrap(),
+                &base,
+            ],
+        )
+        .unwrap();
+        let adapter = super::GitWorktreeAdapter;
+        adapter
+            .validate_recovery(&repo, &tree, "feat/forge-2", &base)
+            .unwrap();
+        assert!(
+            adapter
+                .validate_recovery(&repo, &tree, "wrong", &base)
+                .is_err()
+        );
+        assert!(
+            adapter
+                .validate_recovery(&repo, &tree, "feat/forge-2", "bad-base")
+                .is_err()
+        );
+        assert!(
+            adapter
+                .validate_recovery(&repo, &tree.join("missing"), "feat/forge-2", &base)
+                .is_err()
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

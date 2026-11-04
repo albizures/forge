@@ -126,6 +126,11 @@ pub trait WorktreeApi {
         &self,
         request: CreateManagedWorktreeRequest,
     ) -> RpcResult<ManagedWorktreeResponse>;
+    #[method(name = "recover")]
+    async fn recover(
+        &self,
+        request: RecoverManagedWorktreeRequest,
+    ) -> RpcResult<ManagedWorktreeResponse>;
     #[method(name = "info")]
     async fn info(&self, request: RecordIdRequest) -> RpcResult<ManagedWorktreeResponse>;
     #[method(name = "list")]
@@ -477,6 +482,11 @@ pub struct CreateManagedWorktreeRequest {
 pub struct RemoveManagedWorktreeRequest {
     pub record_id: u64,
     pub force: bool,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RecoverManagedWorktreeRequest {
+    pub record_id: u64,
+    pub confirm_no_active_agent: bool,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ListManagedWorktreesRequest {

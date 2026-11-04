@@ -14,8 +14,7 @@ use tokio::{
 
 use forge_app::{
     AgentAdapterError, AgentAssignmentResource, AgentDispatchAdapter, AgentDispatchContext,
-    AgentDispatchRepository, AgentObservation, AgentProfile, DispatchWorkspace,
-    NewAgentAssignmentResource,
+    AgentDispatchRepository, AgentObservation, AgentProfile, NewAgentAssignmentResource,
 };
 use forge_store::SqliteProjectRepository;
 use serde_json::{Value, json};
@@ -434,34 +433,9 @@ impl HerdrAdapter {
             )?;
             return Ok(workspace.id);
         }
-        std::fs::create_dir_all(&self.dispatch_root).map_err(|_| {
-            AgentAdapterError::Endpoint(
-                "could not create neutral Forge Dispatch Workspace root".into(),
-            )
-        })?;
-        let result = self.request(
-            "workspace.create",
-            json!({"cwd": self.dispatch_root, "focus": false}),
-        )?;
-        let id = result
-            .pointer("/workspace/workspace_id")
-            .or_else(|| result.get("workspace_id"))
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                AgentAdapterError::Endpoint("workspace.create did not return workspace_id".into())
-            })?;
-        resources
-            .retain_dispatch_workspace(&DispatchWorkspace {
-                id: id.into(),
-                root: self.dispatch_root.clone(),
-            })
-            .map_err(|error| {
-                AgentAdapterError::Conflict(format!(
-                    "could not retain Forge Dispatch Workspace: {}",
-                    error.code
-                ))
-            })?;
-        Ok(id.into())
+        Err(AgentAdapterError::Conflict(
+            "no operator-selected Herdr workspace; dispatch is blocked".into(),
+        ))
     }
 
     fn dispatch_workspace_from_context(
@@ -660,18 +634,12 @@ impl AgentDispatchAdapter for HerdrAdapter {
         let pane = if let Some(id) = Self::active(&context.resources, "pane") {
             id.to_owned()
         } else {
-            let root = root.unwrap_or(self.root_pane(&workspace, &tab)?);
-            let result = self.request("pane.split", json!({"target_pane_id": root, "workspace_id": workspace, "direction": "right", "focus": false}))?;
-            let id = result
-                .pointer("/pane/pane_id")
-                .or_else(|| result.get("pane_id"))
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    AgentAdapterError::Endpoint("pane.split did not return pane_id".into())
-                })?
-                .to_owned();
-            Self::retain(resources, context, "pane", &id)?;
-            id
+            let pane = match root {
+                Some(root) => root,
+                None => self.root_pane(&workspace, &tab)?,
+            };
+            Self::retain(resources, context, "pane", &pane)?;
+            pane
         };
         if Self::active(&context.resources, "agent-name").is_none() {
             self.request("agent.start", json!({"name": label, "kind": "pi", "pane_id": pane, "args": ["--model", context.assignment.profile.model], "timeout_ms": context.assignment.profile.startup_timeout_millis}))?;
@@ -788,17 +756,18 @@ impl AgentDispatchAdapter for HerdrAdapter {
                 Self::retire_resource(resources, context, "agent-name", agent)?;
             }
         }
-        if let Some(pane) = &pane
-            && pane_present
-        {
-            self.cleanup_request("pane.close", json!({"pane_id": pane}))?;
-            Self::retire_resource(resources, context, "pane", pane)?;
-        }
+        // The pane may be the tab's root; closing the verified dedicated tab removes
+        // its panes as well and avoids trying to close a tab's last pane separately.
         if let Some(tab) = &tab
             && tab_present
         {
             self.cleanup_request("tab.close", json!({"tab_id": tab}))?;
             Self::retire_resource(resources, context, "tab", tab)?;
+        }
+        if let Some(pane) = &pane
+            && pane_present
+        {
+            Self::retire_resource(resources, context, "pane", pane)?;
         }
         Ok(())
     }
@@ -1032,7 +1001,6 @@ mod tests {
                     serde_json::json!({"result":{"name":"forge-dispatch-assignment","workspace_id":"workspace","tab_id":"tab","pane_id":"pane","agent_status":"done"}}),
                 ),
                 ("pane.release_agent", serde_json::json!({"result":{}})),
-                ("pane.close", serde_json::json!({"result":{}})),
                 ("tab.close", serde_json::json!({"result":{}})),
             ] {
                 let mut stream = listener.accept().unwrap().0;
@@ -1066,6 +1034,19 @@ mod tests {
                 .all(|resource| resource.retired_at_millis.is_some())
         );
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn dispatch_without_selected_workspace_does_not_create_one() {
+        let repository = forge_store::SqliteProjectRepository::in_memory().unwrap();
+        let adapter = super::HerdrAdapter {
+            socket_path: std::env::temp_dir().join("forge-nonexistent-herdr.sock"),
+            dispatch_root: std::env::temp_dir().join("forge-unused-dispatch-root"),
+        };
+        assert!(matches!(
+            adapter.dispatch_workspace(&repository),
+            Err(forge_app::AgentAdapterError::Conflict(_))
+        ));
     }
 
     #[test]

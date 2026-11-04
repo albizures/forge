@@ -193,8 +193,19 @@ The filesystem folder in which an Agent works for an Agent Assignment. A Task Ag
 _Avoid_: agent project, agent checkout
 
 **Forge Dispatch Workspace**:
-The Forge-created reusable Herdr Workspace shared by Forge-dispatched Agents. Its durable Forge-owned identity and each assignment's provider resource identities permit reconciliation; its neutral root folder is under Forge user data, and Forge provisions one dedicated assignment tab and pane in it per Agent Assignment.
+An operator-selected Herdr Workspace shared by Forge-dispatched Agents. Forge retains its exact identity and manages each Agent Assignment's dedicated tab, but does not own or delete the Workspace.
 _Avoid_: Project workspace, task workspace
+
+**Assignment Recovery Blocker**:
+A durable condition that reserves Project dispatch capacity while an Agent Assignment's potentially live Agent or uncertain resources cannot be reconciled safely. It can exist for a closed Assignment.
+_Avoid_: failed Task, completed Agent
+
+**Assignment Heartbeat**:
+A capability-authenticated signal from an Agent Assignment's session that provides positive evidence of recent liveness. Its absence does not establish that the Agent has exited or is ready for work.
+_Avoid_: proof of death, readiness signal
+
+**Prompt Delivery Uncertainty**:
+A condition in which Forge cannot establish whether an Agent Assignment's initial prompt was admitted. It requires explicit resolution before another prompt attempt.
 
 **Comment**:
 A non-blank free-text entry on a Record, optionally attributed to a free-text author. Its content cannot be edited, any Forge client may delete it, and it may be added even after its Record is Done.

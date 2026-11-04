@@ -8,15 +8,15 @@ use forge_cli::{
     request_agent_dispatch_status, request_delete_record_comment, request_dispatch_grilling,
     request_done_record, request_edit_record, request_list_records,
     request_managed_worktree_create, request_managed_worktree_doctor,
-    request_managed_worktree_info, request_managed_worktree_list, request_managed_worktree_remove,
-    request_open_grilling_under_wayfinder, request_open_record, request_open_spec,
-    request_open_task, request_open_task_under_spec, request_open_task_under_wayfinder,
-    request_open_wayfinder, request_project_here, request_project_setup_hook,
-    request_record_comments, request_record_updates, request_register_project,
-    request_relate_record, request_reopen_dispatch_task, request_resume_dispatch_task,
-    request_retire_agent_assignment, request_show_record, request_start_assignment_task,
-    request_start_record, request_status, request_unrelate_record, request_worktree_root,
-    resolve_endpoint as resolve_managed_endpoint,
+    request_managed_worktree_info, request_managed_worktree_list, request_managed_worktree_recover,
+    request_managed_worktree_remove, request_open_grilling_under_wayfinder, request_open_record,
+    request_open_spec, request_open_task, request_open_task_under_spec,
+    request_open_task_under_wayfinder, request_open_wayfinder, request_project_here,
+    request_project_setup_hook, request_record_comments, request_record_updates,
+    request_register_project, request_relate_record, request_reopen_dispatch_task,
+    request_resume_dispatch_task, request_retire_agent_assignment, request_show_record,
+    request_start_assignment_task, request_start_record, request_status, request_unrelate_record,
+    request_worktree_root, resolve_endpoint as resolve_managed_endpoint,
 };
 use std::io::Read;
 
@@ -147,6 +147,7 @@ struct ProjectSetupHookClearArgs {
 #[derive(Debug, Subcommand)]
 enum WorktreeCommand {
     Create(WorktreeCreateArgs),
+    Recover(WorktreeRecoverArgs),
     Info(WorktreeIdArgs),
     List(WorktreeListArgs),
     Remove(WorktreeRemoveArgs),
@@ -159,6 +160,16 @@ struct WorktreeCreateArgs {
     branch: String,
     #[arg(long)]
     base: String,
+    #[arg(long, value_name = "URL")]
+    server_url: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Args, Debug)]
+struct WorktreeRecoverArgs {
+    task: u64,
+    #[arg(long, required = true)]
+    confirm_no_active_agent: bool,
     #[arg(long, value_name = "URL")]
     server_url: Option<String>,
     #[arg(long)]
@@ -726,6 +737,16 @@ async fn worktree(command: WorktreeCommand) -> i32 {
                 args.task,
                 args.branch,
                 args.base,
+            )
+            .await
+            .map(|value| serde_json::to_value(value).unwrap()),
+            args.json,
+        ),
+        WorktreeCommand::Recover(args) => (
+            request_managed_worktree_recover(
+                &resolve_endpoint(args.server_url.as_deref()).await,
+                args.task,
+                args.confirm_no_active_agent,
             )
             .await
             .map(|value| serde_json::to_value(value).unwrap()),

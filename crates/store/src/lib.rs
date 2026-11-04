@@ -435,6 +435,68 @@ impl ManagedWorktreeRepository for SqliteProjectRepository {
         connection.query_row("SELECT setup_hook FROM project_managed_worktree_configuration WHERE project_slug = ?1", [project_slug], |row| row.get(0)).optional().map_err(storage_error)
     }
 
+    fn recover_worktree_claim(
+        &self,
+        record_id: u64,
+        path: &Path,
+    ) -> Result<WorktreeClaim, RegistrationError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        let tx = connection.transaction().map_err(storage_error)?;
+        let record = load_record(&tx, record_id)?;
+        if !is_worktree_eligible(&record) {
+            return Err(RegistrationError::new(
+                "task-not-open",
+                "Recovery requires an Open single-Project Task",
+            ));
+        }
+        let held: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM dispatch_holds WHERE record_id = ?1)",
+                [record_id.cast_signed()],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        let open: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM agent_assignments WHERE record_id = ?1 AND closed_at_millis IS NULL)", [record_id.cast_signed()], |row| row.get(0)).map_err(storage_error)?;
+        if !held || open {
+            return Err(RegistrationError::new(
+                "recovery-blocked",
+                "Recovery requires a dispatch hold and no open Assignment",
+            ));
+        }
+        if load_worktree_claim(&tx, record_id)?.is_some() {
+            return Err(RegistrationError::new(
+                "worktree-claim-exists",
+                "Task already has a Worktree Claim",
+            ));
+        }
+        let root: Option<String> = tx
+            .query_row(
+                "SELECT worktree_root FROM managed_worktree_configuration WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage_error)?
+            .flatten();
+        let root = root.ok_or_else(|| {
+            RegistrationError::new("worktree-root-unset", "Worktree Root is not configured")
+        })?;
+        let slug = &record.project_slugs[0];
+        if managed_worktree_path(Path::new(&root), slug, record_id) != path {
+            return Err(RegistrationError::new(
+                "recovery-path-changed",
+                "Worktree Root changed during recovery",
+            ));
+        }
+        tx.execute("INSERT INTO worktree_claims (record_id, project_slug, path, state) VALUES (?1, ?2, ?3, 'active')", params![record_id.cast_signed(), slug, path.to_string_lossy()]).map_err(storage_error)?;
+        let claim = load_worktree_claim(&tx, record_id)?.expect("inserted claim");
+        tx.commit().map_err(storage_error)?;
+        Ok(claim)
+    }
+
     fn reserve_worktree_claim(&self, record_id: u64) -> Result<WorktreeClaim, RegistrationError> {
         let mut connection = self
             .connection
@@ -2141,7 +2203,7 @@ impl AgentDispatchRepository for SqliteProjectRepository {
             .lock()
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
         connection.execute(
-            "INSERT INTO agent_dispatch_configuration (singleton, dispatch_workspace_id, dispatch_workspace_root) VALUES (1, ?1, ?2) ON CONFLICT(singleton) DO NOTHING",
+            "INSERT INTO agent_dispatch_configuration (singleton, dispatch_workspace_id, dispatch_workspace_root) VALUES (1, ?1, ?2) ON CONFLICT(singleton) DO UPDATE SET dispatch_workspace_id = excluded.dispatch_workspace_id, dispatch_workspace_root = excluded.dispatch_workspace_root WHERE agent_dispatch_configuration.dispatch_workspace_id IS NULL AND agent_dispatch_configuration.dispatch_workspace_root IS NULL",
             params![workspace.id, workspace.root.to_string_lossy()],
         ).map_err(storage_error)?;
         let retained = connection.query_row(
@@ -4668,6 +4730,88 @@ mod tests {
                 .code,
             "invalid-socket-path"
         );
+    }
+
+    #[test]
+    fn retain_dispatch_workspace_fills_existing_configuration_without_overwriting_identity() {
+        let store = SqliteProjectRepository::in_memory().unwrap();
+        store
+            .set_herdr_socket_path(Some(Path::new("/tmp/herdr.sock")))
+            .unwrap();
+        let workspace = forge_app::DispatchWorkspace {
+            id: "w1".into(),
+            root: PathBuf::from("/dispatch"),
+        };
+        assert_eq!(
+            store.retain_dispatch_workspace(&workspace).unwrap(),
+            workspace
+        );
+        assert_eq!(
+            store.retain_dispatch_workspace(&workspace).unwrap(),
+            workspace
+        );
+        let different = forge_app::DispatchWorkspace {
+            id: "w2".into(),
+            root: PathBuf::from("/dispatch"),
+        };
+        assert_eq!(
+            store
+                .retain_dispatch_workspace(&different)
+                .unwrap_err()
+                .code,
+            "dispatch-workspace-conflict"
+        );
+        assert_eq!(store.dispatch_workspace().unwrap(), Some(workspace));
+        assert_eq!(
+            store.herdr_socket_path().unwrap(),
+            Some(PathBuf::from("/tmp/herdr.sock"))
+        );
+    }
+
+    #[test]
+    fn recovery_requires_hold_and_exact_path_and_retains_hold() {
+        let store = SqliteProjectRepository::in_memory().unwrap();
+        store.register(&project("alpha", "/repos/alpha")).unwrap();
+        store
+            .set_worktree_root(Some(Path::new("/worktrees")))
+            .unwrap();
+        let task = store
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Task,
+                task_kind: None,
+                body: "task".into(),
+                project_slugs: vec!["alpha".into()],
+                generated_by_ids: vec![],
+            })
+            .unwrap();
+        let path = PathBuf::from(format!("/worktrees/alpha/{}", task.id));
+        assert_eq!(
+            store
+                .recover_worktree_claim(task.id, &path)
+                .unwrap_err()
+                .code,
+            "recovery-blocked"
+        );
+        store.hold_dispatch(task.id, "operator recovery").unwrap();
+        assert_eq!(
+            store
+                .recover_worktree_claim(task.id, Path::new("/wrong"))
+                .unwrap_err()
+                .code,
+            "recovery-path-changed"
+        );
+        assert_eq!(
+            store.recover_worktree_claim(task.id, &path).unwrap().state,
+            forge_app::WorktreeClaimState::Active
+        );
+        assert_eq!(
+            store
+                .recover_worktree_claim(task.id, &path)
+                .unwrap_err()
+                .code,
+            "worktree-claim-exists"
+        );
+        assert!(store.dispatch_hold(task.id).unwrap().is_some());
     }
 
     #[test]
