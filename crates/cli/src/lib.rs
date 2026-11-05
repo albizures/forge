@@ -127,6 +127,20 @@ pub async fn request_agent_dispatch_endpoint(
     .map_err(|error| format!("could not configure Agent Dispatch through Forge daemon: {error}"))
 }
 
+/// Selects the Herdr workspace identity supplied by the invoking operator.
+///
+/// # Errors
+/// Returns endpoint or workspace verification failures.
+pub async fn request_select_dispatch_workspace(
+    url: &str,
+    workspace_id: String,
+) -> Result<forge_rpc::DispatchWorkspaceResponse, String> {
+    client(url)?
+        .workspace_select(forge_rpc::SelectDispatchWorkspaceRequest { workspace_id })
+        .await
+        .map_err(|error| format!("could not select Herdr workspace: {error}"))
+}
+
 /// Requests the seeded Agent Dispatch Profile.
 ///
 /// # Errors

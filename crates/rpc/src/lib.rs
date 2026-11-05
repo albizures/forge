@@ -68,6 +68,11 @@ pub trait AgentDispatchApi {
         &self,
         request: SetAgentDispatchEndpointRequest,
     ) -> RpcResult<AgentDispatchStatusResponse>;
+    #[method(name = "workspaceSelect")]
+    async fn workspace_select(
+        &self,
+        request: SelectDispatchWorkspaceRequest,
+    ) -> RpcResult<DispatchWorkspaceResponse>;
     #[method(name = "profile")]
     async fn profile(&self) -> RpcResult<AgentDispatchProfileResponse>;
     #[method(name = "projectSet")]
@@ -293,6 +298,14 @@ impl SystemStatusResponse {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SelectDispatchWorkspaceRequest {
+    pub workspace_id: String,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DispatchWorkspaceResponse {
+    pub workspace_id: String,
+}
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SetAgentDispatchEndpointRequest {
     pub socket_path: Option<String>,

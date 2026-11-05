@@ -700,6 +700,9 @@ fn safe_adapter_detail(message: &str) -> String {
         "could not resolve Forge data root" => "could not resolve Forge data root",
         "malformed Herdr response" => "malformed Herdr response",
         "Herdr response has no result" => "Herdr response has no result",
+        "Herdr resource does not match the persisted resource tuple" => {
+            "Herdr resource does not match the persisted resource tuple"
+        }
         _ => "details withheld; adapter message is not allowlisted",
     }
     .to_owned()
@@ -752,6 +755,15 @@ impl std::fmt::Debug for AssignmentCapabilityDelivery {
 #[allow(clippy::missing_errors_doc)]
 pub trait AgentDispatchAdapter: Send + Sync {
     fn probe(&self) -> Result<(), AgentAdapterError>;
+    fn verify_workspace(&self, _id: &str) -> Result<DispatchWorkspace, AgentAdapterError> {
+        Err(AgentAdapterError::InvalidRequest(
+            "workspace selection is unsupported".into(),
+        ))
+    }
+    /// Whether provider-level prerequisites permit provisioning without consuming task retries.
+    fn dispatch_available(&self, _resources: &dyn AgentDispatchRepository) -> bool {
+        true
+    }
     fn provision(
         &self,
         context: &AgentDispatchContext,
@@ -912,7 +924,7 @@ pub struct AgentDispatchScan {
 /// Reconciles all open Assignments without holding storage over adapter calls.
 ///
 /// The caller supplies time so grace and retry behavior is deterministic in tests and durable
-/// across daemon restarts. Retry exhaustion leaves the Task in progress and records one Comment.
+/// across daemon restarts. A provisioning failure holds the Task and retains its Assignment.
 #[allow(clippy::missing_errors_doc)]
 pub fn reconcile_agent_dispatch<F: AgentDispatchAdapterFactory + ?Sized>(
     repository: &dyn AgentDispatchRepository,
@@ -933,6 +945,11 @@ pub fn reconcile_agent_dispatch<F: AgentDispatchAdapterFactory + ?Sized>(
     }
     let mut reconciled = Vec::new();
     for assignment in repository.list_open_agent_assignments()? {
+        if assignment.state == AgentAssignmentState::Provisioning
+            && repository.dispatch_hold(assignment.record_id)?.is_some()
+        {
+            continue;
+        }
         if assignment.next_retry_at_millis > now_millis {
             continue;
         }
@@ -955,6 +972,11 @@ pub fn reconcile_agent_dispatch<F: AgentDispatchAdapterFactory + ?Sized>(
                 continue;
             }
         };
+        if assignment.state == AgentAssignmentState::Provisioning
+            && !adapter.dispatch_available(repository)
+        {
+            continue;
+        }
         let outcome = if assignment.state == AgentAssignmentState::Unknown {
             reconcile_recovery(repository, adapter.as_ref(), &assignment)?
         } else {
@@ -984,22 +1006,17 @@ fn record_dispatch_failure(
         assignment.state,
         next_retry_at_millis,
         retry_count,
-    )? || retry_count < 3
+    )? || assignment.state != AgentAssignmentState::Provisioning
     {
         return Ok(());
     }
     repository.hold_dispatch(
         assignment.record_id,
-        "automatic dispatch stopped after three failed provisioning attempts",
-    )?;
-    let _ = repository.compare_and_close_agent_assignment(
-        &assignment.id,
-        assignment.state,
-        AgentAssignmentClosureReason::Crashed,
+        "automatic dispatch stopped after an uncertain provisioning attempt",
     )?;
     repository.add_record_comment(
         assignment.record_id,
-        "Automatic dispatch stopped after three failed provisioning attempts; a Dispatch Hold requires explicit operator resume.",
+        "Automatic dispatch stopped after an uncertain provisioning attempt; the Assignment remains open because an Agent may still be live. A Dispatch Hold requires operator investigation.",
         Some("agent-dispatch"),
     )
     .map(|_| ())
@@ -1188,11 +1205,10 @@ pub trait RecordUpdateSubscriptionRepository: AgentDispatchRepository {
     ) -> Result<Vec<RecordUpdateEnvelope>, RegistrationError>;
 }
 
-/// The Forge-owned reusable provider workspace shared by dispatched Agents.
+/// The operator-selected provider workspace shared by dispatched Agents.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DispatchWorkspace {
     pub id: String,
-    pub root: PathBuf,
 }
 
 /// A durable operator-cleared block on Agent dispatch.
@@ -1277,6 +1293,10 @@ pub trait AgentDispatchRepository: RecordRepository {
         next_retry_at_millis: u64,
         retry_count: u32,
     ) -> Result<bool, RegistrationError>;
+    /// Atomically records intent before any potentially side-effecting provisioning call.
+    fn begin_agent_provision(&self, _assignment_id: &str) -> Result<bool, RegistrationError> {
+        Ok(false)
+    }
     /// Retains a provider-neutral external resource fact.
     fn add_agent_assignment_resource(
         &self,
@@ -1303,6 +1323,13 @@ pub trait AgentDispatchRepository: RecordRepository {
         &self,
         workspace: &DispatchWorkspace,
     ) -> Result<DispatchWorkspace, RegistrationError>;
+    /// Selects a verified workspace only when changing it cannot strand assignment resources.
+    fn select_dispatch_workspace(
+        &self,
+        workspace: &DispatchWorkspace,
+    ) -> Result<DispatchWorkspace, RegistrationError> {
+        self.retain_dispatch_workspace(workspace)
+    }
     /// Sets or clears the daemon-wide absolute Herdr Unix socket path.
     fn set_herdr_socket_path(&self, path: Option<&Path>) -> Result<(), RegistrationError>;
     /// Returns the configured daemon-wide Herdr Unix socket path.
@@ -2034,6 +2061,49 @@ impl Application {
             .replay_record_updates(subscription_id, after)
     }
 
+    /// Verifies a provider workspace before persisting the operator's selection.
+    ///
+    /// # Errors
+    /// Returns a provider, configuration, or workspace safety failure.
+    pub fn select_dispatch_workspace(
+        &self,
+        id: &str,
+    ) -> Result<DispatchWorkspace, RegistrationError> {
+        if id.trim().is_empty() || id != id.trim() {
+            return Err(RegistrationError::new(
+                "invalid-dispatch-workspace",
+                "HERDR_WORKSPACE_ID must be nonempty",
+            ));
+        }
+        let adapter = self
+            .adapter_factory()?
+            .adapter_for(&self.task_agent_profile()?)
+            .map_err(|_| {
+                RegistrationError::new("workspace-unavailable", "Herdr adapter is unavailable")
+            })?;
+        let workspace = adapter.verify_workspace(id).map_err(|error| {
+            let detail = match error {
+                AgentAdapterError::Endpoint(message)
+                | AgentAdapterError::Transient(message)
+                | AgentAdapterError::NotFound(message)
+                | AgentAdapterError::Conflict(message)
+                | AgentAdapterError::InvalidRequest(message)
+                | AgentAdapterError::Cleanup(message) => safe_adapter_detail(&message),
+            };
+            RegistrationError::new(
+                "workspace-unavailable",
+                format!("could not verify the requested Herdr workspace: {detail}"),
+            )
+        })?;
+        if workspace.id != id {
+            return Err(RegistrationError::new(
+                "workspace-identity-mismatch",
+                "Herdr returned a different workspace identity",
+            ));
+        }
+        self.dispatch()?.select_dispatch_workspace(&workspace)
+    }
+
     /// Sets or clears a registered Project's Task dispatch capacity override.
     ///
     /// # Errors
@@ -2127,6 +2197,15 @@ impl Application {
     /// remains visible to the normal reconciliation and recovery path rather than duplicating work.
     fn schedule_agent_dispatch(&self) -> Result<(), RegistrationError> {
         let dispatch = self.dispatch()?;
+        let adapter = self
+            .adapter_factory()?
+            .adapter_for(&self.task_agent_profile()?)
+            .map_err(|_| {
+                RegistrationError::new("dispatch-unavailable", "agent provider is unavailable")
+            })?;
+        if !adapter.dispatch_available(dispatch) {
+            return Ok(());
+        }
         let projects: BTreeSet<_> = dispatch
             .list_records(&RecordListFilter {
                 project_slug: None,

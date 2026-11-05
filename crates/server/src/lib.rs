@@ -803,17 +803,7 @@ impl CapabilityDeliveryAdapter {
             let workspace = context
                 .agent_workspace
                 .as_deref()
-                .or_else(|| {
-                    context
-                        .dispatch_workspace
-                        .as_ref()
-                        .map(|workspace| workspace.root.as_path())
-                })
-                .ok_or_else(|| {
-                    forge_app::AgentAdapterError::InvalidRequest(
-                        "Assignment has no Agent Workspace".into(),
-                    )
-                })?;
+                .unwrap_or_else(|| self.inner.default_agent_workspace());
             write_assignment_capability_secret(&secret_file, workspace, &secret).map_err(
                 |error| {
                     forge_app::AgentAdapterError::Endpoint(format!(
@@ -835,6 +825,17 @@ impl CapabilityDeliveryAdapter {
 impl AgentDispatchAdapter for CapabilityDeliveryAdapter {
     fn probe(&self) -> Result<(), forge_app::AgentAdapterError> {
         self.inner.probe()
+    }
+
+    fn dispatch_available(&self, resources: &dyn forge_app::AgentDispatchRepository) -> bool {
+        self.inner.dispatch_available(resources)
+    }
+
+    fn verify_workspace(
+        &self,
+        id: &str,
+    ) -> Result<forge_app::DispatchWorkspace, forge_app::AgentAdapterError> {
+        self.inner.verify_workspace(id)
     }
 
     fn provision(
@@ -925,6 +926,18 @@ impl AgentDispatchApiServer for Daemon {
             .set_herdr_socket_path(request.socket_path.as_deref().map(Path::new))
             .and_then(|()| self.application.agent_dispatch_status(None))
             .map(Into::into)
+            .map_err(rpc_error)
+    }
+
+    async fn workspace_select(
+        &self,
+        request: forge_rpc::SelectDispatchWorkspaceRequest,
+    ) -> RpcResult<forge_rpc::DispatchWorkspaceResponse> {
+        self.application
+            .select_dispatch_workspace(&request.workspace_id)
+            .map(|workspace| forge_rpc::DispatchWorkspaceResponse {
+                workspace_id: workspace.id,
+            })
             .map_err(rpc_error)
     }
 

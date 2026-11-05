@@ -265,13 +265,12 @@ forge agent-dispatch project --project alpha
 Use `forge agent-dispatch profile` to inspect the immutable seeded Task profile
 (the `herdr` provider, `pi` agent kind, model, and prompt template).
 
-### Superseded V1 ownership and safety boundary
+### Dispatch ownership and safety boundary
 
-For an eligible Task, Forge finds exactly one existing Herdr workspace matching
-the registered Project folder. It never creates, adopts by label, or closes a
-Project workspace. Within that workspace it creates one unfocused, dedicated
-assignment tab and split pane, starts a Pi agent with the immutable profile,
-and records workspace, tab, pane, and agent identifiers immediately.
+Forge uses an operator-selected existing Herdr workspace shared by dispatched
+agents. It creates an unfocused dedicated tab for each assignment and starts Pi
+in that tab's initial pane, recording resource identifiers for recovery. The
+workspace is not selected by Project folder, and Forge does not close it.
 
 Recovery and retirement trust only those persisted identifiers. Retirement
 revalidates the resource tuple, releases the named agent, and closes only the
@@ -298,15 +297,16 @@ This release supersedes the pre-autonomous provider guidance above. Forge select
 
 Forge retains the Task Branch, Managed Worktree claim, Assignment, provider-resource identities, diagnostics, Dispatch Holds, and shared Forge Dispatch Workspace in SQLite. Existing databases migrate these durable facts automatically; back up production data under the normal upgrade policy. No data rewrite or adoption of legacy workspace/worktree state is supported.
 
-Herdr is a daemon-only provider adapter. Forge creates and retains one neutral-root Forge Dispatch Workspace, then a dedicated tab and split pane for each Assignment whose cwd is the prepared Task Managed Worktree. It persists every returned resource identity immediately, recovers only matching persisted tuples, and never adopts lookalike user resources. The complete protocol-22 contract and retirement sequence are in [`docs/research/herdr-adapter-socket-contract.md`](docs/research/herdr-adapter-socket-contract.md); the architectural decision is [`ADR-005`](crates/docs/adr/0005-autonomous-task-dispatch-recovery.md).
+Herdr is a daemon-only provider adapter. An operator selects an existing Herdr workspace; Forge verifies and retains its identity, then creates a dedicated tab and uses its initial pane for each Assignment. For Task assignments, the tab's cwd is the prepared Task Managed Worktree. Forge retains resource identities, reconciles against those identities, and never adopts lookalike user resources or deletes the shared workspace. Dispatch is blocked if no workspace is selected or the retained workspace cannot be verified. See [`ADR-008`](crates/docs/adr/0008-operator-selected-dispatch-workspaces.md) for the current ownership and recovery decision. The earlier [`protocol-22 research`](docs/research/herdr-adapter-socket-contract.md) and [`ADR-005`](crates/docs/adr/0005-autonomous-task-dispatch-recovery.md) describe a superseded Forge-created workspace design.
 
 ### Operators and recovery
 
-Configure the worktree root and Herdr socket, then use bounded reconciliation:
+Configure the worktree root and Herdr socket, select an existing Herdr workspace, then use bounded reconciliation:
 
 ```sh
 forge config set worktreeRoot "$HOME/.forge/worktrees"
 forge agent-dispatch endpoint --socket-path /absolute/path/to/herdr.sock
+HERDR_WORKSPACE_ID="your-workspace-id" forge agent-dispatch workspace-select
 forge agent-dispatch reconcile
 ```
 

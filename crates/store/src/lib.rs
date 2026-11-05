@@ -1908,11 +1908,11 @@ impl AgentDispatchRepository for SqliteProjectRepository {
             .map_err(storage_error)?;
         let result = (|| {
             let limit = effective_limit(&connection, project_slug)?;
-            let used: u16 = connection.query_row("SELECT COUNT(*) FROM agent_assignments WHERE project_slug = ?1 AND closed_at_millis IS NULL", [project_slug], |row| row.get::<_, i64>(0)).map_err(storage_error)?.cast_unsigned().try_into().expect("assignment count fits u16");
+            let used: u16 = connection.query_row("SELECT COUNT(*) FROM agent_assignments a WHERE a.project_slug = ?1 AND (a.closed_at_millis IS NULL OR EXISTS (SELECT 1 FROM agent_assignment_resources r WHERE r.assignment_id = a.id AND r.retired_at_millis IS NULL))", [project_slug], |row| row.get::<_, i64>(0)).map_err(storage_error)?.cast_unsigned().try_into().expect("assignment count fits u16");
             if used >= limit {
                 return Ok(None);
             }
-            let record_id = connection.query_row("SELECT record.id FROM records record JOIN record_projects scope ON scope.record_id = record.id WHERE record.record_type = 'task' AND record.status = 'open' AND scope.project_slug = ?1 AND (SELECT COUNT(*) FROM record_projects only_scope WHERE only_scope.record_id = record.id) = 1 AND NOT EXISTS (SELECT 1 FROM dispatch_holds hold WHERE hold.record_id = record.id) AND NOT EXISTS (SELECT 1 FROM agent_assignments assignment WHERE assignment.record_id = record.id AND assignment.closed_at_millis IS NULL) AND NOT EXISTS (SELECT 1 FROM record_relationships dependency JOIN records prerequisite ON prerequisite.id = dependency.to_id WHERE dependency.from_id = record.id AND dependency.kind = 'depends-on' AND prerequisite.status != 'done') ORDER BY record.id LIMIT 1", [project_slug], |row| row.get::<_, i64>(0).map(i64::cast_unsigned)).optional().map_err(storage_error)?;
+            let record_id = connection.query_row("SELECT record.id FROM records record JOIN record_projects scope ON scope.record_id = record.id WHERE record.record_type = 'task' AND record.status = 'open' AND scope.project_slug = ?1 AND (SELECT COUNT(*) FROM record_projects only_scope WHERE only_scope.record_id = record.id) = 1 AND NOT EXISTS (SELECT 1 FROM dispatch_holds hold WHERE hold.record_id = record.id) AND NOT EXISTS (SELECT 1 FROM agent_assignments assignment WHERE assignment.record_id = record.id AND (assignment.closed_at_millis IS NULL OR EXISTS (SELECT 1 FROM agent_assignment_resources resource WHERE resource.assignment_id = assignment.id AND resource.retired_at_millis IS NULL))) AND NOT EXISTS (SELECT 1 FROM record_relationships dependency JOIN records prerequisite ON prerequisite.id = dependency.to_id WHERE dependency.from_id = record.id AND dependency.kind = 'depends-on' AND prerequisite.status != 'done') ORDER BY record.id LIMIT 1", [project_slug], |row| row.get::<_, i64>(0).map(i64::cast_unsigned)).optional().map_err(storage_error)?;
             let Some(record_id) = record_id else {
                 return Ok(None);
             };
@@ -2049,6 +2049,18 @@ impl AgentDispatchRepository for SqliteProjectRepository {
         Ok(changed == 1)
     }
 
+    fn begin_agent_provision(&self, assignment_id: &str) -> Result<bool, RegistrationError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        let changed = connection.execute(
+            "INSERT OR IGNORE INTO agent_assignment_resources (assignment_id, resource_kind, resource_id, created_at_millis) SELECT id, 'provision-intent', 'once', ?2 FROM agent_assignments WHERE id = ?1 AND closed_at_millis IS NULL",
+            params![assignment_id, now_millis()?],
+        ).map_err(storage_error)?;
+        Ok(changed == 1)
+    }
+
     fn add_agent_assignment_resource(
         &self,
         resource: &NewAgentAssignmentResource,
@@ -2175,27 +2187,23 @@ impl AgentDispatchRepository for SqliteProjectRepository {
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
         connection
             .query_row(
-                "SELECT dispatch_workspace_id, dispatch_workspace_root FROM agent_dispatch_configuration WHERE singleton = 1",
+                "SELECT dispatch_workspace_id FROM agent_dispatch_configuration WHERE singleton = 1",
                 [],
-                |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?)),
+                |row| row.get::<_, Option<String>>(0),
             )
             .optional()
             .map_err(storage_error)
-            .and_then(|workspace| match workspace {
-                Some((Some(id), Some(root))) => Ok(Some(DispatchWorkspace { id, root: root.into() })),
-                Some((None, None)) | None => Ok(None),
-                _ => Err(RegistrationError::new("storage", "stored dispatch workspace is incomplete")),
-            })
+            .map(|workspace| workspace.flatten().map(|id| DispatchWorkspace { id }))
     }
 
     fn retain_dispatch_workspace(
         &self,
         workspace: &DispatchWorkspace,
     ) -> Result<DispatchWorkspace, RegistrationError> {
-        if workspace.id.trim().is_empty() || !workspace.root.is_absolute() {
+        if workspace.id.trim().is_empty() {
             return Err(RegistrationError::new(
                 "invalid-dispatch-workspace",
-                "dispatch workspace requires an ID and absolute root",
+                "dispatch workspace requires an ID",
             ));
         }
         let connection = self
@@ -2203,19 +2211,17 @@ impl AgentDispatchRepository for SqliteProjectRepository {
             .lock()
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
         connection.execute(
-            "INSERT INTO agent_dispatch_configuration (singleton, dispatch_workspace_id, dispatch_workspace_root) VALUES (1, ?1, ?2) ON CONFLICT(singleton) DO UPDATE SET dispatch_workspace_id = excluded.dispatch_workspace_id, dispatch_workspace_root = excluded.dispatch_workspace_root WHERE agent_dispatch_configuration.dispatch_workspace_id IS NULL AND agent_dispatch_configuration.dispatch_workspace_root IS NULL",
-            params![workspace.id, workspace.root.to_string_lossy()],
+            "INSERT INTO agent_dispatch_configuration (singleton, dispatch_workspace_id) VALUES (1, ?1) ON CONFLICT(singleton) DO UPDATE SET dispatch_workspace_id = excluded.dispatch_workspace_id WHERE agent_dispatch_configuration.dispatch_workspace_id IS NULL",
+            params![workspace.id],
         ).map_err(storage_error)?;
         let retained = connection.query_row(
-            "SELECT dispatch_workspace_id, dispatch_workspace_root FROM agent_dispatch_configuration WHERE singleton = 1",
+            "SELECT dispatch_workspace_id FROM agent_dispatch_configuration WHERE singleton = 1",
             [],
-            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?)),
+            |row| row.get::<_, Option<String>>(0),
         ).map_err(storage_error)?;
         match retained {
-            (Some(id), Some(root)) if id == workspace.id && Path::new(&root) == workspace.root => {
-                Ok(workspace.clone())
-            }
-            (Some(_), Some(_)) => Err(RegistrationError::new(
+            Some(id) if id == workspace.id => Ok(workspace.clone()),
+            Some(_) => Err(RegistrationError::new(
                 "dispatch-workspace-conflict",
                 "a different Forge Dispatch Workspace is already retained",
             )),
@@ -2224,6 +2230,45 @@ impl AgentDispatchRepository for SqliteProjectRepository {
                 "stored dispatch workspace is incomplete",
             )),
         }
+    }
+
+    fn select_dispatch_workspace(
+        &self,
+        workspace: &DispatchWorkspace,
+    ) -> Result<DispatchWorkspace, RegistrationError> {
+        if workspace.id.trim().is_empty() {
+            return Err(RegistrationError::new(
+                "invalid-dispatch-workspace",
+                "workspace requires an ID",
+            ));
+        }
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        let changed = connection.execute(
+            "INSERT INTO agent_dispatch_configuration (singleton, dispatch_workspace_id)
+             SELECT 1, ?1 WHERE NOT EXISTS (SELECT 1 FROM agent_assignments WHERE closed_at_millis IS NULL)
+               AND NOT EXISTS (SELECT 1 FROM agent_assignment_resources WHERE retired_at_millis IS NULL)
+             ON CONFLICT(singleton) DO UPDATE SET dispatch_workspace_id = excluded.dispatch_workspace_id,
+               dispatch_workspace_root = NULL
+             WHERE NOT EXISTS (SELECT 1 FROM agent_assignments WHERE closed_at_millis IS NULL)
+               AND NOT EXISTS (SELECT 1 FROM agent_assignment_resources WHERE retired_at_millis IS NULL)",
+            params![workspace.id],
+        ).map_err(storage_error)?;
+        if changed == 0 {
+            let current: Option<Option<String>> = connection.query_row(
+                "SELECT dispatch_workspace_id FROM agent_dispatch_configuration WHERE singleton = 1", [],
+                |row| row.get(0),
+            ).optional().map_err(storage_error)?;
+            if current.flatten().as_deref() != Some(&workspace.id) {
+                return Err(RegistrationError::new(
+                    "dispatch-workspace-busy",
+                    "assignments or retained resources prevent changing the workspace",
+                ));
+            }
+        }
+        Ok(workspace.clone())
     }
 
     fn set_herdr_socket_path(&self, path: Option<&Path>) -> Result<(), RegistrationError> {
@@ -4610,7 +4655,6 @@ mod tests {
 
         let workspace = forge_app::DispatchWorkspace {
             id: "shared-workspace".into(),
-            root: "/forge-data/herdr-dispatch-workspace".into(),
         };
         assert_eq!(store.dispatch_workspace().unwrap(), None);
         assert_eq!(
@@ -4622,7 +4666,6 @@ mod tests {
             store
                 .retain_dispatch_workspace(&forge_app::DispatchWorkspace {
                     id: "other-workspace".into(),
-                    root: "/forge-data/other".into(),
                 })
                 .unwrap_err()
                 .code,
@@ -4733,15 +4776,130 @@ mod tests {
     }
 
     #[test]
+    fn provisioning_intent_can_only_be_claimed_once() {
+        let store = SqliteProjectRepository::in_memory().unwrap();
+        store.register(&project("alpha", "/repos/alpha")).unwrap();
+        let task = store
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Task,
+                task_kind: None,
+                body: "work".into(),
+                project_slugs: vec!["alpha".into()],
+                generated_by_ids: vec![],
+            })
+            .unwrap();
+        store
+            .create_agent_assignment(&NewAgentAssignment {
+                id: "intent".into(),
+                record_id: task.id,
+                project_slug: "alpha".into(),
+                profile_revision: 1,
+            })
+            .unwrap();
+        assert!(store.begin_agent_provision("intent").unwrap());
+        assert!(!store.begin_agent_provision("intent").unwrap());
+    }
+
+    #[test]
+    fn closed_assignment_with_retained_resources_reserves_project_capacity() {
+        let store = SqliteProjectRepository::in_memory().unwrap();
+        store.register(&project("alpha", "/repos/alpha")).unwrap();
+        let task = store
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Task,
+                task_kind: None,
+                body: "first".into(),
+                project_slugs: vec!["alpha".into()],
+                generated_by_ids: vec![],
+            })
+            .unwrap();
+        store
+            .create_agent_assignment(&NewAgentAssignment {
+                id: "old".into(),
+                record_id: task.id,
+                project_slug: "alpha".into(),
+                profile_revision: 1,
+            })
+            .unwrap();
+        store
+            .add_agent_assignment_resource(&forge_app::NewAgentAssignmentResource {
+                assignment_id: "old".into(),
+                resource_kind: "tab".into(),
+                resource_id: "tab".into(),
+            })
+            .unwrap();
+        store
+            .close_agent_assignment("old", forge_app::AgentAssignmentClosureReason::Crashed)
+            .unwrap();
+        assert!(
+            store
+                .claim_next_agent_assignment("alpha", "new")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn dispatch_workspace_reads_legacy_and_id_only_configuration() {
+        let store = SqliteProjectRepository::in_memory().unwrap();
+        {
+            let connection = store.connection.lock().unwrap();
+            connection.execute(
+                "INSERT INTO agent_dispatch_configuration (singleton, dispatch_workspace_id, dispatch_workspace_root) VALUES (1, 'w1', '/legacy')",
+                [],
+            ).unwrap();
+        }
+        let workspace = forge_app::DispatchWorkspace { id: "w1".into() };
+        assert_eq!(store.dispatch_workspace().unwrap(), Some(workspace.clone()));
+        store.select_dispatch_workspace(&workspace).unwrap();
+        assert_eq!(store.dispatch_workspace().unwrap(), Some(workspace));
+        let connection = store.connection.lock().unwrap();
+        let root: Option<String> = connection.query_row(
+            "SELECT dispatch_workspace_root FROM agent_dispatch_configuration WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(root, None);
+    }
+
+    #[test]
+    fn workspace_reselection_is_blocked_by_assignments_and_retained_resources() {
+        let store = SqliteProjectRepository::in_memory().unwrap();
+        let first = forge_app::DispatchWorkspace { id: "first".into() };
+        let second = forge_app::DispatchWorkspace {
+            id: "second".into(),
+        };
+        store.select_dispatch_workspace(&first).unwrap();
+        store.select_dispatch_workspace(&second).unwrap();
+        store.register(&project("alpha", "/repos/alpha")).unwrap();
+        let task = store
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Task,
+                task_kind: None,
+                body: "work".into(),
+                project_slugs: vec!["alpha".into()],
+                generated_by_ids: vec![],
+            })
+            .unwrap();
+        store
+            .create_agent_assignment(&NewAgentAssignment {
+                id: "session".into(),
+                record_id: task.id,
+                project_slug: "alpha".into(),
+                profile_revision: 1,
+            })
+            .unwrap();
+        assert!(store.select_dispatch_workspace(&first).is_err());
+        assert_eq!(store.dispatch_workspace().unwrap(), Some(second));
+    }
+
+    #[test]
     fn retain_dispatch_workspace_fills_existing_configuration_without_overwriting_identity() {
         let store = SqliteProjectRepository::in_memory().unwrap();
         store
             .set_herdr_socket_path(Some(Path::new("/tmp/herdr.sock")))
             .unwrap();
-        let workspace = forge_app::DispatchWorkspace {
-            id: "w1".into(),
-            root: PathBuf::from("/dispatch"),
-        };
+        let workspace = forge_app::DispatchWorkspace { id: "w1".into() };
         assert_eq!(
             store.retain_dispatch_workspace(&workspace).unwrap(),
             workspace
@@ -4750,10 +4908,7 @@ mod tests {
             store.retain_dispatch_workspace(&workspace).unwrap(),
             workspace
         );
-        let different = forge_app::DispatchWorkspace {
-            id: "w2".into(),
-            root: PathBuf::from("/dispatch"),
-        };
+        let different = forge_app::DispatchWorkspace { id: "w2".into() };
         assert_eq!(
             store
                 .retain_dispatch_workspace(&different)
@@ -4972,14 +5127,14 @@ mod tests {
             forge_app::reconcile_agent_dispatch(&store, &failing, "daemon-a", now, policy).unwrap();
         }
         let assignment = store.list_agent_assignments(task.id).unwrap().remove(0);
-        assert_eq!(assignment.retry_count, 3);
+        assert_eq!(assignment.retry_count, 1);
         assert_eq!(
-            assignment.closure_reason,
-            Some(forge_app::AgentAssignmentClosureReason::Crashed)
+            assignment.closure_reason, None,
+            "a failed provisioning attempt may have left a live agent and must reserve capacity"
         );
         assert_eq!(
             store.dispatch_hold(task.id).unwrap().unwrap().reason,
-            "automatic dispatch stopped after three failed provisioning attempts"
+            "automatic dispatch stopped after an uncertain provisioning attempt"
         );
         assert_eq!(
             store.list_record_comments(task.id).unwrap().len(),

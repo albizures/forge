@@ -276,6 +276,10 @@ fn event_is_owned_status_change(event: &Value, panes: &[String]) -> bool {
 }
 
 impl HerdrAdapter {
+    pub(crate) fn default_agent_workspace(&self) -> &Path {
+        &self.dispatch_root
+    }
+
     #[allow(clippy::needless_pass_by_value)] // Required by the non-Unix fallback's ownership shape.
     fn request(&self, method: &str, params: Value) -> Result<Value, AgentAdapterError> {
         #[cfg(unix)]
@@ -423,14 +427,7 @@ impl HerdrAdapter {
             ))
         })? {
             let found = self.request("workspace.get", json!({"workspace_id": workspace.id}))?;
-            Self::matching_resource(
-                &found,
-                "workspace",
-                &[
-                    ("workspace_id", &workspace.id),
-                    ("cwd", &workspace.root.to_string_lossy()),
-                ],
-            )?;
+            Self::matching_resource(&found, "workspace", &[("workspace_id", &workspace.id)])?;
             return Ok(workspace.id);
         }
         Err(AgentAdapterError::Conflict(
@@ -445,13 +442,8 @@ impl HerdrAdapter {
         let workspace = context.dispatch_workspace.as_ref().ok_or_else(|| {
             AgentAdapterError::Conflict("Forge Dispatch Workspace identity was not retained".into())
         })?;
-        let root = workspace.root.to_string_lossy();
         let found = self.request("workspace.get", json!({"workspace_id": workspace.id}))?;
-        Self::matching_resource(
-            &found,
-            "workspace",
-            &[("workspace_id", &workspace.id), ("cwd", root.as_ref())],
-        )?;
+        Self::matching_resource(&found, "workspace", &[("workspace_id", &workspace.id)])?;
         Ok(workspace.id.clone())
     }
 
@@ -595,6 +587,20 @@ impl AgentDispatchAdapter for HerdrAdapter {
         self.snapshot().map(|_| ())
     }
 
+    fn dispatch_available(&self, resources: &dyn AgentDispatchRepository) -> bool {
+        self.dispatch_workspace(resources).is_ok()
+    }
+
+    fn verify_workspace(
+        &self,
+        id: &str,
+    ) -> Result<forge_app::DispatchWorkspace, AgentAdapterError> {
+        let result = self.request("workspace.get", json!({"workspace_id": id}))?;
+        let workspace = result.get("workspace").unwrap_or(&result);
+        Self::matching_resource(workspace, "workspace", &[("workspace_id", id)])?;
+        Ok(forge_app::DispatchWorkspace { id: id.into() })
+    }
+
     fn provision(
         &self,
         context: &AgentDispatchContext,
@@ -603,6 +609,19 @@ impl AgentDispatchAdapter for HerdrAdapter {
         self.probe()?;
         let label = Self::label(context)?;
         let workspace = self.dispatch_workspace(resources)?;
+        if !resources
+            .begin_agent_provision(&context.assignment.id)
+            .map_err(|error| {
+                AgentAdapterError::Transient(format!(
+                    "could not record provisioning intent: {}",
+                    error.code
+                ))
+            })?
+        {
+            return Err(AgentAdapterError::Conflict(
+                "provisioning was already attempted; investigate retained resources before recovery".into(),
+            ));
+        }
         let agent_workspace = context
             .agent_workspace
             .as_deref()
@@ -645,14 +664,9 @@ impl AgentDispatchAdapter for HerdrAdapter {
             self.request("agent.start", json!({"name": label, "kind": "pi", "pane_id": pane, "args": ["--model", context.assignment.profile.model], "timeout_ms": context.assignment.profile.startup_timeout_millis}))?;
             Self::retain(resources, context, "agent-name", &label)?;
         }
-        match self.request(
-            "agent.prompt",
-            json!({"target": label, "text": context.rendered_initial_prompt}),
-        ) {
-            Ok(_) => Ok(()),
-            Err(AgentAdapterError::InvalidRequest(message)) if message == "agentblocked" => Ok(()),
-            Err(error) => Err(error),
-        }
+        Err(AgentAdapterError::Conflict(
+            "agent started but readiness has not been established; initial prompt not sent".into(),
+        ))
     }
 
     fn observe(
@@ -956,7 +970,6 @@ mod tests {
         repository
             .retain_dispatch_workspace(&forge_app::DispatchWorkspace {
                 id: "workspace".into(),
-                root: "/forge-data/herdr-dispatch-workspace".into(),
             })
             .unwrap();
         let context = AgentDispatchContext {
@@ -967,7 +980,6 @@ mod tests {
             capability_delivery: None,
             dispatch_workspace: Some(forge_app::DispatchWorkspace {
                 id: "workspace".into(),
-                root: "/forge-data/herdr-dispatch-workspace".into(),
             }),
             resources: repository
                 .list_agent_assignment_resources(&assignment.id)
@@ -1033,6 +1045,57 @@ mod tests {
                 .iter()
                 .all(|resource| resource.retired_at_millis.is_some())
         );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_selection_verifies_exact_identity_with_herdr() {
+        use std::{
+            io::{BufRead, BufReader, Write},
+            os::unix::net::UnixListener,
+            thread,
+        };
+        let path = std::env::temp_dir().join(format!(
+            "forge-workspace-select-{}-{}.sock",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = thread::spawn(move || {
+            for returned in [Some("requested"), Some("other"), None] {
+                let mut stream = listener.accept().unwrap().0;
+                let mut line = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(request["method"], "workspace.get");
+                assert_eq!(request["params"]["workspace_id"], "requested");
+                serde_json::to_writer(
+                    &mut stream,
+                    &serde_json::json!({"result":{"workspace":{"workspace_id":returned}}}),
+                )
+                .unwrap();
+                stream.write_all(b"\n").unwrap();
+            }
+        });
+        let adapter = super::HerdrAdapter {
+            socket_path: path.clone(),
+            dispatch_root: "/unused".into(),
+        };
+        assert_eq!(
+            adapter.verify_workspace("requested").unwrap(),
+            forge_app::DispatchWorkspace {
+                id: "requested".into()
+            }
+        );
+        assert!(adapter.verify_workspace("requested").is_err());
+        assert!(adapter.verify_workspace("requested").is_err());
+        server.join().unwrap();
         std::fs::remove_file(path).unwrap();
     }
 

@@ -14,9 +14,10 @@ use forge_cli::{
     request_open_task_under_wayfinder, request_open_wayfinder, request_project_here,
     request_project_setup_hook, request_record_comments, request_record_updates,
     request_register_project, request_relate_record, request_reopen_dispatch_task,
-    request_resume_dispatch_task, request_retire_agent_assignment, request_show_record,
-    request_start_assignment_task, request_start_record, request_status, request_unrelate_record,
-    request_worktree_root, resolve_endpoint as resolve_managed_endpoint,
+    request_resume_dispatch_task, request_retire_agent_assignment,
+    request_select_dispatch_workspace, request_show_record, request_start_assignment_task,
+    request_start_record, request_status, request_unrelate_record, request_worktree_root,
+    resolve_endpoint as resolve_managed_endpoint,
 };
 use std::io::Read;
 
@@ -247,6 +248,8 @@ enum TaskCommand {
 #[derive(Debug, Subcommand)]
 enum AgentDispatchCommand {
     Endpoint(AgentDispatchEndpointArgs),
+    /// Select the existing workspace named by HERDR_WORKSPACE_ID.
+    WorkspaceSelect(AgentDispatchRequestArgs),
     Profile(AgentDispatchRequestArgs),
     Project(AgentDispatchProjectArgs),
     Status(AgentDispatchStatusArgs),
@@ -823,6 +826,18 @@ async fn agent_dispatch(command: AgentDispatchCommand) -> i32 {
             )
             .await
             .map(|value| serde_json::to_value(value).unwrap()),
+            args.json,
+        ),
+        AgentDispatchCommand::WorkspaceSelect(args) => (
+            match std::env::var("HERDR_WORKSPACE_ID") {
+                Ok(id) if !id.trim().is_empty() => request_select_dispatch_workspace(
+                    &resolve_endpoint(args.server_url.as_deref()).await,
+                    id,
+                )
+                .await
+                .map(|value| serde_json::to_value(value).unwrap()),
+                _ => Err("HERDR_WORKSPACE_ID must name an existing Herdr workspace".into()),
+            },
             args.json,
         ),
         AgentDispatchCommand::Profile(args) => (
