@@ -324,6 +324,17 @@ impl HerdrAdapter {
                     "not_found" | "not-found" => {
                         AgentAdapterError::NotFound(format!("Herdr {method}: {code}"))
                     }
+                    // Protocol 22 uses resource-specific codes. Do not treat arbitrary
+                    // *_not_found errors (notably workspace loss) as verified absence.
+                    "agent_not_found" if method == "agent.get" => {
+                        AgentAdapterError::NotFound(format!("Herdr {method}: {code}"))
+                    }
+                    "tab_not_found" if matches!(method, "tab.get" | "tab.close") => {
+                        AgentAdapterError::NotFound(format!("Herdr {method}: {code}"))
+                    }
+                    "pane_not_found" if matches!(method, "pane.get" | "pane.release_agent") => {
+                        AgentAdapterError::NotFound(format!("Herdr {method}: {code}"))
+                    }
                     "conflict" | "already_exists" | "already-exists" => {
                         AgentAdapterError::Conflict(format!("Herdr {method}: {code}"))
                     }
@@ -497,7 +508,27 @@ impl HerdrAdapter {
         tuple: (&str, &str, &str),
     ) -> Result<AgentObservation, AgentAdapterError> {
         match self.request("agent.get", json!({"target": name})) {
-            Ok(agent) => Self::observation_from_agent(&agent, tuple),
+            Ok(result) => {
+                // agent.get returns AgentInfo inside an agent_info envelope; list entries
+                // are already AgentInfo. Decode here, not in the shared tuple validator.
+                if result.get("type").and_then(Value::as_str) != Some("agent_info") {
+                    return Err(AgentAdapterError::Endpoint(
+                        "Herdr agent.get has an invalid response type".into(),
+                    ));
+                }
+                let agent = result
+                    .get("agent")
+                    .filter(|agent| agent.is_object())
+                    .ok_or_else(|| {
+                        AgentAdapterError::Endpoint("Herdr agent.get has no agent object".into())
+                    })?;
+                if agent.get("name").and_then(Value::as_str) != Some(name) {
+                    return Err(AgentAdapterError::Conflict(
+                        "Herdr agent does not match the persisted name".into(),
+                    ));
+                }
+                Self::observation_from_agent(agent, tuple)
+            }
             Err(AgentAdapterError::NotFound(_)) => self.agent_list_fallback(name, tuple),
             Err(error) => Err(error),
         }
@@ -558,27 +589,43 @@ impl HerdrAdapter {
         tuple: (&str, &str, &str),
     ) -> Result<AgentObservation, AgentAdapterError> {
         let result = self.request("agent.list", json!({}))?;
+        if result.get("type").and_then(Value::as_str) != Some("agent_list") {
+            return Err(AgentAdapterError::Endpoint(
+                "Herdr agent.list has an invalid response type".into(),
+            ));
+        }
         let agents = result
             .get("agents")
             .and_then(Value::as_array)
             .ok_or_else(|| AgentAdapterError::Endpoint("Herdr agent.list has no agents".into()))?;
-        let same_name = agents.iter().find(|agent| {
-            agent.get("name").and_then(Value::as_str) == Some(name)
-                || agent.get("agent_name").and_then(Value::as_str) == Some(name)
-        });
-        if let Some(agent) = same_name {
-            return Self::observation_from_agent(agent, tuple);
+        let mut observation = None;
+        for agent in agents {
+            // An incomplete list entry cannot establish that the persisted agent/pane is
+            // absent. Names are optional in AgentInfo, but resource identities are not.
+            if ["workspace_id", "tab_id", "pane_id"].iter().any(|field| {
+                agent
+                    .get(*field)
+                    .and_then(Value::as_str)
+                    .is_none_or(str::is_empty)
+            }) {
+                return Err(AgentAdapterError::Endpoint(
+                    "Herdr agent.list has an incomplete resource tuple".into(),
+                ));
+            }
+            if agent.get("name").and_then(Value::as_str) == Some(name) {
+                if observation.is_some() {
+                    return Err(AgentAdapterError::Conflict(
+                        "Herdr agent.list has duplicate persisted names".into(),
+                    ));
+                }
+                observation = Some(Self::observation_from_agent(agent, tuple)?);
+            } else if agent.get("pane_id").and_then(Value::as_str) == Some(tuple.2) {
+                return Err(AgentAdapterError::Conflict(
+                    "Herdr persisted pane is occupied by a different agent".into(),
+                ));
+            }
         }
-        if agents.iter().any(|agent| {
-            agent.get("workspace_id").and_then(Value::as_str) == Some(tuple.0)
-                && agent.get("tab_id").and_then(Value::as_str) == Some(tuple.1)
-                && agent.get("pane_id").and_then(Value::as_str) == Some(tuple.2)
-        }) {
-            return Err(AgentAdapterError::Conflict(
-                "Herdr persisted pane is occupied by a different agent".into(),
-            ));
-        }
-        Ok(AgentObservation::Absent)
+        Ok(observation.unwrap_or(AgentObservation::Absent))
     }
 }
 
@@ -1092,6 +1139,221 @@ mod tests {
         std::fs::remove_file(path).unwrap();
     }
 
+    /// Socket seam with protocol-22 response envelopes (not flattened `AgentInfo` doubles).
+    #[cfg(unix)]
+    fn observe_transcript(
+        transcript: Vec<(&'static str, serde_json::Value)>,
+    ) -> Result<forge_app::AgentObservation, forge_app::AgentAdapterError> {
+        use std::{
+            io::{BufRead, BufReader, Write},
+            os::unix::net::UnixListener,
+            thread,
+        };
+        let path = std::env::temp_dir().join(format!(
+            "forge-herdr-agent-{}-{}.sock",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let listener = UnixListener::bind(&path).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = thread::spawn(move || {
+            for (method, response) in transcript {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(std::time::Instant::now() < deadline, "missing {method}");
+                            thread::sleep(std::time::Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("{error}"),
+                    }
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                    .unwrap();
+                let mut line = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(request["method"], method);
+                if method == "agent.get" {
+                    assert_eq!(request["params"]["target"], "forge-dispatch-a");
+                }
+                serde_json::to_writer(&mut stream, &response).unwrap();
+                stream.write_all(b"\n").unwrap();
+            }
+        });
+        let adapter = super::HerdrAdapter {
+            socket_path: path.clone(),
+            dispatch_root: "/unused".into(),
+        };
+        let result = adapter.agent_observation("forge-dispatch-a", ("workspace", "tab", "pane"));
+        server.join().unwrap();
+        std::fs::remove_file(path).unwrap();
+        result
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn observation_decodes_nested_agent_info_and_validates_identity() {
+        use forge_app::{AgentAdapterError, AgentObservation};
+        let agent = serde_json::json!({
+            "name":"forge-dispatch-a", "workspace_id":"workspace", "tab_id":"tab",
+            "pane_id":"pane", "agent_status":"working", "terminal_id":"terminal",
+            "focused":false, "revision":1, "interactive_ready":false, "state_change_seq":7
+        });
+        for (status, expected) in [
+            ("working", AgentObservation::Working),
+            ("idle", AgentObservation::Idle),
+            ("blocked", AgentObservation::Blocked),
+            ("done", AgentObservation::Done),
+            ("unknown", AgentObservation::Unknown),
+        ] {
+            let mut info = agent.clone();
+            info["agent_status"] = status.into();
+            assert_eq!(
+                observe_transcript(vec![(
+                    "agent.get",
+                    serde_json::json!({
+                        "result":{"type":"agent_info", "agent":info}
+                    })
+                )])
+                .unwrap(),
+                expected
+            );
+        }
+        for field in ["workspace_id", "tab_id", "pane_id", "name"] {
+            let mut info = agent.clone();
+            info[field] = "foreign".into();
+            assert!(
+                matches!(
+                    observe_transcript(vec![(
+                        "agent.get",
+                        serde_json::json!({
+                            "result":{"type":"agent_info", "agent":info}
+                        })
+                    )]),
+                    Err(AgentAdapterError::Conflict(_))
+                ),
+                "{field}"
+            );
+        }
+        for info in [
+            serde_json::Value::Null,
+            serde_json::json!({}),
+            agent.clone(),
+        ] {
+            // A flattened object is not the protocol-22 envelope, even with a valid tuple.
+            assert!(
+                observe_transcript(vec![("agent.get", serde_json::json!({"result":info}))])
+                    .is_err()
+            );
+        }
+        for kind in [serde_json::Value::Null, serde_json::json!("agent_started")] {
+            assert!(
+                observe_transcript(vec![(
+                    "agent.get",
+                    serde_json::json!({
+                        "result":{"type":kind, "agent":agent}
+                    })
+                )])
+                .is_err()
+            );
+        }
+        let mut invalid = agent;
+        invalid["agent_status"] = "absent".into();
+        assert!(matches!(
+            observe_transcript(vec![(
+                "agent.get",
+                serde_json::json!({
+                    "result":{"type":"agent_info", "agent":invalid}
+                })
+            )]),
+            Err(AgentAdapterError::Endpoint(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_fallback_does_not_adopt_replacements_or_infer_absence_from_malformed_data() {
+        use forge_app::AgentObservation;
+        let agent = serde_json::json!({
+            "name":"forge-dispatch-a", "workspace_id":"workspace", "tab_id":"tab",
+            "pane_id":"pane", "agent_status":"working"
+        });
+        let mut renamed = agent.clone();
+        renamed["name"] = "replacement".into();
+        let mut misplaced = agent.clone();
+        misplaced["pane_id"] = "foreign-pane".into();
+        let mut unnamed = agent.clone();
+        unnamed.as_object_mut().unwrap().remove("name");
+        for entries in [
+            serde_json::json!([renamed]),
+            serde_json::json!([misplaced]),
+            serde_json::json!([unnamed]),
+            serde_json::json!([{}]),
+            serde_json::json!([agent, agent]),
+            serde_json::Value::Null,
+        ] {
+            assert!(
+                observe_transcript(vec![
+                    (
+                        "agent.get",
+                        serde_json::json!({"error":{"code":"agent_not_found"}})
+                    ),
+                    (
+                        "agent.list",
+                        serde_json::json!({"result":{"type":"agent_list", "agents":entries}})
+                    ),
+                ])
+                .is_err()
+            );
+        }
+        assert_eq!(
+            observe_transcript(vec![
+                (
+                    "agent.get",
+                    serde_json::json!({"error":{"code":"agent_not_found"}})
+                ),
+                (
+                    "agent.list",
+                    serde_json::json!({"result":{"type":"agent_list", "agents":[]}})
+                ),
+            ])
+            .unwrap(),
+            AgentObservation::Absent
+        );
+        assert!(
+            observe_transcript(vec![
+                (
+                    "agent.get",
+                    serde_json::json!({"error":{"code":"agent_not_found"}})
+                ),
+                (
+                    "agent.list",
+                    serde_json::json!({"result":{"type":"wrong", "agents":[]}})
+                ),
+            ])
+            .is_err()
+        );
+        // Workspace/provider failures must not trigger the absence fallback.
+        for code in ["workspace_not_found", "internal_error", "timeout"] {
+            assert!(
+                observe_transcript(vec![(
+                    "agent.get",
+                    serde_json::json!({"error":{"code":code}})
+                )])
+                .is_err()
+            );
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn observation_uses_one_list_fallback_after_get_not_found() {
@@ -1114,11 +1376,11 @@ mod tests {
             for (method, response) in [
                 (
                     "agent.get",
-                    serde_json::json!({"error":{"code":"not_found"}}),
+                    serde_json::json!({"error":{"code":"agent_not_found","message":"agent target not found"}}),
                 ),
                 (
                     "agent.list",
-                    serde_json::json!({"result":{"agents":[{
+                    serde_json::json!({"result":{"type":"agent_list","agents":[{
                         "name":"forge-dispatch-a", "workspace_id":"workspace",
                         "tab_id":"tab", "pane_id":"pane", "agent_status":"working",
                         "interactive_ready":false, "state_change_seq":7
@@ -1161,6 +1423,13 @@ mod tests {
             "agent-live",
             "provider-error",
             "tuple-mismatch",
+            "agent-tuple-mismatch",
+            "agent-renamed",
+            "agent-malformed",
+            "agent-replaced",
+            "list-malformed",
+            "workspace-missing",
+            "cleanup-retry",
         ] {
             retirement_provider_outcome(outcome);
         }
@@ -1264,22 +1533,62 @@ mod tests {
                 ),
                 (
                     "agent.get",
-                    serde_json::json!({"result":{"name":"forge-dispatch-assignment","workspace_id":"workspace","tab_id":"tab","pane_id":"pane","agent_status":"done"}}),
+                    serde_json::json!({"result":{"type":"agent_info","agent":{"name":"forge-dispatch-assignment","workspace_id":"workspace","tab_id":"tab","pane_id":"pane","agent_status":"done"}}}),
                 ),
-                ("pane.release_agent", serde_json::json!({"result":{}})),
-                ("tab.close", serde_json::json!({"result":{}})),
-                ("tab.get", serde_json::json!({"error":{"code":"not_found"}})),
+                (
+                    "pane.release_agent",
+                    serde_json::json!({"result":{"type":"ok"}}),
+                ),
+                ("tab.close", serde_json::json!({"result":{"type":"ok"}})),
+                (
+                    "tab.get",
+                    serde_json::json!({"error":{"code":"tab_not_found"}}),
+                ),
                 (
                     "pane.get",
-                    serde_json::json!({"error":{"code":"not_found"}}),
+                    serde_json::json!({"error":{"code":"pane_not_found"}}),
                 ),
                 (
                     "agent.get",
-                    serde_json::json!({"error":{"code":"not_found"}}),
+                    serde_json::json!({"error":{"code":"agent_not_found"}}),
                 ),
-                ("agent.list", serde_json::json!({"result":{"agents":[]}})),
+                (
+                    "agent.list",
+                    serde_json::json!({"result":{"type":"agent_list","agents":[]}}),
+                ),
             ];
             match outcome {
+                "workspace-missing" => {
+                    transcript[0].1 = serde_json::json!({"error":{"code":"workspace_not_found"}});
+                    transcript.truncate(1);
+                }
+                "agent-tuple-mismatch" => {
+                    transcript[3].1["result"]["agent"]["pane_id"] = "foreign-pane".into();
+                    transcript.truncate(4);
+                }
+                "agent-renamed" => {
+                    transcript[3].1["result"]["agent"]["name"] = "replacement".into();
+                    transcript.truncate(4);
+                }
+                "agent-malformed" => {
+                    transcript[3].1["result"]["agent"] = serde_json::Value::Null;
+                    transcript.truncate(4);
+                }
+                "agent-replaced" => {
+                    transcript[9].1["result"]["agents"] = serde_json::json!([{
+                        "name":"replacement", "workspace_id":"workspace",
+                        "tab_id":"tab", "pane_id":"pane", "agent_status":"working"
+                    }]);
+                }
+                "list-malformed" => {
+                    transcript[9].1["result"]["agents"] = serde_json::json!([{}]);
+                }
+                "cleanup-retry" => {
+                    let retry = transcript.clone();
+                    transcript[5].1 = serde_json::json!({"error":{"code":"internal_error"}});
+                    transcript.truncate(6);
+                    transcript.extend(retry);
+                }
                 "tab-live" => {
                     transcript[6].1 = serde_json::json!({"result":{"tab":{"tab_id":"tab","workspace_id":"workspace"}}});
                     transcript.truncate(7);
@@ -1289,7 +1598,7 @@ mod tests {
                     transcript.truncate(8);
                 }
                 "agent-live" => {
-                    transcript[8].1 = serde_json::json!({"result":{"name":"forge-dispatch-assignment","workspace_id":"workspace","tab_id":"tab","pane_id":"pane","agent_status":"working"}});
+                    transcript[8].1 = serde_json::json!({"result":{"type":"agent_info","agent":{"name":"forge-dispatch-assignment","workspace_id":"workspace","tab_id":"tab","pane_id":"pane","agent_status":"working"}}});
                     transcript.truncate(9);
                 }
                 "provider-error" => {
@@ -1340,7 +1649,6 @@ mod tests {
         };
         let result = adapter.retire(&context, &repository);
         assert_eq!(result.is_ok(), outcome == "absent", "{outcome}: {result:?}");
-        server.join().unwrap();
         let resources = repository
             .list_agent_assignment_resources(&assignment.id)
             .unwrap();
@@ -1349,6 +1657,17 @@ mod tests {
                 .iter()
                 .all(|resource| resource.retired_at_millis.is_some() == (outcome == "absent"))
         );
+        if outcome == "cleanup-retry" {
+            adapter.retire(&context, &repository).unwrap();
+            assert!(
+                repository
+                    .list_agent_assignment_resources(&assignment.id)
+                    .unwrap()
+                    .iter()
+                    .all(|resource| resource.retired_at_millis.is_some())
+            );
+        }
+        server.join().unwrap();
         std::fs::remove_file(path).unwrap();
     }
 
