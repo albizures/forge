@@ -155,6 +155,38 @@ async fn assignment_info_cli_renders_human_and_json_diagnostics() {
             assert!(!text.contains(private), "leaked {private}");
         }
     }
+    for json in [false, true] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_forge"));
+        command.args(["agent-dispatch", "resume", "1", "--server-url", &url]);
+        if json {
+            command.arg("--json");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let text = String::from_utf8(output.stdout).unwrap();
+        if json {
+            let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(value["task_id"], 1);
+            assert_eq!(value["resolves_recovery_blockers"], false);
+            assert_eq!(value["authorizes_replacement"], false);
+        } else {
+            assert!(text.contains("Dispatch Hold cleared"), "{text}");
+            assert!(
+                text.contains("does not resolve recovery blockers"),
+                "{text}"
+            );
+            assert!(text.contains("does not authorize a replacement"), "{text}");
+        }
+        let inspected = run("inspect-me", true);
+        let info: serde_json::Value = serde_json::from_slice(&inspected.stdout).unwrap();
+        assert!(info["dispatch_hold"].is_null());
+        assert_eq!(info["capacity_reserved"], true);
+        assert_eq!(info["state"], "provisioning");
+    }
     let missing = run("missing", true);
     assert!(!missing.status.success());
     assert!(missing.stdout.is_empty());

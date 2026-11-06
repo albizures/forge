@@ -976,15 +976,37 @@ async fn agent_dispatch(command: AgentDispatchCommand) -> i32 {
             .map(|value| serde_json::to_value(value).unwrap()),
             args.json,
         ),
-        AgentDispatchCommand::Resume(args) => (
-            request_resume_dispatch_task(
+        AgentDispatchCommand::Resume(args) => {
+            return match request_resume_dispatch_task(
                 &resolve_endpoint(args.server_url.as_deref()).await,
                 args.task_id,
             )
             .await
-            .map(|()| serde_json::Value::Null),
-            args.json,
-        ),
+            {
+                Ok(()) => {
+                    let warning = "Clearing a Dispatch Hold does not resolve recovery blockers or prove an agent is absent. It does not resend a prompt and does not authorize a replacement. Replacement requires retirement and safe resolution of all known and uncertain resources; hold clearing is separate. Use assignment-info <assignment-id> to investigate.";
+                    if args.json {
+                        println!(
+                            "{}",
+                            serde_json::json!({
+                                "task_id": args.task_id,
+                                "operation": "clear-dispatch-hold",
+                                "resolves_recovery_blockers": false,
+                                "authorizes_replacement": false,
+                                "warning": warning,
+                            })
+                        );
+                    } else {
+                        println!("Task {}: Dispatch Hold cleared.\n{warning}", args.task_id);
+                    }
+                    0
+                }
+                Err(error) => {
+                    eprintln!("forge agent-dispatch resume: {error}");
+                    1
+                }
+            };
+        }
         AgentDispatchCommand::AssignmentResolveUnknown(args) => {
             if !args.confirm_old_agent_cannot_act || !args.confirm_unknown_resources_safe {
                 eprintln!(
