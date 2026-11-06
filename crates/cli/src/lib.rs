@@ -352,6 +352,76 @@ pub async fn request_resume_dispatch_task(url: &str, task_id: u64) -> Result<(),
         .map_err(|error| format!("could not resume Task dispatch through Forge daemon: {error}"))
 }
 
+/// Inspects retained Assignment evidence through the operator daemon interface.
+///
+/// # Errors
+/// Returns a user-facing error when the daemon is unreachable or inspection fails.
+pub async fn request_agent_assignment_info(
+    url: &str,
+    assignment_id: String,
+) -> Result<forge_rpc::AgentAssignmentInfoResponse, String> {
+    client(url)?
+        .assignment_info(forge_rpc::AssignmentInfoRequest { assignment_id })
+        .await
+        .map_err(|error| {
+            format!("could not inspect Agent Assignment through Forge daemon: {error}")
+        })
+}
+
+/// Renders persisted facts without claiming provider liveness or safe cleanup.
+#[must_use]
+pub fn render_agent_assignment_info(info: &forge_rpc::AgentAssignmentInfoResponse) -> String {
+    use std::fmt::Write;
+    let timestamp =
+        |value: Option<u64>| value.map_or_else(|| "not recorded".into(), |time| time.to_string());
+    let acknowledged = info.acknowledged_at_millis.map_or_else(
+        || "not acknowledged".into(),
+        |time| format!("acknowledged at {time}"),
+    );
+    let mut output = format!(
+        "Assignment {} ({})\nTask {} ({}) — Project {}\nProvider: {} — Attempt {}\nClaimed: {} — State changed: {}\nClosed: {} — Closure reason: {}\nLaunch started: {}\nAcknowledgement: {}\nAcknowledgement deadline: {}\nDispatch Hold: {}\nCapacity reserved: {}\nRecovery blockers: {}\nResources (persisted evidence, not live provider verification):",
+        info.id,
+        info.state,
+        info.record_id,
+        info.task_status,
+        info.project_slug,
+        info.provider,
+        info.attempt_number,
+        info.claimed_at_millis,
+        info.state_changed_at_millis,
+        timestamp(info.closed_at_millis),
+        info.closure_reason.as_deref().unwrap_or("none"),
+        timestamp(info.launch_started_at_millis),
+        acknowledged,
+        timestamp(info.acknowledgement_deadline_millis),
+        info.dispatch_hold.as_deref().unwrap_or("none"),
+        info.capacity_reserved,
+        if info.recovery_blockers.is_empty() {
+            "none".into()
+        } else {
+            info.recovery_blockers.join(", ")
+        },
+    );
+    if info.resources.is_empty() {
+        output.push_str("\n  none recorded (not proof that no agent exists)");
+    }
+    for resource in &info.resources {
+        let retirement = resource
+            .retired_at_millis
+            .map_or_else(|| "unretired".into(), |time| format!("retired at {time}"));
+        write!(
+            output,
+            "\n  {} {} — created at {} — {}",
+            resource.resource_kind, resource.resource_id, resource.created_at_millis, retirement
+        )
+        .unwrap();
+    }
+    output.push_str("\nTimestamps are Unix milliseconds.\nOperations:\n");
+    output.push_str(&info.operations.join("\n"));
+    output.push_str("\nClearing a Dispatch Hold does not resolve recovery blockers or establish that an agent is absent. Investigate resources before retirement; hold clearing is separate.");
+    output
+}
+
 /// Retires an Assignment and its provider resources.
 pub async fn request_retire_agent_assignment(
     url: &str,

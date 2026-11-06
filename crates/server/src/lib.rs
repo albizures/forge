@@ -1170,6 +1170,16 @@ impl AgentDispatchApiServer for Daemon {
             .map_err(rpc_error)
     }
 
+    async fn assignment_info(
+        &self,
+        request: forge_rpc::AssignmentInfoRequest,
+    ) -> RpcResult<forge_rpc::AgentAssignmentInfoResponse> {
+        self.application
+            .agent_assignment_info(&request.assignment_id)
+            .map(Into::into)
+            .map_err(rpc_error)
+    }
+
     async fn assignment_retire(&self, request: RetireAgentAssignmentRequest) -> RpcResult<()> {
         self.application
             .retire_agent_assignment(&request.assignment_id)
@@ -2627,6 +2637,210 @@ mod tests {
             subscription.start_cursor.0,
             target.id,
         )
+    }
+
+    #[tokio::test]
+    async fn assignment_info_does_not_invent_missing_evidence() {
+        let (fixture, assignment, _, _, _) = subscription_test_daemon();
+        let initial = AgentDispatchApiServer::assignment_info(
+            &fixture.daemon(),
+            forge_rpc::AssignmentInfoRequest {
+                assignment_id: assignment.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(initial.resources.is_empty());
+        assert_eq!(initial.dispatch_hold, None);
+        assert_eq!(initial.acknowledged_at_millis, None);
+        assert_eq!(initial.launch_started_at_millis, None);
+        assert_eq!(initial.acknowledgement_deadline_millis, None);
+        assert!(initial.capacity_reserved);
+    }
+
+    #[tokio::test]
+    async fn assignment_info_reports_persisted_evidence_without_prompts_or_secrets() {
+        let (fixture, assignment, _, _, _) = subscription_test_daemon();
+        let store = SqliteProjectRepository::open(&fixture.database_path).unwrap();
+        let task_id = store.agent_assignment(&assignment).unwrap().record_id;
+        store.edit_record(task_id, "PRIVATE TASK PROMPT").unwrap();
+        store.begin_agent_launch(&assignment, 1000).unwrap();
+        store
+            .guard_agent_provisioning(&assignment, 301_000)
+            .unwrap();
+        for (kind, id) in [("pane", "pane-live"), ("tab", "tab-retired")] {
+            store
+                .add_agent_assignment_resource(&forge_app::NewAgentAssignmentResource {
+                    assignment_id: assignment.clone(),
+                    resource_kind: kind.into(),
+                    resource_id: id.into(),
+                })
+                .unwrap();
+        }
+        store
+            .retire_agent_assignment_resource(&assignment, "tab", "tab-retired")
+            .unwrap();
+        let root = fixture.database_path.with_extension("info-secrets");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join(&assignment), "PRIVATE CAPABILITY VALUE\n").unwrap();
+        let mut daemon = fixture.daemon();
+        daemon.capability_secret_root = Some(root.clone());
+        let request = || forge_rpc::AssignmentInfoRequest {
+            assignment_id: assignment.clone(),
+        };
+        let before = AgentDispatchApiServer::assignment_info(&daemon, request())
+            .await
+            .unwrap();
+        assert_eq!(before.id, assignment);
+        assert_eq!(before.record_id, task_id);
+        assert_eq!(before.task_status, "open");
+        assert_eq!(before.state, "provisioning");
+        assert_eq!(before.launch_started_at_millis, Some(1000));
+        assert_eq!(before.acknowledgement_deadline_millis, Some(301_000));
+        assert_eq!(before.acknowledged_at_millis, None);
+        assert!(
+            before
+                .dispatch_hold
+                .as_deref()
+                .unwrap()
+                .contains("deadline expired")
+        );
+        assert!(before.capacity_reserved);
+        assert!(
+            before
+                .recovery_blockers
+                .contains(&"unretired-resources".into())
+        );
+        assert_eq!(before.resources.len(), 2);
+        assert!(
+            before
+                .resources
+                .iter()
+                .any(|r| r.resource_id == "tab-retired" && r.retired_at_millis.is_some())
+        );
+        let encoded = serde_json::to_string(&before).unwrap();
+        for private in [
+            "PRIVATE TASK PROMPT",
+            "PRIVATE CAPABILITY VALUE",
+            "agent-dispatch/task/v1",
+            "prompt_template",
+            "capability",
+            "secret",
+        ] {
+            assert!(!encoded.contains(private), "leaked {private}");
+        }
+        // A late acknowledgement must remain distinguishable from hold clearing.
+        store.acknowledge_agent_assignment(&assignment).unwrap();
+        let after = AgentDispatchApiServer::assignment_info(&daemon, request())
+            .await
+            .unwrap();
+        assert_eq!(after.state, "working");
+        assert!(after.acknowledged_at_millis.unwrap() > 301_000);
+        assert_eq!(after.dispatch_hold, before.dispatch_hold);
+        assert_eq!(
+            after.acknowledgement_deadline_millis,
+            before.acknowledgement_deadline_millis
+        );
+        assert!(
+            AgentDispatchApiServer::assignment_info(
+                &daemon,
+                forge_rpc::AssignmentInfoRequest {
+                    assignment_id: "missing".into(),
+                }
+            )
+            .await
+            .unwrap_err()
+            .data()
+            .unwrap()
+            .get()
+            .contains("assignment-not-found")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn assignment_info_retains_closed_recovery_evidence_across_reopen() {
+        let (fixture, assignment, _, _, _) = subscription_test_daemon();
+        {
+            let store = SqliteProjectRepository::open(&fixture.database_path).unwrap();
+            store.begin_agent_provision(&assignment).unwrap();
+            store.hold_uncertain_agent_assignment(&assignment).unwrap();
+            store
+                .close_agent_assignment(
+                    &assignment,
+                    forge_app::AgentAssignmentClosureReason::Crashed,
+                )
+                .unwrap();
+        }
+        let request = || forge_rpc::AssignmentInfoRequest {
+            assignment_id: assignment.clone(),
+        };
+        let info = AgentDispatchApiServer::assignment_info(&fixture.daemon(), request())
+            .await
+            .unwrap();
+        assert!(info.closed_at_millis.is_some());
+        assert_eq!(info.closure_reason.as_deref(), Some("crashed"));
+        assert_eq!(info.launch_started_at_millis, None);
+        assert_eq!(info.acknowledgement_deadline_millis, None);
+        assert_eq!(info.acknowledged_at_millis, None);
+        assert!(info.capacity_reserved);
+        assert_eq!(
+            info.recovery_blockers,
+            ["unretired-resources", "uncertain-provisioning"]
+        );
+        {
+            let store = SqliteProjectRepository::open(&fixture.database_path).unwrap();
+            store.resume_dispatch(info.record_id).unwrap();
+        }
+        let resumed = AgentDispatchApiServer::assignment_info(&fixture.daemon(), request())
+            .await
+            .unwrap();
+        assert_eq!(resumed.dispatch_hold, None);
+        assert!(resumed.capacity_reserved);
+        assert_eq!(resumed.recovery_blockers, info.recovery_blockers);
+        {
+            let store = SqliteProjectRepository::open(&fixture.database_path).unwrap();
+            store
+                .retire_agent_assignment_resource(&assignment, "provision-intent", "once")
+                .unwrap();
+        }
+        let resolved = AgentDispatchApiServer::assignment_info(&fixture.daemon(), request())
+            .await
+            .unwrap();
+        assert!(!resolved.capacity_reserved);
+        assert!(resolved.recovery_blockers.is_empty());
+        assert!(resolved.resources[0].retired_at_millis.is_some());
+    }
+
+    #[tokio::test]
+    async fn assignment_info_uses_the_operator_contract_not_assignment_credentials() {
+        let (fixture, assignment, _, _, _) = subscription_test_daemon();
+        // Like resume and retirement, this read is on the existing trusted operator RPC
+        // surface. It does not authenticate operators or accept agent credentials.
+        let module = AgentDispatchApiServer::into_rpc(fixture.daemon());
+        let request = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": forge_rpc::AGENT_DISPATCH_ASSIGNMENT_INFO_METHOD,
+            "params": [{"assignment_id": assignment, "secret": "PRIVATE SECRET"}],
+        });
+        let (response, _) = module
+            .raw_json_request(&request.to_string(), 1)
+            .await
+            .unwrap();
+        let denied: serde_json::Value = serde_json::from_str(response.get()).unwrap();
+        assert_eq!(denied["error"]["code"], -32602);
+        assert!(denied.get("result").is_none());
+        assert!(!response.get().contains("PRIVATE SECRET"));
+        let request = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": forge_rpc::AGENT_DISPATCH_ASSIGNMENT_INFO_METHOD,
+            "params": [{"assignment_id": assignment}],
+        });
+        let (response, _) = module
+            .raw_json_request(&request.to_string(), 1)
+            .await
+            .unwrap();
+        let allowed: serde_json::Value = serde_json::from_str(response.get()).unwrap();
+        assert_eq!(allowed["result"]["id"], assignment);
+        assert!(allowed.get("error").is_none());
     }
 
     #[tokio::test]

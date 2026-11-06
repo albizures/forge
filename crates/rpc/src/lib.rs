@@ -34,6 +34,7 @@ pub const AGENT_DISPATCH_TASK_START_METHOD: &str = "agentDispatch.taskStart";
 pub const AGENT_DISPATCH_TASK_REOPEN_METHOD: &str = "agentDispatch.taskReopen";
 pub const AGENT_DISPATCH_RESUME_METHOD: &str = "agentDispatch.resume";
 pub const AGENT_DISPATCH_ASSIGNMENT_RETIRE_METHOD: &str = "agentDispatch.assignmentRetire";
+pub const AGENT_DISPATCH_ASSIGNMENT_INFO_METHOD: &str = "agentDispatch_assignmentInfo";
 pub const AGENT_SUBSCRIPTION_CREATE_METHOD: &str = "agentSubscription.create";
 pub const AGENT_SUBSCRIPTION_RENEW_METHOD: &str = "agentSubscription.renew";
 pub const AGENT_SUBSCRIPTION_DELETE_METHOD: &str = "agentSubscription.delete";
@@ -123,6 +124,12 @@ pub trait AgentDispatchApi {
     async fn task_reopen(&self, request: RecordIdRequest) -> RpcResult<RecordResponse>;
     #[method(name = "resume")]
     async fn resume(&self, request: RecordIdRequest) -> RpcResult<()>;
+    /// Operator diagnostics on the trusted daemon interface, not a capability-authenticated agent operation.
+    #[method(name = "assignmentInfo")]
+    async fn assignment_info(
+        &self,
+        request: AssignmentInfoRequest,
+    ) -> RpcResult<AgentAssignmentInfoResponse>;
     #[method(name = "assignmentRetire")]
     async fn assignment_retire(&self, request: RetireAgentAssignmentRequest) -> RpcResult<()>;
 }
@@ -424,6 +431,95 @@ impl From<forge_app::AgentAssignment> for AgentAssignmentResponse {
             state: format!("{:?}", value.state).to_lowercase(),
         }
     }
+}
+
+/// Explicit allowlist of diagnostic fields; never serialize an Agent Profile or Task body.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AgentAssignmentInfoResponse {
+    pub id: String,
+    pub record_id: u64,
+    pub project_slug: String,
+    pub task_status: String,
+    pub state: String,
+    pub provider: String,
+    pub attempt_number: u32,
+    pub claimed_at_millis: u64,
+    pub state_changed_at_millis: u64,
+    pub closed_at_millis: Option<u64>,
+    pub closure_reason: Option<String>,
+    pub launch_started_at_millis: Option<u64>,
+    pub acknowledgement_deadline_millis: Option<u64>,
+    pub acknowledged_at_millis: Option<u64>,
+    pub dispatch_hold: Option<String>,
+    pub resources: Vec<AgentAssignmentResourceResponse>,
+    pub recovery_blockers: Vec<String>,
+    pub capacity_reserved: bool,
+    pub operations: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AgentAssignmentResourceResponse {
+    pub resource_kind: String,
+    pub resource_id: String,
+    pub created_at_millis: u64,
+    pub retired_at_millis: Option<u64>,
+}
+
+impl From<forge_app::AgentAssignmentInfo> for AgentAssignmentInfoResponse {
+    fn from(value: forge_app::AgentAssignmentInfo) -> Self {
+        let capacity_reserved = value.capacity_reserved();
+        let recovery_blockers = value.recovery_blockers();
+        let assignment = value.assignment;
+        let operations = vec![
+            format!("forge agent-dispatch assignment-info {}", assignment.id),
+            format!("forge worktree info {}", assignment.record_id),
+            format!("forge agent-dispatch assignment-retire {}", assignment.id),
+            format!("forge agent-dispatch resume {}", assignment.record_id),
+        ];
+        Self {
+            id: assignment.id,
+            record_id: assignment.record_id,
+            project_slug: assignment.project_slug,
+            task_status: record_status_name(value.task_status),
+            state: format!("{:?}", assignment.state).to_lowercase(),
+            provider: assignment.profile.provider,
+            attempt_number: assignment.attempt_number,
+            claimed_at_millis: assignment.claimed_at_millis,
+            state_changed_at_millis: assignment.state_changed_at_millis,
+            closed_at_millis: assignment.closed_at_millis,
+            closure_reason: assignment
+                .closure_reason
+                .map(|reason| format!("{reason:?}").to_lowercase()),
+            launch_started_at_millis: value
+                .launch_intent
+                .as_ref()
+                .map(|intent| intent.started_at_millis),
+            acknowledgement_deadline_millis: value
+                .launch_intent
+                .map(|intent| intent.acknowledgement_deadline_millis),
+            acknowledged_at_millis: value.acknowledged_at_millis,
+            dispatch_hold: value.dispatch_hold.map(|hold| hold.reason),
+            resources: value
+                .resources
+                .into_iter()
+                .map(|resource| AgentAssignmentResourceResponse {
+                    resource_kind: resource.resource_kind,
+                    resource_id: resource.resource_id,
+                    created_at_millis: resource.created_at_millis,
+                    retired_at_millis: resource.retired_at_millis,
+                })
+                .collect(),
+            recovery_blockers,
+            capacity_reserved,
+            operations,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssignmentInfoRequest {
+    pub assignment_id: String,
 }
 
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]

@@ -266,6 +266,8 @@ enum AgentDispatchCommand {
     TaskReopen(DispatchTaskArgs),
     /// Clear an operator-controlled Dispatch Hold.
     Resume(DispatchTaskArgs),
+    /// Inspect persisted Assignment evidence without contacting the provider.
+    AssignmentInfo(AssignmentRetireArgs),
     /// Retire an Assignment after provider cleanup.
     AssignmentRetire(AssignmentRetireArgs),
 }
@@ -832,6 +834,28 @@ async fn worktree(command: WorktreeCommand) -> i32 {
 
 async fn agent_dispatch(command: AgentDispatchCommand) -> i32 {
     let (result, json) = match command {
+        AgentDispatchCommand::AssignmentInfo(args) => {
+            // Keep typed diagnostics separate from generic dispatch response rendering.
+            return match forge_cli::request_agent_assignment_info(
+                &resolve_endpoint(args.server_url.as_deref()).await,
+                args.assignment_id,
+            )
+            .await
+            {
+                Ok(info) => {
+                    if args.json {
+                        println!("{}", serde_json::to_string(&info).unwrap());
+                    } else {
+                        println!("{}", forge_cli::render_agent_assignment_info(&info));
+                    }
+                    0
+                }
+                Err(error) => {
+                    eprintln!("forge agent-dispatch assignment-info: {error}");
+                    1
+                }
+            };
+        }
         AgentDispatchCommand::Bootstrap => {
             return match forge_cli::assignment_bootstrap().await {
                 Ok(instructions) => {

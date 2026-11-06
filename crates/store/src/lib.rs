@@ -1928,6 +1928,67 @@ impl AgentDispatchRepository for SqliteProjectRepository {
             .map_err(|error| match error { rusqlite::Error::QueryReturnedNoRows => RegistrationError::new("assignment-not-found", "Agent Assignment does not exist"), _ => storage_error(error) })
     }
 
+    fn agent_assignment_info(
+        &self,
+        assignment_id: &str,
+    ) -> Result<forge_app::AgentAssignmentInfo, RegistrationError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        // A transaction keeps reads coherent across other daemon/store connections.
+        let transaction = connection.transaction().map_err(storage_error)?;
+        let assignment = transaction.query_row("SELECT id, record_id, project_slug, profile_record_type, profile_revision, attempt_number, claimed_at_millis, state, closed_at_millis, closure_reason, state_changed_at_millis, next_retry_at_millis, retry_count FROM agent_assignments WHERE id = ?1", [assignment_id], |row| agent_assignment_from_row(row, &transaction))
+            .map_err(|error| match error { rusqlite::Error::QueryReturnedNoRows => RegistrationError::new("assignment-not-found", "Agent Assignment does not exist"), _ => storage_error(error) })?;
+        let task_status = load_record(&transaction, assignment.record_id)?.status;
+        let (start, deadline, acknowledged_at_millis) = transaction.query_row(
+            "SELECT launch_started_at_millis, acknowledgement_deadline_millis, acknowledged_at_millis FROM agent_assignments WHERE id = ?1",
+            [assignment_id],
+            |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, Option<i64>>(1)?, row.get::<_, Option<i64>>(2)?.map(i64::cast_unsigned))),
+        ).map_err(storage_error)?;
+        let launch_intent = match (start, deadline) {
+            (Some(start), Some(deadline)) => Some(forge_app::AgentLaunchIntent {
+                started_at_millis: start.cast_unsigned(),
+                acknowledgement_deadline_millis: deadline.cast_unsigned(),
+            }),
+            (None, None) => None,
+            _ => {
+                return Err(RegistrationError::new(
+                    "storage",
+                    "incomplete launch intent",
+                ));
+            }
+        };
+        let dispatch_hold = transaction
+            .query_row(
+                "SELECT reason FROM dispatch_holds WHERE record_id = ?1",
+                [assignment.record_id.cast_signed()],
+                |row| {
+                    Ok(forge_app::DispatchHold {
+                        record_id: assignment.record_id,
+                        reason: row.get(0)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(storage_error)?;
+        let resources = transaction.prepare("SELECT assignment_id, resource_kind, resource_id, created_at_millis, retired_at_millis FROM agent_assignment_resources WHERE assignment_id = ?1 ORDER BY created_at_millis, resource_kind, resource_id").map_err(storage_error)?
+            .query_map([assignment_id], |row| Ok(AgentAssignmentResource {
+                assignment_id: row.get(0)?, resource_kind: row.get(1)?, resource_id: row.get(2)?,
+                created_at_millis: row.get::<_, i64>(3)?.cast_unsigned(),
+                retired_at_millis: row.get::<_, Option<i64>>(4)?.map(i64::cast_unsigned),
+            })).map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)?;
+        transaction.commit().map_err(storage_error)?;
+        Ok(forge_app::AgentAssignmentInfo {
+            assignment,
+            task_status,
+            launch_intent,
+            acknowledged_at_millis,
+            dispatch_hold,
+            resources,
+        })
+    }
+
     fn list_agent_assignments(
         &self,
         record_id: u64,

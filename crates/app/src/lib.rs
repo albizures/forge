@@ -603,6 +603,56 @@ pub struct AgentAssignment {
     pub closure_reason: Option<AgentAssignmentClosureReason>,
 }
 
+/// A consistent persisted snapshot for operator investigation. Never includes Task contents.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentAssignmentInfo {
+    pub assignment: AgentAssignment,
+    pub task_status: RecordStatus,
+    pub launch_intent: Option<AgentLaunchIntent>,
+    pub acknowledged_at_millis: Option<u64>,
+    pub dispatch_hold: Option<DispatchHold>,
+    pub resources: Vec<AgentAssignmentResource>,
+}
+
+impl AgentAssignmentInfo {
+    /// Matches dispatch capacity accounting, including retained resources on closed attempts.
+    #[must_use]
+    pub fn capacity_reserved(&self) -> bool {
+        self.assignment.closed_at_millis.is_none()
+            || self
+                .resources
+                .iter()
+                .any(|resource| resource.retired_at_millis.is_none())
+    }
+
+    /// Describes retained recovery evidence, independently of the operator-controlled hold.
+    #[must_use]
+    pub fn recovery_blockers(&self) -> Vec<String> {
+        let mut blockers = Vec::new();
+        if self
+            .resources
+            .iter()
+            .any(|resource| resource.retired_at_millis.is_none())
+        {
+            blockers.push("unretired-resources".into());
+        }
+        if self.resources.iter().any(|resource| {
+            resource.resource_kind == "provision-intent" && resource.retired_at_millis.is_none()
+        }) {
+            blockers.push("uncertain-provisioning".into());
+        }
+        if self.assignment.closed_at_millis.is_none()
+            && matches!(
+                self.assignment.state,
+                AgentAssignmentState::Provisioning | AgentAssignmentState::Unknown
+            )
+        {
+            blockers.push("unresolved-open-assignment".into());
+        }
+        blockers
+    }
+}
+
 /// Durable evidence of a single potentially uncertain agent launch.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentLaunchIntent {
@@ -1291,6 +1341,11 @@ pub trait AgentDispatchRepository: RecordRepository {
     ) -> Result<AgentAssignment, RegistrationError>;
     /// Returns one Assignment by opaque identifier.
     fn agent_assignment(&self, assignment_id: &str) -> Result<AgentAssignment, RegistrationError>;
+    /// Returns a consistent snapshot of persisted investigation evidence, including closed attempts.
+    fn agent_assignment_info(
+        &self,
+        assignment_id: &str,
+    ) -> Result<AgentAssignmentInfo, RegistrationError>;
     /// Returns retained Assignment history for a Record, newest attempt first.
     fn list_agent_assignments(
         &self,
@@ -2108,6 +2163,17 @@ impl Application {
     /// Returns persistence failures.
     pub fn resume_task_dispatch(&self, task_id: u64) -> Result<(), RegistrationError> {
         self.dispatch()?.resume_dispatch(task_id)
+    }
+
+    /// Inspects persisted Assignment evidence without contacting the provider or changing state.
+    ///
+    /// # Errors
+    /// Returns an error when dispatch is unavailable or the Assignment does not exist.
+    pub fn agent_assignment_info(
+        &self,
+        assignment_id: &str,
+    ) -> Result<AgentAssignmentInfo, RegistrationError> {
+        self.dispatch()?.agent_assignment_info(assignment_id)
     }
 
     /// Retires an Assignment after best-effort provider cleanup, preserving all Git evidence.
