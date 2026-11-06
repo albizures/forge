@@ -32,6 +32,7 @@ fn capability_launch_environment(
         "FORGE_ASSIGNMENT_ID": assignment_id,
         "FORGE_ASSIGNMENT_DAEMON_URL": capability.endpoint,
         "FORGE_ASSIGNMENT_CAPABILITY_SECRET_FILE": capability.secret_file,
+        "FORGE_ASSIGNMENT_FORGE_CLI": capability.cli_path,
     })
 }
 
@@ -606,6 +607,20 @@ impl AgentDispatchAdapter for HerdrAdapter {
         context: &AgentDispatchContext,
         resources: &dyn AgentDispatchRepository,
     ) -> Result<(), AgentAdapterError> {
+        let bootstrap = context
+            .bootstrap_prompt
+            .as_deref()
+            .filter(|prompt| !prompt.trim().is_empty())
+            .ok_or_else(|| {
+                AgentAdapterError::InvalidRequest(
+                    "verified agent bootstrap is not configured".into(),
+                )
+            })?;
+        if context.capability_delivery.is_none() {
+            return Err(AgentAdapterError::InvalidRequest(
+                "Assignment Capability delivery is not configured".into(),
+            ));
+        }
         self.probe()?;
         let label = Self::label(context)?;
         let workspace = self.dispatch_workspace(resources)?;
@@ -661,12 +676,28 @@ impl AgentDispatchAdapter for HerdrAdapter {
             pane
         };
         if Self::active(&context.resources, "agent-name").is_none() {
-            self.request("agent.start", json!({"name": label, "kind": "pi", "pane_id": pane, "args": ["--model", context.assignment.profile.model], "timeout_ms": context.assignment.profile.startup_timeout_millis}))?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|_| {
+                    AgentAdapterError::Transient("system clock is before Unix epoch".into())
+                })?
+                .as_millis()
+                .try_into()
+                .map_err(|_| AgentAdapterError::Transient("system clock is out of range".into()))?;
+            if !resources
+                .begin_agent_launch(&context.assignment.id, now)
+                .map_err(|_| {
+                    AgentAdapterError::Transient("could not record launch intent".into())
+                })?
+            {
+                return Err(AgentAdapterError::Conflict(
+                    "launch was already attempted or Assignment is no longer provisioning".into(),
+                ));
+            }
+            self.request("agent.start", json!({"name": label, "kind": "pi", "pane_id": pane, "args": ["--model", context.assignment.profile.model, bootstrap], "timeout_ms": context.assignment.profile.startup_timeout_millis}))?;
             Self::retain(resources, context, "agent-name", &label)?;
         }
-        Err(AgentAdapterError::Conflict(
-            "agent started but readiness has not been established; initial prompt not sent".into(),
-        ))
+        Ok(())
     }
 
     fn observe(
@@ -797,6 +828,7 @@ mod tests {
         let delivery = forge_app::AssignmentCapabilityDelivery {
             endpoint: "http://127.0.0.1:45003".into(),
             secret_file: std::path::PathBuf::from("/forge-data/assignment-capabilities/a-1"),
+            cli_path: std::path::PathBuf::from("/forge-bin/forge"),
         };
         assert_eq!(
             super::capability_launch_environment("a-1", &delivery),
@@ -804,8 +836,62 @@ mod tests {
                 "FORGE_ASSIGNMENT_ID": "a-1",
                 "FORGE_ASSIGNMENT_DAEMON_URL": "http://127.0.0.1:45003",
                 "FORGE_ASSIGNMENT_CAPABILITY_SECRET_FILE": "/forge-data/assignment-capabilities/a-1",
+                "FORGE_ASSIGNMENT_FORGE_CLI": "/forge-bin/forge",
             })
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provisioning_refuses_to_launch_without_a_bootstrap() {
+        use forge_app::{
+            AgentDispatchRepository, NewAgentAssignment, NewTypedRecord, Project,
+            ProjectRepository, RecordRepository, RecordType,
+        };
+        let store = forge_store::SqliteProjectRepository::in_memory().unwrap();
+        store
+            .register(&Project {
+                slug: "alpha".into(),
+                registered_folder: "/project".into(),
+                origin_url: "https://example.test/repo".into(),
+            })
+            .unwrap();
+        let task = store
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Task,
+                task_kind: None,
+                body: "task".into(),
+                project_slugs: vec!["alpha".into()],
+                generated_by_ids: vec![],
+            })
+            .unwrap();
+        let assignment = store
+            .create_agent_assignment(&NewAgentAssignment {
+                id: "bootstrap-test".into(),
+                record_id: task.id,
+                project_slug: "alpha".into(),
+                profile_revision: 1,
+            })
+            .unwrap();
+        let context = forge_app::AgentDispatchContext {
+            assignment,
+            registered_project_folder: "/project".into(),
+            agent_workspace: None,
+            dispatch_workspace: None,
+            rendered_initial_prompt: "full instructions".into(),
+            bootstrap_prompt: None,
+            capability_delivery: None,
+            resources: vec![],
+        };
+        let adapter = super::HerdrAdapter {
+            socket_path: "/nonexistent-herdr-socket".into(),
+            dispatch_root: "/tmp".into(),
+        };
+        assert!(matches!(
+            adapter.provision(&context, &store),
+            Err(forge_app::AgentAdapterError::InvalidRequest(_))
+        ));
+        assert_eq!(store.agent_launch_intent("bootstrap-test").unwrap(), None);
     }
 
     #[cfg(unix)]
@@ -850,6 +936,139 @@ mod tests {
             dispatch_root: std::env::temp_dir().join("forge-dispatch-workspace"),
         };
         adapter.probe().unwrap();
+        server.join().unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provisioning_launches_only_short_bootstrap_and_delivers_secret_path() {
+        use forge_app::{
+            AgentDispatchContext, AgentDispatchRepository, AssignmentCapabilityDelivery,
+            DispatchWorkspace, NewAgentAssignment, NewTypedRecord, Project, ProjectRepository,
+            RecordRepository, RecordType,
+        };
+        use std::{
+            io::{BufRead, BufReader, Write},
+            os::unix::net::UnixListener,
+            thread,
+        };
+        let repository = forge_store::SqliteProjectRepository::in_memory().unwrap();
+        repository
+            .register(&Project {
+                slug: "project".into(),
+                registered_folder: "/project".into(),
+                origin_url: "https://example.test/project".into(),
+            })
+            .unwrap();
+        let task = repository
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Task,
+                task_kind: None,
+                body: "private full instructions".into(),
+                project_slugs: vec!["project".into()],
+                generated_by_ids: vec![],
+            })
+            .unwrap();
+        let assignment = repository
+            .create_agent_assignment(&NewAgentAssignment {
+                id: "assignment".into(),
+                record_id: task.id,
+                project_slug: "project".into(),
+                profile_revision: 1,
+            })
+            .unwrap();
+        repository
+            .retain_dispatch_workspace(&DispatchWorkspace {
+                id: "workspace".into(),
+            })
+            .unwrap();
+        let context = AgentDispatchContext {
+            assignment: assignment.clone(),
+            registered_project_folder: "/project".into(),
+            agent_workspace: Some("/worktree".into()),
+            dispatch_workspace: Some(DispatchWorkspace {
+                id: "workspace".into(),
+            }),
+            rendered_initial_prompt: "private full instructions".into(),
+            bootstrap_prompt: Some("short bootstrap".into()),
+            capability_delivery: Some(AssignmentCapabilityDelivery {
+                endpoint: "http://127.0.0.1:45003".into(),
+                secret_file: "/secrets/assignment".into(),
+                cli_path: "/bin/forge".into(),
+            }),
+            resources: vec![],
+        };
+        let path = std::env::temp_dir().join(format!(
+            "forge-launch-{}-{}.sock",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let listener = UnixListener::bind(&path).unwrap();
+        let model = assignment.profile.model.clone();
+        let server = thread::spawn(move || {
+            for (method, response) in [
+                (
+                    "ping",
+                    serde_json::json!({"type":"pong","protocol":22,"version":"test"}),
+                ),
+                (
+                    "session.snapshot",
+                    serde_json::json!({"type":"session_snapshot","snapshot":{"protocol":22,"schema_version":1,"workspaces":[]}}),
+                ),
+                (
+                    "workspace.get",
+                    serde_json::json!({"workspace":{"workspace_id":"workspace"}}),
+                ),
+                (
+                    "tab.create",
+                    serde_json::json!({"tab":{"tab_id":"tab"},"root_pane":{"pane_id":"pane"}}),
+                ),
+                ("agent.start", serde_json::json!({"type":"agent_started"})),
+            ] {
+                let mut stream = listener.accept().unwrap().0;
+                let mut line = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(request["method"], method);
+                if method == "tab.create" {
+                    assert_eq!(
+                        request["params"]["env"]["FORGE_ASSIGNMENT_CAPABILITY_SECRET_FILE"],
+                        "/secrets/assignment"
+                    );
+                }
+                if method == "agent.start" {
+                    assert_eq!(
+                        request["params"]["args"],
+                        serde_json::json!(["--model", model, "short bootstrap"])
+                    );
+                    assert!(!line.contains("private full instructions"));
+                    assert!(!line.contains("/secrets/assignment"));
+                }
+                serde_json::to_writer(
+                    &mut stream,
+                    &serde_json::json!({"id":"forge-dispatch","result":response}),
+                )
+                .unwrap();
+                stream.write_all(b"\n").unwrap();
+            }
+        });
+        let adapter = super::HerdrAdapter {
+            socket_path: path.clone(),
+            dispatch_root: "/worktree".into(),
+        };
+        adapter.provision(&context, &repository).unwrap();
+        assert!(
+            repository
+                .agent_launch_intent(&assignment.id)
+                .unwrap()
+                .is_some()
+        );
         server.join().unwrap();
         std::fs::remove_file(path).unwrap();
     }
@@ -977,6 +1196,7 @@ mod tests {
             registered_project_folder: "/project".into(),
             agent_workspace: Some("/worktree".into()),
             rendered_initial_prompt: String::new(),
+            bootstrap_prompt: None,
             capability_delivery: None,
             dispatch_workspace: Some(forge_app::DispatchWorkspace {
                 id: "workspace".into(),

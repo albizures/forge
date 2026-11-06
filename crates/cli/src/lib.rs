@@ -79,6 +79,91 @@ fn managed_error(error: &forgeup::ForgeupError) -> String {
         "could not resolve the active Forge Revision: {error}. Run `forgeup use <selector>` or provide --server-url / FORGE_SERVER_URL"
     )
 }
+/// Performs the Assignment bootstrap using the secret delivered in an owner-only file.
+/// Instructions are returned only after acknowledgement and a confirmed Task start.
+#[allow(clippy::missing_errors_doc)]
+pub async fn assignment_bootstrap() -> Result<String, String> {
+    let assignment_id = env::var("FORGE_ASSIGNMENT_ID").map_err(|_| "missing Assignment ID")?;
+    let endpoint =
+        env::var("FORGE_ASSIGNMENT_DAEMON_URL").map_err(|_| "missing Assignment daemon URL")?;
+    let secret_file = env::var_os("FORGE_ASSIGNMENT_CAPABILITY_SECRET_FILE")
+        .ok_or("missing Assignment secret file")?;
+    let secret =
+        fs::read_to_string(secret_file).map_err(|_| "could not read Assignment secret file")?;
+    let secret = secret.trim_end_matches('\n').to_owned();
+    if secret.is_empty() {
+        return Err("empty Assignment secret".into());
+    }
+    assignment_bootstrap_with(&endpoint, assignment_id, secret).await
+}
+
+async fn assignment_bootstrap_with(
+    endpoint: &str,
+    assignment_id: String,
+    secret: String,
+) -> Result<String, String> {
+    let url = format!("{}/rpc", endpoint.trim_end_matches('/'));
+    let client = client(&url)?;
+    let auth = || forge_rpc::AcknowledgeAssignmentRequest {
+        assignment_id: assignment_id.clone(),
+        secret: secret.clone(),
+        correlation_id: "bootstrap".into(),
+    };
+    let mut acknowledged = None;
+    for attempt in 0..3 {
+        if let Ok(value) = client.assignment_acknowledge(auth()).await {
+            acknowledged = Some(value);
+            break;
+        }
+        if attempt < 2 {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+    let Some(assignment) = acknowledged else {
+        return Err("Assignment acknowledgement failed or is uncertain; do not begin work".into());
+    };
+    let mut started = false;
+    for attempt in 0..3 {
+        let result = client
+            .assignment_task_start(forge_rpc::AuthenticatedAssignmentTaskStartRequest {
+                assignment_id: assignment_id.clone(),
+                secret: secret.clone(),
+                correlation_id: "bootstrap".into(),
+                task_id: assignment.record_id,
+            })
+            .await;
+        if result
+            .is_ok_and(|record| record.id == assignment.record_id && record.status == "in_progress")
+        {
+            started = true;
+            break;
+        }
+        if attempt < 2 {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+    if !started {
+        let _ = client.assignment_bootstrap_failure(forge_rpc::AssignmentBootstrapFailureRequest {
+            assignment_id, secret, correlation_id: "bootstrap".into(),
+            message: "Agent bootstrap could not establish Task start after bounded retries; no implementation should begin. Investigate the Assignment and Task.".into(),
+        }).await;
+        return Err("Task start failed or is uncertain; do not begin work".into());
+    }
+    for attempt in 0..3 {
+        if let Ok(instructions) = client.assignment_instructions(auth()).await {
+            return Ok(instructions);
+        }
+        if attempt < 2 {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+    let _ = client.assignment_bootstrap_failure(forge_rpc::AssignmentBootstrapFailureRequest {
+        assignment_id, secret, correlation_id: "bootstrap".into(),
+        message: "Agent bootstrap started the Task but could not retrieve instructions after bounded retries; no implementation should begin.".into(),
+    }).await;
+    Err("Could not retrieve Assignment instructions; do not begin work".into())
+}
+
 fn client(url: &str) -> Result<jsonrpsee::http_client::HttpClient, String> {
     HttpClientBuilder::default()
         .request_timeout(REQUEST_TIMEOUT)
@@ -152,6 +237,19 @@ pub async fn request_agent_dispatch_profile(
     client(url)?.profile().await.map_err(|error| {
         format!("could not inspect Agent Dispatch profile through Forge daemon: {error}")
     })
+}
+
+/// Configures the Task Agent Profile acknowledgement timeout in milliseconds.
+pub async fn request_set_acknowledgement_timeout(
+    url: &str,
+    timeout_millis: u64,
+) -> Result<AgentDispatchProfileResponse, String> {
+    client(url)?
+        .profile_acknowledgement_timeout_set(forge_rpc::SetAcknowledgementTimeoutRequest {
+            timeout_millis,
+        })
+        .await
+        .map_err(|error| format!("could not configure acknowledgement timeout: {error}"))
 }
 
 /// Configures a registered Project's dispatch capacity.
@@ -949,6 +1047,94 @@ mod tests {
                 .unwrap(),
             "http://manual-daemon/rpc"
         );
+    }
+
+    #[tokio::test]
+    async fn bootstrap_retries_lost_responses_and_never_reads_after_start_failure() {
+        use axum::{Json, Router, extract::State, routing::post};
+        use std::sync::{Arc, Mutex};
+        #[derive(Default)]
+        struct Calls {
+            ack: u32,
+            start: u32,
+            read: u32,
+            report: u32,
+            fail_start: bool,
+        }
+        async fn handler(
+            State(state): State<Arc<Mutex<Calls>>>,
+            Json(request): Json<serde_json::Value>,
+        ) -> Json<serde_json::Value> {
+            let mut calls = state.lock().unwrap();
+            let method = request["method"].as_str().unwrap();
+            let result = if method.ends_with("assignmentAcknowledge") {
+                calls.ack += 1;
+                if calls.ack == 1 {
+                    None
+                } else {
+                    Some(serde_json::json!({"id":"a", "record_id":7, "state":"working"}))
+                }
+            } else if method.ends_with("assignmentTaskStart") {
+                calls.start += 1;
+                if calls.start == 1 || calls.fail_start {
+                    None
+                } else {
+                    Some(
+                        serde_json::json!({"id":7,"record_type":"task","task_kind":null,"body":"task","project_scope":{"project_slugs":[]},"status":"in_progress","completion_resolution":null,"relationships":[]}),
+                    )
+                }
+            } else if method.ends_with("assignmentInstructions") {
+                calls.read += 1;
+                Some(serde_json::json!("instructions"))
+            } else if method.ends_with("assignmentBootstrapFailure") {
+                calls.report += 1;
+                Some(serde_json::Value::Null)
+            } else {
+                panic!("unexpected method {method}")
+            };
+            Json(match result {
+                Some(value) => {
+                    serde_json::json!({"jsonrpc":"2.0","id":request["id"],"result":value})
+                }
+                None => {
+                    serde_json::json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":-32000,"message":"response lost"}})
+                }
+            })
+        }
+        let state = Arc::new(Mutex::new(Calls::default()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/rpc", post(handler))
+            .with_state(state.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let endpoint = format!("http://{address}");
+        assert_eq!(
+            assignment_bootstrap_with(&endpoint, "a".into(), "secret".into())
+                .await
+                .unwrap(),
+            "instructions"
+        );
+        {
+            let mut calls = state.lock().unwrap();
+            assert_eq!((calls.ack, calls.start, calls.read), (2, 2, 1));
+            *calls = Calls {
+                fail_start: true,
+                ..Calls::default()
+            };
+        }
+        assert!(
+            assignment_bootstrap_with(&endpoint, "a".into(), "secret".into())
+                .await
+                .is_err()
+        );
+        {
+            let calls = state.lock().unwrap();
+            assert_eq!((calls.start, calls.read, calls.report), (3, 0, 1));
+        }
+        server.abort();
     }
 
     #[tokio::test]

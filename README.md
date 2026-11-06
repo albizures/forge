@@ -312,11 +312,29 @@ forge agent-dispatch reconcile
 
 Use `forge agent-dispatch status --project <slug>` for capacity/configuration and `forge worktree info <task>` or `forge worktree doctor` for retained checkout evidence. Correct the endpoint, provider state, or Git checkout before an explicit recovery action. After resolving a Dispatch Hold, run `forge agent-dispatch resume <task-id>`; to retire an assignment's provider resources while retaining its Git evidence, run `forge agent-dispatch assignment-retire <assignment-id>`; and use `forge agent-dispatch task-reopen <task-id>` only for an unassigned manual In Progress Task.
 
-Forge does **not** reset, rebase, delete, recreate, or automatically repair a dispatcher-created worktree/branch; does not adopt unknown provider resources; does not infer Task completion from a provider state; and does not automatically retire an assignment merely because its checkout is missing or invalid. A failed setup hook, branch collision, unavailable base, invalid checkout, or provider/workspace failure retains diagnostics and requires operator investigation. After three failed provisioning attempts Forge creates a durable hold; capacity is released only after the failed attempt is durably closed or explicit retirement finishes.
+Forge does **not** reset, rebase, delete, recreate, or automatically repair a dispatcher-created worktree/branch; does not adopt unknown provider resources; does not infer Task completion from a provider state; and does not automatically retire an assignment merely because its checkout is missing or invalid. A failed setup hook, branch collision, unavailable base, invalid checkout, or provider/workspace failure retains diagnostics and requires operator investigation. Repeated definite provisioning failures can create a durable hold. Uncertain launches follow the more conservative acknowledgement and recovery rules below; do not assume that clearing a hold or requesting retirement safely releases their capacity.
 
 ### Intentionally deferred V1 limits
 
 This release does not provide automated Git evidence cleanup/repair, automatic provider-resource adoption or replacement, a mutable agent profile/prompt/model override, user-initiated cancellation semantics beyond assignment retirement, or automated resolution of conflicting/missing shared-workspace state. Events are wake signals only; authoritative reconciliation remains the source of truth. Final task completion and broader integration/release policy remain explicit Forge workflow actions.
+
+## Safe agent launch and acknowledgement handoff (Spec #567)
+
+This handoff covers safe launch and acknowledgement, **not an operationally complete recovery feature**. The follow-on Spec #568, “Agent assignment investigation and safe recovery,” is still required for assignment diagnostics, safe recovery and audited resolution of unknown resources.
+
+Forge launches Pi through Herdr with a short bootstrap and the profile model, not the rendered Task instructions or capability secret in the launch arguments. The capability is delivered in an owner-only file. The bootstrap authenticates its acknowledgement, separately starts the Task with bounded retries, and only then retrieves the rendered instructions through an assignment-scoped authenticated read. Acknowledgement makes the Assignment Working; it is not itself a Task start. If start cannot be confirmed, the agent must not begin implementation.
+
+Before launch, Forge persists a one-shot launch intent and acknowledgement deadline. The Task Agent Profile acknowledgement timeout defaults to 300000 ms and is separate from the startup timeout. Inspect the profile with `forge agent-dispatch profile`; create a profile revision with `forge agent-dispatch profile-acknowledgement-timeout-set --timeout-millis <milliseconds>` when a different deadline is needed.
+
+Existing databases migrate the durable acknowledgement and launch-intent state automatically; back up the database before upgrading. Pre-upgrade Provisioning Assignments without a deadline are treated as uncertain, not automatically relaunched. At a missed deadline, or after an interrupted uncertain attempt, Forge retains the open Assignment, evidence and reserved Project capacity and places a Dispatch Hold for investigation. Do not infer that the agent is absent. A late acknowledgement can make the Assignment Working and allow its agent to start the Task, but does not clear the hold.
+
+`forge agent-dispatch resume <task-id>` clears a hold; it does **not** establish that an agent is gone, authorize redelivery or resolve uncertain resources. Clearing it prematurely must not trigger a repeat launch. Preserve evidence and capacity while investigating; do not manually create a replacement merely to bypass the hold. The existing `assignment-retire` operation verifies known provider identities but is not a complete unknown-resource recovery workflow. Spec #568 is intended to provide the missing investigation, revocation and explicit resolution controls.
+
+### Verification and known limitations
+
+- Task #569 verified bootstrap prompt execution and subsequent interactive use with Herdr 0.9.5 and Pi 1.5.0. Task #573 exercised the integrated flow with those versions and profile `gpt-5.6-terra`: the agent executed the bootstrap, acknowledged, started its Task and retrieved authenticated instructions from an isolated daemon.
+- Task #573 recorded `cargo test --workspace -- --test-threads=1` and `git diff --check` passing. A default-thread workspace test run failed two server ownership-lock/listener tests with `WouldBlock` and `AddrInUse`; an earlier default-thread run passed. Strict Clippy was reported failing on existing unrelated `forge-app` warnings in Tasks #570 and #571.
+- During the isolated smoke cleanup, `assignment-retire` failed with a persisted Herdr resource tuple mismatch. The dedicated smoke workspace was closed and daemon stopped, but the isolated store and worktree remain at `/tmp/forge-573-iejdsy` for investigation. This is not evidence of successful retirement; no production assignments were affected.
 
 ## Manual Managed Worktree release handoff
 

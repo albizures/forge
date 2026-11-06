@@ -15,9 +15,9 @@ use forge_cli::{
     request_project_setup_hook, request_record_comments, request_record_updates,
     request_register_project, request_relate_record, request_reopen_dispatch_task,
     request_resume_dispatch_task, request_retire_agent_assignment,
-    request_select_dispatch_workspace, request_show_record, request_start_assignment_task,
-    request_start_record, request_status, request_unrelate_record, request_worktree_root,
-    resolve_endpoint as resolve_managed_endpoint,
+    request_select_dispatch_workspace, request_set_acknowledgement_timeout, request_show_record,
+    request_start_assignment_task, request_start_record, request_status, request_unrelate_record,
+    request_worktree_root, resolve_endpoint as resolve_managed_endpoint,
 };
 use std::io::Read;
 
@@ -247,10 +247,14 @@ enum TaskCommand {
 }
 #[derive(Debug, Subcommand)]
 enum AgentDispatchCommand {
+    /// Acknowledge and start the delivered Assignment before printing its instructions.
+    Bootstrap,
     Endpoint(AgentDispatchEndpointArgs),
     /// Select the existing workspace named by HERDR_WORKSPACE_ID.
     WorkspaceSelect(AgentDispatchRequestArgs),
     Profile(AgentDispatchRequestArgs),
+    /// Create a Task Agent Profile revision with this acknowledgement timeout.
+    ProfileAcknowledgementTimeoutSet(AgentDispatchTimeoutArgs),
     Project(AgentDispatchProjectArgs),
     Status(AgentDispatchStatusArgs),
     Reconcile(AgentDispatchRequestArgs),
@@ -270,6 +274,15 @@ struct AgentDispatchEndpointArgs {
     /// Set this absolute Unix socket path. Omit to inspect current configuration.
     #[arg(long)]
     socket_path: Option<String>,
+    #[arg(long, value_name = "URL")]
+    server_url: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Args, Debug)]
+struct AgentDispatchTimeoutArgs {
+    #[arg(long)]
+    timeout_millis: u64,
     #[arg(long, value_name = "URL")]
     server_url: Option<String>,
     #[arg(long)]
@@ -819,6 +832,18 @@ async fn worktree(command: WorktreeCommand) -> i32 {
 
 async fn agent_dispatch(command: AgentDispatchCommand) -> i32 {
     let (result, json) = match command {
+        AgentDispatchCommand::Bootstrap => {
+            return match forge_cli::assignment_bootstrap().await {
+                Ok(instructions) => {
+                    println!("{instructions}");
+                    0
+                }
+                Err(error) => {
+                    eprintln!("forge agent-dispatch bootstrap: {error}");
+                    1
+                }
+            };
+        }
         AgentDispatchCommand::Endpoint(args) => (
             request_agent_dispatch_endpoint(
                 &resolve_endpoint(args.server_url.as_deref()).await,
@@ -844,6 +869,15 @@ async fn agent_dispatch(command: AgentDispatchCommand) -> i32 {
             request_agent_dispatch_profile(&resolve_endpoint(args.server_url.as_deref()).await)
                 .await
                 .map(|value| serde_json::to_value(value).unwrap()),
+            args.json,
+        ),
+        AgentDispatchCommand::ProfileAcknowledgementTimeoutSet(args) => (
+            request_set_acknowledgement_timeout(
+                &resolve_endpoint(args.server_url.as_deref()).await,
+                args.timeout_millis,
+            )
+            .await
+            .map(|value| serde_json::to_value(value).unwrap()),
             args.json,
         ),
         AgentDispatchCommand::Project(args) => (

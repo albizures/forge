@@ -200,6 +200,10 @@ _Avoid_: Project workspace, task workspace
 A durable condition that reserves Project dispatch capacity while an Agent Assignment's potentially live Agent or uncertain resources cannot be reconciled safely. It can exist for a closed Assignment.
 _Avoid_: failed Task, completed Agent
 
+**Assignment Acknowledgement**:
+A capability-authenticated signal that an Agent has received its Agent Assignment and can communicate with Forge. It does not itself start the assigned Task.
+_Avoid_: task start, heartbeat
+
 **Assignment Heartbeat**:
 A capability-authenticated signal from an Agent Assignment's session that provides positive evidence of recent liveness. Its absence does not establish that the Agent has exited or is ready for work.
 _Avoid_: proof of death, readiness signal

@@ -75,6 +75,11 @@ pub trait AgentDispatchApi {
     ) -> RpcResult<DispatchWorkspaceResponse>;
     #[method(name = "profile")]
     async fn profile(&self) -> RpcResult<AgentDispatchProfileResponse>;
+    #[method(name = "profileAcknowledgementTimeoutSet")]
+    async fn profile_acknowledgement_timeout_set(
+        &self,
+        request: SetAcknowledgementTimeoutRequest,
+    ) -> RpcResult<AgentDispatchProfileResponse>;
     #[method(name = "projectSet")]
     async fn project_set(
         &self,
@@ -92,8 +97,28 @@ pub trait AgentDispatchApi {
         &self,
         request: DispatchGrillingRequest,
     ) -> RpcResult<AgentAssignmentResponse>;
+    #[method(name = "assignmentAcknowledge")]
+    async fn assignment_acknowledge(
+        &self,
+        request: AcknowledgeAssignmentRequest,
+    ) -> RpcResult<AgentAssignmentResponse>;
     #[method(name = "taskStart")]
     async fn task_start(&self, request: StartAssignmentTaskRequest) -> RpcResult<RecordResponse>;
+    #[method(name = "assignmentTaskStart")]
+    async fn assignment_task_start(
+        &self,
+        request: AuthenticatedAssignmentTaskStartRequest,
+    ) -> RpcResult<RecordResponse>;
+    #[method(name = "assignmentInstructions")]
+    async fn assignment_instructions(
+        &self,
+        request: AcknowledgeAssignmentRequest,
+    ) -> RpcResult<String>;
+    #[method(name = "assignmentBootstrapFailure")]
+    async fn assignment_bootstrap_failure(
+        &self,
+        request: AssignmentBootstrapFailureRequest,
+    ) -> RpcResult<()>;
     #[method(name = "taskReopen")]
     async fn task_reopen(&self, request: RecordIdRequest) -> RpcResult<RecordResponse>;
     #[method(name = "resume")]
@@ -359,6 +384,12 @@ pub struct AgentDispatchProfileResponse {
     pub agent_kind: String,
     pub model: String,
     pub prompt_template: String,
+    pub startup_timeout_millis: u64,
+    pub acknowledgement_timeout_millis: u64,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SetAcknowledgementTimeoutRequest {
+    pub timeout_millis: u64,
 }
 impl From<AgentProfile> for AgentDispatchProfileResponse {
     fn from(value: AgentProfile) -> Self {
@@ -369,6 +400,8 @@ impl From<AgentProfile> for AgentDispatchProfileResponse {
             agent_kind: value.agent_kind,
             model: value.model,
             prompt_template: value.prompt_template,
+            startup_timeout_millis: value.startup_timeout_millis,
+            acknowledgement_timeout_millis: value.acknowledgement_timeout_millis,
         }
     }
 }
@@ -391,6 +424,29 @@ impl From<forge_app::AgentAssignment> for AgentAssignmentResponse {
             state: format!("{:?}", value.state).to_lowercase(),
         }
     }
+}
+
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AcknowledgeAssignmentRequest {
+    pub assignment_id: String,
+    pub secret: String,
+    pub correlation_id: String,
+}
+
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AssignmentBootstrapFailureRequest {
+    pub assignment_id: String,
+    pub secret: String,
+    pub correlation_id: String,
+    pub message: String,
+}
+
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AuthenticatedAssignmentTaskStartRequest {
+    pub assignment_id: String,
+    pub secret: String,
+    pub correlation_id: String,
+    pub task_id: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

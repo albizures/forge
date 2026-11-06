@@ -579,6 +579,7 @@ pub struct AgentProfile {
     pub retry_limit: u32,
     pub retry_backoff_millis: u64,
     pub startup_timeout_millis: u64,
+    pub acknowledgement_timeout_millis: u64,
     pub unknown_state_grace_millis: u64,
 }
 
@@ -600,6 +601,13 @@ pub struct AgentAssignment {
     pub retry_count: u32,
     pub closed_at_millis: Option<u64>,
     pub closure_reason: Option<AgentAssignmentClosureReason>,
+}
+
+/// Durable evidence of a single potentially uncertain agent launch.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentLaunchIntent {
+    pub started_at_millis: u64,
+    pub acknowledgement_deadline_millis: u64,
 }
 
 /// The durable lifecycle of an Agent Assignment while it retains Project capacity.
@@ -728,6 +736,8 @@ pub struct AgentDispatchContext {
     pub agent_workspace: Option<PathBuf>,
     pub dispatch_workspace: Option<DispatchWorkspace>,
     pub rendered_initial_prompt: String,
+    /// A short, verified bootstrap, distinct from the full rendered instructions.
+    pub bootstrap_prompt: Option<String>,
     /// Capability delivery is intentionally opaque to the provider. A later capability issuer
     /// supplies this value without exposing its secret in assignment persistence.
     pub capability_delivery: Option<AssignmentCapabilityDelivery>,
@@ -739,6 +749,7 @@ pub struct AgentDispatchContext {
 pub struct AssignmentCapabilityDelivery {
     pub endpoint: String,
     pub secret_file: PathBuf,
+    pub cli_path: PathBuf,
 }
 
 impl std::fmt::Debug for AssignmentCapabilityDelivery {
@@ -796,6 +807,7 @@ pub trait AgentDispatchAdapterFactory: Send + Sync {
 /// The persisted result of reconciling one already-open assignment.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AssignmentReconciliation {
+    AwaitingAcknowledgement,
     StateUpdated(AgentAssignment),
     Closed(AgentAssignment),
     Stale,
@@ -833,6 +845,17 @@ pub fn reconcile_agent_assignment<A: AgentDispatchAdapter + ?Sized>(
         | AgentAssignmentState::Blocked
         | AgentAssignmentState::Unknown => adapter.observe(&context),
     };
+    if assignment.state == AgentAssignmentState::Provisioning
+        && (observed.is_ok() || repository.agent_launch_intent(&assignment.id)?.is_some())
+    {
+        return if repository.agent_assignment(&assignment.id)?.state
+            == AgentAssignmentState::Provisioning
+        {
+            Ok(AssignmentReconciliation::AwaitingAcknowledgement)
+        } else {
+            Ok(AssignmentReconciliation::Stale)
+        };
+    }
     let observation = match observed {
         Ok(observation) => observation,
         Err(error) => {
@@ -946,9 +969,25 @@ pub fn reconcile_agent_dispatch<F: AgentDispatchAdapterFactory + ?Sized>(
     let mut reconciled = Vec::new();
     for assignment in repository.list_open_agent_assignments()? {
         if assignment.state == AgentAssignmentState::Provisioning
-            && repository.dispatch_hold(assignment.record_id)?.is_some()
+            && !repository.guard_agent_provisioning(&assignment.id, now_millis)?
         {
             continue;
+        }
+        if let Some(_intent) = repository.agent_launch_intent(&assignment.id)? {
+            // Acknowledgement can win while agent.start is still in flight. Until the
+            // response has retained the external identity, an absent observation is not
+            // evidence of agent death (and a lost response may never retain it).
+            if assignment.state == AgentAssignmentState::Working
+                && !repository
+                    .list_agent_assignment_resources(&assignment.id)?
+                    .iter()
+                    .any(|resource| {
+                        resource.resource_kind == "agent-name"
+                            && resource.retired_at_millis.is_none()
+                    })
+            {
+                continue;
+            }
         }
         if assignment.next_retry_at_millis > now_millis {
             continue;
@@ -1010,10 +1049,9 @@ fn record_dispatch_failure(
     {
         return Ok(());
     }
-    repository.hold_dispatch(
-        assignment.record_id,
-        "automatic dispatch stopped after an uncertain provisioning attempt",
-    )?;
+    if !repository.hold_uncertain_agent_assignment(&assignment.id)? {
+        return Ok(());
+    }
     repository.add_record_comment(
         assignment.record_id,
         "Automatic dispatch stopped after an uncertain provisioning attempt; the Assignment remains open because an Agent may still be live. A Dispatch Hold requires operator investigation.",
@@ -1085,6 +1123,7 @@ fn agent_dispatch_context(
         registered_project_folder: project.registered_folder,
         agent_workspace,
         dispatch_workspace: repository.dispatch_workspace()?,
+        bootstrap_prompt: None,
         rendered_initial_prompt: format!(
             "{}\n\n{}{}",
             assignment.profile.prompt_template, record.body, worktree_instruction
@@ -1152,6 +1191,7 @@ pub enum AssignmentAuthorizationOperation {
     AddComment,
     CompleteTask,
     StartTask,
+    Acknowledge,
     CreateSubscription,
     RenewSubscription,
     DeleteSubscription,
@@ -1237,6 +1277,13 @@ pub trait AgentDispatchRepository: RecordRepository {
         record_type: RecordType,
         revision: u32,
     ) -> Result<AgentProfile, RegistrationError>;
+    /// Returns the active immutable Task profile revision.
+    fn active_task_agent_profile(&self) -> Result<AgentProfile, RegistrationError>;
+    /// Creates a new Task profile revision with a distinct acknowledgement timeout.
+    fn configure_task_acknowledgement_timeout(
+        &self,
+        timeout_millis: u64,
+    ) -> Result<AgentProfile, RegistrationError>;
     /// Creates an Assignment with immutable profile provenance.
     fn create_agent_assignment(
         &self,
@@ -1272,6 +1319,11 @@ pub trait AgentDispatchRepository: RecordRepository {
         expected: AgentAssignmentState,
         next: AgentAssignmentState,
     ) -> Result<Option<AgentAssignment>, RegistrationError>;
+    /// Atomically acknowledges an open provisioning Assignment, including retries.
+    fn acknowledge_agent_assignment(
+        &self,
+        assignment_id: &str,
+    ) -> Result<AgentAssignment, RegistrationError>;
     /// Closes an open Assignment conditionally, releasing its capacity for a later attempt.
     fn close_agent_assignment(
         &self,
@@ -1292,6 +1344,28 @@ pub trait AgentDispatchRepository: RecordRepository {
         expected: AgentAssignmentState,
         next_retry_at_millis: u64,
         retry_count: u32,
+    ) -> Result<bool, RegistrationError>;
+    /// Persists launch intent and deadline once, immediately before the launch request.
+    fn begin_agent_launch(
+        &self,
+        assignment_id: &str,
+        now_millis: u64,
+    ) -> Result<bool, RegistrationError>;
+    /// Returns durable launch intent, if one was recorded.
+    fn agent_launch_intent(
+        &self,
+        assignment_id: &str,
+    ) -> Result<Option<AgentLaunchIntent>, RegistrationError>;
+    /// Hold an open provisioning Assignment without racing an acknowledgement.
+    fn hold_uncertain_agent_assignment(
+        &self,
+        assignment_id: &str,
+    ) -> Result<bool, RegistrationError>;
+    /// Atomically holds uncertain provisioning attempts and returns whether a fresh attempt may run.
+    fn guard_agent_provisioning(
+        &self,
+        assignment_id: &str,
+        now_millis: u64,
     ) -> Result<bool, RegistrationError>;
     /// Atomically records intent before any potentially side-effecting provisioning call.
     fn begin_agent_provision(&self, _assignment_id: &str) -> Result<bool, RegistrationError> {
@@ -1408,7 +1482,7 @@ pub fn assignment_context<R: AgentDispatchRepository>(
 
 /// Authorizes a capability-authenticated Comment on its bound Task and records its decision.
 #[allow(clippy::missing_errors_doc)]
-pub fn assignment_add_comment<R: AgentDispatchRepository>(
+pub fn assignment_add_comment<R: AgentDispatchRepository + ?Sized>(
     repository: &R,
     assignment_id: &str,
     capability_id: &str,
@@ -1434,6 +1508,27 @@ pub fn assignment_add_comment<R: AgentDispatchRepository>(
         ));
     }
     repository.add_record_comment(task_id, body, None)
+}
+
+/// Records an acknowledgement after the daemon authenticates the Assignment Capability.
+#[allow(clippy::missing_errors_doc)]
+pub fn assignment_acknowledge<R: AgentDispatchRepository + ?Sized>(
+    repository: &R,
+    assignment_id: &str,
+    capability_id: &str,
+    correlation_id: &str,
+) -> Result<AgentAssignment, RegistrationError> {
+    let assignment = repository.agent_assignment(assignment_id)?;
+    authorize_assignment_operation(
+        repository,
+        &assignment,
+        capability_id,
+        correlation_id,
+        AssignmentAuthorizationOperation::Acknowledge,
+        assignment.record_id,
+        assignment.closed_at_millis.is_none(),
+    )?;
+    repository.acknowledge_agent_assignment(assignment_id)
 }
 
 /// Authorizes idempotent capability-authenticated start of its bound Open Task.
@@ -1802,7 +1897,7 @@ impl Application {
     ///
     /// Returns configuration or persistence failures.
     pub fn task_agent_profile(&self) -> Result<AgentProfile, RegistrationError> {
-        self.dispatch()?.agent_profile(RecordType::Task, 1)
+        self.dispatch()?.active_task_agent_profile()
     }
 
     /// Dispatches one ready, single-Project Grilling without creating a Managed Worktree.
@@ -1854,6 +1949,105 @@ impl Application {
             })?;
         let _ = reconcile_agent_assignment(dispatch, adapter.as_ref(), &assignment)?;
         dispatch.agent_assignment(&assignment.id)
+    }
+
+    /// Creates a new Task Agent Profile revision with the requested acknowledgement timeout.
+    #[allow(clippy::missing_errors_doc)]
+    pub fn configure_task_acknowledgement_timeout(
+        &self,
+        timeout_millis: u64,
+    ) -> Result<AgentProfile, RegistrationError> {
+        self.dispatch()?
+            .configure_task_acknowledgement_timeout(timeout_millis)
+    }
+
+    /// Acknowledges an Assignment after transport-level capability authentication.
+    #[allow(clippy::missing_errors_doc)]
+    pub fn acknowledge_assignment(
+        &self,
+        assignment_id: &str,
+        correlation_id: &str,
+    ) -> Result<AgentAssignment, RegistrationError> {
+        assignment_acknowledge(
+            self.dispatch()?,
+            assignment_id,
+            assignment_id,
+            correlation_id,
+        )
+    }
+
+    /// Reads rendered instructions after transport authentication and a confirmed Task start.
+    #[allow(clippy::missing_errors_doc)]
+    pub fn assignment_instructions(
+        &self,
+        assignment_id: &str,
+        correlation_id: &str,
+    ) -> Result<String, RegistrationError> {
+        let repository = self.dispatch()?;
+        let assignment = repository.agent_assignment(assignment_id)?;
+        let task = repository.show_record(assignment.record_id)?;
+        authorize_assignment_operation(
+            repository,
+            &assignment,
+            assignment_id,
+            correlation_id,
+            AssignmentAuthorizationOperation::ReadContext,
+            task.id,
+            assignment.closed_at_millis.is_none()
+                && matches!(
+                    assignment.state,
+                    AgentAssignmentState::Working
+                        | AgentAssignmentState::Idle
+                        | AgentAssignmentState::Blocked
+                )
+                && task.record_type == RecordType::Task
+                && task.status == RecordStatus::InProgress,
+        )?;
+        Ok(agent_dispatch_context(repository, &assignment)?.rendered_initial_prompt)
+    }
+
+    /// Reports a bootstrap failure after transport authentication.
+    #[allow(clippy::missing_errors_doc)]
+    pub fn report_assignment_bootstrap_failure(
+        &self,
+        assignment_id: &str,
+        correlation_id: &str,
+        message: &str,
+    ) -> Result<(), RegistrationError> {
+        let repository = self.dispatch()?;
+        let assignment = repository.agent_assignment(assignment_id)?;
+        assignment_add_comment(
+            repository,
+            assignment_id,
+            assignment_id,
+            correlation_id,
+            assignment.record_id,
+            message,
+        )
+        .map(|_| ())
+    }
+
+    /// Starts a Task only after its Assignment has acknowledged.
+    #[allow(clippy::missing_errors_doc)]
+    pub fn start_acknowledged_assignment_task(
+        &self,
+        assignment_id: &str,
+        correlation_id: &str,
+        task_id: u64,
+    ) -> Result<Record, RegistrationError> {
+        let assignment = self.dispatch()?.agent_assignment(assignment_id)?;
+        if !matches!(
+            assignment.state,
+            AgentAssignmentState::Working
+                | AgentAssignmentState::Idle
+                | AgentAssignmentState::Blocked
+        ) {
+            return Err(RegistrationError::new(
+                "assignment-not-acknowledged",
+                "Assignment has not acknowledged",
+            ));
+        }
+        self.start_assignment_task(assignment_id, assignment_id, correlation_id, task_id)
     }
 
     /// Starts an Assignment's bound Task through its delivered capability.

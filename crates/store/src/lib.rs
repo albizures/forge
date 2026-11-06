@@ -1419,6 +1419,36 @@ fn migrate_agent_assignment_schema(connection: &Connection) -> Result<(), Regist
         .map_err(storage_error)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(storage_error)?;
+    for column in [
+        "launch_started_at_millis",
+        "acknowledgement_deadline_millis",
+    ] {
+        if !columns.iter().any(|existing| existing == column) {
+            connection
+                .execute(
+                    &format!("ALTER TABLE agent_assignments ADD COLUMN {column} INTEGER"),
+                    [],
+                )
+                .map_err(storage_error)?;
+        }
+    }
+    if !columns
+        .iter()
+        .any(|column| column == "safe_dispatch_generation")
+    {
+        connection.execute("ALTER TABLE agent_assignments ADD COLUMN safe_dispatch_generation INTEGER NOT NULL DEFAULT 0", []).map_err(storage_error)?;
+    }
+    if !columns
+        .iter()
+        .any(|column| column == "acknowledged_at_millis")
+    {
+        connection
+            .execute(
+                "ALTER TABLE agent_assignments ADD COLUMN acknowledged_at_millis INTEGER",
+                [],
+            )
+            .map_err(storage_error)?;
+    }
     if !columns.iter().any(|column| column == "state") {
         connection.execute("ALTER TABLE agent_assignments ADD COLUMN state TEXT NOT NULL DEFAULT 'provisioning'", []).map_err(storage_error)?;
     }
@@ -1483,7 +1513,7 @@ fn migrate_assignment_authorization_audit_schema(
             |row| row.get(0),
         )
         .map_err(storage_error)?;
-    if schema.contains("start-task") {
+    if schema.contains("acknowledge") {
         return Ok(());
     }
     connection.execute_batch(
@@ -1493,7 +1523,7 @@ fn migrate_assignment_authorization_audit_schema(
             assignment_id TEXT NOT NULL REFERENCES agent_assignments(id),
             capability_id TEXT NOT NULL,
             created_at_millis INTEGER NOT NULL,
-            operation TEXT NOT NULL CHECK (operation IN ('read-context', 'add-comment', 'complete-task', 'start-task', 'create-subscription', 'renew-subscription', 'delete-subscription')),
+            operation TEXT NOT NULL CHECK (operation IN ('read-context', 'add-comment', 'complete-task', 'start-task', 'acknowledge', 'create-subscription', 'renew-subscription', 'delete-subscription')),
             target_record_id INTEGER NOT NULL REFERENCES records(id),
             outcome TEXT NOT NULL CHECK (outcome IN ('allowed', 'denied')),
             reason TEXT NOT NULL,
@@ -1512,12 +1542,10 @@ fn migrate_agent_profile_schema(connection: &Connection) -> Result<(), Registrat
             |row| row.get(0),
         )
         .map_err(storage_error)?;
-    if schema.contains("'grilling'") {
-        return Ok(());
-    }
-    connection
-        .execute_batch(
-            "ALTER TABLE agent_profiles RENAME TO agent_profiles_old;
+    if !schema.contains("'grilling'") {
+        connection
+            .execute_batch(
+                "ALTER TABLE agent_profiles RENAME TO agent_profiles_old;
         CREATE TABLE agent_profiles (
             record_type TEXT NOT NULL CHECK (record_type IN ('spec', 'task', 'grilling')),
             revision INTEGER NOT NULL CHECK (revision > 0),
@@ -1533,8 +1561,23 @@ fn migrate_agent_profile_schema(connection: &Connection) -> Result<(), Registrat
         );
         INSERT INTO agent_profiles SELECT * FROM agent_profiles_old;
         DROP TABLE agent_profiles_old;",
-        )
-        .map_err(storage_error)
+            )
+            .map_err(storage_error)?;
+    }
+    let columns = connection
+        .prepare("PRAGMA table_info(agent_profiles)")
+        .map_err(storage_error)?
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(storage_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(storage_error)?;
+    if !columns
+        .iter()
+        .any(|column| column == "acknowledgement_timeout_millis")
+    {
+        connection.execute("ALTER TABLE agent_profiles ADD COLUMN acknowledgement_timeout_millis INTEGER NOT NULL DEFAULT 300000", []).map_err(storage_error)?;
+    }
+    Ok(())
 }
 
 fn seed_agent_profiles(connection: &Connection) -> Result<(), RegistrationError> {
@@ -1557,7 +1600,7 @@ fn load_agent_profile(
     revision: u32,
 ) -> Result<AgentProfile, RegistrationError> {
     connection.query_row(
-        "SELECT record_type, revision, provider, agent_kind, model, prompt_template, retry_limit, retry_backoff_millis, startup_timeout_millis, unknown_state_grace_millis FROM agent_profiles WHERE record_type = ?1 AND revision = ?2",
+        "SELECT record_type, revision, provider, agent_kind, model, prompt_template, retry_limit, retry_backoff_millis, startup_timeout_millis, unknown_state_grace_millis, acknowledgement_timeout_millis FROM agent_profiles WHERE record_type = ?1 AND revision = ?2",
         params![record_type_name(profile_record_type), revision],
         |row| Ok(AgentProfile {
             record_type: match row.get::<_, String>(0)?.as_str() {
@@ -1570,6 +1613,7 @@ fn load_agent_profile(
             provider: row.get(2)?, agent_kind: row.get(3)?, model: row.get(4)?, prompt_template: row.get(5)?,
             retry_limit: row.get::<_, i64>(6)?.cast_unsigned().try_into().expect("retry limit fits u32"), retry_backoff_millis: row.get::<_, i64>(7)?.cast_unsigned(),
             startup_timeout_millis: row.get::<_, i64>(8)?.cast_unsigned(), unknown_state_grace_millis: row.get::<_, i64>(9)?.cast_unsigned(),
+            acknowledgement_timeout_millis: row.get::<_, i64>(10)?.cast_unsigned(),
         }),
     ).map_err(|error| match error { rusqlite::Error::QueryReturnedNoRows => RegistrationError::new("agent-profile-not-found", "Agent Profile revision does not exist"), error => storage_error(error) })
 }
@@ -1766,6 +1810,54 @@ impl AgentDispatchRepository for SqliteProjectRepository {
         load_agent_profile(&connection, record_type, revision)
     }
 
+    fn active_task_agent_profile(&self) -> Result<AgentProfile, RegistrationError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        let revision: u32 = connection
+            .query_row(
+                "SELECT MAX(revision) FROM agent_profiles WHERE record_type = 'task'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        load_agent_profile(&connection, RecordType::Task, revision)
+    }
+
+    fn configure_task_acknowledgement_timeout(
+        &self,
+        timeout_millis: u64,
+    ) -> Result<AgentProfile, RegistrationError> {
+        let timeout = i64::try_from(timeout_millis)
+            .ok()
+            .filter(|v| *v > 0 && *v <= i64::MAX / 2)
+            .ok_or_else(|| {
+                RegistrationError::new(
+                    "invalid-acknowledgement-timeout",
+                    "acknowledgement timeout must be positive and in range",
+                )
+            })?;
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        transaction.execute("INSERT INTO agent_profiles (record_type, revision, provider, agent_kind, model, prompt_template, retry_limit, retry_backoff_millis, startup_timeout_millis, unknown_state_grace_millis, acknowledgement_timeout_millis) SELECT record_type, revision + 1, provider, agent_kind, model, prompt_template, retry_limit, retry_backoff_millis, startup_timeout_millis, unknown_state_grace_millis, ?1 FROM agent_profiles WHERE record_type = 'task' ORDER BY revision DESC LIMIT 1", [timeout]).map_err(storage_error)?;
+        let revision: u32 = transaction
+            .query_row(
+                "SELECT MAX(revision) FROM agent_profiles WHERE record_type = 'task'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        let profile = load_agent_profile(&transaction, RecordType::Task, revision)?;
+        transaction.commit().map_err(storage_error)?;
+        Ok(profile)
+    }
+
     fn create_agent_assignment(
         &self,
         assignment: &NewAgentAssignment,
@@ -1803,7 +1895,7 @@ impl AgentDispatchRepository for SqliteProjectRepository {
         ).map_err(storage_error)?.cast_unsigned().try_into().expect("attempt number fits u32");
         let claimed_at_millis = now_millis()?;
         match transaction.execute(
-            "INSERT INTO agent_assignments (id, record_id, project_slug, profile_record_type, profile_revision, attempt_number, claimed_at_millis, state_changed_at_millis) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+            "INSERT INTO agent_assignments (id, record_id, project_slug, profile_record_type, profile_revision, attempt_number, claimed_at_millis, state_changed_at_millis, safe_dispatch_generation) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, 1)",
             params![assignment.id, assignment.record_id.cast_signed(), assignment.project_slug, record_type_name(record.record_type), assignment.profile_revision, attempt_number, claimed_at_millis],
         ) {
             Ok(_) => {},
@@ -1916,10 +2008,17 @@ impl AgentDispatchRepository for SqliteProjectRepository {
             let Some(record_id) = record_id else {
                 return Ok(None);
             };
-            let profile = load_agent_profile(&connection, RecordType::Task, 1)?;
+            let revision: u32 = connection
+                .query_row(
+                    "SELECT MAX(revision) FROM agent_profiles WHERE record_type = 'task'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(storage_error)?;
+            let profile = load_agent_profile(&connection, RecordType::Task, revision)?;
             let attempt: u32 = connection.query_row("SELECT COALESCE(MAX(attempt_number), 0) + 1 FROM agent_assignments WHERE record_id = ?1", [record_id.cast_signed()], |row| row.get::<_, i64>(0)).map_err(storage_error)?.cast_unsigned().try_into().expect("attempt number fits u32");
             let claimed_at_millis = now_millis()?;
-            connection.execute("INSERT INTO agent_assignments (id, record_id, project_slug, profile_record_type, profile_revision, attempt_number, claimed_at_millis, state, state_changed_at_millis) VALUES (?1, ?2, ?3, 'task', 1, ?4, ?5, 'provisioning', ?5)", params![assignment_id, record_id.cast_signed(), project_slug, attempt, claimed_at_millis]).map_err(|error| if matches!(error.sqlite_error_code(), Some(ErrorCode::ConstraintViolation)) { RegistrationError::new("assignment-conflict", "Agent Assignment already exists or Task is assigned") } else { storage_error(error) })?;
+            connection.execute("INSERT INTO agent_assignments (id, record_id, project_slug, profile_record_type, profile_revision, attempt_number, claimed_at_millis, state, state_changed_at_millis, safe_dispatch_generation) VALUES (?1, ?2, ?3, 'task', ?6, ?4, ?5, 'provisioning', ?5, 1)", params![assignment_id, record_id.cast_signed(), project_slug, attempt, claimed_at_millis, revision]).map_err(|error| if matches!(error.sqlite_error_code(), Some(ErrorCode::ConstraintViolation)) { RegistrationError::new("assignment-conflict", "Agent Assignment already exists or Task is assigned") } else { storage_error(error) })?;
             Ok(Some(AgentAssignment {
                 id: assignment_id.into(),
                 record_id,
@@ -1969,6 +2068,27 @@ impl AgentDispatchRepository for SqliteProjectRepository {
         } else {
             None
         };
+        transaction.commit().map_err(storage_error)?;
+        Ok(assignment)
+    }
+
+    fn acknowledge_agent_assignment(
+        &self,
+        assignment_id: &str,
+    ) -> Result<AgentAssignment, RegistrationError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        let transaction = connection.transaction().map_err(storage_error)?;
+        let changed = transaction.execute("UPDATE agent_assignments SET state = CASE WHEN acknowledged_at_millis IS NULL THEN 'working' ELSE state END, state_changed_at_millis = CASE WHEN acknowledged_at_millis IS NULL THEN ?2 ELSE state_changed_at_millis END, acknowledged_at_millis = COALESCE(acknowledged_at_millis, ?2), next_retry_at_millis = 0, retry_count = 0 WHERE id = ?1 AND closed_at_millis IS NULL AND (state = 'provisioning' OR acknowledged_at_millis IS NOT NULL)", params![assignment_id, now_millis()?]).map_err(storage_error)?;
+        if changed != 1 {
+            return Err(RegistrationError::new(
+                "assignment-acknowledgement-denied",
+                "Assignment is closed or not provisioning",
+            ));
+        }
+        let assignment = transaction.query_row("SELECT id, record_id, project_slug, profile_record_type, profile_revision, attempt_number, claimed_at_millis, state, closed_at_millis, closure_reason, state_changed_at_millis, next_retry_at_millis, retry_count FROM agent_assignments WHERE id = ?1", [assignment_id], |row| agent_assignment_from_row(row, &transaction)).map_err(storage_error)?;
         transaction.commit().map_err(storage_error)?;
         Ok(assignment)
     }
@@ -2047,6 +2167,74 @@ impl AgentDispatchRepository for SqliteProjectRepository {
             params![next_retry_at_millis.cast_signed(), i64::from(retry_count), assignment_id, assignment_state_name(expected)],
         ).map_err(storage_error)?;
         Ok(changed == 1)
+    }
+
+    fn begin_agent_launch(
+        &self,
+        assignment_id: &str,
+        now_millis: u64,
+    ) -> Result<bool, RegistrationError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        let now = i64::try_from(now_millis)
+            .map_err(|_| RegistrationError::new("invalid-time", "launch time is out of range"))?;
+        let changed = connection.execute("UPDATE agent_assignments SET launch_started_at_millis = ?2, acknowledgement_deadline_millis = ?2 + (SELECT acknowledgement_timeout_millis FROM agent_profiles WHERE record_type = profile_record_type AND revision = profile_revision) WHERE id = ?1 AND closed_at_millis IS NULL AND state = 'provisioning' AND launch_started_at_millis IS NULL AND ?2 <= 9223372036854775807 - (SELECT acknowledgement_timeout_millis FROM agent_profiles WHERE record_type = profile_record_type AND revision = profile_revision)", params![assignment_id, now]).map_err(storage_error)?;
+        Ok(changed == 1)
+    }
+
+    fn agent_launch_intent(
+        &self,
+        assignment_id: &str,
+    ) -> Result<Option<forge_app::AgentLaunchIntent>, RegistrationError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        let intent = connection.query_row("SELECT launch_started_at_millis, acknowledgement_deadline_millis FROM agent_assignments WHERE id = ?1", [assignment_id], |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, Option<i64>>(1)?))).map_err(storage_error)?;
+        match intent {
+            (Some(start), Some(deadline)) => Ok(Some(forge_app::AgentLaunchIntent {
+                started_at_millis: start.cast_unsigned(),
+                acknowledgement_deadline_millis: deadline.cast_unsigned(),
+            })),
+            (None, None) => Ok(None),
+            _ => Err(RegistrationError::new(
+                "storage",
+                "incomplete launch intent",
+            )),
+        }
+    }
+
+    fn hold_uncertain_agent_assignment(
+        &self,
+        assignment_id: &str,
+    ) -> Result<bool, RegistrationError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        connection.execute("INSERT OR IGNORE INTO agent_assignment_resources (assignment_id, resource_kind, resource_id, created_at_millis) SELECT id, 'provision-intent', 'once', ?2 FROM agent_assignments WHERE id = ?1 AND closed_at_millis IS NULL AND state = 'provisioning'", params![assignment_id, now_millis()?]).map_err(storage_error)?;
+        let changed = connection.execute("INSERT OR IGNORE INTO dispatch_holds (record_id, reason) SELECT record_id, 'Automatic dispatch stopped after an uncertain provisioning attempt; investigate the open Assignment and potentially live resources.' FROM agent_assignments WHERE id = ?1 AND closed_at_millis IS NULL AND state = 'provisioning'", [assignment_id]).map_err(storage_error)?;
+        Ok(changed == 1)
+    }
+
+    fn guard_agent_provisioning(
+        &self,
+        assignment_id: &str,
+        now_millis: u64,
+    ) -> Result<bool, RegistrationError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        let now = i64::try_from(now_millis).map_err(|_| {
+            RegistrationError::new("invalid-time", "reconciliation time is out of range")
+        })?;
+        // The conditional insert and acknowledgement serialize in SQLite. Never replace an
+        // operator's existing hold, and never place one after acknowledgement has won.
+        connection.execute("INSERT OR IGNORE INTO dispatch_holds (record_id, reason) SELECT record_id, CASE WHEN acknowledgement_deadline_millis IS NOT NULL THEN 'Agent acknowledgement deadline expired; investigate the open Assignment and potentially live resources before retirement or explicit resolution.' ELSE 'Uncertain legacy or interrupted provisioning attempt; investigate the open Assignment and potentially live resources before retirement or explicit resolution.' END FROM agent_assignments a WHERE id = ?1 AND closed_at_millis IS NULL AND state = 'provisioning' AND ((acknowledgement_deadline_millis IS NOT NULL AND acknowledgement_deadline_millis <= ?2) OR (acknowledgement_deadline_millis IS NULL AND (safe_dispatch_generation = 0 OR EXISTS (SELECT 1 FROM agent_assignment_resources r WHERE r.assignment_id = a.id AND r.resource_kind = 'provision-intent'))))", params![assignment_id, now]).map_err(storage_error)?;
+        connection.query_row("SELECT EXISTS(SELECT 1 FROM agent_assignments a WHERE id = ?1 AND closed_at_millis IS NULL AND state = 'provisioning' AND safe_dispatch_generation = 1 AND launch_started_at_millis IS NULL AND acknowledgement_deadline_millis IS NULL AND NOT EXISTS (SELECT 1 FROM dispatch_holds h WHERE h.record_id = a.record_id) AND NOT EXISTS (SELECT 1 FROM agent_assignment_resources r WHERE r.assignment_id = a.id AND r.resource_kind = 'provision-intent'))", [assignment_id], |row| row.get(0)).map_err(storage_error)
     }
 
     fn begin_agent_provision(&self, assignment_id: &str) -> Result<bool, RegistrationError> {
@@ -2136,6 +2324,7 @@ impl AgentDispatchRepository for SqliteProjectRepository {
             AssignmentAuthorizationOperation::AddComment => "add-comment",
             AssignmentAuthorizationOperation::CompleteTask => "complete-task",
             AssignmentAuthorizationOperation::StartTask => "start-task",
+            AssignmentAuthorizationOperation::Acknowledge => "acknowledge",
             AssignmentAuthorizationOperation::CreateSubscription => "create-subscription",
             AssignmentAuthorizationOperation::RenewSubscription => "renew-subscription",
             AssignmentAuthorizationOperation::DeleteSubscription => "delete-subscription",
@@ -2158,7 +2347,7 @@ impl AgentDispatchRepository for SqliteProjectRepository {
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
         connection.prepare("SELECT assignment_id, capability_id, created_at_millis, operation, target_record_id, outcome, reason, correlation_id FROM assignment_authorization_audits WHERE assignment_id = ?1 ORDER BY id").map_err(storage_error)?
             .query_map([assignment_id], |row| {
-                let operation = match row.get::<_, String>(3)?.as_str() { "read-context" => AssignmentAuthorizationOperation::ReadContext, "add-comment" => AssignmentAuthorizationOperation::AddComment, "complete-task" => AssignmentAuthorizationOperation::CompleteTask, "start-task" => AssignmentAuthorizationOperation::StartTask, "create-subscription" => AssignmentAuthorizationOperation::CreateSubscription, "renew-subscription" => AssignmentAuthorizationOperation::RenewSubscription, "delete-subscription" => AssignmentAuthorizationOperation::DeleteSubscription, _ => return Err(rusqlite::Error::InvalidQuery) };
+                let operation = match row.get::<_, String>(3)?.as_str() { "read-context" => AssignmentAuthorizationOperation::ReadContext, "add-comment" => AssignmentAuthorizationOperation::AddComment, "complete-task" => AssignmentAuthorizationOperation::CompleteTask, "start-task" => AssignmentAuthorizationOperation::StartTask, "acknowledge" => AssignmentAuthorizationOperation::Acknowledge, "create-subscription" => AssignmentAuthorizationOperation::CreateSubscription, "renew-subscription" => AssignmentAuthorizationOperation::RenewSubscription, "delete-subscription" => AssignmentAuthorizationOperation::DeleteSubscription, _ => return Err(rusqlite::Error::InvalidQuery) };
                 let outcome = match row.get::<_, String>(5)?.as_str() { "allowed" => AssignmentAuthorizationOutcome::Allowed, "denied" => AssignmentAuthorizationOutcome::Denied, _ => return Err(rusqlite::Error::InvalidQuery) };
                 Ok(AssignmentAuthorizationAudit { assignment_id: row.get(0)?, capability_id: row.get(1)?, created_at_millis: row.get::<_, i64>(2)?.cast_unsigned(), operation, target_record_id: row.get::<_, i64>(4)?.cast_unsigned(), outcome, reason: row.get(6)?, correlation_id: row.get(7)? })
             }).map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)
@@ -3384,8 +3573,8 @@ mod tests {
         NewTypedRecord, Project, ProjectRepository, Record, RecordListFilter,
         RecordRelationshipKind, RecordRepository, RecordStatus, RecordType, RecordUpdateKind,
         RecordUpdateKindFilter, RecordUpdateSubscriptionRepository, TaskKind,
-        assignment_add_comment, assignment_complete_task, assignment_context,
-        assignment_create_record_update_subscription, assignment_start_task,
+        assignment_acknowledge, assignment_add_comment, assignment_complete_task,
+        assignment_context, assignment_create_record_update_subscription, assignment_start_task,
     };
     use std::{
         path::{Path, PathBuf},
@@ -4651,6 +4840,8 @@ mod tests {
         assert_eq!(profile.provider, "herdr");
         assert_eq!(profile.agent_kind, "pi");
         assert_eq!(profile.model, "gpt-5.6-terra");
+        assert_eq!(profile.acknowledgement_timeout_millis, 300_000);
+        assert_eq!(profile.startup_timeout_millis, 30_000);
         assert_eq!(store.agent_profile(RecordType::Task, 1).unwrap(), profile);
 
         let workspace = forge_app::DispatchWorkspace {
@@ -5097,6 +5288,157 @@ mod tests {
     }
 
     #[test]
+    fn acknowledgement_wins_against_an_in_flight_launch_error() {
+        struct RacingAdapter;
+        impl forge_app::AgentDispatchAdapter for RacingAdapter {
+            fn probe(&self) -> Result<(), forge_app::AgentAdapterError> {
+                Ok(())
+            }
+            fn provision(
+                &self,
+                context: &forge_app::AgentDispatchContext,
+                repo: &dyn AgentDispatchRepository,
+            ) -> Result<(), forge_app::AgentAdapterError> {
+                assert!(
+                    repo.begin_agent_launch(&context.assignment.id, 1_000)
+                        .unwrap()
+                );
+                repo.acknowledge_agent_assignment(&context.assignment.id)
+                    .unwrap();
+                Err(forge_app::AgentAdapterError::Transient(
+                    "lost response".into(),
+                ))
+            }
+            fn observe(
+                &self,
+                _: &forge_app::AgentDispatchContext,
+            ) -> Result<forge_app::AgentObservation, forge_app::AgentAdapterError> {
+                unreachable!()
+            }
+            fn recover(
+                &self,
+                _: &forge_app::AgentDispatchContext,
+            ) -> Result<forge_app::AgentObservation, forge_app::AgentAdapterError> {
+                unreachable!()
+            }
+            fn retire(
+                &self,
+                _: &forge_app::AgentDispatchContext,
+                _: &dyn AgentDispatchRepository,
+            ) -> Result<(), forge_app::AgentAdapterError> {
+                unreachable!()
+            }
+        }
+        let store = SqliteProjectRepository::in_memory().unwrap();
+        store.register(&project("alpha", "/repos/alpha")).unwrap();
+        let task = store
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Task,
+                task_kind: None,
+                body: "task".into(),
+                project_slugs: vec!["alpha".into()],
+                generated_by_ids: vec![],
+            })
+            .unwrap();
+        let assignment = store
+            .create_agent_assignment(&NewAgentAssignment {
+                id: "race".into(),
+                record_id: task.id,
+                project_slug: "alpha".into(),
+                profile_revision: 1,
+            })
+            .unwrap();
+        assert!(matches!(
+            forge_app::reconcile_agent_assignment(&store, &RacingAdapter, &assignment).unwrap(),
+            forge_app::AssignmentReconciliation::Stale
+        ));
+        assert_eq!(
+            store.agent_assignment("race").unwrap().state,
+            forge_app::AgentAssignmentState::Working
+        );
+        assert!(store.dispatch_hold(task.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn launch_success_and_lost_response_wait_for_acknowledgement() {
+        struct LaunchAdapter {
+            fail: bool,
+        }
+        impl forge_app::AgentDispatchAdapter for LaunchAdapter {
+            fn probe(&self) -> Result<(), forge_app::AgentAdapterError> {
+                Ok(())
+            }
+            fn provision(
+                &self,
+                context: &forge_app::AgentDispatchContext,
+                repo: &dyn AgentDispatchRepository,
+            ) -> Result<(), forge_app::AgentAdapterError> {
+                assert!(
+                    repo.begin_agent_launch(&context.assignment.id, 1_000)
+                        .unwrap()
+                );
+                if self.fail {
+                    Err(forge_app::AgentAdapterError::Transient(
+                        "response lost".into(),
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
+            fn observe(
+                &self,
+                _: &forge_app::AgentDispatchContext,
+            ) -> Result<forge_app::AgentObservation, forge_app::AgentAdapterError> {
+                unreachable!()
+            }
+            fn recover(
+                &self,
+                _: &forge_app::AgentDispatchContext,
+            ) -> Result<forge_app::AgentObservation, forge_app::AgentAdapterError> {
+                unreachable!()
+            }
+            fn retire(
+                &self,
+                _: &forge_app::AgentDispatchContext,
+                _: &dyn AgentDispatchRepository,
+            ) -> Result<(), forge_app::AgentAdapterError> {
+                unreachable!()
+            }
+        }
+        for fail in [false, true] {
+            let store = SqliteProjectRepository::in_memory().unwrap();
+            store.register(&project("alpha", "/repos/alpha")).unwrap();
+            let task = store
+                .open_typed_record(&NewTypedRecord {
+                    record_type: RecordType::Task,
+                    task_kind: None,
+                    body: "task".into(),
+                    project_slugs: vec!["alpha".into()],
+                    generated_by_ids: vec![],
+                })
+                .unwrap();
+            let assignment = store
+                .create_agent_assignment(&NewAgentAssignment {
+                    id: "launch".into(),
+                    record_id: task.id,
+                    project_slug: "alpha".into(),
+                    profile_revision: 1,
+                })
+                .unwrap();
+            assert!(matches!(
+                forge_app::reconcile_agent_assignment(&store, &LaunchAdapter { fail }, &assignment)
+                    .unwrap(),
+                forge_app::AssignmentReconciliation::AwaitingAcknowledgement
+            ));
+            assert_eq!(
+                store.agent_assignment("launch").unwrap().state,
+                forge_app::AgentAssignmentState::Provisioning
+            );
+            assert!(store.dispatch_hold(task.id).unwrap().is_none());
+        }
+    }
+
+    #[test]
     fn reconciliation_scan_uses_a_lease_and_durable_retry_exhaustion() {
         let store = SqliteProjectRepository::in_memory().unwrap();
         store.register(&project("alpha", "/repos/alpha")).unwrap();
@@ -5134,7 +5476,7 @@ mod tests {
         );
         assert_eq!(
             store.dispatch_hold(task.id).unwrap().unwrap().reason,
-            "automatic dispatch stopped after an uncertain provisioning attempt"
+            "Automatic dispatch stopped after an uncertain provisioning attempt; investigate the open Assignment and potentially live resources."
         );
         assert_eq!(
             store.list_record_comments(task.id).unwrap().len(),
@@ -5269,6 +5611,332 @@ mod tests {
             .expect("a closed attempt permits a replacement");
         assert_eq!(retry.record_id, first.id);
         assert_eq!(retry.attempt_number, 2);
+    }
+
+    #[test]
+    fn legacy_profile_and_assignment_migrate_without_inventing_launch_intent() {
+        let path = std::env::temp_dir().join(format!(
+            "forge-launch-migration-{}.sqlite",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = SqliteProjectRepository::open(&path).unwrap();
+        store.register(&project("alpha", "/repos/alpha")).unwrap();
+        let task = store
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Task,
+                task_kind: None,
+                body: "legacy".into(),
+                project_slugs: vec!["alpha".into()],
+                generated_by_ids: vec![],
+            })
+            .unwrap();
+        store
+            .create_agent_assignment(&NewAgentAssignment {
+                id: "legacy".into(),
+                record_id: task.id,
+                project_slug: "alpha".into(),
+                profile_revision: 1,
+            })
+            .unwrap();
+        drop(store);
+        let db = rusqlite::Connection::open(&path).unwrap();
+        db.execute_batch("ALTER TABLE agent_profiles DROP COLUMN acknowledgement_timeout_millis; ALTER TABLE agent_assignments DROP COLUMN acknowledged_at_millis; ALTER TABLE agent_assignments DROP COLUMN launch_started_at_millis; ALTER TABLE agent_assignments DROP COLUMN acknowledgement_deadline_millis; ALTER TABLE agent_assignments DROP COLUMN safe_dispatch_generation;").unwrap();
+        drop(db);
+        let store = SqliteProjectRepository::open(&path).unwrap();
+        assert_eq!(
+            store
+                .agent_profile(RecordType::Task, 1)
+                .unwrap()
+                .acknowledgement_timeout_millis,
+            300_000
+        );
+        assert_eq!(store.agent_launch_intent("legacy").unwrap(), None);
+        assert!(!store.guard_agent_provisioning("legacy", 1).unwrap());
+        assert!(store.dispatch_hold(task.id).unwrap().is_some());
+        store.resume_dispatch(task.id).unwrap();
+        assert!(!store.guard_agent_provisioning("legacy", 2).unwrap());
+        assert!(store.dispatch_hold(task.id).unwrap().is_some());
+        assert_eq!(
+            store.agent_assignment("legacy").unwrap().state,
+            forge_app::AgentAssignmentState::Provisioning
+        );
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn acknowledgement_timeout_configuration_creates_a_new_immutable_profile_revision() {
+        let store = SqliteProjectRepository::in_memory().unwrap();
+        let original = store.active_task_agent_profile().unwrap();
+        let updated = store
+            .configure_task_acknowledgement_timeout(42_000)
+            .unwrap();
+        assert_eq!(updated.revision, original.revision + 1);
+        assert_eq!(updated.acknowledgement_timeout_millis, 42_000);
+        assert_eq!(
+            updated.startup_timeout_millis,
+            original.startup_timeout_millis
+        );
+        assert_eq!(
+            store
+                .agent_profile(RecordType::Task, original.revision)
+                .unwrap(),
+            original
+        );
+        assert_eq!(store.active_task_agent_profile().unwrap(), updated);
+        assert!(store.configure_task_acknowledgement_timeout(0).is_err());
+        store.register(&project("alpha", "/repos/alpha")).unwrap();
+        store
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Task,
+                task_kind: None,
+                body: "configured".into(),
+                project_slugs: vec!["alpha".into()],
+                generated_by_ids: vec![],
+            })
+            .unwrap();
+        let assignment = store
+            .claim_next_agent_assignment("alpha", "configured")
+            .unwrap()
+            .unwrap();
+        assert_eq!(assignment.profile, updated);
+        assert!(store.begin_agent_launch("configured", 1000).unwrap());
+        assert_eq!(
+            store
+                .agent_launch_intent("configured")
+                .unwrap()
+                .unwrap()
+                .acknowledgement_deadline_millis,
+            43_000
+        );
+    }
+
+    #[test]
+    fn launch_intent_is_durable_and_cannot_be_replaced() {
+        let store = SqliteProjectRepository::in_memory().unwrap();
+        store.register(&project("alpha", "/repos/alpha")).unwrap();
+        let task = store
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Task,
+                task_kind: None,
+                body: "task".into(),
+                project_slugs: vec!["alpha".into()],
+                generated_by_ids: vec![],
+            })
+            .unwrap();
+        store
+            .create_agent_assignment(&NewAgentAssignment {
+                id: "launch".into(),
+                record_id: task.id,
+                project_slug: "alpha".into(),
+                profile_revision: 1,
+            })
+            .unwrap();
+        assert_eq!(store.agent_launch_intent("launch").unwrap(), None);
+        assert!(store.begin_agent_launch("launch", 1000).unwrap());
+        assert!(!store.begin_agent_launch("launch", 2000).unwrap());
+        let intent = store.agent_launch_intent("launch").unwrap().unwrap();
+        assert_eq!(intent.started_at_millis, 1000);
+        assert_eq!(intent.acknowledgement_deadline_millis, 301_000);
+    }
+
+    #[test]
+    fn provisioning_deadline_holds_until_operator_resolution_and_late_ack_keeps_hold() {
+        let store = SqliteProjectRepository::in_memory().unwrap();
+        store.register(&project("alpha", "/repos/alpha")).unwrap();
+        let task = store
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Task,
+                task_kind: None,
+                body: "deadline".into(),
+                project_slugs: vec!["alpha".into()],
+                generated_by_ids: vec![],
+            })
+            .unwrap();
+        store
+            .create_agent_assignment(&NewAgentAssignment {
+                id: "deadline".into(),
+                record_id: task.id,
+                project_slug: "alpha".into(),
+                profile_revision: 1,
+            })
+            .unwrap();
+        assert!(store.guard_agent_provisioning("deadline", 999).unwrap());
+        assert!(store.begin_agent_launch("deadline", 1000).unwrap());
+        assert!(!store.guard_agent_provisioning("deadline", 300_999).unwrap());
+        assert!(store.dispatch_hold(task.id).unwrap().is_none());
+        assert!(!store.guard_agent_provisioning("deadline", 301_000).unwrap());
+        assert!(store.dispatch_hold(task.id).unwrap().is_some());
+        store.resume_dispatch(task.id).unwrap();
+        assert!(!store.guard_agent_provisioning("deadline", 301_001).unwrap());
+        assert!(store.dispatch_hold(task.id).unwrap().is_some());
+        store.acknowledge_agent_assignment("deadline").unwrap();
+        assert!(!store.guard_agent_provisioning("deadline", 301_002).unwrap());
+        assert!(store.dispatch_hold(task.id).unwrap().is_some());
+        assert_eq!(
+            store.agent_assignment("deadline").unwrap().state,
+            forge_app::AgentAssignmentState::Working
+        );
+    }
+
+    #[test]
+    fn scan_after_restart_retains_launch_and_holds_at_deadline() {
+        let path = std::env::temp_dir().join(format!(
+            "forge-reconcile-restart-{}.sqlite",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = SqliteProjectRepository::open(&path).unwrap();
+        store.register(&project("alpha", "/repos/alpha")).unwrap();
+        let task = store
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Task,
+                task_kind: None,
+                body: "restart".into(),
+                project_slugs: vec!["alpha".into()],
+                generated_by_ids: vec![],
+            })
+            .unwrap();
+        store
+            .create_agent_assignment(&NewAgentAssignment {
+                id: "restart".into(),
+                record_id: task.id,
+                project_slug: "alpha".into(),
+                profile_revision: 1,
+            })
+            .unwrap();
+        store.begin_agent_launch("restart", 1000).unwrap();
+        drop(store);
+        let store = SqliteProjectRepository::open(&path).unwrap();
+        let factory = FakeAdapter {
+            provision_fails: false,
+        };
+        let policy = forge_app::AgentDispatchReconciliationPolicy {
+            scan_lease_millis: 10,
+        };
+        forge_app::reconcile_agent_dispatch(&store, &factory, "daemon", 300_999, policy).unwrap();
+        assert!(store.dispatch_hold(task.id).unwrap().is_none());
+        forge_app::reconcile_agent_dispatch(&store, &factory, "daemon", 301_010, policy).unwrap();
+        assert!(store.dispatch_hold(task.id).unwrap().is_some());
+        store.resume_dispatch(task.id).unwrap();
+        forge_app::reconcile_agent_dispatch(&store, &factory, "daemon", 301_020, policy).unwrap();
+        assert!(store.dispatch_hold(task.id).unwrap().is_some());
+        assert_eq!(
+            store
+                .agent_launch_intent("restart")
+                .unwrap()
+                .unwrap()
+                .started_at_millis,
+            1000
+        );
+        assert_eq!(store.list_open_agent_assignments().unwrap().len(), 1);
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn acknowledgement_winning_before_timeout_does_not_create_a_hold() {
+        let store = SqliteProjectRepository::in_memory().unwrap();
+        store.register(&project("alpha", "/repos/alpha")).unwrap();
+        let task = store
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Task,
+                task_kind: None,
+                body: "ack".into(),
+                project_slugs: vec!["alpha".into()],
+                generated_by_ids: vec![],
+            })
+            .unwrap();
+        store
+            .create_agent_assignment(&NewAgentAssignment {
+                id: "ack-before-timeout".into(),
+                record_id: task.id,
+                project_slug: "alpha".into(),
+                profile_revision: 1,
+            })
+            .unwrap();
+        store
+            .begin_agent_launch("ack-before-timeout", 1000)
+            .unwrap();
+        store
+            .acknowledge_agent_assignment("ack-before-timeout")
+            .unwrap();
+        assert!(
+            !store
+                .guard_agent_provisioning("ack-before-timeout", 301_000)
+                .unwrap()
+        );
+        assert!(
+            !store
+                .hold_uncertain_agent_assignment("ack-before-timeout")
+                .unwrap()
+        );
+        assert!(store.dispatch_hold(task.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn acknowledgement_is_idempotent_does_not_start_task_and_rejects_closed_assignment() {
+        let store = SqliteProjectRepository::in_memory().unwrap();
+        store.register(&project("alpha", "/repos/alpha")).unwrap();
+        let task = store
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Task,
+                task_kind: None,
+                body: "task".into(),
+                project_slugs: vec!["alpha".into()],
+                generated_by_ids: vec![],
+            })
+            .unwrap();
+        store
+            .create_agent_assignment(&NewAgentAssignment {
+                id: "ack-attempt".into(),
+                record_id: task.id,
+                project_slug: "alpha".into(),
+                profile_revision: 1,
+            })
+            .unwrap();
+        let first = assignment_acknowledge(&store, "ack-attempt", "cap", "first").unwrap();
+        assert_eq!(first.state, forge_app::AgentAssignmentState::Working);
+        assert_eq!(
+            store.show_record(task.id).unwrap().status,
+            RecordStatus::Open
+        );
+        assert_eq!(
+            assignment_acknowledge(&store, "ack-attempt", "cap", "retry").unwrap(),
+            first
+        );
+        assert!(
+            store
+                .compare_and_set_agent_assignment_state(
+                    "ack-attempt",
+                    forge_app::AgentAssignmentState::Provisioning,
+                    forge_app::AgentAssignmentState::Unknown
+                )
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            !store
+                .schedule_agent_assignment_retry(
+                    "ack-attempt",
+                    forge_app::AgentAssignmentState::Provisioning,
+                    1,
+                    1
+                )
+                .unwrap()
+        );
+        store
+            .close_agent_assignment(
+                "ack-attempt",
+                forge_app::AgentAssignmentClosureReason::Replaced,
+            )
+            .unwrap();
+        assert!(assignment_acknowledge(&store, "ack-attempt", "cap", "closed").is_err());
     }
 
     #[test]
