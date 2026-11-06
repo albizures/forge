@@ -185,6 +185,14 @@ async fn resume_and_restart_do_not_relaunch_and_late_ack_can_work_under_hold() {
 
 #[test]
 fn concurrent_resume_late_acknowledgement_and_scan_never_duplicate_the_attempt() {
+    // Each round uses a new persisted store and three independent applications.
+    // Do not retry/ignore an operation failure: every competing call must succeed.
+    for _ in 0..64 {
+        race_resume_late_acknowledgement_and_scan();
+    }
+}
+
+fn race_resume_late_acknowledgement_and_scan() {
     let f = Fixture::new();
     let barrier = std::sync::Barrier::new(3);
     std::thread::scope(|scope| {
@@ -218,6 +226,33 @@ fn concurrent_resume_late_acknowledgement_and_scan_never_duplicate_the_attempt()
     assert_eq!(open.len(), 1);
     assert_eq!(open[0].id, "old");
     assert_eq!(open[0].attempt_number, 1);
+    assert_eq!(open[0].state, forge_app::AgentAssignmentState::Working);
+    let info = f.store().agent_assignment_info("old").unwrap();
+    assert!(info.acknowledged_at_millis.is_some());
+    assert!(info.capacity_reserved());
+    // Retrying the public start is idempotent; no second transition is recorded.
+    assert_eq!(
+        f.app()
+            .start_acknowledged_assignment_task("old", "repeated-start", f.task)
+            .unwrap()
+            .status,
+        RecordStatus::InProgress
+    );
+    assert_eq!(
+        f.store()
+            .list_record_updates(f.task)
+            .unwrap()
+            .iter()
+            .filter(|update| matches!(
+                update.kind,
+                forge_app::RecordUpdateKind::StatusTransition {
+                    to: RecordStatus::InProgress,
+                    ..
+                }
+            ))
+            .count(),
+        1
+    );
     assert!(
         f.store()
             .claim_next_agent_assignment("alpha", "duplicate")

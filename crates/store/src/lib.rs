@@ -1031,7 +1031,14 @@ impl RecordRepository for SqliteProjectRepository {
             .connection
             .lock()
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
-        let transaction = connection.transaction().map_err(storage_error)?;
+        // Reserve the writer before reading prerequisites. A deferred transaction's
+        // read-to-write upgrade can fail immediately (bypassing the busy timeout)
+        // when another connection, e.g. resume/reconciliation, holds the reservation.
+        // BEGIN IMMEDIATE instead waits within SQLite's bounded busy timeout before
+        // taking a read snapshot; no lifecycle operation needs to be replayed.
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
         let unfinished = unfinished_prerequisite_ids(&transaction, id)?;
         if !unfinished.is_empty() {
             return Err(dependencies_not_done_error(&unfinished));
@@ -3704,6 +3711,153 @@ mod tests {
             registered_folder: PathBuf::from(folder),
             origin_url: "https://example.test/repo.git".into(),
         }
+    }
+
+    #[test]
+    fn task_start_waits_for_competing_resume_without_losing_the_transition() {
+        use std::{sync::mpsc, time::Duration};
+
+        let path = std::env::temp_dir().join(format!(
+            "forge-start-resume-{}-{}.sqlite",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let starter = SqliteProjectRepository::open(&path).unwrap();
+        starter.register(&project("alpha", "/repos/alpha")).unwrap();
+        let task = starter
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Task,
+                task_kind: None,
+                body: "start while another connection clears the hold".into(),
+                project_slugs: vec!["alpha".into()],
+                generated_by_ids: vec![],
+            })
+            .unwrap();
+        starter
+            .hold_dispatch(task.id, "acknowledgement timeout")
+            .unwrap();
+        let resumer = SqliteProjectRepository::open(&path).unwrap();
+        let (reserved_tx, reserved_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        // Test-only scheduling: stop the real DELETE after it obtains a writer
+        // reservation but before commit. No production operation is mocked/retried.
+        resumer
+            .connection
+            .lock()
+            .unwrap()
+            .update_hook(Some(move |action, _: &str, table: &str, _: i64| {
+                if action == rusqlite::hooks::Action::SQLITE_DELETE && table == "dispatch_holds" {
+                    reserved_tx.send(()).unwrap();
+                    release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                }
+            }))
+            .unwrap();
+        let result = std::thread::scope(|scope| {
+            let resume = scope.spawn(|| resumer.resume_dispatch(task.id));
+            reserved_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            let (started_tx, started_rx) = mpsc::channel();
+            let starter = &starter;
+            let start = scope.spawn(move || {
+                started_tx.send(starter.start_record(task.id)).unwrap();
+            });
+            // A deferred read-to-write upgrade fails immediately here, despite
+            // SQLite's busy timeout. A safe start waits for the competing writer.
+            let early = started_rx.recv_timeout(Duration::from_millis(100));
+            release_tx.send(()).unwrap();
+            resume.join().unwrap().unwrap();
+            let result = match early {
+                Ok(result) => result,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    started_rx.recv_timeout(Duration::from_secs(5)).unwrap()
+                }
+                Err(error) => panic!("Task start disconnected: {error}"),
+            };
+            start.join().unwrap();
+            result
+        });
+        drop(resumer);
+        let reopened = SqliteProjectRepository::open(&path).unwrap();
+        let status = reopened.show_record(task.id).unwrap().status;
+        let hold = reopened.dispatch_hold(task.id).unwrap();
+        let transitions = reopened
+            .list_record_updates(task.id)
+            .unwrap()
+            .iter()
+            .filter(|update| {
+                matches!(
+                    update.kind,
+                    RecordUpdateKind::StatusTransition {
+                        to: RecordStatus::InProgress,
+                        ..
+                    }
+                )
+            })
+            .count();
+        drop(reopened);
+        drop(starter);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(result.unwrap().status, RecordStatus::InProgress);
+        assert_eq!(status, RecordStatus::InProgress);
+        assert!(hold.is_none());
+        assert_eq!(transitions, 1);
+    }
+
+    #[test]
+    fn task_start_exhausts_its_busy_timeout_without_partial_lifecycle_writes() {
+        use std::time::Duration;
+
+        let path = std::env::temp_dir().join(format!(
+            "forge-start-timeout-{}-{}.sqlite",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = SqliteProjectRepository::open(&path).unwrap();
+        store.register(&project("alpha", "/repos/alpha")).unwrap();
+        let task = store
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Task,
+                task_kind: None,
+                body: "bounded contention".into(),
+                project_slugs: vec!["alpha".into()],
+                generated_by_ids: vec![],
+            })
+            .unwrap();
+        // Shorten only the test connection's wait, not the production policy.
+        store
+            .connection
+            .lock()
+            .unwrap()
+            .busy_timeout(Duration::from_millis(30))
+            .unwrap();
+        let mut competing = rusqlite::Connection::open(&path).unwrap();
+        let reserved = competing
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        let before = std::time::Instant::now();
+        let error = store.start_record(task.id).unwrap_err();
+        assert_eq!(error.code, "storage");
+        assert!(error.message.contains("database is locked"));
+        assert!(before.elapsed() >= Duration::from_millis(20));
+        assert_eq!(
+            store.show_record(task.id).unwrap().status,
+            RecordStatus::Open
+        );
+        assert_eq!(store.list_record_updates(task.id).unwrap().len(), 1);
+        reserved.rollback().unwrap();
+        assert_eq!(
+            store.start_record(task.id).unwrap().status,
+            RecordStatus::InProgress
+        );
+        assert_eq!(store.list_record_updates(task.id).unwrap().len(), 2);
+        drop(competing);
+        drop(store);
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]

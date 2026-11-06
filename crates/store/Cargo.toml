@@ -10,5 +10,8 @@ repository.workspace = true
 forge-app = { path = "../app" }
 rusqlite.workspace = true
 
+[dev-dependencies]
+rusqlite = { workspace = true, features = ["hooks"] }
+
 [lints]
 workspace = true
