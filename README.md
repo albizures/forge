@@ -320,7 +320,7 @@ This release does not provide automated Git evidence cleanup/repair, automatic p
 
 ## Safe agent launch and acknowledgement handoff (Spec #567)
 
-This handoff covers safe launch and acknowledgement, **not an operationally complete recovery feature**. The follow-on Spec #568, “Agent assignment investigation and safe recovery,” is still required for assignment diagnostics, safe recovery and audited resolution of unknown resources.
+This handoff covers safe launch and acknowledgement, **not an operationally complete recovery feature**. The follow-on Spec #568, “Agent assignment investigation and safe recovery,” is still required for complete safe recovery and audited resolution of unknown resources.
 
 Forge launches Pi through Herdr with a short bootstrap and the profile model, not the rendered Task instructions or capability secret in the launch arguments. The capability is delivered in an owner-only file. The bootstrap authenticates its acknowledgement, separately starts the Task with bounded retries, and only then retrieves the rendered instructions through an assignment-scoped authenticated read. Acknowledgement makes the Assignment Working; it is not itself a Task start. If start cannot be confirmed, the agent must not begin implementation.
 
@@ -328,7 +328,18 @@ Before launch, Forge persists a one-shot launch intent and acknowledgement deadl
 
 Existing databases migrate the durable acknowledgement and launch-intent state automatically; back up the database before upgrading. Pre-upgrade Provisioning Assignments without a deadline are treated as uncertain, not automatically relaunched. At a missed deadline, or after an interrupted uncertain attempt, Forge retains the open Assignment, evidence and reserved Project capacity and places a Dispatch Hold for investigation. Do not infer that the agent is absent. A late acknowledgement can make the Assignment Working and allow its agent to start the Task, but does not clear the hold.
 
-`forge agent-dispatch resume <task-id>` clears a hold; it does **not** establish that an agent is gone, authorize redelivery or resolve uncertain resources. Clearing it prematurely must not trigger a repeat launch. Preserve evidence and capacity while investigating; do not manually create a replacement merely to bypass the hold. The existing `assignment-retire` operation verifies known provider identities but is not a complete unknown-resource recovery workflow. Spec #568 is intended to provide the missing investigation, revocation and explicit resolution controls.
+`forge agent-dispatch resume <task-id>` clears a hold; it does **not** establish that an agent is gone, authorize redelivery or resolve uncertain resources. Clearing it prematurely must not trigger a repeat launch. Preserve evidence and capacity while investigating; do not manually create a replacement merely to bypass the hold. `assignment-retire` revokes Assignment access before provider cleanup and retains a durable recovery marker until cleanup succeeds. It verifies persisted provider identities before destructive requests and verifies their absence afterward; failed, uncertain or interrupted cleanup reserves capacity across restarts. Retrying retirement also works for closed Assignments with unfinished cleanup. Its successful human/JSON output includes current Assignment diagnostics: unresolved resources can still reserve capacity, and the Dispatch Hold remains a separate operator action. Revocation cannot undo external actions already performed. Unknown-resource confirmation remains a separate recovery workflow (Spec #568); retirement alone does not resolve that uncertainty.
+
+### Assignment investigation
+
+```sh
+forge agent-dispatch assignment-info <assignment-id>
+forge agent-dispatch assignment-info <assignment-id> --json
+```
+
+Inspection reads a consistent persisted snapshot: Task and Assignment state, launch and acknowledgement timestamps (Unix milliseconds), Dispatch Hold reason, provider resource identities and retirement timestamps, recovery blockers and capacity reservation. It works for closed Assignments too. Missing timestamps mean no fact was recorded, not proof that an agent is absent. Resource evidence is not live provider verification, and inspection neither contacts Herdr nor changes state. Output identifies worktree investigation, retirement and separate hold-clearing commands; it excludes Task bodies, profile prompts and capability material.
+
+This uses the existing trusted operator RPC surface, like `resume` and `assignment-retire`; it does not introduce operator authentication or grant an Assignment Capability a new scoped operation. Keep daemon access restricted to trusted clients.
 
 ### Verification and known limitations
 

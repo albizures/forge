@@ -553,6 +553,7 @@ pub struct StartAssignmentTaskRequest {
     pub task_id: u64,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct RetireAgentAssignmentRequest {
     pub assignment_id: String,
 }

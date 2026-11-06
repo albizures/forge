@@ -2176,10 +2176,11 @@ impl Application {
         self.dispatch()?.agent_assignment_info(assignment_id)
     }
 
-    /// Retires an Assignment after best-effort provider cleanup, preserving all Git evidence.
+    /// Revokes an Assignment before provider cleanup, preserving all Git evidence.
     ///
-    /// A Dispatch Hold is installed before cleanup so no replacement can consume released
-    /// capacity between provider retirement and durable Assignment closure.
+    /// A durable retirement marker reserves capacity until cleanup succeeds, including after
+    /// a crash. Closed Assignments with unresolved resources remain retryable. A separate
+    /// Dispatch Hold requires explicit operator review before replacement.
     ///
     /// # Errors
     ///
@@ -2190,13 +2191,30 @@ impl Application {
     ) -> Result<AgentAssignment, RegistrationError> {
         let dispatch = self.dispatch()?;
         let assignment = dispatch.agent_assignment(assignment_id)?;
-        if assignment.closed_at_millis.is_some() {
+        if assignment.closed_at_millis.is_some()
+            && dispatch
+                .list_agent_assignment_resources(assignment_id)?
+                .iter()
+                .all(|resource| resource.retired_at_millis.is_some())
+        {
             return Ok(assignment);
         }
         dispatch.hold_dispatch(
             assignment.record_id,
             "Assignment retirement requested; resume dispatch explicitly after recovery review.",
         )?;
+        // Persist the blocker before revocation: failure or a crash at any later step must
+        // not free capacity. Closure revokes capability access and subscriptions atomically.
+        dispatch.add_agent_assignment_resource(&NewAgentAssignmentResource {
+            assignment_id: assignment_id.into(),
+            resource_kind: "retirement-pending".into(),
+            resource_id: "operator".into(),
+        })?;
+        let assignment = if assignment.closed_at_millis.is_none() {
+            dispatch.close_agent_assignment(assignment_id, AgentAssignmentClosureReason::Retired)?
+        } else {
+            assignment
+        };
         let context = agent_dispatch_context(dispatch, &assignment)?;
         let adapter = self
             .adapter_factory()?
@@ -2207,7 +2225,12 @@ impl Application {
         adapter.retire(&context, dispatch).map_err(|error| {
             RegistrationError::new("agent-retirement-failed", format!("{error:?}"))
         })?;
-        dispatch.close_agent_assignment(assignment_id, AgentAssignmentClosureReason::Retired)
+        dispatch.retire_agent_assignment_resource(
+            assignment_id,
+            "retirement-pending",
+            "operator",
+        )?;
+        Ok(assignment)
     }
 
     /// Creates an Assignment-authorized durable Record Update Subscription.

@@ -745,9 +745,7 @@ impl AgentDispatchAdapter for HerdrAdapter {
                     )?;
                     tab_present = true;
                 }
-                Err(AgentAdapterError::NotFound(_)) => {
-                    Self::retire_resource(resources, context, "tab", tab)?;
-                }
+                Err(AgentAdapterError::NotFound(_)) => {}
                 Err(error) => {
                     return Err(AgentAdapterError::Cleanup(format!("tab.get: {error:?}")));
                 }
@@ -768,12 +766,7 @@ impl AgentDispatchAdapter for HerdrAdapter {
                     )?;
                     pane_present = true;
                 }
-                Err(AgentAdapterError::NotFound(_)) => {
-                    Self::retire_resource(resources, context, "pane", pane)?;
-                    if let Some(agent) = &agent {
-                        Self::retire_resource(resources, context, "agent-name", agent)?;
-                    }
-                }
+                Err(AgentAdapterError::NotFound(_)) => {}
                 Err(error) => {
                     return Err(AgentAdapterError::Cleanup(format!("pane.get: {error:?}")));
                 }
@@ -790,15 +783,12 @@ impl AgentDispatchAdapter for HerdrAdapter {
             && pane_present
         {
             if self.agent_observation(agent, (&workspace, tab.as_deref().unwrap_or(""), pane))?
-                == AgentObservation::Absent
+                != AgentObservation::Absent
             {
-                Self::retire_resource(resources, context, "agent-name", agent)?;
-            } else {
                 self.cleanup_request(
                     "pane.release_agent",
                     json!({"pane_id": pane, "source": "forge-agent-dispatch", "agent": agent, "seq": 1}),
                 )?;
-                Self::retire_resource(resources, context, "agent-name", agent)?;
             }
         }
         // The pane may be the tab's root; closing the verified dedicated tab removes
@@ -807,12 +797,41 @@ impl AgentDispatchAdapter for HerdrAdapter {
             && tab_present
         {
             self.cleanup_request("tab.close", json!({"tab_id": tab}))?;
-            Self::retire_resource(resources, context, "tab", tab)?;
         }
-        if let Some(pane) = &pane
-            && pane_present
-        {
-            Self::retire_resource(resources, context, "pane", pane)?;
+        // Mutation admission is not proof of removal. Verify all retained identities before
+        // releasing their capacity; a no-op, stale observation or endpoint error is unsafe.
+        for (kind, id) in [("tab", tab.as_ref()), ("pane", pane.as_ref())] {
+            if let Some(id) = id {
+                match self.request(&format!("{kind}.get"), json!({format!("{kind}_id"): id})) {
+                    Err(AgentAdapterError::NotFound(_)) => {}
+                    Ok(_) => {
+                        return Err(AgentAdapterError::Cleanup(format!(
+                            "{kind} remains after cleanup"
+                        )));
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        if let Some(agent) = &agent {
+            if self.agent_observation(
+                agent,
+                (
+                    &workspace,
+                    tab.as_deref().unwrap_or(""),
+                    pane.as_deref().unwrap_or(""),
+                ),
+            )? != AgentObservation::Absent
+            {
+                return Err(AgentAdapterError::Cleanup(
+                    "agent remains after cleanup".into(),
+                ));
+            }
+        }
+        for (kind, id) in [("tab", tab), ("pane", pane), ("agent-name", agent)] {
+            if let Some(id) = id {
+                Self::retire_resource(resources, context, kind, &id)?;
+            }
         }
         Ok(())
     }
@@ -1135,6 +1154,21 @@ mod tests {
     #[test]
     #[allow(clippy::too_many_lines)] // The full request/response transcript documents one lifecycle.
     fn retirement_releases_and_closes_only_the_verified_dedicated_resources() {
+        for outcome in [
+            "absent",
+            "tab-live",
+            "pane-live",
+            "agent-live",
+            "provider-error",
+            "tuple-mismatch",
+        ] {
+            retirement_provider_outcome(outcome);
+        }
+    }
+
+    #[cfg(unix)]
+    #[allow(clippy::too_many_lines)]
+    fn retirement_provider_outcome(outcome: &'static str) {
         use std::{
             io::{BufRead, BufReader, Write},
             os::unix::net::UnixListener,
@@ -1215,7 +1249,7 @@ mod tests {
         ));
         let listener = UnixListener::bind(&path).unwrap();
         let server = thread::spawn(move || {
-            for (method, response) in [
+            let mut transcript = vec![
                 (
                     "workspace.get",
                     serde_json::json!({"result":{"workspace":{"workspace_id":"workspace","cwd":"/forge-data/herdr-dispatch-workspace"}}}),
@@ -1234,8 +1268,57 @@ mod tests {
                 ),
                 ("pane.release_agent", serde_json::json!({"result":{}})),
                 ("tab.close", serde_json::json!({"result":{}})),
-            ] {
-                let mut stream = listener.accept().unwrap().0;
+                ("tab.get", serde_json::json!({"error":{"code":"not_found"}})),
+                (
+                    "pane.get",
+                    serde_json::json!({"error":{"code":"not_found"}}),
+                ),
+                (
+                    "agent.get",
+                    serde_json::json!({"error":{"code":"not_found"}}),
+                ),
+                ("agent.list", serde_json::json!({"result":{"agents":[]}})),
+            ];
+            match outcome {
+                "tab-live" => {
+                    transcript[6].1 = serde_json::json!({"result":{"tab":{"tab_id":"tab","workspace_id":"workspace"}}});
+                    transcript.truncate(7);
+                }
+                "pane-live" => {
+                    transcript[7].1 = serde_json::json!({"result":{"pane":{"pane_id":"pane","tab_id":"tab","workspace_id":"workspace"}}});
+                    transcript.truncate(8);
+                }
+                "agent-live" => {
+                    transcript[8].1 = serde_json::json!({"result":{"name":"forge-dispatch-assignment","workspace_id":"workspace","tab_id":"tab","pane_id":"pane","agent_status":"working"}});
+                    transcript.truncate(9);
+                }
+                "provider-error" => {
+                    transcript[6].1 = serde_json::json!({"error":{"code":"internal_error"}});
+                    transcript.truncate(7);
+                }
+                "tuple-mismatch" => {
+                    transcript[1].1 = serde_json::json!({"result":{"tab":{"tab_id":"tab","workspace_id":"foreign-workspace"}}});
+                    transcript.truncate(2);
+                }
+                _ => {}
+            }
+            for (method, response) in transcript {
+                listener.set_nonblocking(true).unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(
+                                std::time::Instant::now() < deadline,
+                                "missing verification request: {method}"
+                            );
+                            thread::sleep(std::time::Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("{error}"),
+                    }
+                };
+                stream.set_nonblocking(false).unwrap();
                 let mut line = String::new();
                 BufReader::new(stream.try_clone().unwrap())
                     .read_line(&mut line)
@@ -1255,7 +1338,8 @@ mod tests {
             socket_path: path.clone(),
             dispatch_root: std::env::temp_dir().join("forge-dispatch-workspace"),
         };
-        adapter.retire(&context, &repository).unwrap();
+        let result = adapter.retire(&context, &repository);
+        assert_eq!(result.is_ok(), outcome == "absent", "{outcome}: {result:?}");
         server.join().unwrap();
         let resources = repository
             .list_agent_assignment_resources(&assignment.id)
@@ -1263,7 +1347,7 @@ mod tests {
         assert!(
             resources
                 .iter()
-                .all(|resource| resource.retired_at_millis.is_some())
+                .all(|resource| resource.retired_at_millis.is_some() == (outcome == "absent"))
         );
         std::fs::remove_file(path).unwrap();
     }

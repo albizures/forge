@@ -1181,11 +1181,18 @@ impl AgentDispatchApiServer for Daemon {
     }
 
     async fn assignment_retire(&self, request: RetireAgentAssignmentRequest) -> RpcResult<()> {
-        self.application
-            .retire_agent_assignment(&request.assignment_id)
-            .inspect(|_| self.delivery.cancel_assignment(&request.assignment_id))
-            .map(|_| ())
-            .map_err(rpc_error)
+        let result = self
+            .application
+            .retire_agent_assignment(&request.assignment_id);
+        // Cleanup errors do not undo revocation. End already-open delivery connections too.
+        if self
+            .application
+            .agent_assignment_info(&request.assignment_id)
+            .is_ok_and(|info| info.assignment.closed_at_millis.is_some())
+        {
+            self.delivery.cancel_assignment(&request.assignment_id);
+        }
+        result.map(|_| ()).map_err(rpc_error)
     }
 }
 
@@ -2637,6 +2644,81 @@ mod tests {
             subscription.start_cursor.0,
             target.id,
         )
+    }
+
+    #[tokio::test]
+    async fn retirement_failure_revokes_access_and_retains_capacity_across_restart() {
+        let (fixture, assignment, subscription, _, _) = subscription_test_daemon();
+        let response = router(fixture.daemon()).oneshot(loopback_request(format!(
+            "/v1/agent-assignments/{assignment}/record-update-subscriptions/{subscription}/events"
+        ))).await.unwrap();
+        let mut stream = response.into_body().into_data_stream();
+        let _ = stream.next().await.unwrap().unwrap();
+        let _ = stream.next().await.unwrap().unwrap();
+        let request = || forge_rpc::RetireAgentAssignmentRequest {
+            assignment_id: assignment.clone(),
+        };
+        // This fixture has no configured provider workspace: cleanup cannot be established.
+        assert!(
+            AgentDispatchApiServer::assignment_retire(&fixture.daemon(), request())
+                .await
+                .is_err()
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), stream.next())
+                .await
+                .expect("revoked delivery must end even when cleanup fails")
+                .is_none()
+        );
+        let store = SqliteProjectRepository::open(&fixture.database_path).unwrap();
+        let info = store.agent_assignment_info(&assignment).unwrap();
+        assert!(
+            info.assignment.closed_at_millis.is_some(),
+            "retirement revokes even when cleanup fails"
+        );
+        assert!(info.capacity_reserved());
+        assert!(info.dispatch_hold.is_some());
+        let denied = AgentDispatchApiServer::task_start(
+            &fixture.daemon(),
+            forge_rpc::StartAssignmentTaskRequest {
+                assignment_id: assignment.clone(),
+                capability_id: assignment.clone(),
+                correlation_id: "after-retirement".into(),
+                task_id: info.assignment.record_id,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(denied.to_string().contains("assignment-capability-denied"));
+        assert!(
+            store
+                .record_update_subscription(forge_app::RecordUpdateSubscriptionId(subscription))
+                .is_err()
+        );
+        drop(store);
+        // A closed Assignment with unfinished cleanup must remain retryable, not report success.
+        assert!(
+            AgentDispatchApiServer::assignment_retire(&fixture.daemon(), request())
+                .await
+                .is_err()
+        );
+        let store = SqliteProjectRepository::open(&fixture.database_path).unwrap();
+        assert!(
+            store
+                .agent_assignment_info(&assignment)
+                .unwrap()
+                .capacity_reserved()
+        );
+    }
+
+    #[test]
+    fn retirement_rejects_assignment_credential_shaped_requests() {
+        assert!(
+            serde_json::from_value::<forge_rpc::RetireAgentAssignmentRequest>(serde_json::json!({
+                "assignment_id": "owner-assignment", "secret": "agent-secret"
+            }))
+            .is_err()
+        );
     }
 
     #[tokio::test]

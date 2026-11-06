@@ -268,7 +268,7 @@ enum AgentDispatchCommand {
     Resume(DispatchTaskArgs),
     /// Inspect persisted Assignment evidence without contacting the provider.
     AssignmentInfo(AssignmentRetireArgs),
-    /// Retire an Assignment after provider cleanup.
+    /// Revoke an Assignment and verify provider cleanup; retains unresolved capacity and hold.
     AssignmentRetire(AssignmentRetireArgs),
 }
 #[derive(Args, Debug)]
@@ -968,15 +968,33 @@ async fn agent_dispatch(command: AgentDispatchCommand) -> i32 {
             .map(|()| serde_json::Value::Null),
             args.json,
         ),
-        AgentDispatchCommand::AssignmentRetire(args) => (
-            request_retire_agent_assignment(
-                &resolve_endpoint(args.server_url.as_deref()).await,
-                args.assignment_id,
-            )
+        AgentDispatchCommand::AssignmentRetire(args) => {
+            let endpoint = resolve_endpoint(args.server_url.as_deref()).await;
+            return match async {
+                request_retire_agent_assignment(&endpoint, args.assignment_id.clone()).await?;
+                forge_cli::request_agent_assignment_info(&endpoint, args.assignment_id).await
+            }
             .await
-            .map(|()| serde_json::Value::Null),
-            args.json,
-        ),
+            {
+                Ok(info) => {
+                    if args.json {
+                        println!("{}", serde_json::to_string(&info).unwrap());
+                    } else {
+                        println!("{}", forge_cli::render_agent_assignment_info(&info));
+                        println!(
+                            "Assignment access revoked. External actions already performed cannot be undone. Dispatch Hold clearing remains separate."
+                        );
+                    }
+                    0
+                }
+                Err(error) => {
+                    eprintln!(
+                        "forge agent-dispatch assignment-retire: {error}. Cleanup may be incomplete; inspect assignment-info before any replacement."
+                    );
+                    1
+                }
+            };
+        }
     };
     match result {
         Ok(value) => {
