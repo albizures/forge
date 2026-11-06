@@ -328,7 +328,7 @@ Before launch, Forge persists a one-shot launch intent and acknowledgement deadl
 
 Existing databases migrate the durable acknowledgement and launch-intent state automatically; back up the database before upgrading. Pre-upgrade Provisioning Assignments without a deadline are treated as uncertain, not automatically relaunched. At a missed deadline, or after an interrupted uncertain attempt, Forge retains the open Assignment, evidence and reserved Project capacity and places a Dispatch Hold for investigation. Do not infer that the agent is absent. A late acknowledgement can make the Assignment Working and allow its agent to start the Task, but does not clear the hold.
 
-`forge agent-dispatch resume <task-id>` clears a hold; it does **not** establish that an agent is gone, authorize redelivery or resolve uncertain resources. Clearing it prematurely must not trigger a repeat launch. Preserve evidence and capacity while investigating; do not manually create a replacement merely to bypass the hold. `assignment-retire` revokes Assignment access before provider cleanup and retains a durable recovery marker until cleanup succeeds. It verifies persisted provider identities before destructive requests and verifies their absence afterward; failed, uncertain or interrupted cleanup reserves capacity across restarts. Retrying retirement also works for closed Assignments with unfinished cleanup. Its successful human/JSON output includes current Assignment diagnostics: unresolved resources can still reserve capacity, and the Dispatch Hold remains a separate operator action. Revocation cannot undo external actions already performed. Unknown-resource confirmation remains a separate recovery workflow (Spec #568); retirement alone does not resolve that uncertainty.
+`forge agent-dispatch resume <task-id>` clears a hold; it does **not** establish that an agent is gone, authorize redelivery or resolve uncertain resources. Clearing it prematurely must not trigger a repeat launch. Preserve evidence and capacity while investigating; do not manually create a replacement merely to bypass the hold. `assignment-retire` revokes Assignment access before provider cleanup and retains a durable recovery marker until cleanup succeeds. It verifies persisted provider identities before destructive requests and verifies their absence afterward; failed, uncertain or interrupted cleanup reserves capacity across restarts. Retrying retirement also works for closed Assignments with unfinished cleanup. Its successful human/JSON output includes current Assignment diagnostics: unresolved resources can still reserve capacity, and the Dispatch Hold remains a separate operator action. Revocation cannot undo external actions already performed. Retirement alone does not resolve unknown-resource uncertainty; use the explicit assertion workflow below only after investigation.
 
 ### Assignment investigation
 
@@ -340,6 +340,22 @@ forge agent-dispatch assignment-info <assignment-id> --json
 Inspection reads a consistent persisted snapshot: Task and Assignment state, launch and acknowledgement timestamps (Unix milliseconds), Dispatch Hold reason, provider resource identities and retirement timestamps, recovery blockers and capacity reservation. It works for closed Assignments too. Missing timestamps mean no fact was recorded, not proof that an agent is absent. Resource evidence is not live provider verification, and inspection neither contacts Herdr nor changes state. Output identifies worktree investigation, retirement and separate hold-clearing commands; it excludes Task bodies, profile prompts and capability material.
 
 This uses the existing trusted operator RPC surface, like `resume` and `assignment-retire`; it does not introduce operator authentication or grant an Assignment Capability a new scoped operation. Keep daemon access restricted to trusted clients.
+
+### Explicit unknown-resource resolution
+
+A crash can leave a provisioning-intent marker without a persisted provider identifier. Forge cannot discover or safely clean up that unknown resource automatically. Investigate the retained evidence and external processes, make the old agent unable to act (including outside Forge), and remove unknown resources or otherwise make them safe. **Revocation alone is not proof of process death and cannot undo external actions. An incorrect assertion risks duplicate agents and concurrent external work.**
+
+First run `assignment-retire` to revoke Assignment access and attempt verified cleanup of known resources. Even if cleanup fails, revocation remains effective. Then, only when both safety assertions are true:
+
+```sh
+forge agent-dispatch assignment-resolve-unknown <assignment-id> \
+  --confirm-old-agent-cannot-act --confirm-unknown-resources-safe
+# Add --json for current diagnostics and the persisted resolution audit.
+```
+
+Both flags are required; missing either leaves uncertainty untouched. The daemon also enforces both confirmations and rejects open (unrevoked) Assignments. The operation atomically retains an immutable timestamp, operator authority boundary and confirmation text while retiring only provisioning-intent uncertainty. `assignment-info` displays that audit, including after restart. This records an operator assertion, not provider verification or an authenticated human identity; repeated assertions preserve the original audit.
+
+Known resources, retirement-pending cleanup and any other unresolved resources still reserve capacity. Retry `assignment-retire` to finish verified known-resource cleanup; the assertion never bypasses it. Resolution does not clear the Dispatch Hold: explicitly review and use `resume <task-id>` separately when recovery is safe. This resolution RPC is on the same **trusted, unauthenticated operator surface**, not an Assignment Capability operation; agent credential-shaped payloads are rejected, but that validation is not client authentication. Keep daemon access restricted to trusted operators.
 
 ### Verification and known limitations
 

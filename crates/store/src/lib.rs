@@ -155,6 +155,12 @@ impl SqliteProjectRepository {
                 retired_at_millis INTEGER,
                 PRIMARY KEY (assignment_id, resource_kind, resource_id)
             );
+            CREATE TABLE IF NOT EXISTS assignment_unknown_resource_resolutions (
+                assignment_id TEXT PRIMARY KEY NOT NULL REFERENCES agent_assignments(id),
+                confirmed_at_millis INTEGER NOT NULL,
+                authority TEXT NOT NULL,
+                confirmation TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS assignment_authorization_audits (
                 id INTEGER PRIMARY KEY NOT NULL,
                 assignment_id TEXT NOT NULL REFERENCES agent_assignments(id),
@@ -1978,6 +1984,14 @@ impl AgentDispatchRepository for SqliteProjectRepository {
                 created_at_millis: row.get::<_, i64>(3)?.cast_unsigned(),
                 retired_at_millis: row.get::<_, Option<i64>>(4)?.map(i64::cast_unsigned),
             })).map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)?;
+        let unknown_resource_resolution = transaction.query_row(
+            "SELECT confirmed_at_millis, authority, confirmation FROM assignment_unknown_resource_resolutions WHERE assignment_id = ?1",
+            [assignment_id],
+            |row| Ok(forge_app::UnknownResourceResolution {
+                confirmed_at_millis: row.get::<_, i64>(0)?.cast_unsigned(),
+                authority: row.get(1)?, confirmation: row.get(2)?,
+            }),
+        ).optional().map_err(storage_error)?;
         transaction.commit().map_err(storage_error)?;
         Ok(forge_app::AgentAssignmentInfo {
             assignment,
@@ -1986,6 +2000,7 @@ impl AgentDispatchRepository for SqliteProjectRepository {
             acknowledged_at_millis,
             dispatch_hold,
             resources,
+            unknown_resource_resolution,
         })
     }
 
@@ -2354,6 +2369,48 @@ impl AgentDispatchRepository for SqliteProjectRepository {
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
         connection.execute("UPDATE agent_assignment_resources SET retired_at_millis = COALESCE(retired_at_millis, ?1) WHERE assignment_id = ?2 AND resource_kind = ?3 AND resource_id = ?4", params![now_millis()?, assignment_id, resource_kind, resource_id]).map_err(storage_error)?;
         connection.query_row("SELECT assignment_id, resource_kind, resource_id, created_at_millis, retired_at_millis FROM agent_assignment_resources WHERE assignment_id = ?1 AND resource_kind = ?2 AND resource_id = ?3", params![assignment_id, resource_kind, resource_id], |row| Ok(AgentAssignmentResource { assignment_id: row.get(0)?, resource_kind: row.get(1)?, resource_id: row.get(2)?, created_at_millis: row.get::<_, i64>(3)?.cast_unsigned(), retired_at_millis: row.get::<_, Option<i64>>(4)?.map(i64::cast_unsigned) })).map_err(|error| match error { rusqlite::Error::QueryReturnedNoRows => RegistrationError::new("assignment-resource-not-found", "Agent Assignment resource does not exist"), error => storage_error(error) })
+    }
+
+    fn resolve_unknown_agent_resources(
+        &self,
+        assignment_id: &str,
+    ) -> Result<(), RegistrationError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        let closed = transaction
+            .query_row(
+                "SELECT closed_at_millis IS NOT NULL FROM agent_assignments WHERE id = ?1",
+                [assignment_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .optional()
+            .map_err(storage_error)?
+            .ok_or_else(|| {
+                RegistrationError::new("assignment-not-found", "Agent Assignment does not exist")
+            })?;
+        if !closed {
+            return Err(RegistrationError::new(
+                "assignment-not-revoked",
+                "Retire the Assignment to revoke its capability before resolving unknown resources",
+            ));
+        }
+        let now = now_millis()?;
+        // Only the uncertainty marker is covered by the assertion. Known identities and
+        // retirement-pending must still be resolved through verified provider cleanup.
+        transaction.execute(
+            "INSERT OR IGNORE INTO assignment_unknown_resource_resolutions (assignment_id, confirmed_at_millis, authority, confirmation) VALUES (?1, ?2, ?3, ?4)",
+            params![assignment_id, now, "trusted-operator-rpc", "Operator confirmed the old agent can no longer act and unknown resources have been removed or otherwise made safe; this assertion is not provider proof and revocation cannot undo external actions."],
+        ).map_err(storage_error)?;
+        transaction.execute(
+            "UPDATE agent_assignment_resources SET retired_at_millis = ?2 WHERE assignment_id = ?1 AND resource_kind = 'provision-intent' AND retired_at_millis IS NULL",
+            params![assignment_id, now],
+        ).map_err(storage_error)?;
+        transaction.commit().map_err(storage_error)
     }
 
     fn list_agent_assignment_resources(

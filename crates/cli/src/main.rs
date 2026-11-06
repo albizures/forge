@@ -270,6 +270,8 @@ enum AgentDispatchCommand {
     AssignmentInfo(AssignmentRetireArgs),
     /// Revoke an Assignment and verify provider cleanup; retains unresolved capacity and hold.
     AssignmentRetire(AssignmentRetireArgs),
+    /// Assert unknown resources are safe after retirement (risk of duplicate agents).
+    AssignmentResolveUnknown(AssignmentResolveUnknownArgs),
 }
 #[derive(Args, Debug)]
 struct AgentDispatchEndpointArgs {
@@ -351,6 +353,21 @@ struct AssignmentTaskStartArgs {
 #[derive(Args, Debug)]
 struct AssignmentRetireArgs {
     assignment_id: String,
+    #[arg(long, value_name = "URL")]
+    server_url: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Args, Debug)]
+struct AssignmentResolveUnknownArgs {
+    assignment_id: String,
+    /// Confirm the old agent can no longer act, including outside Forge.
+    #[arg(long)]
+    confirm_old_agent_cannot_act: bool,
+    /// Confirm unknown resources have been removed or otherwise made safe.
+    #[arg(long)]
+    confirm_unknown_resources_safe: bool,
     #[arg(long, value_name = "URL")]
     server_url: Option<String>,
     #[arg(long)]
@@ -968,6 +985,36 @@ async fn agent_dispatch(command: AgentDispatchCommand) -> i32 {
             .map(|()| serde_json::Value::Null),
             args.json,
         ),
+        AgentDispatchCommand::AssignmentResolveUnknown(args) => {
+            if !args.confirm_old_agent_cannot_act || !args.confirm_unknown_resources_safe {
+                eprintln!(
+                    "Risk of duplicate agents and external actions: confirm the old agent can no longer act AND unknown resources have been removed or otherwise made safe. Revocation cannot undo external actions. Investigate first, then pass both --confirm-old-agent-cannot-act and --confirm-unknown-resources-safe. Known resources still require verified retirement; Dispatch Hold clearing remains separate."
+                );
+                return 1;
+            }
+            let endpoint = resolve_endpoint(args.server_url.as_deref()).await;
+            return match forge_cli::request_resolve_unknown_agent_resources(
+                &endpoint,
+                args.assignment_id,
+                args.confirm_old_agent_cannot_act,
+                args.confirm_unknown_resources_safe,
+            )
+            .await
+            {
+                Ok(info) => {
+                    if args.json {
+                        println!("{}", serde_json::to_string(&info).unwrap());
+                    } else {
+                        println!("{}", forge_cli::render_agent_assignment_info(&info));
+                    }
+                    0
+                }
+                Err(error) => {
+                    eprintln!("forge agent-dispatch assignment-resolve-unknown: {error}");
+                    1
+                }
+            };
+        }
         AgentDispatchCommand::AssignmentRetire(args) => {
             let endpoint = resolve_endpoint(args.server_url.as_deref()).await;
             return match async {

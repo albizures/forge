@@ -132,6 +132,11 @@ pub trait AgentDispatchApi {
     ) -> RpcResult<AgentAssignmentInfoResponse>;
     #[method(name = "assignmentRetire")]
     async fn assignment_retire(&self, request: RetireAgentAssignmentRequest) -> RpcResult<()>;
+    #[method(name = "assignmentResolveUnknown")]
+    async fn assignment_resolve_unknown(
+        &self,
+        request: ResolveUnknownAgentResourcesRequest,
+    ) -> RpcResult<AgentAssignmentInfoResponse>;
 }
 
 #[rpc(client, server, namespace = "agentSubscription")]
@@ -455,6 +460,15 @@ pub struct AgentAssignmentInfoResponse {
     pub recovery_blockers: Vec<String>,
     pub capacity_reserved: bool,
     pub operations: Vec<String>,
+    #[serde(default)]
+    pub unknown_resource_resolution: Option<UnknownResourceResolutionResponse>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct UnknownResourceResolutionResponse {
+    pub confirmed_at_millis: u64,
+    pub authority: String,
+    pub confirmation: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -474,6 +488,10 @@ impl From<forge_app::AgentAssignmentInfo> for AgentAssignmentInfoResponse {
             format!("forge agent-dispatch assignment-info {}", assignment.id),
             format!("forge worktree info {}", assignment.record_id),
             format!("forge agent-dispatch assignment-retire {}", assignment.id),
+            format!(
+                "forge agent-dispatch assignment-resolve-unknown {} --confirm-old-agent-cannot-act --confirm-unknown-resources-safe",
+                assignment.id
+            ),
             format!("forge agent-dispatch resume {}", assignment.record_id),
         ];
         Self {
@@ -512,6 +530,13 @@ impl From<forge_app::AgentAssignmentInfo> for AgentAssignmentInfoResponse {
             recovery_blockers,
             capacity_reserved,
             operations,
+            unknown_resource_resolution: value.unknown_resource_resolution.map(|resolution| {
+                UnknownResourceResolutionResponse {
+                    confirmed_at_millis: resolution.confirmed_at_millis,
+                    authority: resolution.authority,
+                    confirmation: resolution.confirmation,
+                }
+            }),
         }
     }
 }
@@ -556,6 +581,17 @@ pub struct StartAssignmentTaskRequest {
 #[serde(deny_unknown_fields)]
 pub struct RetireAgentAssignmentRequest {
     pub assignment_id: String,
+}
+
+/// Trusted operator operation, never an Assignment Capability operation.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResolveUnknownAgentResourcesRequest {
+    pub assignment_id: String,
+    #[serde(default)]
+    pub confirm_old_agent_cannot_act: bool,
+    #[serde(default)]
+    pub confirm_unknown_resources_safe: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

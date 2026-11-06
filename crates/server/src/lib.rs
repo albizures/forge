@@ -1180,6 +1180,20 @@ impl AgentDispatchApiServer for Daemon {
             .map_err(rpc_error)
     }
 
+    async fn assignment_resolve_unknown(
+        &self,
+        request: forge_rpc::ResolveUnknownAgentResourcesRequest,
+    ) -> RpcResult<forge_rpc::AgentAssignmentInfoResponse> {
+        self.application
+            .resolve_unknown_agent_resources(
+                &request.assignment_id,
+                request.confirm_old_agent_cannot_act,
+                request.confirm_unknown_resources_safe,
+            )
+            .map(Into::into)
+            .map_err(rpc_error)
+    }
+
     async fn assignment_retire(&self, request: RetireAgentAssignmentRequest) -> RpcResult<()> {
         let result = self
             .application
@@ -2708,6 +2722,185 @@ mod tests {
                 .agent_assignment_info(&assignment)
                 .unwrap()
                 .capacity_reserved()
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_resolution_requires_confirmation_and_revocation_and_preserves_other_blockers()
+    {
+        let (fixture, assignment, _, _, _) = subscription_test_daemon();
+        let store = SqliteProjectRepository::open(&fixture.database_path).unwrap();
+        for (kind, id) in [
+            ("provision-intent", "once"),
+            ("pane", "known-pane"),
+            ("retirement-pending", "operator"),
+        ] {
+            store
+                .add_agent_assignment_resource(&forge_app::NewAgentAssignmentResource {
+                    assignment_id: assignment.clone(),
+                    resource_kind: kind.into(),
+                    resource_id: id.into(),
+                })
+                .unwrap();
+        }
+        for field in ["secret", "capability_id", "capability", "correlation_id"] {
+            let mut payload = serde_json::json!({
+                "assignment_id": assignment,
+                "confirm_old_agent_cannot_act": true,
+                "confirm_unknown_resources_safe": true,
+            });
+            payload[field] = "agent-credential".into();
+            assert!(
+                serde_json::from_value::<forge_rpc::ResolveUnknownAgentResourcesRequest>(payload)
+                    .is_err()
+            );
+        }
+        let absent = serde_json::from_value::<forge_rpc::ResolveUnknownAgentResourcesRequest>(
+            serde_json::json!({"assignment_id": assignment}),
+        )
+        .unwrap();
+        assert!(
+            AgentDispatchApiServer::assignment_resolve_unknown(&fixture.daemon(), absent)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("confirmation-required")
+        );
+        let missing = forge_rpc::ResolveUnknownAgentResourcesRequest {
+            assignment_id: "does-not-exist".into(),
+            confirm_old_agent_cannot_act: true,
+            confirm_unknown_resources_safe: true,
+        };
+        assert!(
+            AgentDispatchApiServer::assignment_resolve_unknown(&fixture.daemon(), missing)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("assignment-not-found")
+        );
+        let request = |agent, resources| forge_rpc::ResolveUnknownAgentResourcesRequest {
+            assignment_id: assignment.clone(),
+            confirm_old_agent_cannot_act: agent,
+            confirm_unknown_resources_safe: resources,
+        };
+        let resolve = |request| {
+            let daemon = fixture.daemon();
+            async move { AgentDispatchApiServer::assignment_resolve_unknown(&daemon, request).await }
+        };
+        assert!(
+            resolve(request(true, true))
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("assignment-not-revoked")
+        );
+        store
+            .close_agent_assignment(
+                &assignment,
+                forge_app::AgentAssignmentClosureReason::Retired,
+            )
+            .unwrap();
+        store
+            .hold_dispatch(
+                store.agent_assignment(&assignment).unwrap().record_id,
+                "operator review",
+            )
+            .unwrap();
+        for (agent, resources) in [(false, false), (true, false), (false, true)] {
+            assert!(
+                resolve(request(agent, resources))
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains("confirmation-required")
+            );
+        }
+        let before = AgentDispatchApiServer::assignment_info(
+            &fixture.daemon(),
+            forge_rpc::AssignmentInfoRequest {
+                assignment_id: assignment.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(before.unknown_resource_resolution.is_none());
+        assert!(
+            before
+                .resources
+                .iter()
+                .find(|r| r.resource_kind == "provision-intent")
+                .unwrap()
+                .retired_at_millis
+                .is_none()
+        );
+        let resolved = resolve(request(true, true)).await.unwrap();
+        assert!(resolved.capacity_reserved);
+        assert!(resolved.dispatch_hold.is_some());
+        assert!(
+            !resolved
+                .recovery_blockers
+                .iter()
+                .any(|b| b == "uncertain-provisioning")
+        );
+        let audit = resolved.unknown_resource_resolution.unwrap();
+        assert!(audit.confirmed_at_millis > 0);
+        assert_eq!(audit.authority, "trusted-operator-rpc");
+        assert!(audit.confirmation.contains("old agent can no longer act"));
+        assert!(audit.confirmation.contains("unknown resources"));
+        // Repeating the assertion must not rewrite the original audit timestamp.
+        assert_eq!(
+            resolve(request(true, true))
+                .await
+                .unwrap()
+                .unknown_resource_resolution,
+            Some(audit.clone())
+        );
+        drop(store);
+        let reopened = SqliteProjectRepository::open(&fixture.database_path).unwrap();
+        let persisted: forge_rpc::AgentAssignmentInfoResponse =
+            reopened.agent_assignment_info(&assignment).unwrap().into();
+        assert_eq!(persisted.unknown_resource_resolution, Some(audit));
+        assert!(persisted.capacity_reserved);
+        reopened
+            .retire_agent_assignment_resource(&assignment, "pane", "known-pane")
+            .unwrap();
+        assert!(
+            reopened
+                .agent_assignment_info(&assignment)
+                .unwrap()
+                .capacity_reserved(),
+            "retirement-pending still reserves capacity"
+        );
+        reopened
+            .retire_agent_assignment_resource(&assignment, "retirement-pending", "operator")
+            .unwrap();
+        assert!(
+            !reopened
+                .agent_assignment_info(&assignment)
+                .unwrap()
+                .capacity_reserved()
+        );
+        assert!(
+            reopened
+                .agent_assignment_info(&assignment)
+                .unwrap()
+                .dispatch_hold
+                .is_some()
+        );
+        drop(reopened);
+        let after_restart = SqliteProjectRepository::open(&fixture.database_path).unwrap();
+        assert!(
+            !after_restart
+                .agent_assignment_info(&assignment)
+                .unwrap()
+                .capacity_reserved()
+        );
+        assert!(
+            after_restart
+                .agent_assignment_info(&assignment)
+                .unwrap()
+                .unknown_resource_resolution
+                .is_some()
         );
     }
 

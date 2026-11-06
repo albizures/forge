@@ -196,6 +196,65 @@ async fn retirement_cli_retries_failed_cleanup_and_reports_remaining_uncertainty
                 .unwrap()["retired_at_millis"]
                 .is_number()
         );
+        if unknown {
+            let resolve = |flags: &[&str]| {
+                Command::new(env!("CARGO_BIN_EXE_forge"))
+                    .args([
+                        "agent-dispatch",
+                        "assignment-resolve-unknown",
+                        "retire-me",
+                        "--server-url",
+                        &url,
+                    ])
+                    .args(flags)
+                    .output()
+                    .unwrap()
+            };
+            for flags in [
+                vec![],
+                vec!["--confirm-old-agent-cannot-act"],
+                vec!["--confirm-unknown-resources-safe"],
+            ] {
+                let rejected = resolve(&flags);
+                assert!(!rejected.status.success());
+                let warning = String::from_utf8_lossy(&rejected.stderr);
+                assert!(warning.contains("old agent can no longer act"), "{warning}");
+                assert!(warning.contains("unknown resources"), "{warning}");
+                let info: serde_json::Value =
+                    serde_json::from_slice(&run("assignment-info", true).stdout).unwrap();
+                assert_eq!(info["capacity_reserved"], true);
+                assert!(info["unknown_resource_resolution"].is_null());
+            }
+            let confirmed = resolve(&[
+                "--confirm-old-agent-cannot-act",
+                "--confirm-unknown-resources-safe",
+            ]);
+            assert!(
+                confirmed.status.success(),
+                "{}",
+                String::from_utf8_lossy(&confirmed.stderr)
+            );
+            let human = String::from_utf8(confirmed.stdout).unwrap();
+            assert!(human.contains("Operator confirmed"), "{human}");
+            assert!(human.contains("cannot undo external actions"), "{human}");
+            assert!(!human.contains("PRIVATE PROMPT"));
+            let info: serde_json::Value =
+                serde_json::from_slice(&run("assignment-info", true).stdout).unwrap();
+            assert_eq!(info["capacity_reserved"], false);
+            assert!(info["dispatch_hold"].is_string());
+            assert!(info["unknown_resource_resolution"]["confirmed_at_millis"].is_number());
+            let json = resolve(&[
+                "--confirm-old-agent-cannot-act",
+                "--confirm-unknown-resources-safe",
+                "--json",
+            ]);
+            assert!(json.status.success());
+            let repeated: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+            assert_eq!(
+                repeated["unknown_resource_resolution"],
+                info["unknown_resource_resolution"]
+            );
+        }
         server.abort();
         let _ = std::fs::remove_file(path);
     }

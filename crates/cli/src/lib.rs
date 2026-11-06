@@ -416,6 +416,14 @@ pub fn render_agent_assignment_info(info: &forge_rpc::AgentAssignmentInfoRespons
         )
         .unwrap();
     }
+    if let Some(resolution) = &info.unknown_resource_resolution {
+        write!(
+            output,
+            "\nUnknown-resource resolution at {} ({}): {}",
+            resolution.confirmed_at_millis, resolution.authority, resolution.confirmation
+        )
+        .unwrap();
+    }
     output.push_str("\nTimestamps are Unix milliseconds.\nOperations:\n");
     output.push_str(&info.operations.join("\n"));
     output.push_str("\nClearing a Dispatch Hold does not resolve recovery blockers or establish that an agent is absent. Investigate resources before retirement; hold clearing is separate.");
@@ -431,6 +439,28 @@ pub async fn request_retire_agent_assignment(
         .assignment_retire(RetireAgentAssignmentRequest { assignment_id })
         .await
         .map_err(|error| format!("could not retire Agent Assignment through Forge daemon: {error}"))
+}
+
+/// Sends the operator's two explicit safety assertions (never an agent credential).
+///
+/// # Errors
+/// Returns transport, confirmation, revocation, or persistence errors.
+pub async fn request_resolve_unknown_agent_resources(
+    url: &str,
+    assignment_id: String,
+    confirm_old_agent_cannot_act: bool,
+    confirm_unknown_resources_safe: bool,
+) -> Result<forge_rpc::AgentAssignmentInfoResponse, String> {
+    client(url)?
+        .assignment_resolve_unknown(forge_rpc::ResolveUnknownAgentResourcesRequest {
+            assignment_id,
+            confirm_old_agent_cannot_act,
+            confirm_unknown_resources_safe,
+        })
+        .await
+        .map_err(|error| {
+            format!("could not resolve unknown resources through Forge daemon: {error}")
+        })
 }
 
 #[must_use]

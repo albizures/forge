@@ -612,6 +612,15 @@ pub struct AgentAssignmentInfo {
     pub acknowledged_at_millis: Option<u64>,
     pub dispatch_hold: Option<DispatchHold>,
     pub resources: Vec<AgentAssignmentResource>,
+    pub unknown_resource_resolution: Option<UnknownResourceResolution>,
+}
+
+/// Immutable operator assertion, not provider proof of process exit.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UnknownResourceResolution {
+    pub confirmed_at_millis: u64,
+    pub authority: String,
+    pub confirmation: String,
 }
 
 impl AgentAssignmentInfo {
@@ -1438,6 +1447,10 @@ pub trait AgentDispatchRepository: RecordRepository {
         resource_kind: &str,
         resource_id: &str,
     ) -> Result<AgentAssignmentResource, RegistrationError>;
+    /// Atomically audits an explicit operator assertion and resolves provisioning uncertainty.
+    /// Requires a closed (capability-revoked) Assignment; never retires known resources.
+    fn resolve_unknown_agent_resources(&self, assignment_id: &str)
+    -> Result<(), RegistrationError>;
     /// Returns retained resource history for an Assignment.
     fn list_agent_assignment_resources(
         &self,
@@ -2231,6 +2244,28 @@ impl Application {
             "operator",
         )?;
         Ok(assignment)
+    }
+
+    /// Records an operator assertion that unknown resources are safe, after revocation.
+    /// This is not provider verification and does not clear known resources or the hold.
+    ///
+    /// # Errors
+    /// Returns an error for absent confirmation, an open Assignment, or storage failure.
+    pub fn resolve_unknown_agent_resources(
+        &self,
+        assignment_id: &str,
+        confirm_old_agent_cannot_act: bool,
+        confirm_unknown_resources_safe: bool,
+    ) -> Result<AgentAssignmentInfo, RegistrationError> {
+        if !confirm_old_agent_cannot_act || !confirm_unknown_resources_safe {
+            return Err(RegistrationError::new(
+                "confirmation-required",
+                "Risk of duplicate agents and external actions: explicitly confirm the old agent can no longer act AND unknown resources have been removed or otherwise made safe. Revocation cannot undo external actions.",
+            ));
+        }
+        self.dispatch()?
+            .resolve_unknown_agent_resources(assignment_id)?;
+        self.agent_assignment_info(assignment_id)
     }
 
     /// Creates an Assignment-authorized durable Record Update Subscription.
