@@ -60,6 +60,27 @@ Records normally advance from `open` to `in-progress` to `done`. A Spec can be
 completed after its Tasks are done. For automatic execution, configure
 [agent dispatch](docs/dispatch.md) instead of manually starting the Task.
 
+## Agent skills
+
+Install the skills with the [Skills CLI](https://skills.sh):
+
+```sh
+npx skills add albizures/forge
+
+# Required extra skills
+npx skills add mattpocock/skills --skill prototype research
+
+# Optional extra skills
+npx skills add mattpocock/skills --skill grill-me writing-for-agents improve-codebase-architecture
+```
+
+| Skill | Description |
+| --- | --- |
+| [forge](skills/forge/SKILL.md) | Manage Forge records, worktrees, agent dispatch, and assignment recovery. |
+| [spec](skills/spec/SKILL.md) | Define, plan, and deliver a Spec through task rounds, agent assignments, and review. |
+| [grilling](skills/grilling/SKILL.md) | Stress-test a plan or idea through structured questions and explicit decisions. |
+| [domain-modeling](skills/domain-modeling/SKILL.md) | Clarify domain terminology, maintain a glossary, and record architectural decisions. |
+
 ## Documentation
 
 | Guide | Contents |
@@ -70,7 +91,6 @@ completed after its Tasks are done. For automatic execution, configure
 | [Assignment recovery](docs/assignment-recovery.md) | Investigation, retirement, unknown resources, and holds |
 | [Forgeup operations](crates/docs/forgeup.md) | Revision registration, selection, daemon lifecycle, and recovery |
 | [Development](docs/development.md) | Source setup, manual daemon endpoints, browser/RPC, and verification |
-| [Agent workflows](skills/forge/SKILL.md) | Record workflows, worktrees, dispatch, and assignment recovery |
 | [Management Protocol](crates/docs/management-protocol.md) | Forgeup's daemon attestation and lifecycle contract |
 
 ## Security
