@@ -283,6 +283,9 @@ pub async fn request_agent_dispatch_reconcile(
 }
 
 /// Explicitly dispatches a Task or interactive Grilling Assignment.
+///
+/// # Errors
+/// Returns endpoint, eligibility, or daemon provisioning failures.
 pub async fn request_dispatch_record(
     url: &str,
     record_id: u64,
@@ -294,6 +297,9 @@ pub async fn request_dispatch_record(
 }
 
 /// Starts the Task bound to an Assignment Capability.
+///
+/// # Errors
+/// Returns endpoint, authorization, or Task-start failures from the daemon.
 pub async fn request_start_assignment_task(
     url: &str,
     assignment_id: String,
@@ -313,6 +319,9 @@ pub async fn request_start_assignment_task(
 }
 
 /// Returns an unassigned Task to Open.
+///
+/// # Errors
+/// Returns endpoint or daemon Task-reopen failures.
 pub async fn request_reopen_dispatch_task(
     url: &str,
     task_id: u64,
@@ -324,6 +333,9 @@ pub async fn request_reopen_dispatch_task(
 }
 
 /// Clears a Task's Dispatch Hold.
+///
+/// # Errors
+/// Returns endpoint or daemon hold-clearing failures.
 pub async fn request_resume_dispatch_task(url: &str, task_id: u64) -> Result<(), String> {
     client(url)?
         .resume(RecordIdRequest { id: task_id })
@@ -410,6 +422,9 @@ pub fn render_agent_assignment_info(info: &forge_rpc::AgentAssignmentInfoRespons
 }
 
 /// Retires an Assignment and its provider resources.
+///
+/// # Errors
+/// Returns endpoint or daemon retirement failures, including unsafe cleanup.
 pub async fn request_retire_agent_assignment(
     url: &str,
     assignment_id: String,

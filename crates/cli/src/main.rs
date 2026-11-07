@@ -934,62 +934,7 @@ async fn agent_dispatch(command: AgentDispatchCommand) -> i32 {
                 }
             };
         }
-        AgentDispatchCommand::Config { command } => {
-            let (result, json) = match command {
-                DispatcherConfigCommand::Get(args) => (
-                    forge_cli::request_dispatcher_config_get(
-                        &resolve_endpoint(args.server_url.as_deref()).await,
-                        args.key,
-                        args.project,
-                    )
-                    .await,
-                    args.json,
-                ),
-                DispatcherConfigCommand::Set(args) => (
-                    forge_cli::request_dispatcher_config_set(
-                        &resolve_endpoint(args.server_url.as_deref()).await,
-                        args.key,
-                        args.value,
-                        args.project,
-                    )
-                    .await,
-                    args.json,
-                ),
-                DispatcherConfigCommand::Unset(args) => (
-                    forge_cli::request_dispatcher_config_unset(
-                        &resolve_endpoint(args.server_url.as_deref()).await,
-                        args.key,
-                        args.project,
-                    )
-                    .await,
-                    args.json,
-                ),
-            };
-            return match result {
-                Ok(config) => {
-                    if json {
-                        println!("{}", serde_json::to_string(&config).unwrap());
-                    } else {
-                        if let Some(applicability) = config.applicability {
-                            println!("{applicability}");
-                        }
-                        for entry in config.entries {
-                            println!(
-                                "{}\t{}\t{}",
-                                entry.key,
-                                entry.value.as_deref().unwrap_or("unset"),
-                                entry.provenance
-                            );
-                        }
-                    }
-                    0
-                }
-                Err(error) => {
-                    eprintln!("forge dispatcher config: {error}");
-                    1
-                }
-            };
-        }
+        AgentDispatchCommand::Config { command } => return dispatcher_config(command).await,
         AgentDispatchCommand::Profile(args) => (
             request_agent_dispatch_profile(&resolve_endpoint(args.server_url.as_deref()).await)
                 .await
@@ -1029,94 +974,11 @@ async fn agent_dispatch(command: AgentDispatchCommand) -> i32 {
             .map(|value| serde_json::to_value(value).unwrap()),
             args.json,
         ),
-        AgentDispatchCommand::Resume(args) => {
-            return match request_resume_dispatch_task(
-                &resolve_endpoint(args.server_url.as_deref()).await,
-                args.task_id,
-            )
-            .await
-            {
-                Ok(()) => {
-                    let warning = "Clearing a Dispatch Hold does not resolve recovery blockers or prove an agent is absent. It does not resend a prompt and does not authorize a replacement. Replacement requires retirement and safe resolution of all known and uncertain resources; hold clearing is separate. Use assignment-info <assignment-id> to investigate.";
-                    if args.json {
-                        println!(
-                            "{}",
-                            serde_json::json!({
-                                "task_id": args.task_id,
-                                "operation": "clear-dispatch-hold",
-                                "resolves_recovery_blockers": false,
-                                "authorizes_replacement": false,
-                                "warning": warning,
-                            })
-                        );
-                    } else {
-                        println!("Task {}: Dispatch Hold cleared.\n{warning}", args.task_id);
-                    }
-                    0
-                }
-                Err(error) => {
-                    eprintln!("forge dispatcher resume: {error}");
-                    1
-                }
-            };
-        }
+        AgentDispatchCommand::Resume(args) => return dispatcher_resume(args).await,
         AgentDispatchCommand::AssignmentResolveUnknown(args) => {
-            if !args.confirm_old_agent_cannot_act || !args.confirm_unknown_resources_safe {
-                eprintln!(
-                    "Risk of duplicate agents and external actions: confirm the old agent can no longer act AND unknown resources have been removed or otherwise made safe. Revocation cannot undo external actions. Investigate first, then pass both --confirm-old-agent-cannot-act and --confirm-unknown-resources-safe. Known resources still require verified retirement; Dispatch Hold clearing remains separate."
-                );
-                return 1;
-            }
-            let endpoint = resolve_endpoint(args.server_url.as_deref()).await;
-            return match forge_cli::request_resolve_unknown_agent_resources(
-                &endpoint,
-                args.assignment_id,
-                args.confirm_old_agent_cannot_act,
-                args.confirm_unknown_resources_safe,
-            )
-            .await
-            {
-                Ok(info) => {
-                    if args.json {
-                        println!("{}", serde_json::to_string(&info).unwrap());
-                    } else {
-                        println!("{}", forge_cli::render_agent_assignment_info(&info));
-                    }
-                    0
-                }
-                Err(error) => {
-                    eprintln!("forge dispatcher assignment-resolve-unknown: {error}");
-                    1
-                }
-            };
+            return dispatcher_resolve_unknown(args).await;
         }
-        AgentDispatchCommand::AssignmentRetire(args) => {
-            let endpoint = resolve_endpoint(args.server_url.as_deref()).await;
-            return match async {
-                request_retire_agent_assignment(&endpoint, args.assignment_id.clone()).await?;
-                forge_cli::request_agent_assignment_info(&endpoint, args.assignment_id).await
-            }
-            .await
-            {
-                Ok(info) => {
-                    if args.json {
-                        println!("{}", serde_json::to_string(&info).unwrap());
-                    } else {
-                        println!("{}", forge_cli::render_agent_assignment_info(&info));
-                        println!(
-                            "Assignment access revoked. External actions already performed cannot be undone. Dispatch Hold clearing remains separate."
-                        );
-                    }
-                    0
-                }
-                Err(error) => {
-                    eprintln!(
-                        "forge dispatcher assignment-retire: {error}. Cleanup may be incomplete; inspect assignment-info before any replacement."
-                    );
-                    1
-                }
-            };
-        }
+        AgentDispatchCommand::AssignmentRetire(args) => return dispatcher_retire(args).await,
     };
     match result {
         Ok(value) => {
@@ -1137,6 +999,154 @@ async fn agent_dispatch(command: AgentDispatchCommand) -> i32 {
         }
         Err(error) => {
             eprintln!("forge dispatcher: {error}");
+            1
+        }
+    }
+}
+
+async fn dispatcher_config(command: DispatcherConfigCommand) -> i32 {
+    let (result, json) = match command {
+        DispatcherConfigCommand::Get(args) => (
+            forge_cli::request_dispatcher_config_get(
+                &resolve_endpoint(args.server_url.as_deref()).await,
+                args.key,
+                args.project,
+            )
+            .await,
+            args.json,
+        ),
+        DispatcherConfigCommand::Set(args) => (
+            forge_cli::request_dispatcher_config_set(
+                &resolve_endpoint(args.server_url.as_deref()).await,
+                args.key,
+                args.value,
+                args.project,
+            )
+            .await,
+            args.json,
+        ),
+        DispatcherConfigCommand::Unset(args) => (
+            forge_cli::request_dispatcher_config_unset(
+                &resolve_endpoint(args.server_url.as_deref()).await,
+                args.key,
+                args.project,
+            )
+            .await,
+            args.json,
+        ),
+    };
+    match result {
+        Ok(config) => {
+            if json {
+                println!("{}", serde_json::to_string(&config).unwrap());
+            } else {
+                if let Some(applicability) = config.applicability {
+                    println!("{applicability}");
+                }
+                for entry in config.entries {
+                    println!(
+                        "{}\t{}\t{}",
+                        entry.key,
+                        entry.value.as_deref().unwrap_or("unset"),
+                        entry.provenance
+                    );
+                }
+            }
+            0
+        }
+        Err(error) => {
+            eprintln!("forge dispatcher config: {error}");
+            1
+        }
+    }
+}
+
+async fn dispatcher_resume(args: DispatchTaskArgs) -> i32 {
+    match request_resume_dispatch_task(
+        &resolve_endpoint(args.server_url.as_deref()).await,
+        args.task_id,
+    )
+    .await
+    {
+        Ok(()) => {
+            let warning = "Clearing a Dispatch Hold does not resolve recovery blockers or prove an agent is absent. It does not resend a prompt and does not authorize a replacement. Replacement requires retirement and safe resolution of all known and uncertain resources; hold clearing is separate. Use assignment-info <assignment-id> to investigate.";
+            if args.json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "task_id": args.task_id,
+                        "operation": "clear-dispatch-hold",
+                        "resolves_recovery_blockers": false,
+                        "authorizes_replacement": false,
+                        "warning": warning,
+                    })
+                );
+            } else {
+                println!("Task {}: Dispatch Hold cleared.\n{warning}", args.task_id);
+            }
+            0
+        }
+        Err(error) => {
+            eprintln!("forge dispatcher resume: {error}");
+            1
+        }
+    }
+}
+
+async fn dispatcher_resolve_unknown(args: AssignmentResolveUnknownArgs) -> i32 {
+    if !args.confirm_old_agent_cannot_act || !args.confirm_unknown_resources_safe {
+        eprintln!(
+            "Risk of duplicate agents and external actions: confirm the old agent can no longer act AND unknown resources have been removed or otherwise made safe. Revocation cannot undo external actions. Investigate first, then pass both --confirm-old-agent-cannot-act and --confirm-unknown-resources-safe. Known resources still require verified retirement; Dispatch Hold clearing remains separate."
+        );
+        return 1;
+    }
+    let endpoint = resolve_endpoint(args.server_url.as_deref()).await;
+    match forge_cli::request_resolve_unknown_agent_resources(
+        &endpoint,
+        args.assignment_id,
+        args.confirm_old_agent_cannot_act,
+        args.confirm_unknown_resources_safe,
+    )
+    .await
+    {
+        Ok(info) => {
+            if args.json {
+                println!("{}", serde_json::to_string(&info).unwrap());
+            } else {
+                println!("{}", forge_cli::render_agent_assignment_info(&info));
+            }
+            0
+        }
+        Err(error) => {
+            eprintln!("forge dispatcher assignment-resolve-unknown: {error}");
+            1
+        }
+    }
+}
+
+async fn dispatcher_retire(args: AssignmentRetireArgs) -> i32 {
+    let endpoint = resolve_endpoint(args.server_url.as_deref()).await;
+    match async {
+        request_retire_agent_assignment(&endpoint, args.assignment_id.clone()).await?;
+        forge_cli::request_agent_assignment_info(&endpoint, args.assignment_id).await
+    }
+    .await
+    {
+        Ok(info) => {
+            if args.json {
+                println!("{}", serde_json::to_string(&info).unwrap());
+            } else {
+                println!("{}", forge_cli::render_agent_assignment_info(&info));
+                println!(
+                    "Assignment access revoked. External actions already performed cannot be undone. Dispatch Hold clearing remains separate."
+                );
+            }
+            0
+        }
+        Err(error) => {
+            eprintln!(
+                "forge dispatcher assignment-retire: {error}. Cleanup may be incomplete; inspect assignment-info before any replacement."
+            );
             1
         }
     }

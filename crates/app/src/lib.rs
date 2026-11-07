@@ -245,6 +245,10 @@ pub trait RepositoryInspector: Send + Sync {
     /// Returns a user-facing error when the folder is not eligible.
     fn inspect(&self, folder: &Path) -> Result<Project, RegistrationError>;
     /// Resolves the immutable Git `HEAD` commit for a registered Project folder.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-facing error when commit resolution is unsupported or fails.
     fn head_commit(&self, folder: &Path) -> Result<String, RegistrationError> {
         let _ = folder;
         Err(RegistrationError::new(
@@ -416,6 +420,10 @@ pub trait RecordRepository: ProjectRepository {
     /// Returns a user-facing validation or storage failure.
     fn open_typed_record(&self, record: &NewTypedRecord) -> Result<Record, RegistrationError>;
     /// Persists the immutable Task Base Commit captured when the Task opens.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-facing error when persistence is unsupported or storage fails.
     fn set_task_base_commit(&self, record_id: u64, commit: &str) -> Result<(), RegistrationError> {
         let _ = (record_id, commit);
         Err(RegistrationError::new(
@@ -424,6 +432,10 @@ pub trait RecordRepository: ProjectRepository {
         ))
     }
     /// Returns the immutable Task Base Commit, if the Task has Project scope.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-facing error when lookup is unsupported or storage fails.
     fn task_base_commit(&self, record_id: u64) -> Result<Option<String>, RegistrationError> {
         let _ = record_id;
         Err(RegistrationError::new(
@@ -493,6 +505,11 @@ pub trait RecordRepository: ProjectRepository {
     /// Returns a user-facing error for an invalid transition, absent Record, or storage failure.
     fn start_record(&self, id: u64) -> Result<Record, RegistrationError>;
     /// Returns an In Progress Task to Open so it can become dispatch-eligible again.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-facing error when reopening is unsupported, the transition is invalid,
+    /// the Record is absent, or storage fails.
     fn reopen_record(&self, id: u64) -> Result<Record, RegistrationError> {
         let _ = id;
         Err(RegistrationError::new(
@@ -720,8 +737,7 @@ fn safe_adapter_detail(message: &str) -> String {
     if let Some((method, code)) = message
         .strip_prefix("Herdr ")
         .and_then(|s| s.split_once(": "))
-    {
-        if matches!(
+        && matches!(
             method,
             "ping"
                 | "state.get"
@@ -738,7 +754,8 @@ fn safe_adapter_detail(message: &str) -> String {
                 | "agent.stop"
                 | "tab.close"
                 | "pane.close"
-        ) && matches!(
+        )
+        && matches!(
             code,
             "not_found"
                 | "not-found"
@@ -749,9 +766,9 @@ fn safe_adapter_detail(message: &str) -> String {
                 | "timeout"
                 | "temporarily_unavailable"
                 | "unknown"
-        ) {
-            return format!("Herdr {method}: {code}");
-        }
+        )
+    {
+        return format!("Herdr {method}: {code}");
     }
     match message {
         "Assignment has no Agent Workspace" => "Assignment has no Agent Workspace",
@@ -2671,22 +2688,20 @@ impl Application {
                 scan_lease_millis: 30_000,
             },
         )
-        .map_err(|error| {
+        .inspect_err(|error| {
             tracing::warn!(
                 phase = "reconcile-assignments",
                 code = error.code,
                 "agent dispatch phase failed"
             );
-            error
         })?;
         if scan.acquired_lease {
-            self.schedule_agent_dispatch().map_err(|error| {
+            self.schedule_agent_dispatch().inspect_err(|error| {
                 tracing::warn!(
                     phase = "schedule-tasks",
                     code = error.code,
                     "agent dispatch phase failed"
                 );
-                error
             })?;
         }
         Ok(AgentDispatchReconcileResult {
@@ -2716,13 +2731,12 @@ impl Application {
                 record_type: Some(RecordType::Task),
                 task_kind: None,
             })
-            .map_err(|error| {
+            .inspect_err(|error| {
                 tracing::warn!(
                     operation = "list-open-tasks",
                     code = error.code,
                     "agent dispatch scheduling failed"
                 );
-                error
             })?
             .into_iter()
             .filter(|record| record.project_slugs.len() == 1)
@@ -2731,9 +2745,8 @@ impl Application {
         for project_slug in projects {
             while let Some(assignment) = dispatch
                 .claim_next_agent_assignment(&project_slug, &next_dispatch_assignment_id())
-                .map_err(|error| {
+                .inspect_err(|error| {
                     tracing::warn!(operation = "claim-assignment", project = %project_slug, code = error.code, "agent dispatch scheduling failed");
-                    error
                 })?
             {
                 // Preparation deliberately happens outside the claim transaction. Its durable
@@ -3404,7 +3417,6 @@ impl Application {
         project_slugs: &[String],
     ) -> Result<Option<String>, RegistrationError> {
         match project_slugs {
-            [] => Ok(None),
             [project_slug] => {
                 let project = self.records.project(project_slug)?;
                 self.inspector

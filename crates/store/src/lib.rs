@@ -5273,24 +5273,7 @@ mod tests {
         assert_eq!(profile.startup_timeout_millis, 30_000);
         assert_eq!(store.agent_profile(RecordType::Task, 1).unwrap(), profile);
 
-        let workspace = forge_app::DispatchWorkspace {
-            id: "shared-workspace".into(),
-        };
-        assert_eq!(store.dispatch_workspace().unwrap(), None);
-        assert_eq!(
-            store.retain_dispatch_workspace(&workspace).unwrap(),
-            workspace
-        );
-        assert_eq!(store.dispatch_workspace().unwrap(), Some(workspace.clone()));
-        assert_eq!(
-            store
-                .retain_dispatch_workspace(&forge_app::DispatchWorkspace {
-                    id: "other-workspace".into(),
-                })
-                .unwrap_err()
-                .code,
-            "dispatch-workspace-conflict"
-        );
+        asserts_dispatch_workspace_persists(&store);
 
         // Provider configuration must be established before an Assignment reserves it.
         asserts_project_configuration_persists(&store);
@@ -5353,6 +5336,27 @@ mod tests {
                 .unwrap(),
             retired,
             "retirement evidence is idempotent"
+        );
+    }
+
+    fn asserts_dispatch_workspace_persists(store: &SqliteProjectRepository) {
+        let workspace = forge_app::DispatchWorkspace {
+            id: "shared-workspace".into(),
+        };
+        assert_eq!(store.dispatch_workspace().unwrap(), None);
+        assert_eq!(
+            store.retain_dispatch_workspace(&workspace).unwrap(),
+            workspace
+        );
+        assert_eq!(store.dispatch_workspace().unwrap(), Some(workspace.clone()));
+        assert_eq!(
+            store
+                .retain_dispatch_workspace(&forge_app::DispatchWorkspace {
+                    id: "other-workspace".into(),
+                })
+                .unwrap_err()
+                .code,
+            "dispatch-workspace-conflict"
         );
     }
 
@@ -6091,7 +6095,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_dispatch_enforces_readiness_holds_and_closed_assignment_resources() {
+    fn explicit_dispatch_enforces_supported_types_readiness_and_holds() {
         let store = SqliteProjectRepository::in_memory().unwrap();
         store.register(&project("alpha", "/repos/alpha")).unwrap();
         store.register(&project("beta", "/repos/beta")).unwrap();
@@ -6162,7 +6166,30 @@ mod tests {
             "dispatch-held"
         );
         assert!(store.dispatch_hold(task.id).unwrap().is_some());
-        let grilling = open(RecordType::Grilling, vec!["alpha"]);
+        let in_progress = open(RecordType::Task, vec!["beta"]);
+        store.start_record(in_progress.id).unwrap();
+        assert_eq!(
+            store
+                .claim_record_agent_assignment(in_progress.id, "in-progress")
+                .unwrap_err()
+                .code,
+            "record-not-ready"
+        );
+    }
+
+    #[test]
+    fn explicit_dispatch_rejects_closed_assignment_resources() {
+        let store = SqliteProjectRepository::in_memory().unwrap();
+        store.register(&project("alpha", "/repos/alpha")).unwrap();
+        let grilling = store
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Grilling,
+                task_kind: None,
+                body: "record".into(),
+                project_slugs: vec!["alpha".into()],
+                generated_by_ids: vec![],
+            })
+            .unwrap();
         let (assignment, _) = store
             .claim_record_agent_assignment(grilling.id, "interactive")
             .unwrap();
@@ -6195,15 +6222,6 @@ mod tests {
             "retained-agent"
         );
         assert_eq!(store.list_agent_assignments(grilling.id).unwrap().len(), 1);
-        let in_progress = open(RecordType::Task, vec!["beta"]);
-        store.start_record(in_progress.id).unwrap();
-        assert_eq!(
-            store
-                .claim_record_agent_assignment(in_progress.id, "in-progress")
-                .unwrap_err()
-                .code,
-            "record-not-ready"
-        );
     }
 
     #[test]

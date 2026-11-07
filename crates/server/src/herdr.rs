@@ -629,64 +629,46 @@ impl HerdrAdapter {
     }
 }
 
-impl AgentDispatchAdapter for HerdrAdapter {
-    fn probe(&self) -> Result<(), AgentAdapterError> {
-        self.request("ping", json!({}))?;
-        self.snapshot().map(|_| ())
+fn provisioning_prompt(context: &AgentDispatchContext) -> Result<&str, AgentAdapterError> {
+    match context.assignment.profile.record_type {
+        forge_app::RecordType::Task => {
+            let bootstrap = context
+                .bootstrap_prompt
+                .as_deref()
+                .filter(|prompt| !prompt.trim().is_empty())
+                .ok_or_else(|| {
+                    AgentAdapterError::InvalidRequest(
+                        "verified agent bootstrap is not configured".into(),
+                    )
+                })?;
+            if context.capability_delivery.is_none() {
+                return Err(AgentAdapterError::InvalidRequest(
+                    "Assignment Capability delivery is not configured".into(),
+                ));
+            }
+            if context.agent_workspace.is_none() {
+                return Err(AgentAdapterError::InvalidRequest(
+                    "Task provisioning requires its active Managed Worktree".into(),
+                ));
+            }
+            Ok(bootstrap)
+        }
+        forge_app::RecordType::Grilling => Ok(context.rendered_initial_prompt.as_str()),
+        _ => Err(AgentAdapterError::InvalidRequest(
+            "explicit dispatch supports only Tasks and Grillings".into(),
+        )),
     }
+}
 
-    fn dispatch_available(&self, resources: &dyn AgentDispatchRepository) -> bool {
-        self.dispatch_workspace(resources).is_ok()
-    }
-
-    fn verify_workspace(
-        &self,
-        id: &str,
-    ) -> Result<forge_app::DispatchWorkspace, AgentAdapterError> {
-        let result = self.request("workspace.get", json!({"workspace_id": id}))?;
-        let workspace = result.get("workspace").unwrap_or(&result);
-        Self::matching_resource(workspace, "workspace", &[("workspace_id", id)])?;
-        Ok(forge_app::DispatchWorkspace { id: id.into() })
-    }
-
-    fn provision(
+impl HerdrAdapter {
+    fn provision_resources(
         &self,
         context: &AgentDispatchContext,
         resources: &dyn AgentDispatchRepository,
+        prompt: &str,
+        label: &str,
+        workspace: &str,
     ) -> Result<(), AgentAdapterError> {
-        let prompt = match context.assignment.profile.record_type {
-            forge_app::RecordType::Task => {
-                let bootstrap = context
-                    .bootstrap_prompt
-                    .as_deref()
-                    .filter(|prompt| !prompt.trim().is_empty())
-                    .ok_or_else(|| {
-                        AgentAdapterError::InvalidRequest(
-                            "verified agent bootstrap is not configured".into(),
-                        )
-                    })?;
-                if context.capability_delivery.is_none() {
-                    return Err(AgentAdapterError::InvalidRequest(
-                        "Assignment Capability delivery is not configured".into(),
-                    ));
-                }
-                if context.agent_workspace.is_none() {
-                    return Err(AgentAdapterError::InvalidRequest(
-                        "Task provisioning requires its active Managed Worktree".into(),
-                    ));
-                }
-                bootstrap
-            }
-            forge_app::RecordType::Grilling => context.rendered_initial_prompt.as_str(),
-            _ => {
-                return Err(AgentAdapterError::InvalidRequest(
-                    "explicit dispatch supports only Tasks and Grillings".into(),
-                ));
-            }
-        };
-        self.probe()?;
-        let label = Self::label(context)?;
-        let workspace = self.dispatch_workspace(resources)?;
         if !resources
             .begin_agent_provision(&context.assignment.id)
             .map_err(|error| {
@@ -733,7 +715,7 @@ impl AgentDispatchAdapter for HerdrAdapter {
         } else {
             let pane = match root {
                 Some(root) => root,
-                None => self.root_pane(&workspace, &tab)?,
+                None => self.root_pane(workspace, &tab)?,
             };
             Self::retain(resources, context, "pane", &pane)?;
             pane
@@ -758,9 +740,42 @@ impl AgentDispatchAdapter for HerdrAdapter {
                 ));
             }
             self.request("agent.start", json!({"name": label, "kind": "pi", "pane_id": pane, "args": ["--model", context.assignment.profile.model, prompt], "timeout_ms": context.assignment.profile.startup_timeout_millis}))?;
-            Self::retain(resources, context, "agent-name", &label)?;
+            Self::retain(resources, context, "agent-name", label)?;
         }
         Ok(())
+    }
+}
+
+impl AgentDispatchAdapter for HerdrAdapter {
+    fn probe(&self) -> Result<(), AgentAdapterError> {
+        self.request("ping", json!({}))?;
+        self.snapshot().map(|_| ())
+    }
+
+    fn dispatch_available(&self, resources: &dyn AgentDispatchRepository) -> bool {
+        self.dispatch_workspace(resources).is_ok()
+    }
+
+    fn verify_workspace(
+        &self,
+        id: &str,
+    ) -> Result<forge_app::DispatchWorkspace, AgentAdapterError> {
+        let result = self.request("workspace.get", json!({"workspace_id": id}))?;
+        let workspace = result.get("workspace").unwrap_or(&result);
+        Self::matching_resource(workspace, "workspace", &[("workspace_id", id)])?;
+        Ok(forge_app::DispatchWorkspace { id: id.into() })
+    }
+
+    fn provision(
+        &self,
+        context: &AgentDispatchContext,
+        resources: &dyn AgentDispatchRepository,
+    ) -> Result<(), AgentAdapterError> {
+        let prompt = provisioning_prompt(context)?;
+        self.probe()?;
+        let label = Self::label(context)?;
+        let workspace = self.dispatch_workspace(resources)?;
+        self.provision_resources(context, resources, prompt, &label, &workspace)
     }
 
     fn observe(
@@ -844,15 +859,13 @@ impl AgentDispatchAdapter for HerdrAdapter {
 
         if let (Some(pane), Some(agent)) = (&pane, &agent)
             && pane_present
-        {
-            if self.agent_observation(agent, (&workspace, tab.as_deref().unwrap_or(""), pane))?
+            && self.agent_observation(agent, (&workspace, tab.as_deref().unwrap_or(""), pane))?
                 != AgentObservation::Absent
-            {
-                self.cleanup_request(
-                    "pane.release_agent",
-                    json!({"pane_id": pane, "source": "forge-agent-dispatch", "agent": agent, "seq": 1}),
-                )?;
-            }
+        {
+            self.cleanup_request(
+                "pane.release_agent",
+                json!({"pane_id": pane, "source": "forge-agent-dispatch", "agent": agent, "seq": 1}),
+            )?;
         }
         // The pane may be the tab's root; closing the verified dedicated tab removes
         // its panes as well and avoids trying to close a tab's last pane separately.
@@ -876,8 +889,8 @@ impl AgentDispatchAdapter for HerdrAdapter {
                 }
             }
         }
-        if let Some(agent) = &agent {
-            if self.agent_observation(
+        if let Some(agent) = &agent
+            && self.agent_observation(
                 agent,
                 (
                     &workspace,
@@ -885,11 +898,10 @@ impl AgentDispatchAdapter for HerdrAdapter {
                     pane.as_deref().unwrap_or(""),
                 ),
             )? != AgentObservation::Absent
-            {
-                return Err(AgentAdapterError::Cleanup(
-                    "agent remains after cleanup".into(),
-                ));
-            }
+        {
+            return Err(AgentAdapterError::Cleanup(
+                "agent remains after cleanup".into(),
+            ));
         }
         for (kind, id) in [("tab", tab), ("pane", pane), ("agent-name", agent)] {
             if let Some(id) = id {
@@ -1039,11 +1051,7 @@ mod tests {
             DispatchWorkspace, NewAgentAssignment, NewTypedRecord, Project, ProjectRepository,
             RecordRepository,
         };
-        use std::{
-            io::{BufRead, BufReader, Write},
-            os::unix::net::UnixListener,
-            thread,
-        };
+        use std::os::unix::net::UnixListener;
         let interactive = record_type == forge_app::RecordType::Grilling;
         let repository = forge_store::SqliteProjectRepository::in_memory().unwrap();
         repository
@@ -1101,7 +1109,36 @@ mod tests {
         ));
         let listener = UnixListener::bind(&path).unwrap();
         let model = assignment.profile.model.clone();
-        let server = thread::spawn(move || {
+        let server = launch_contract_server(listener, interactive, model);
+        let adapter = super::HerdrAdapter {
+            socket_path: path.clone(),
+            dispatch_root: "/neutral".into(),
+        };
+        adapter.provision(&context, &repository).unwrap();
+        assert!(
+            repository
+                .agent_launch_intent(&assignment.id)
+                .unwrap()
+                .is_some()
+        );
+        server.join().unwrap();
+        if !interactive {
+            let mut missing_worktree = context.clone();
+            missing_worktree.agent_workspace = None;
+            assert!(
+                matches!(adapter.provision(&missing_worktree, &repository), Err(forge_app::AgentAdapterError::InvalidRequest(message)) if message.contains("Managed Worktree"))
+            );
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    fn launch_contract_server(
+        listener: std::os::unix::net::UnixListener,
+        interactive: bool,
+        model: String,
+    ) -> std::thread::JoinHandle<()> {
+        use std::io::{BufRead, BufReader, Write};
+        std::thread::spawn(move || {
             for (method, response) in [
                 (
                     "ping",
@@ -1167,27 +1204,7 @@ mod tests {
                 .unwrap();
                 stream.write_all(b"\n").unwrap();
             }
-        });
-        let adapter = super::HerdrAdapter {
-            socket_path: path.clone(),
-            dispatch_root: "/neutral".into(),
-        };
-        adapter.provision(&context, &repository).unwrap();
-        assert!(
-            repository
-                .agent_launch_intent(&assignment.id)
-                .unwrap()
-                .is_some()
-        );
-        server.join().unwrap();
-        if !interactive {
-            let mut missing_worktree = context.clone();
-            missing_worktree.agent_workspace = None;
-            assert!(
-                matches!(adapter.provision(&missing_worktree, &repository), Err(forge_app::AgentAdapterError::InvalidRequest(message)) if message.contains("Managed Worktree"))
-            );
-        }
-        std::fs::remove_file(path).unwrap();
+        })
     }
 
     /// Socket seam with protocol-22 response envelopes (not flattened `AgentInfo` doubles).

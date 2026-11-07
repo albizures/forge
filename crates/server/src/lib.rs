@@ -328,10 +328,9 @@ impl SubscriptionDelivery {
         if connections
             .get(&id)
             .is_some_and(|connection| connection.connection_id == connection_id)
+            && let Some(connection) = connections.remove(&id)
         {
-            if let Some(connection) = connections.remove(&id) {
-                let _ = connection.cancelled.send(true);
-            }
+            let _ = connection.cancelled.send(true);
         }
     }
 
@@ -838,10 +837,14 @@ impl CapabilityDeliveryAdapter {
                     "could not issue Assignment Capability".into(),
                 )
             })?;
-            let secret = bytes
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>();
+            let secret = bytes.iter().fold(
+                String::with_capacity(bytes.len() * 2),
+                |mut secret, byte| {
+                    use std::fmt::Write;
+                    write!(secret, "{byte:02x}").expect("writing to a String cannot fail");
+                    secret
+                },
+            );
             let workspace = context
                 .agent_workspace
                 .as_deref()
@@ -1706,6 +1709,16 @@ async fn subscription_events(
         }
         Err(_) => return StatusCode::UNAUTHORIZED.into_response(),
     };
+    let Ok(cursor) = subscription_cursor(&request, subscription.start_cursor) else {
+        return (StatusCode::BAD_REQUEST, "invalid-cursor").into_response();
+    };
+    subscription_event_stream(&daemon, id, &subscription, cursor)
+}
+
+fn subscription_cursor(
+    request: &Request,
+    start_cursor: RecordUpdateId,
+) -> Result<RecordUpdateId, ()> {
     let header_cursor = request
         .headers()
         .get("last-event-id")
@@ -1722,12 +1735,20 @@ async fn subscription_events(
         || query_cursor.is_some_and(|cursor| cursor.is_none())
         || matches!((header_cursor.flatten(), query_cursor.flatten()), (Some(left), Some(right)) if left != right)
     {
-        return (StatusCode::BAD_REQUEST, "invalid-cursor").into_response();
+        return Err(());
     }
-    let cursor = header_cursor
+    Ok(header_cursor
         .flatten()
         .or(query_cursor.flatten())
-        .unwrap_or(subscription.start_cursor);
+        .unwrap_or(start_cursor))
+}
+
+fn subscription_event_stream(
+    daemon: &Daemon,
+    id: RecordUpdateSubscriptionId,
+    subscription: &forge_app::RecordUpdateSubscription,
+    cursor: RecordUpdateId,
+) -> Response {
     if cursor < subscription.start_cursor {
         return match daemon.application.record_update_head() {
             Ok(head) => resync_required(id, subscription.start_cursor, head),
@@ -1737,7 +1758,7 @@ async fn subscription_events(
     let (connection_id, receiver, mut cancellation, mut lease_expires_at_millis, replay) =
         match daemon
             .delivery
-            .connect_and_replay(&daemon.application, &subscription, cursor)
+            .connect_and_replay(&daemon.application, subscription, cursor)
         {
             Ok(connection) => connection,
             Err(error) if error.code == "invalid-cursor" => {
@@ -2163,6 +2184,7 @@ impl StoreOwnershipLock {
         let lock_path = PathBuf::from(lock_path);
         let file = fs::OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(&lock_path)?;
@@ -2507,9 +2529,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn explicit_dispatch_prepares_only_task_worktrees_and_never_relaunches_duplicates() {
-        use forge_app::{AgentAssignmentState, ManagedWorktreeRepository};
+    fn explicit_dispatch_fixture() -> (PathBuf, SqliteProjectRepository, Vec<forge_app::Record>) {
+        use forge_app::ManagedWorktreeRepository;
         let root = std::env::temp_dir().join(format!(
             "forge-explicit-app-{}",
             SystemTime::now()
@@ -2566,6 +2587,14 @@ mod tests {
             }
             records.push(record);
         }
+        (root, store, records)
+    }
+
+    #[test]
+    fn explicit_dispatch_prepares_only_task_worktrees_and_never_relaunches_duplicates() {
+        use forge_app::AgentAssignmentState;
+        let (root, store, records) = explicit_dispatch_fixture();
+        let database = root.join("store.sqlite");
         let launches = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let app = Application::with_managed_worktrees_and_agent_dispatch(
             Box::new(SqliteProjectRepository::open(&database).unwrap()),
@@ -2735,11 +2764,7 @@ mod tests {
     #[test]
     fn provider_configuration_verifies_workspace_and_rechecks_safety_after_provider_call() {
         use forge_app::{AgentAssignmentClosureReason, AgentDispatchRepository};
-        use std::{
-            io::{BufRead, BufReader, Write},
-            os::unix::net::UnixListener,
-            thread,
-        };
+        use std::os::unix::net::UnixListener;
         let root = std::env::temp_dir().join(format!(
             "forge-config-{}-{}",
             std::process::id(),
@@ -2769,8 +2794,32 @@ mod tests {
             })
             .unwrap();
         let listener = UnixListener::bind(&socket).unwrap();
-        let provider_database = database.clone();
-        let provider = thread::spawn(move || {
+        let provider = workspace_selection_server(listener, database.clone(), task.id);
+        let app = super::application_from_config(&super::DaemonConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            store_path: database,
+            managed: None,
+        })
+        .unwrap();
+        verify_workspace_configuration(&app, &store, &socket);
+        provider.join().unwrap();
+        store
+            .close_agent_assignment("concurrent", AgentAssignmentClosureReason::Crashed)
+            .unwrap();
+        verify_unconfigured_dispatch(&app, &store);
+        drop(app);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn workspace_selection_server(
+        listener: std::os::unix::net::UnixListener,
+        provider_database: PathBuf,
+        task_id: u64,
+    ) -> std::thread::JoinHandle<()> {
+        use std::io::{BufRead, BufReader, Write};
+        std::thread::spawn(move || {
             for (requested, returned) in [
                 ("selected", "selected"),
                 ("missing", "different"),
@@ -2791,7 +2840,7 @@ mod tests {
                     other
                         .create_agent_assignment(&NewAgentAssignment {
                             id: "concurrent".into(),
-                            record_id: task.id,
+                            record_id: task_id,
                             project_slug: "alpha".into(),
                             profile_revision: 1,
                         })
@@ -2804,13 +2853,15 @@ mod tests {
                 .unwrap();
                 stream.write_all(b"\n").unwrap();
             }
-        });
-        let app = super::application_from_config(&super::DaemonConfig {
-            bind_addr: "127.0.0.1:0".parse().unwrap(),
-            store_path: database,
-            managed: None,
         })
-        .unwrap();
+    }
+
+    #[cfg(unix)]
+    fn verify_workspace_configuration(
+        app: &Application,
+        store: &SqliteProjectRepository,
+        socket: &Path,
+    ) {
         app.dispatcher_config_set("herdr-socket", socket.to_str().unwrap(), None)
             .unwrap();
         app.dispatcher_config_set("workspace", "selected", None)
@@ -2833,11 +2884,11 @@ mod tests {
         assert!(app.dispatcher_config_unset("workspace", None).is_err());
         assert!(app.dispatcher_config_unset("herdr-socket", None).is_err());
         assert_eq!(store.dispatch_workspace().unwrap().unwrap().id, "selected");
-        assert_eq!(store.herdr_socket_path().unwrap(), Some(socket));
-        provider.join().unwrap();
-        store
-            .close_agent_assignment("concurrent", AgentAssignmentClosureReason::Crashed)
-            .unwrap();
+        assert_eq!(store.herdr_socket_path().unwrap().as_deref(), Some(socket));
+    }
+
+    #[cfg(unix)]
+    fn verify_unconfigured_dispatch(app: &Application, store: &SqliteProjectRepository) {
         app.dispatcher_config_unset("workspace", None).unwrap();
         app.dispatcher_config_unset("herdr-socket", None).unwrap();
         assert!(
@@ -2868,9 +2919,6 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        drop(app);
-        drop(store);
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn test_application() -> Application {
@@ -3071,6 +3119,14 @@ mod tests {
                 })
                 .unwrap();
         }
+        verify_unknown_resolution_request_validation(&fixture, &assignment).await;
+        verify_unknown_resolution_confirmation_and_persistence(&fixture, &assignment, store).await;
+    }
+
+    async fn verify_unknown_resolution_request_validation(
+        fixture: &SubscriptionTestDaemon,
+        assignment: &str,
+    ) {
         for field in ["secret", "capability_id", "capability", "correlation_id"] {
             let mut payload = serde_json::json!({
                 "assignment_id": assignment,
@@ -3106,6 +3162,14 @@ mod tests {
                 .to_string()
                 .contains("assignment-not-found")
         );
+    }
+
+    async fn verify_unknown_resolution_confirmation_and_persistence(
+        fixture: &SubscriptionTestDaemon,
+        assignment: &str,
+        store: SqliteProjectRepository,
+    ) {
+        let assignment = assignment.to_owned();
         let request = |agent, resources| forge_rpc::ResolveUnknownAgentResourcesRequest {
             assignment_id: assignment.clone(),
             confirm_old_agent_cannot_act: agent,
@@ -3184,48 +3248,56 @@ mod tests {
             Some(audit.clone())
         );
         drop(store);
-        let reopened = SqliteProjectRepository::open(&fixture.database_path).unwrap();
+        verify_resolved_resource_persistence(&fixture.database_path, &assignment, audit);
+    }
+
+    fn verify_resolved_resource_persistence(
+        database_path: &Path,
+        assignment: &str,
+        audit: forge_rpc::UnknownResourceResolutionResponse,
+    ) {
+        let reopened = SqliteProjectRepository::open(database_path).unwrap();
         let persisted: forge_rpc::AgentAssignmentInfoResponse =
-            reopened.agent_assignment_info(&assignment).unwrap().into();
+            reopened.agent_assignment_info(assignment).unwrap().into();
         assert_eq!(persisted.unknown_resource_resolution, Some(audit));
         assert!(persisted.capacity_reserved);
         reopened
-            .retire_agent_assignment_resource(&assignment, "pane", "known-pane")
+            .retire_agent_assignment_resource(assignment, "pane", "known-pane")
             .unwrap();
         assert!(
             reopened
-                .agent_assignment_info(&assignment)
+                .agent_assignment_info(assignment)
                 .unwrap()
                 .capacity_reserved(),
             "retirement-pending still reserves capacity"
         );
         reopened
-            .retire_agent_assignment_resource(&assignment, "retirement-pending", "operator")
+            .retire_agent_assignment_resource(assignment, "retirement-pending", "operator")
             .unwrap();
         assert!(
             !reopened
-                .agent_assignment_info(&assignment)
+                .agent_assignment_info(assignment)
                 .unwrap()
                 .capacity_reserved()
         );
         assert!(
             reopened
-                .agent_assignment_info(&assignment)
+                .agent_assignment_info(assignment)
                 .unwrap()
                 .dispatch_hold
                 .is_some()
         );
         drop(reopened);
-        let after_restart = SqliteProjectRepository::open(&fixture.database_path).unwrap();
+        let after_restart = SqliteProjectRepository::open(database_path).unwrap();
         assert!(
             !after_restart
-                .agent_assignment_info(&assignment)
+                .agent_assignment_info(assignment)
                 .unwrap()
                 .capacity_reserved()
         );
         assert!(
             after_restart
-                .agent_assignment_info(&assignment)
+                .agent_assignment_info(assignment)
                 .unwrap()
                 .unknown_resource_resolution
                 .is_some()
@@ -3514,6 +3586,20 @@ mod tests {
         std::fs::write(root.join(&assignment), "correct-secret\n").unwrap();
         let mut daemon = fixture.daemon();
         daemon.capability_secret_root = Some(root.clone());
+        verify_assignment_before_ack(&daemon, &assignment, &fixture.database_path).await;
+        verify_authenticated_assignment_start(
+            &daemon,
+            &assignment,
+            other_task,
+            &fixture.database_path,
+        )
+        .await;
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    async fn verify_assignment_before_ack(daemon: &Daemon, assignment: &str, database_path: &Path) {
+        let daemon = daemon.clone();
+        let assignment = assignment.to_owned();
         let read_request = |secret: &str| forge_rpc::AcknowledgeAssignmentRequest {
             assignment_id: assignment.clone(),
             secret: secret.into(),
@@ -3532,7 +3618,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        let initial_store = SqliteProjectRepository::open(&fixture.database_path).unwrap();
+        let initial_store = SqliteProjectRepository::open(database_path).unwrap();
         let owner_id = initial_store
             .agent_assignment(&assignment)
             .unwrap()
@@ -3550,6 +3636,21 @@ mod tests {
             .await
             .is_err()
         );
+    }
+
+    async fn verify_authenticated_assignment_start(
+        daemon: &Daemon,
+        assignment: &str,
+        other_task: u64,
+        database_path: &Path,
+    ) {
+        let daemon = daemon.clone();
+        let assignment = assignment.to_owned();
+        let read_request = |secret: &str| forge_rpc::AcknowledgeAssignmentRequest {
+            assignment_id: assignment.clone(),
+            secret: secret.into(),
+            correlation_id: "read".into(),
+        };
         let acknowledged = AgentDispatchApiServer::assignment_acknowledge(
             &daemon,
             forge_rpc::AcknowledgeAssignmentRequest {
@@ -3590,7 +3691,7 @@ mod tests {
             .await
             .is_err()
         );
-        let store = SqliteProjectRepository::open(&fixture.database_path).unwrap();
+        let store = SqliteProjectRepository::open(database_path).unwrap();
         store.start_record(other_task).unwrap();
         store.done_record(other_task, Some("done")).unwrap();
         assert!(
@@ -3621,7 +3722,35 @@ mod tests {
                 .await
                 .is_err()
         );
-        let store = SqliteProjectRepository::open(&fixture.database_path).unwrap();
+        verify_revoked_assignment_start(
+            &daemon,
+            &assignment,
+            acknowledged.record_id,
+            database_path,
+        )
+        .await;
+    }
+
+    async fn verify_revoked_assignment_start(
+        daemon: &Daemon,
+        assignment: &str,
+        task_id: u64,
+        database_path: &Path,
+    ) {
+        let daemon = daemon.clone();
+        let assignment = assignment.to_owned();
+        let read_request = |secret: &str| forge_rpc::AcknowledgeAssignmentRequest {
+            assignment_id: assignment.clone(),
+            secret: secret.into(),
+            correlation_id: "read".into(),
+        };
+        let request = |secret: &str, task_id| forge_rpc::AuthenticatedAssignmentTaskStartRequest {
+            assignment_id: assignment.clone(),
+            secret: secret.into(),
+            correlation_id: "start".into(),
+            task_id,
+        };
+        let store = SqliteProjectRepository::open(database_path).unwrap();
         store
             .close_agent_assignment(
                 &assignment,
@@ -3639,12 +3768,11 @@ mod tests {
         assert!(
             AgentDispatchApiServer::assignment_task_start(
                 &daemon,
-                request("correct-secret", acknowledged.record_id)
+                request("correct-secret", task_id)
             )
             .await
             .is_err()
         );
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn loopback_request(uri: String) -> Request<Body> {
@@ -3656,8 +3784,7 @@ mod tests {
         request
     }
 
-    #[tokio::test]
-    async fn subscription_rpc_authorizes_task_prerequisites_and_spec_children_only() {
+    fn subscription_authorization_fixture() -> (PathBuf, u64, u64, u64) {
         let database_path = std::env::temp_dir().join(format!(
             "forge-provenance-subscription-{}-{}.sqlite3",
             std::process::id(),
@@ -3725,7 +3852,12 @@ mod tests {
             })
             .unwrap();
         drop(store);
+        (database_path, prerequisite.id, generated.id, child.id)
+    }
 
+    #[tokio::test]
+    async fn subscription_rpc_authorizes_task_prerequisites_and_spec_children_only() {
+        let (database_path, prerequisite, generated, child) = subscription_authorization_fixture();
         let daemon = Daemon::new(Application::with_agent_dispatch(
             Box::new(SqliteProjectRepository::open(&database_path).unwrap()),
             Box::new(SqliteProjectRepository::open(&database_path).unwrap()),
@@ -3744,38 +3876,32 @@ mod tests {
             kind_filters: vec![],
         };
         assert_eq!(
-            AgentSubscriptionApiServer::create(
-                &daemon,
-                request("owner-assignment", prerequisite.id)
-            )
-            .await
-            .unwrap()
-            .target_record_ids,
-            vec![prerequisite.id]
+            AgentSubscriptionApiServer::create(&daemon, request("owner-assignment", prerequisite))
+                .await
+                .unwrap()
+                .target_record_ids,
+            vec![prerequisite]
         );
         assert!(
-            AgentSubscriptionApiServer::create(&daemon, request("owner-assignment", generated.id))
+            AgentSubscriptionApiServer::create(&daemon, request("owner-assignment", generated))
                 .await
                 .unwrap_err()
                 .to_string()
                 .contains("assignment-capability-denied")
         );
         assert_eq!(
-            AgentSubscriptionApiServer::create(&daemon, request("spec-assignment", child.id))
+            AgentSubscriptionApiServer::create(&daemon, request("spec-assignment", child))
                 .await
                 .unwrap()
                 .target_record_ids,
-            vec![child.id]
+            vec![child]
         );
         assert!(
-            AgentSubscriptionApiServer::create(
-                &daemon,
-                request("spec-assignment", prerequisite.id)
-            )
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("assignment-capability-denied")
+            AgentSubscriptionApiServer::create(&daemon, request("spec-assignment", prerequisite))
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("assignment-capability-denied")
         );
         drop(daemon);
         std::fs::remove_file(database_path).unwrap();

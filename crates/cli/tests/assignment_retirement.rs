@@ -83,59 +83,64 @@ impl RepositoryInspector for Inspector {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn retirement_cli_retries_failed_cleanup_and_reports_remaining_uncertainty() {
-    for unknown in [false, true] {
-        let path = std::env::temp_dir().join(format!(
-            "forge-retirement-{}-{}.sqlite3",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let store = SqliteProjectRepository::open(&path).unwrap();
-        store
-            .register(&Project {
-                slug: "alpha".into(),
-                registered_folder: "/repos/alpha".into(),
-                origin_url: "https://example.test/alpha.git".into(),
-            })
-            .unwrap();
-        let task = store
-            .open_typed_record(&NewTypedRecord {
-                record_type: RecordType::Task,
-                task_kind: None,
-                body: "PRIVATE PROMPT".into(),
-                project_slugs: vec!["alpha".into()],
-                generated_by_ids: vec![],
-            })
-            .unwrap();
-        store
-            .create_agent_assignment(&NewAgentAssignment {
-                id: "retire-me".into(),
-                record_id: task.id,
-                project_slug: "alpha".into(),
-                profile_revision: 1,
-            })
-            .unwrap();
-        store.begin_agent_launch("retire-me", 1000).unwrap();
-        if unknown {
-            store
-                .add_agent_assignment_resource(&NewAgentAssignmentResource {
-                    assignment_id: "retire-me".into(),
-                    resource_kind: "provision-intent".into(),
-                    resource_id: "once".into(),
-                })
-                .unwrap();
-        }
+fn retirement_fixture(unknown: bool) -> (std::path::PathBuf, SqliteProjectRepository) {
+    let path = std::env::temp_dir().join(format!(
+        "forge-retirement-{}-{}.sqlite3",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let store = SqliteProjectRepository::open(&path).unwrap();
+    store
+        .register(&Project {
+            slug: "alpha".into(),
+            registered_folder: "/repos/alpha".into(),
+            origin_url: "https://example.test/alpha.git".into(),
+        })
+        .unwrap();
+    let task = store
+        .open_typed_record(&NewTypedRecord {
+            record_type: RecordType::Task,
+            task_kind: None,
+            body: "PRIVATE PROMPT".into(),
+            project_slugs: vec!["alpha".into()],
+            generated_by_ids: vec![],
+        })
+        .unwrap();
+    store
+        .create_agent_assignment(&NewAgentAssignment {
+            id: "retire-me".into(),
+            record_id: task.id,
+            project_slug: "alpha".into(),
+            profile_revision: 1,
+        })
+        .unwrap();
+    store.begin_agent_launch("retire-me", 1000).unwrap();
+    if unknown {
         store
             .add_agent_assignment_resource(&NewAgentAssignmentResource {
                 assignment_id: "retire-me".into(),
-                resource_kind: "pane".into(),
-                resource_id: "persisted-pane".into(),
+                resource_kind: "provision-intent".into(),
+                resource_id: "once".into(),
             })
             .unwrap();
+    }
+    store
+        .add_agent_assignment_resource(&NewAgentAssignmentResource {
+            assignment_id: "retire-me".into(),
+            resource_kind: "pane".into(),
+            resource_id: "persisted-pane".into(),
+        })
+        .unwrap();
+    (path, store)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retirement_cli_retries_failed_cleanup_and_reports_remaining_uncertainty() {
+    for unknown in [false, true] {
+        let (path, store) = retirement_fixture(unknown);
         let fail = Arc::new(AtomicBool::new(true));
         let app = Application::with_agent_dispatch(
             Box::new(SqliteProjectRepository::open(&path).unwrap()),
@@ -191,65 +196,72 @@ async fn retirement_cli_retries_failed_cleanup_and_reports_remaining_uncertainty
                 .is_number()
         );
         if unknown {
-            let resolve = |flags: &[&str]| {
-                Command::new(env!("CARGO_BIN_EXE_forge"))
-                    .args([
-                        "dispatcher",
-                        "assignment-resolve-unknown",
-                        "retire-me",
-                        "--server-url",
-                        &url,
-                    ])
-                    .args(flags)
-                    .output()
-                    .unwrap()
-            };
-            for flags in [
-                vec![],
-                vec!["--confirm-old-agent-cannot-act"],
-                vec!["--confirm-unknown-resources-safe"],
-            ] {
-                let rejected = resolve(&flags);
-                assert!(!rejected.status.success());
-                let warning = String::from_utf8_lossy(&rejected.stderr);
-                assert!(warning.contains("old agent can no longer act"), "{warning}");
-                assert!(warning.contains("unknown resources"), "{warning}");
-                let info: serde_json::Value =
-                    serde_json::from_slice(&run("assignment-info", true).stdout).unwrap();
-                assert_eq!(info["capacity_reserved"], true);
-                assert!(info["unknown_resource_resolution"].is_null());
-            }
-            let confirmed = resolve(&[
-                "--confirm-old-agent-cannot-act",
-                "--confirm-unknown-resources-safe",
-            ]);
-            assert!(
-                confirmed.status.success(),
-                "{}",
-                String::from_utf8_lossy(&confirmed.stderr)
-            );
-            let human = String::from_utf8(confirmed.stdout).unwrap();
-            assert!(human.contains("Operator confirmed"), "{human}");
-            assert!(human.contains("cannot undo external actions"), "{human}");
-            assert!(!human.contains("PRIVATE PROMPT"));
-            let info: serde_json::Value =
-                serde_json::from_slice(&run("assignment-info", true).stdout).unwrap();
-            assert_eq!(info["capacity_reserved"], false);
-            assert!(info["dispatch_hold"].is_string());
-            assert!(info["unknown_resource_resolution"]["confirmed_at_millis"].is_number());
-            let json = resolve(&[
-                "--confirm-old-agent-cannot-act",
-                "--confirm-unknown-resources-safe",
-                "--json",
-            ]);
-            assert!(json.status.success());
-            let repeated: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
-            assert_eq!(
-                repeated["unknown_resource_resolution"],
-                info["unknown_resource_resolution"]
-            );
+            verify_unknown_resource_resolution(&url, &run);
         }
         server.abort();
         let _ = std::fs::remove_file(path);
     }
+}
+
+fn verify_unknown_resource_resolution(
+    url: &str,
+    run: &impl Fn(&str, bool) -> std::process::Output,
+) {
+    let resolve = |flags: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_forge"))
+            .args([
+                "dispatcher",
+                "assignment-resolve-unknown",
+                "retire-me",
+                "--server-url",
+                url,
+            ])
+            .args(flags)
+            .output()
+            .unwrap()
+    };
+    for flags in [
+        vec![],
+        vec!["--confirm-old-agent-cannot-act"],
+        vec!["--confirm-unknown-resources-safe"],
+    ] {
+        let rejected = resolve(&flags);
+        assert!(!rejected.status.success());
+        let warning = String::from_utf8_lossy(&rejected.stderr);
+        assert!(warning.contains("old agent can no longer act"), "{warning}");
+        assert!(warning.contains("unknown resources"), "{warning}");
+        let info: serde_json::Value =
+            serde_json::from_slice(&run("assignment-info", true).stdout).unwrap();
+        assert_eq!(info["capacity_reserved"], true);
+        assert!(info["unknown_resource_resolution"].is_null());
+    }
+    let confirmed = resolve(&[
+        "--confirm-old-agent-cannot-act",
+        "--confirm-unknown-resources-safe",
+    ]);
+    assert!(
+        confirmed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&confirmed.stderr)
+    );
+    let human = String::from_utf8(confirmed.stdout).unwrap();
+    assert!(human.contains("Operator confirmed"), "{human}");
+    assert!(human.contains("cannot undo external actions"), "{human}");
+    assert!(!human.contains("PRIVATE PROMPT"));
+    let info: serde_json::Value =
+        serde_json::from_slice(&run("assignment-info", true).stdout).unwrap();
+    assert_eq!(info["capacity_reserved"], false);
+    assert!(info["dispatch_hold"].is_string());
+    assert!(info["unknown_resource_resolution"]["confirmed_at_millis"].is_number());
+    let json = resolve(&[
+        "--confirm-old-agent-cannot-act",
+        "--confirm-unknown-resources-safe",
+        "--json",
+    ]);
+    assert!(json.status.success());
+    let repeated: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(
+        repeated["unknown_resource_resolution"],
+        info["unknown_resource_resolution"]
+    );
 }
