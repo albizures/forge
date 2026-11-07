@@ -39,20 +39,20 @@ Do not create a later round while an earlier task PR is open, review/manual-test
 Forge dispatches eligible open Tasks into durable Assignments and Managed Worktrees. Configure/diagnose it with the public surface only:
 
 ```sh
-forge agent-dispatch status --project <slug>
-forge agent-dispatch reconcile
+forge dispatcher status --project <slug>
+forge dispatcher reconcile
 forge worktree info <task-id>
 ```
 
 An interactive review Grilling is explicitly dispatched after it is ready:
 
 ```sh
-forge agent-dispatch grilling-dispatch <grilling-id>
+forge dispatcher grilling-dispatch <grilling-id>
 ```
 
 A dispatched Spec Assignment may subscribe only to its direct child Tasks; a Task Assignment may subscribe only to direct prerequisites. In an Assignment Capability Delivery session, use `forge_subscribe` for those explicit record IDs, retain its cursor, and use `forge_wait_for_updates` only as a wake. After every update, timeout, connection loss, deletion/expiry, or `resync_required`, reread authoritative Forge records; renew or recreate the subscription as necessary. SSE is at-least-once and never authorizes a lifecycle transition by itself.
 
-For a Dispatch Hold or retained/invalid worktree, stop rather than repairing it by hand. Diagnose with `forge agent-dispatch status`, `forge worktree info`, and `forge worktree doctor`; an operator may then use `forge agent-dispatch resume <task-id>` or `forge agent-dispatch assignment-retire <assignment-id>`. Only an unassigned manual in-progress Task may use `forge agent-dispatch task-reopen <task-id>`.
+For a Dispatch Hold or retained/invalid worktree, stop rather than repairing it by hand. Diagnose with `forge dispatcher status`, `forge worktree info`, and `forge worktree doctor`; an operator may then use `forge dispatcher resume <task-id>` or `forge dispatcher assignment-retire <assignment-id>`. Only an unassigned manual in-progress Task may use `forge dispatcher task-reopen <task-id>`.
 
 ## Work a Task and unify in order
 

@@ -20,6 +20,12 @@ A LONG, numbered list of user stories. Each user story should be in the format o
 
 This list of user stories should be extremely extensive and cover all aspects of the feature.
 
+## Acceptance criteria
+
+A numbered list of testable criteria that, together, mean the Spec is done. Each states an observable behavior a human or test can check, and the Test plan is written per criterion.
+
+1. <Observable behavior that can be checked as pass or fail>
+
 ## Implementation Decisions
 
 A list of implementation decisions that were made. This can include:
@@ -43,6 +49,13 @@ A list of testing decisions that were made. Include:
 - A description of what makes a good test (only test external behavior, not implementation details)
 - Which modules will be tested
 - Prior art for the tests (i.e. similar types of tests in the codebase)
+
+## Domain changes
+
+The domain-model changes this Spec makes, written here instead of in the main checkout. Write "None" when empty.
+
+- **Glossary**: the exact Markdown blocks to add, change or remove in `CONTEXT.md` (or the context's own `CONTEXT.md`). Label each block add, change or remove.
+- **ADRs**: for each, the file name (e.g. `docs/adr/0003-title.md`) and the full text.
 
 ## Out of Scope
 
