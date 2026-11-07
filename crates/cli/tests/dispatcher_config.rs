@@ -81,22 +81,6 @@ async fn grouped_provider_configuration_round_trips_through_cli_and_daemon() {
             origin_url: "https://example.com/alpha".into(),
         })
         .unwrap();
-    let open_task = || {
-        store
-            .open_typed_record(&NewTypedRecord {
-                record_type: RecordType::Task,
-                task_kind: None,
-                body: "configured task".into(),
-                project_slugs: vec!["alpha".into()],
-                generated_by_ids: vec![],
-            })
-            .unwrap()
-    };
-    open_task();
-    let original_assignment = store
-        .claim_next_agent_assignment("alpha", "original")
-        .unwrap()
-        .unwrap();
     let app = Application::with_agent_dispatch(
         Box::new(SqliteProjectRepository::in_memory().unwrap()),
         Box::new(SqliteProjectRepository::open(&db).unwrap()),
@@ -134,6 +118,16 @@ async fn grouped_provider_configuration_round_trips_through_cli_and_daemon() {
         );
         serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
     };
+    verify_capacity(&json);
+    verify_timeout_revisions(&store, &json);
+    let defaults = verify_default_provenance(&db, &run, &json);
+    verify_provider_configuration(&store, &run, &json, &defaults);
+    server.abort();
+    drop(store);
+    let _ = std::fs::remove_file(db);
+}
+
+fn verify_capacity(json: &impl Fn(&[&str]) -> serde_json::Value) {
     let capacity = json(&["get", "project-limit", "--project", "alpha"]);
     assert_eq!(
         capacity["entries"][0],
@@ -151,6 +145,28 @@ async fn grouped_provider_configuration_round_trips_through_cli_and_daemon() {
     assert_eq!(capacity["entries"][0]["provenance"], "default");
     // Keep room for Assignments used to observe revision binding below.
     json(&["set", "project-limit", "3", "--project", "alpha"]);
+}
+
+fn verify_timeout_revisions(
+    store: &SqliteProjectRepository,
+    json: &impl Fn(&[&str]) -> serde_json::Value,
+) {
+    let open_task = || {
+        store
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Task,
+                task_kind: None,
+                body: "configured task".into(),
+                project_slugs: vec!["alpha".into()],
+                generated_by_ids: vec![],
+            })
+            .unwrap()
+    };
+    open_task();
+    let original_assignment = store
+        .claim_next_agent_assignment("alpha", "original")
+        .unwrap()
+        .unwrap();
     let timeout = json(&["set", "acknowledgement-timeout-ms", "42000"]);
     assert_eq!(timeout["entries"][0]["value"], "42000");
     assert_eq!(timeout["entries"][0]["provenance"], "override");
@@ -207,6 +223,13 @@ async fn grouped_provider_configuration_round_trips_through_cli_and_daemon() {
             .close_agent_assignment(id, forge_app::AgentAssignmentClosureReason::Retired)
             .unwrap();
     }
+}
+
+fn verify_default_provenance(
+    db: &Path,
+    run: &impl Fn(&[&str], bool) -> std::process::Output,
+    json: &impl Fn(&[&str]) -> serde_json::Value,
+) -> serde_json::Value {
     let defaults = json(&["get"]);
     assert_eq!(
         defaults,
@@ -220,7 +243,7 @@ async fn grouped_provider_configuration_round_trips_through_cli_and_daemon() {
     let explicit_default = json(&["set", "acknowledgement-timeout-ms", "300000"]);
     assert_eq!(explicit_default["entries"][0]["provenance"], "override");
     assert!(
-        SqliteProjectRepository::open(&db)
+        SqliteProjectRepository::open(db)
             .unwrap()
             .active_task_agent_profile()
             .unwrap()
@@ -232,12 +255,21 @@ async fn grouped_provider_configuration_round_trips_through_cli_and_daemon() {
     assert!(human_timeout.contains("future Assignments only"));
     assert!(human_timeout.contains("acknowledgement-timeout-ms\t300000\tdefault"));
     assert!(
-        !SqliteProjectRepository::open(&db)
+        !SqliteProjectRepository::open(db)
             .unwrap()
             .active_task_agent_profile()
             .unwrap()
             .acknowledgement_timeout_overridden
     );
+    defaults
+}
+
+fn verify_provider_configuration(
+    store: &SqliteProjectRepository,
+    run: &impl Fn(&[&str], bool) -> std::process::Output,
+    json: &impl Fn(&[&str]) -> serde_json::Value,
+    defaults: &serde_json::Value,
+) {
     let profile_before_invalid = store.active_task_agent_profile().unwrap();
     let socket = json(&["set", "herdr-socket", "/tmp/herdr.sock"]);
     assert_eq!(socket["entries"][0]["value"], "/tmp/herdr.sock");
@@ -296,8 +328,5 @@ async fn grouped_provider_configuration_round_trips_through_cli_and_daemon() {
     );
     json(&["unset", "workspace"]);
     json(&["unset", "herdr-socket"]);
-    assert_eq!(json(&["get"]), defaults);
-    server.abort();
-    drop(store);
-    let _ = std::fs::remove_file(db);
+    assert_eq!(&json(&["get"]), defaults);
 }

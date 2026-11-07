@@ -94,8 +94,7 @@ impl RepositoryInspector for NoInspector {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn configuration_dispatch_and_recovery_round_trip_without_duplicate_launches() {
+fn dispatch_fixture() -> (std::path::PathBuf, SqliteProjectRepository, Vec<String>) {
     let db = std::env::temp_dir().join(format!(
         "forge-record-dispatch-{}-{}.sqlite",
         std::process::id(),
@@ -128,6 +127,12 @@ async fn configuration_dispatch_and_recovery_round_trip_without_duplicate_launch
                 .to_string(),
         );
     }
+    (db, store, ids)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn configuration_dispatch_and_recovery_round_trip_without_duplicate_launches() {
+    let (db, store, ids) = dispatch_fixture();
     let launches = Arc::new(AtomicUsize::new(0));
     let app = Application::with_agent_dispatch(
         Box::new(SqliteProjectRepository::open(&db).unwrap()),
