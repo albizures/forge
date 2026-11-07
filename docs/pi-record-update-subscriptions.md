@@ -8,7 +8,7 @@ The wire-level lifecycle, SSE framing, authorization, cursor validation, and rec
 
 ## Prerequisite: Forge-launched Pi Assignment
 
-Configure Forge's dispatch provider and reconcile it as described in the [dispatch operator guide](../README.md#operators-and-recovery). Forge launches Pi in the Assignment's Agent Workspace and supplies this process environment:
+Configure Forge's dispatch provider and reconcile it as described in the [dispatch operator guide](dispatch.md#configure-dispatch). Forge launches Pi in the Assignment's Agent Workspace and supplies this process environment:
 
 - `FORGE_ASSIGNMENT_ID`
 - `FORGE_ASSIGNMENT_DAEMON_URL` — daemon root URL; the extension derives JSON-RPC and SSE URLs.
@@ -47,7 +47,7 @@ Forge now includes a Pi project extension for assignment-owned Record Update Sub
 
 ### Operator preflight
 
-1. Configure and reconcile the Forge dispatch provider as described in the [dispatch operator guide](../README.md#operators-and-recovery). Do not manually set the extension's launch variables or copy a capability value into a prompt, shell environment, or workspace.
+1. Configure and reconcile the Forge dispatch provider as described in the [dispatch operator guide](dispatch.md#configure-dispatch). Do not manually set the extension's launch variables or copy a capability value into a prompt, shell environment, or workspace.
 2. Confirm the launched Pi process has all three launch variables listed above and that the secret-file path is absolute, outside its Agent Workspace, and owner-only. Forge creates, owns, and cleans up that file.
 3. Confirm `/forge-subscriptions` reports configured availability without revealing a capability. Absence of model-callable tools outside this launch context is expected.
 4. Ensure consumers retain an explicit cursor, use one bounded wait at a time per subscription, renew a lease deliberately, and reconcile after every wake or recovery outcome.

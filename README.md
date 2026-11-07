@@ -1,455 +1,99 @@
 # Forge
 
-Forge is a daemon-first Rust application foundation. One running `forge-server`
-daemon exposes status and supported Project and Record operations through a Rust
-CLI and JSON-RPC; its browser page currently exposes read-only status.
+Forge manages project work from planning through agent execution. A local daemon
+keeps Projects, Specs, Tasks, managed Git worktrees, and agent assignments in
+SQLite; the `forge` CLI operates on that shared state.
 
-For Forgeup release and operational guidance, see
-[`crates/docs/forgeup.md`](crates/docs/forgeup.md). The Forge-side Management
-Protocol is specified in
-[`crates/docs/management-protocol.md`](crates/docs/management-protocol.md).
+- **Plan work:** register Git repositories as Projects, then create Specs and Tasks.
+- **Isolate implementation:** give Tasks their own managed worktrees and branches.
+- **Dispatch agents:** run Pi through Herdr with durable assignments and explicit
+  recovery controls.
 
-For agent workflows covering records, managed worktrees, dispatch, and assignment
-recovery, use [`skills/forge/SKILL.md`](skills/forge/SKILL.md).
+The browser interface currently provides read-only daemon status.
 
-## Prerequisites
+## Quickstart
 
-- Rust 1.98.0 or newer (the repository selects its toolchain with
-  `rust-toolchain.toml`)
-- A supported development platform: macOS, Windows, or Linux
+You need a supported platform (macOS, Windows, or Linux), `forgeup`, and a matching
+`forge` / `forge-server` pair registered with Forgeup. To build and register them,
+follow [source setup](docs/development.md#build-and-register-a-revision)
+(Rust 1.98.0 or newer).
 
-## Start the daemon
-
-From the repository root, start the daemon:
+Select your registered Revision, replacing `dev` with its selector or alias:
 
 ```sh
-cargo run -p forge-server --bin forge-server
+forgeup use dev
+forgeup daemon start
+forge status
 ```
 
-It listens on `127.0.0.1:45003` by default. The daemon serves its browser
-routes and JSON-RPC endpoint from that one listener. Stop it with Ctrl-C;
-SIGTERM also triggers graceful shutdown where the platform supports it. This is
-a manual daemon: pass `--server-url http://127.0.0.1:45003/rpc` (or export
-`FORGE_SERVER_URL` with that value) for the direct `cargo run ... forge`
-examples below, unless you have selected a managed Revision.
+Ensure [Forgeup's managed bin directory](crates/docs/forgeup.md#locations-and-recovery)
+is on `PATH`. Ordinary `forge` commands use the selected Revision and ensure its
+managed daemon is running; you do not need to start a separate server.
 
-To select a bind address, use `--bind-addr` or `FORGE_BIND_ADDR`. The flag
-wins when both are supplied:
+## Example workflow
+
+A Project registers a local Git repository's **main worktree**. It must have an
+`origin` remote. Replace `/repos/alpha` with your repository's absolute path:
 
 ```sh
-cargo run -p forge-server --bin forge-server -- --bind-addr 127.0.0.1:45004
-FORGE_BIND_ADDR=127.0.0.1:45004 cargo run -p forge-server --bin forge-server
+forge add project /repos/alpha alpha
+cd /repos/alpha
+forge here
+forge spec open --body 'Deliver the migration' --project alpha
 ```
 
-A non-loopback bind is unauthenticated. Use it only for an explicitly trusted
-private network such as Tailscale; startup logging warns about this boundary.
-
-## CLI endpoint modes
-
-Ordinary `forge` commands use the selected **Active Forge Revision** by
-default. The CLI reads the active Forgeup installation, attests that its own
-hash and Revision Identity match it, ensures that Revision's managed daemon,
-and uses its registered endpoint. Select a Revision first with `forgeup use
-<selector>`; see [`crates/docs/forgeup.md`](crates/docs/forgeup.md) for
-registration and recovery.
-
-An explicit endpoint is **Manual Daemon** operation. `--server-url` takes
-precedence over `FORGE_SERVER_URL`; either bypasses Forgeup lookup, attestation,
-and daemon lifecycle work completely:
+Use the Spec ID printed by that command to open a Task:
 
 ```sh
-cargo run -p forge-cli --bin forge -- status --server-url http://127.0.0.1:45004/rpc
-FORGE_SERVER_URL=http://127.0.0.1:45004/rpc cargo run -p forge-cli --bin forge -- status
+forge task under-spec --body 'Implement the migration' --spec <spec-id>
 ```
 
-Use this mode for a daemon you started yourself. If neither override is set,
-there is no active Revision, the CLI is stale, the registry is invalid, or
-Forgeup cannot ensure the daemon, `forge` fails closed with recovery guidance;
-it never falls back to `http://127.0.0.1:45003/rpc`. `--build-info --json` is
-the sole offline command and remains available without Forgeup or a daemon.
-
-With a reachable endpoint, status calls `system.status` through daemon
-JSON-RPC/HTTP and reports failures on stderr after at most the 10-second
-request timeout.
-
-## Register and confirm a Project
-
-A Forge Project is a local Git repository's **main worktree**, identified by an
-immutable slug. It must have an `origin` remote. With the daemon running,
-register it through the CLI:
+For manual work, use the returned Task ID to advance it:
 
 ```sh
-cargo run -p forge-cli --bin forge -- add project /repos/alpha alpha
+forge record start <task-id>
+# Do the work, then record its completion.
+forge record done <task-id> --resolution 'Implemented and verified'
 ```
 
-Forge confirms the registration and prompts you to run `forge here`. From the
-registered folder or any subfolder, confirm the Project that contains the
-current directory:
-
-```sh
-cd /repos/alpha/src/module
-cargo run -p forge-cli --bin forge -- here
-# Project `alpha` is registered at `/repos/alpha` (origin: `...`).
-```
-
-`forge here` exits nonzero with an actionable error when the current folder is
-outside every registered Project. Registration also exits nonzero for a
-non-Git folder, a linked (non-main) worktree, a repository without `origin`,
-or conflicting Project slug or Registered Folder identities.
-
-The daemon persists registrations in SQLite. By default it uses `forge.sqlite3`
-in its working directory; set `FORGE_STORE_PATH` to choose another path. One
-Forge daemon owns a store at a time: startup holds a non-blocking exclusive
-advisory sidecar lock and rejects a second daemon before listener binding. This
-is a daemon-ownership boundary only; it does not prevent deliberate direct
-SQLite access.
-
-## Manage generic Records
-
-A Record is a generic work item with a required, non-blank Markdown body and an
-opaque numeric ID. Its Project Scope is selected explicitly when it is opened:
-pass one or more registered Project slugs with repeatable `--project`, or pass
-`--no-projects` to deliberately create an unscoped Record. Scope is immutable.
-
-```sh
-cargo run -p forge-cli --bin forge -- record open \
-  --body 'Investigate the migration' --project alpha
-cargo run -p forge-cli --bin forge -- record open \
-  --body 'General research' --no-projects
-cargo run -p forge-cli --bin forge -- record show 1
-cargo run -p forge-cli --bin forge -- record edit 1 --body 'Revised Markdown body'
-```
-
-Records begin `open` and advance only through `in-progress` to `done`:
-
-```sh
-cargo run -p forge-cli --bin forge -- record start 1
-cargo run -p forge-cli --bin forge -- record done 1 --resolution 'completed'
-```
-
-A completed Record's body and optional completion resolution cannot change.
-Records are retained rather than deleted; complete mistaken Records with an
-explanatory resolution.
-
-## Manage Specs and Tasks
-
-Specs and Tasks have dedicated, valid-by-construction commands. A Spec always
-has exactly one Project. A standalone Task may have zero or one Project, while
-a Task opened beneath a Spec atomically inherits that Spec's Project Scope and
-parent relationship.
-
-```sh
-cargo run -p forge-cli --bin forge -- spec open \
-  --body 'Deliver the migration' --project alpha
-cargo run -p forge-cli --bin forge -- task open --body 'Investigate options'
-cargo run -p forge-cli --bin forge -- task open \
-  --body 'Project-specific handoff' --project alpha
-cargo run -p forge-cli --bin forge -- task under-spec \
-  --body 'Implement the migration' --spec 1
-```
-
-Human-readable open, show, and list output identifies each Record's type;
-`--json` returns the type supplied by the daemon. Record Type and Project Scope
-membership are selected at opening and cannot change later.
-
-Typed hierarchy is also fixed at opening: a Spec may parent Tasks, and a Task
-created with `task under-spec` receives its Spec parent and exact Project Scope
-atomically. A Task cannot parent another Record. Typed Records cannot be added
-to or removed from a relationship after opening; use the dedicated commands
-rather than `record relate` or `record unrelate`.
-
-Use `child-of` relationships to make a generic Record hierarchy. Only Generic
-Records can be related this way. A child has at most one parent; parent and
-child must have identical Project Scopes. Hierarchies may be nested and cannot
-contain cycles. A parent cannot be completed while any child is not done,
-although generic relationships can be corrected after completion.
-
-```sh
-cargo run -p forge-cli --bin forge -- record relate 2 --kind child-of --to 1
-cargo run -p forge-cli --bin forge -- record unrelate 2 --kind child-of --to 1
-```
-
-Discovery is intentionally limited to optional Project Scope membership, status,
-and Record Type filters, which combine with AND. Results are newest first. There
-is no full-text search, deletion, or scope editing.
-
-```sh
-cargo run -p forge-cli --bin forge -- record list --project alpha --status open --type spec
-```
-
-Record commands support `--json`; use `--server-url` or `FORGE_SERVER_URL` to
-target a non-default daemon as described above.
-
-## Typed Record release notes
-
-Existing SQLite databases migrate automatically when opened by this release:
-pre-existing Records are classified as `generic`. The migration preserves their
-IDs, bodies, Project Scopes, statuses, completion resolutions, relationships,
-comments, and update logs. The release verification gate passed `cargo fmt
---check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test
---workspace`, and `git diff --check`, plus an isolated legacy-database smoke
-test covering migration, typed creation, filtering, and invalid hierarchy
-rejection.
-
-## Generated-by provenance release notes
-
-This release adds the directed `generated-by` Record Relationship. It records
-that a generated Record was caused by another Record's work or output; it does
-not affect hierarchy, lifecycle, readiness, dispatch, or dependency behavior.
-
-Existing SQLite databases migrate automatically when opened. The migration
-extends relationship and update-log constraints for `generated-by`; legacy
-relationship updates retain an absent relationship kind rather than receiving
-invented history. No operator action or data rewrite is required. Back up a
-production database before upgrading under the normal operational policy.
-
-For API and CLI clients, record-opening commands accept repeatable
-`--generated-by <ID>` inputs, and relationship correction accepts
-`--kind generated-by`. Additions and removals are permitted only while the
-generated Record is Open. New relationship add/remove updates and subscription
-payloads include their relationship kind; clients consuming update events
-should tolerate its absence for migrated legacy events. Assignment Context
-includes directly incident provenance Records. Subscription authorization is
-limited to direct prerequisites for Task Assignments and direct children for Spec
-Assignments.
-
-## Superseded pre-autonomous dispatch handoff
-
-> **Superseded by the autonomous-dispatch release notes below.** This section records the earlier provider model and must not be used as operational guidance for new dispatches.
-
-This release provides a durable, daemon-owned **Herdr/Pi dispatch provider**
-behind the Agent Dispatch Core. The daemon, rather than the CLI, connects to
-Herdr and owns all assignment state transitions, reconciliation leases, and
-provider resources.
-
-### Operator configuration, diagnostics, and recovery
-
-Configure an absolute Herdr Unix-socket path through the daemon, then inspect
-its configured endpoint. Relative paths are rejected:
-
-```sh
-forge agent-dispatch endpoint --socket-path /absolute/path/to/herdr.sock
-forge agent-dispatch endpoint
-```
-
-`endpoint` reports configuration, not reachability: `configured; Herdr adapter
-will probe on reconciliation` means a socket path is saved. Run a bounded,
-authoritative reconciliation to probe Herdr and progress eligible assignments:
-
-```sh
-forge agent-dispatch reconcile
-```
-
-The CLI never opens dispatch storage or contacts Herdr directly. A successful
-response reports whether the daemon acquired its reconciliation lease and the
-number of assignments scanned; socket, protocol, or provider errors are
-reported by the daemon and use its durable retry policy. The daemon also keeps
-a long-lived Herdr status observer for active Forge-owned panes. It subscribes
-before snapshotting and only schedules reconciliation; events never mutate an
-assignment directly. On a socket or protocol failure it reconnects, and the
-next authoritative scan recovers state from persisted resource IDs.
-
-The adapter requires Herdr Socket API protocol **22** and schema version **1**.
-A probe rejects an incompatible snapshot or malformed endpoint. Use the daemon
-and Herdr diagnostics to correct the endpoint or upgrade the incompatible side,
-then request reconciliation again.
-
-Each registered Project has an effective Task capacity of **1** unless it has
-an explicit override. Set an override from 1 through 1024, inspect the
-configured-versus-default value, or omit `--limit` to return the Project to
-the default:
-
-```sh
-forge agent-dispatch project --project alpha --limit 2
-forge agent-dispatch status --project alpha
-forge agent-dispatch project --project alpha
-```
-
-Use `forge agent-dispatch profile` to inspect the immutable seeded Task profile
-(the `herdr` provider, `pi` agent kind, model, and prompt template).
-
-### Dispatch ownership and safety boundary
-
-Forge uses an operator-selected existing Herdr workspace shared by dispatched
-agents. It creates an unfocused dedicated tab for each assignment and starts Pi
-in that tab's initial pane, recording resource identifiers for recovery. The
-workspace is not selected by Project folder, and Forge does not close it.
-
-Recovery and retirement trust only those persisted identifiers. Retirement
-revalidates the resource tuple, releases the named agent, and closes only the
-dedicated pane and tab. Conflicting or missing resources are diagnostics, not
-permission to adopt or delete similarly named user resources.
-
-An open assignment has an opaque capability. The daemon is the authorization
-gateway: a capability may read only its bounded Assignment Context and may add
-Comments to or complete only its bound Task. Closed, replaced, abandoned, or
-revoked assignments lose that authority immediately. Authorization outcomes
-are retained as redacted audit facts; neither capability secrets nor Comment
-bodies are retained in that audit history. A provider receives the capability
-through a daemon-created, permission-restricted secret file outside the Agent
-Workspace.
-
-Provider state is never Task completion: Pi admission, `agentblocked`, idle,
-done, or other observed agent states only drive durable assignment
-reconciliation. Completion remains an explicit Forge Task action authorized by
-the assignment capability or a human workflow action.
-
-## Autonomous Task-agent dispatch release handoff
-
-This release supersedes the pre-autonomous provider guidance above. Forge selects the oldest dependency-ready, single-Project **Open** Task while Project capacity is available (default: one), atomically creates a durable Provisioning Assignment to hold that capacity, and prepares `feat/forge-<task-id>` in a Task Managed Worktree. The immutable Base Commit is captured from the Project Registered Folder `HEAD` when the Task opens; dispatch never runs Pi in that Registered Folder.
-
-Forge retains the Task Branch, Managed Worktree claim, Assignment, provider-resource identities, diagnostics, Dispatch Holds, and shared Forge Dispatch Workspace in SQLite. Existing databases migrate these durable facts automatically; back up production data under the normal upgrade policy. No data rewrite or adoption of legacy workspace/worktree state is supported.
-
-Herdr is a daemon-only provider adapter. An operator selects an existing Herdr workspace; Forge verifies and retains its identity, then creates a dedicated tab and uses its initial pane for each Assignment. For Task assignments, the tab's cwd is the prepared Task Managed Worktree. Forge retains resource identities, reconciles against those identities, and never adopts lookalike user resources or deletes the shared workspace. Dispatch is blocked if no workspace is selected or the retained workspace cannot be verified. See [`ADR-008`](crates/docs/adr/0008-operator-selected-dispatch-workspaces.md) for the current ownership and recovery decision. The earlier [`protocol-22 research`](docs/research/herdr-adapter-socket-contract.md) and [`ADR-005`](crates/docs/adr/0005-autonomous-task-dispatch-recovery.md) describe a superseded Forge-created workspace design.
-
-### Operators and recovery
-
-Configure the worktree root and Herdr socket, select an existing Herdr workspace, then use bounded reconciliation:
-
-```sh
-forge config set worktreeRoot "$HOME/.forge/worktrees"
-forge agent-dispatch endpoint --socket-path /absolute/path/to/herdr.sock
-HERDR_WORKSPACE_ID="your-workspace-id" forge agent-dispatch workspace-select
-forge agent-dispatch reconcile
-```
-
-Use `forge agent-dispatch status --project <slug>` for capacity/configuration and `forge worktree info <task>` or `forge worktree doctor` for retained checkout evidence. Correct the endpoint, provider state, or Git checkout before an explicit recovery action. After resolving a Dispatch Hold, run `forge agent-dispatch resume <task-id>`; to retire an assignment's provider resources while retaining its Git evidence, run `forge agent-dispatch assignment-retire <assignment-id>`; and use `forge agent-dispatch task-reopen <task-id>` only for an unassigned manual In Progress Task.
-
-Forge does **not** reset, rebase, delete, recreate, or automatically repair a dispatcher-created worktree/branch; does not adopt unknown provider resources; does not infer Task completion from a provider state; and does not automatically retire an assignment merely because its checkout is missing or invalid. A failed setup hook, branch collision, unavailable base, invalid checkout, or provider/workspace failure retains diagnostics and requires operator investigation. Repeated definite provisioning failures can create a durable hold. Uncertain launches follow the more conservative acknowledgement and recovery rules below; do not assume that clearing a hold or requesting retirement safely releases their capacity.
-
-### Intentionally deferred V1 limits
-
-This release does not provide automated Git evidence cleanup/repair, automatic provider-resource adoption or replacement, a mutable agent profile/prompt/model override, user-initiated cancellation semantics beyond assignment retirement, or automated resolution of conflicting/missing shared-workspace state. Events are wake signals only; authoritative reconciliation remains the source of truth. Final task completion and broader integration/release policy remain explicit Forge workflow actions.
-
-## Safe agent launch and acknowledgement handoff (Spec #567)
-
-This section covers safe launch and acknowledgement. Spec #568 adds investigation, verified retirement and audited unknown-resource resolution; see the [Assignment recovery operator handoff](docs/assignment-recovery.md) for the ordered runbook, current verification evidence and release limitations. The historical #567 verification notes below do not represent the current recovery sign-off.
-
-Forge launches Pi through Herdr with a short bootstrap and the profile model, not the rendered Task instructions or capability secret in the launch arguments. The capability is delivered in an owner-only file. The bootstrap authenticates its acknowledgement, separately starts the Task with bounded retries, and only then retrieves the rendered instructions through an assignment-scoped authenticated read. Acknowledgement makes the Assignment Working; it is not itself a Task start. If start cannot be confirmed, the agent must not begin implementation.
-
-Before launch, Forge persists a one-shot launch intent and acknowledgement deadline. The Task Agent Profile acknowledgement timeout defaults to 300000 ms and is separate from the startup timeout. Inspect the profile with `forge agent-dispatch profile`; create a profile revision with `forge agent-dispatch profile-acknowledgement-timeout-set --timeout-millis <milliseconds>` when a different deadline is needed.
-
-Existing databases migrate the durable acknowledgement and launch-intent state automatically; back up the database before upgrading. Pre-upgrade Provisioning Assignments without a deadline are treated as uncertain, not automatically relaunched. At a missed deadline, or after an interrupted uncertain attempt, Forge retains the open Assignment, evidence and reserved Project capacity and places a Dispatch Hold for investigation. Do not infer that the agent is absent. A late acknowledgement can make the Assignment Working and allow its agent to start the Task, but does not clear the hold.
-
-`forge agent-dispatch resume <task-id>` clears a hold; it does **not** establish that an agent is gone, authorize redelivery or resolve uncertain resources. Clearing it prematurely must not trigger a repeat launch. Both human and JSON `resume` output describe only the hold-clearing operation, not current dispatch eligibility; JSON includes `resolves_recovery_blockers: false` and `authorizes_replacement: false`. A reconciliation scan can reapply a timeout hold while an unacknowledged Assignment remains uncertain. Late acknowledgement still permits the existing agent to start its Task without clearing that hold. Replacement becomes eligible only after the old Assignment is retired, all known and uncertain resources are safely resolved, and the hold is separately cleared. Preserve evidence and capacity while investigating; do not manually create a replacement merely to bypass the hold. `assignment-retire` revokes Assignment access before provider cleanup and retains a durable recovery marker until cleanup succeeds. It verifies persisted provider identities before destructive requests and verifies their absence afterward; failed, uncertain or interrupted cleanup reserves capacity across restarts. Retrying retirement also works for closed Assignments with unfinished cleanup. Its successful human/JSON output includes current Assignment diagnostics: unresolved resources can still reserve capacity, and the Dispatch Hold remains a separate operator action. Revocation cannot undo external actions already performed. Retirement alone does not resolve unknown-resource uncertainty; use the explicit assertion workflow below only after investigation.
-
-### Assignment investigation
-
-```sh
-forge agent-dispatch assignment-info <assignment-id>
-forge agent-dispatch assignment-info <assignment-id> --json
-```
-
-Inspection reads a consistent persisted snapshot: Task and Assignment state, launch and acknowledgement timestamps (Unix milliseconds), Dispatch Hold reason, provider resource identities and retirement timestamps, recovery blockers and capacity reservation. It works for closed Assignments too. Missing timestamps mean no fact was recorded, not proof that an agent is absent. Resource evidence is not live provider verification, and inspection neither contacts Herdr nor changes state. Output identifies worktree investigation, retirement and separate hold-clearing commands; it excludes Task bodies, profile prompts and capability material.
-
-This uses the existing trusted operator RPC surface, like `resume` and `assignment-retire`; it does not introduce operator authentication or grant an Assignment Capability a new scoped operation. Keep daemon access restricted to trusted clients.
-
-### Explicit unknown-resource resolution
-
-A crash can leave a provisioning-intent marker without a persisted provider identifier. Forge cannot discover or safely clean up that unknown resource automatically. Investigate the retained evidence and external processes, make the old agent unable to act (including outside Forge), and remove unknown resources or otherwise make them safe. **Revocation alone is not proof of process death and cannot undo external actions. An incorrect assertion risks duplicate agents and concurrent external work.**
-
-First run `assignment-retire` to revoke Assignment access and attempt verified cleanup of known resources. Even if cleanup fails, revocation remains effective. Then, only when both safety assertions are true:
-
-```sh
-forge agent-dispatch assignment-resolve-unknown <assignment-id> \
-  --confirm-old-agent-cannot-act --confirm-unknown-resources-safe
-# Add --json for current diagnostics and the persisted resolution audit.
-```
-
-Both flags are required; missing either leaves uncertainty untouched. The daemon also enforces both confirmations and rejects open (unrevoked) Assignments. The operation atomically retains an immutable timestamp, operator authority boundary and confirmation text while retiring only provisioning-intent uncertainty. `assignment-info` displays that audit, including after restart. This records an operator assertion, not provider verification or an authenticated human identity; repeated assertions preserve the original audit.
-
-Known resources, retirement-pending cleanup and any other unresolved resources still reserve capacity. Retry `assignment-retire` to finish verified known-resource cleanup; the assertion never bypasses it. Resolution does not clear the Dispatch Hold: explicitly review and use `resume <task-id>` separately when recovery is safe. This resolution RPC is on the same **trusted, unauthenticated operator surface**, not an Assignment Capability operation; agent credential-shaped payloads are rejected, but that validation is not client authentication. Keep daemon access restricted to trusted operators.
-
-### Historical #567 verification and known limitations
-
-The provider tuple-mismatch finding below was subsequently addressed by #581 and reverified against live Herdr in #583. This does not establish cleanup of the older retained smoke artifacts. See the [current #568 handoff](docs/assignment-recovery.md#verification-handoff-and-remaining-limitations); default-parallel ownership-test and strict-lint limitations remain.
-
-- Task #569 verified bootstrap prompt execution and subsequent interactive use with Herdr 0.9.5 and Pi 1.5.0. Task #573 exercised the integrated flow with those versions and profile `gpt-5.6-terra`: the agent executed the bootstrap, acknowledged, started its Task and retrieved authenticated instructions from an isolated daemon.
-- Task #573 recorded `cargo test --workspace -- --test-threads=1` and `git diff --check` passing. A default-thread workspace test run failed two server ownership-lock/listener tests with `WouldBlock` and `AddrInUse`; an earlier default-thread run passed. Strict Clippy was reported failing on existing unrelated `forge-app` warnings in Tasks #570 and #571.
-- During the isolated smoke cleanup, `assignment-retire` failed with a persisted Herdr resource tuple mismatch. The dedicated smoke workspace was closed and daemon stopped, but the isolated store and worktree remain at `/tmp/forge-573-iejdsy` for investigation. This is not evidence of successful retirement; no production assignments were affected.
-
-## Manual Managed Worktree release handoff
-
-This surface is for explicitly requested, non-dispatch worktrees. Dispatcher-created Task Managed Worktrees follow the autonomous handoff above and are never automatically rolled back or repaired.
-
-This release replaces the unsupported deployed legacy worktree surface. Do not
-use its `--path` or `--copy-manifest` arguments and do not migrate its existing
-state: Forge reports that state as unsupported and never adopts it
-automatically.
-
-A **Managed Worktree** is Forge's durable checkout for one in-progress Task
-scoped to exactly one Project. Forge creates it at
-`<worktree-root>/<project-slug>/<task-id>` and retains one Worktree Claim for
-that Task. Set the user-wide Worktree Root before creating the first checkout;
-the configured value is visible through the daemon-backed CLI:
-
-```sh
-forge config set worktreeRoot "$HOME/.forge/worktrees"
-forge config get worktreeRoot
-```
-
-Create a checkout with an explicit branch and base, then inspect or remove it:
-
-```sh
-forge worktree create 42 --branch task-42 --base main
-forge worktree info 42
-forge worktree list
-forge worktree remove 42
-```
-
-All worktree commands accept `--json`. `forge worktree list --all` includes
-claims that require attention. `forge worktree doctor` diagnoses those claims;
-only `forge worktree doctor --repair` performs repair. Ordinary removal is
-local and offline and refuses dirty checkouts, missing or invalid Git metadata,
-unresolvable upstreams, and local commits ahead of upstream. Behind or
-diverged status is informational. Inspect the ordered `blockers` and
-`removable` fields from `info`, `list`, or `doctor`; use `remove --force` only
-after deliberately accepting the reported risk.
-
-For a manually created checkout, a Project Setup Hook is optional and runs in the new checkout through the
-platform shell. It receives `FORGE_PROJECT_SLUG`, `FORGE_RECORD_ID`,
-`FORGE_WORKTREE_PATH`, `FORGE_BRANCH`, and `FORGE_BASE`. A nonzero exit rolls
-back the checkout and claim; hook output is not persisted. Configure or remove
-the hook with:
-
-```sh
-forge project setup-hook set --project alpha 'cargo fetch'
-forge project setup-hook clear --project alpha
-```
-
-A claim moves from `reserving` to `active`. If creation rollback or removal is
-incomplete, it becomes `cleanup-required`; do not try to create a second
-checkout or bypass the claim. Use `forge worktree doctor` to obtain the
-recovery facts and explicitly repair or force-remove only when appropriate.
-
-Release verification completed with `cargo fmt --check`,
-`cargo clippy --workspace --all-targets -- -D warnings`, `cargo test
---workspace`, and `git diff --check`.
-
-## Browser and RPC access
-
-Open <http://127.0.0.1:45003/> in a browser. The page is server-rendered and
-uses its locally served HTMX asset to refresh the status only when the user
-selects **Refresh status**. The fragment route is
-<http://127.0.0.1:45003/status>; the typed JSON-RPC endpoint is `POST /rpc`.
-
-## Security and scope
-
-This initial foundation deliberately uses plaintext HTTP and binds to loopback
-by default. The daemon is unauthenticated and exposes mutating Project and
-Record RPC operations, so do not expose it beyond a trusted local environment.
-Any remote use requires an explicitly trusted private network and a redesigned
-security boundary.
-
-Authentication, authorization, TLS termination, browser mutations, CSRF
-handling, CORS access, CI, and service management are deferred.
-
-## Verify the workspace
-
-Run the quality gate from the repository root:
+Records normally advance from `open` to `in-progress` to `done`. A Spec can be
+completed after its Tasks are done. For automatic execution, configure
+[agent dispatch](docs/dispatch.md) instead of manually starting the Task.
+
+## Documentation
+
+| Guide | Contents |
+| --- | --- |
+| [Records](docs/records.md) | Projects, scope, lifecycle, hierarchy, and provenance |
+| [Managed worktrees](docs/worktrees.md) | Manual checkout creation, safety checks, and repair |
+| [Agent dispatch](docs/dispatch.md) | Herdr setup, capacity, launch, and ownership boundaries |
+| [Assignment recovery](docs/assignment-recovery.md) | Investigation, retirement, unknown resources, and holds |
+| [Forgeup operations](crates/docs/forgeup.md) | Revision registration, selection, daemon lifecycle, and recovery |
+| [Development](docs/development.md) | Source setup, manual daemon endpoints, browser/RPC, and verification |
+| [Agent workflows](skills/forge/SKILL.md) | Record workflows, worktrees, dispatch, and assignment recovery |
+| [Management Protocol](crates/docs/management-protocol.md) | Forgeup's daemon attestation and lifecycle contract |
+
+## Security
+
+The daemon uses **unauthenticated plaintext HTTP** and binds to loopback by
+default. Its operator RPC surface can mutate state; keep access restricted to
+trusted clients. A non-loopback bind is suitable only for an explicitly trusted
+private network, not public exposure. Assignment capabilities restrict agent
+operations but do not authenticate operator clients.
+
+Authentication, TLS termination, browser mutations, CSRF handling, and CORS access
+are not provided by this foundation.
+
+## Development
+
+Run the intended quality gate from the repository root:
 
 ```sh
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
+
+These are verification commands, not a claim that the current checkout passes
+every gate. See [verification limitations](docs/development.md#verification)
+before using results as release sign-off.
