@@ -86,11 +86,11 @@ pub trait AgentDispatchApi {
     ) -> RpcResult<AgentDispatchStatusResponse>;
     #[method(name = "reconcile")]
     async fn reconcile(&self) -> RpcResult<AgentDispatchReconcileResponse>;
-    #[method(name = "grillingDispatch")]
-    async fn grilling_dispatch(
+    #[method(name = "dispatchRecord")]
+    async fn dispatch_record(
         &self,
-        request: DispatchGrillingRequest,
-    ) -> RpcResult<AgentAssignmentResponse>;
+        request: DispatchRecordRequest,
+    ) -> RpcResult<DispatchRecordResponse>;
     #[method(name = "assignmentAcknowledge")]
     async fn assignment_acknowledge(
         &self,
@@ -433,8 +433,15 @@ impl From<AgentProfile> for AgentDispatchProfileResponse {
     }
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct DispatchGrillingRequest {
-    pub grilling_id: u64,
+pub struct DispatchRecordRequest {
+    pub record_id: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DispatchRecordResponse {
+    pub assignment: AgentAssignmentResponse,
+    pub already_assigned: bool,
+    pub message: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

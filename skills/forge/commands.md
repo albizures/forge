@@ -79,15 +79,17 @@ forge dispatcher config get workspace
 forge dispatcher config unset workspace
 forge dispatcher config unset herdr-socket
 forge dispatcher profile
-forge dispatcher profile-acknowledgement-timeout-set --timeout-millis 300000
-forge dispatcher project --project alpha --limit 2
-forge dispatcher project --project alpha
+forge dispatcher config set acknowledgement-timeout-ms 300000
+forge dispatcher config unset acknowledgement-timeout-ms
+forge dispatcher config set project-limit 2 --project alpha
+forge dispatcher config get project-limit --project alpha
+forge dispatcher config unset project-limit --project alpha
 forge dispatcher status --project alpha --json
 forge dispatcher reconcile --json
-forge dispatcher grilling-dispatch 47 --json
+forge dispatcher dispatch 47 --json
 ```
 
-`config set workspace` verifies the explicitly named existing Herdr Workspace. `herdr-socket` is Herdr's absolute Unix socket path, not the Forge RPC endpoint. Reads show effective values and default/override provenance; `config unset` explicitly removes an override. Socket/Workspace changes are rejected while unresolved Assignments or retained resources depend on them; investigate with `status` and `assignment-info` before safe recovery. The Project command sets a dispatch limit (1–1024); omitting `--limit` clears its override, so it is not a read operation. Inspect with `status` instead. Profile timeout changes create a new Task Agent Profile revision.
+`config set workspace` verifies the explicitly named existing Herdr Workspace. `herdr-socket` is Herdr's absolute Unix socket path, not the Forge RPC endpoint. Reads show effective values and default/override provenance; `config unset` explicitly removes an override. Socket/Workspace changes are rejected while unresolved Assignments or retained resources depend on them; investigate with `status` and `assignment-info` before safe recovery. `project-limit` requires explicit `--project` scope for reads, sets, and unsets; unset restores capacity 1. Aggregate `config get --project <slug>` includes that Project's capacity alongside global values. Timeout set/unset creates an immutable Task Agent Profile revision for future Assignments only; existing Assignments retain their bound profiles. Unset restores 300000 ms.
 
 Reconciliation can provision agents and worktrees; it is not a read-only health check. Automatic dispatch selects eligible dependency-ready Open Tasks within Project capacity. Grilling dispatch explicitly launches interactive human-in-the-loop work without a Managed Worktree.
 

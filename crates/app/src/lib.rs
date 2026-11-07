@@ -906,7 +906,11 @@ pub fn reconcile_agent_assignment<A: AgentDispatchAdapter + ?Sized>(
         | AgentAssignmentState::Blocked
         | AgentAssignmentState::Unknown => adapter.observe(&context),
     };
+    // Tasks must acknowledge through their authenticated bootstrap. Interactive Grillings
+    // have no Task capability; a confirmed provider launch moves them to Working directly.
+    // Failed launches with retained launch intent still require conservative recovery.
     if assignment.state == AgentAssignmentState::Provisioning
+        && (assignment.profile.record_type != RecordType::Grilling || observed.is_err())
         && (observed.is_ok() || repository.agent_launch_intent(&assignment.id)?.is_some())
     {
         return if repository.agent_assignment(&assignment.id)?.state
@@ -1350,6 +1354,13 @@ pub trait AgentDispatchRepository: RecordRepository {
         &self,
         assignment: &NewAgentAssignment,
     ) -> Result<AgentAssignment, RegistrationError>;
+    /// Atomically claims an explicitly selected Task or Grilling, or returns its open Assignment.
+    /// The boolean reports an existing Assignment; all eligibility and recovery checks are atomic.
+    fn claim_record_agent_assignment(
+        &self,
+        record_id: u64,
+        assignment_id: &str,
+    ) -> Result<(AgentAssignment, bool), RegistrationError>;
     /// Returns one Assignment by opaque identifier.
     fn agent_assignment(&self, assignment_id: &str) -> Result<AgentAssignment, RegistrationError>;
     /// Returns a consistent snapshot of persisted investigation evidence, including closed attempts.
@@ -2159,47 +2170,24 @@ impl Application {
         self.dispatch()?.active_task_agent_profile()
     }
 
-    /// Dispatches one ready, single-Project Grilling without creating a Managed Worktree.
+    /// Explicitly dispatches a Task or interactive Grilling using its immutable profile.
     ///
     /// # Errors
     ///
-    /// Returns lifecycle, provider, or persistence failures.
-    pub fn dispatch_grilling(
+    /// Returns eligibility, recovery, provider, or persistence failures.
+    pub fn dispatch_record(
         &self,
-        grilling_id: u64,
-    ) -> Result<AgentAssignment, RegistrationError> {
+        record_id: u64,
+    ) -> Result<(AgentAssignment, bool), RegistrationError> {
         let dispatch = self.dispatch()?;
-        let grilling = dispatch.show_record(grilling_id)?;
-        if grilling.record_type != RecordType::Grilling
-            || grilling.status != RecordStatus::Open
-            || grilling.project_slugs.len() != 1
-            || grilling.relationships.iter().any(|relationship| {
-                relationship.kind == RecordRelationshipKind::DependsOn
-                    && relationship.from_id == grilling_id
-                    && dispatch
-                        .show_record(relationship.to_id)
-                        .map_or(true, |prerequisite| {
-                            prerequisite.status != RecordStatus::Done
-                        })
-            })
-        {
-            return Err(RegistrationError::new(
-                "grilling-not-ready",
-                "an interactive Assignment requires a ready Grilling scoped to exactly one Project",
-            ));
+        let (assignment, already_assigned) =
+            dispatch.claim_record_agent_assignment(record_id, &next_dispatch_assignment_id())?;
+        if already_assigned {
+            return Ok((assignment, true));
         }
-        if dispatch.dispatch_hold(grilling_id)?.is_some() {
-            return Err(RegistrationError::new(
-                "dispatch-held",
-                "interactive Grilling dispatch requires explicit operator resume",
-            ));
+        if assignment.profile.record_type == RecordType::Task {
+            self.prepare_dispatch_worktree(record_id)?;
         }
-        let assignment = dispatch.create_agent_assignment(&NewAgentAssignment {
-            id: next_dispatch_assignment_id(),
-            record_id: grilling_id,
-            project_slug: grilling.project_slugs[0].clone(),
-            profile_revision: 1,
-        })?;
         let adapter = self
             .adapter_factory()?
             .adapter_for(&assignment.profile)
@@ -2207,7 +2195,7 @@ impl Application {
                 RegistrationError::new("agent-dispatch-unavailable", format!("{error:?}"))
             })?;
         let _ = reconcile_agent_assignment(dispatch, adapter.as_ref(), &assignment)?;
-        dispatch.agent_assignment(&assignment.id)
+        Ok((dispatch.agent_assignment(&assignment.id)?, false))
     }
 
     /// Creates a new Task Agent Profile revision with the requested acknowledgement timeout.

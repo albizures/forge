@@ -44,18 +44,19 @@ immutable Base Commit is captured from the Registered Folder's `HEAD` when the
 Task opens.
 
 Each Project defaults to capacity **1**. Set an override from 1 through 1024, or
-omit `--limit` to restore the default:
+explicitly unset it to restore the default. Capacity operations require `--project`:
 
 ```sh
-forge dispatcher project --project alpha --limit 2
-forge dispatcher status --project alpha
-forge dispatcher project --project alpha
+forge dispatcher config set project-limit 2 --project alpha
+forge dispatcher config get project-limit --project alpha
+forge dispatcher config get --project alpha
+forge dispatcher config unset project-limit --project alpha
 forge dispatcher profile
 ```
 
 The profile identifies provider, agent kind, model, and prompt configuration.
 General model/prompt/profile overrides are not provided; acknowledgement timeout
-has its own explicit revision command below.
+has its own grouped configuration key below.
 
 ## Launch and acknowledgement
 
@@ -75,8 +76,14 @@ timeout. Inspect the profile or create a timeout revision explicitly:
 
 ```sh
 forge dispatcher profile
-forge dispatcher profile-acknowledgement-timeout-set --timeout-millis 300000
+forge dispatcher config get acknowledgement-timeout-ms
+forge dispatcher config set acknowledgement-timeout-ms 42000
+forge dispatcher config unset acknowledgement-timeout-ms
 ```
+
+Reads report effective values and default/override provenance. Timeout set and
+unset create immutable Agent Profile revisions for future Assignments only;
+existing Assignments retain their bound profiles. Unset restores **300000 ms**.
 
 A missed deadline or interrupted uncertain launch retains the Assignment,
 evidence, and capacity with a Dispatch Hold. Pre-upgrade Provisioning Assignments

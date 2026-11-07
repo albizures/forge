@@ -4,7 +4,7 @@ use forge_cli::{
     render_managed_worktrees, render_project_here, render_project_registered, render_record,
     render_record_comments, render_record_list, render_record_opened, render_record_updates,
     request_add_record_comment, request_agent_dispatch_profile, request_agent_dispatch_reconcile,
-    request_agent_dispatch_status, request_delete_record_comment, request_dispatch_grilling,
+    request_agent_dispatch_status, request_delete_record_comment, request_dispatch_record,
     request_done_record, request_edit_record, request_list_records,
     request_managed_worktree_create, request_managed_worktree_doctor,
     request_managed_worktree_info, request_managed_worktree_list, request_managed_worktree_recover,
@@ -265,8 +265,8 @@ enum AgentDispatchCommand {
     Profile(AgentDispatchRequestArgs),
     Status(AgentDispatchStatusArgs),
     Reconcile(AgentDispatchRequestArgs),
-    /// Dispatch one ready Grilling to an interactive Agent without a Managed Worktree.
-    GrillingDispatch(DispatchGrillingArgs),
+    /// Dispatch a ready Task or interactive Grilling by Record id.
+    Dispatch(DispatchRecordArgs),
     /// Return an unassigned In Progress Task to Open.
     TaskReopen(DispatchTaskArgs),
     /// Clear an operator-controlled Dispatch Hold.
@@ -339,8 +339,8 @@ struct AgentDispatchRequestArgs {
     json: bool,
 }
 #[derive(Args, Debug)]
-struct DispatchGrillingArgs {
-    grilling_id: u64,
+struct DispatchRecordArgs {
+    record_id: u64,
     #[arg(long, value_name = "URL")]
     server_url: Option<String>,
     #[arg(long)]
@@ -1007,10 +1007,10 @@ async fn agent_dispatch(command: AgentDispatchCommand) -> i32 {
                 .map(|value| serde_json::to_value(value).unwrap()),
             args.json,
         ),
-        AgentDispatchCommand::GrillingDispatch(args) => (
-            request_dispatch_grilling(
+        AgentDispatchCommand::Dispatch(args) => (
+            request_dispatch_record(
                 &resolve_endpoint(args.server_url.as_deref()).await,
-                args.grilling_id,
+                args.record_id,
             )
             .await
             .map(|value| serde_json::to_value(value).unwrap()),
@@ -1122,6 +1122,10 @@ async fn agent_dispatch(command: AgentDispatchCommand) -> i32 {
                 serde_json::from_value::<forge_rpc::AgentDispatchStatusResponse>(value.clone())
             {
                 println!("{}", render_agent_dispatch_status(&status));
+            } else if let Ok(dispatch) =
+                serde_json::from_value::<forge_rpc::DispatchRecordResponse>(value.clone())
+            {
+                println!("{}", dispatch.message);
             } else {
                 println!("{value}");
             }
@@ -1821,6 +1825,13 @@ mod tests {
         };
         assert_eq!(args.wayfinder, 43);
         assert_eq!(args.project.as_deref(), Some("alpha"));
+    }
+
+    #[test]
+    fn explicit_record_dispatch_uses_only_the_canonical_path() {
+        assert!(Cli::try_parse_from(["forge", "dispatcher", "dispatch", "42", "--json"]).is_ok());
+        assert!(Cli::try_parse_from(["forge", "dispatcher", "dispatch"]).is_err());
+        assert!(Cli::try_parse_from(["forge", "dispatcher", "grilling-dispatch", "42"]).is_err());
     }
 
     #[test]

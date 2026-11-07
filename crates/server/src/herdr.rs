@@ -654,20 +654,36 @@ impl AgentDispatchAdapter for HerdrAdapter {
         context: &AgentDispatchContext,
         resources: &dyn AgentDispatchRepository,
     ) -> Result<(), AgentAdapterError> {
-        let bootstrap = context
-            .bootstrap_prompt
-            .as_deref()
-            .filter(|prompt| !prompt.trim().is_empty())
-            .ok_or_else(|| {
-                AgentAdapterError::InvalidRequest(
-                    "verified agent bootstrap is not configured".into(),
-                )
-            })?;
-        if context.capability_delivery.is_none() {
-            return Err(AgentAdapterError::InvalidRequest(
-                "Assignment Capability delivery is not configured".into(),
-            ));
-        }
+        let prompt = match context.assignment.profile.record_type {
+            forge_app::RecordType::Task => {
+                let bootstrap = context
+                    .bootstrap_prompt
+                    .as_deref()
+                    .filter(|prompt| !prompt.trim().is_empty())
+                    .ok_or_else(|| {
+                        AgentAdapterError::InvalidRequest(
+                            "verified agent bootstrap is not configured".into(),
+                        )
+                    })?;
+                if context.capability_delivery.is_none() {
+                    return Err(AgentAdapterError::InvalidRequest(
+                        "Assignment Capability delivery is not configured".into(),
+                    ));
+                }
+                if context.agent_workspace.is_none() {
+                    return Err(AgentAdapterError::InvalidRequest(
+                        "Task provisioning requires its active Managed Worktree".into(),
+                    ));
+                }
+                bootstrap
+            }
+            forge_app::RecordType::Grilling => context.rendered_initial_prompt.as_str(),
+            _ => {
+                return Err(AgentAdapterError::InvalidRequest(
+                    "explicit dispatch supports only Tasks and Grillings".into(),
+                ));
+            }
+        };
         self.probe()?;
         let label = Self::label(context)?;
         let workspace = self.dispatch_workspace(resources)?;
@@ -741,7 +757,7 @@ impl AgentDispatchAdapter for HerdrAdapter {
                     "launch was already attempted or Assignment is no longer provisioning".into(),
                 ));
             }
-            self.request("agent.start", json!({"name": label, "kind": "pi", "pane_id": pane, "args": ["--model", context.assignment.profile.model, bootstrap], "timeout_ms": context.assignment.profile.startup_timeout_millis}))?;
+            self.request("agent.start", json!({"name": label, "kind": "pi", "pane_id": pane, "args": ["--model", context.assignment.profile.model, prompt], "timeout_ms": context.assignment.profile.startup_timeout_millis}))?;
             Self::retain(resources, context, "agent-name", &label)?;
         }
         Ok(())
@@ -1009,16 +1025,26 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn provisioning_launches_only_short_bootstrap_and_delivers_secret_path() {
+        provisioning_launch_contract(forge_app::RecordType::Task);
+    }
+
+    #[test]
+    fn grilling_provisions_interactively_without_worktree_or_task_capability() {
+        provisioning_launch_contract(forge_app::RecordType::Grilling);
+    }
+
+    fn provisioning_launch_contract(record_type: forge_app::RecordType) {
         use forge_app::{
             AgentDispatchContext, AgentDispatchRepository, AssignmentCapabilityDelivery,
             DispatchWorkspace, NewAgentAssignment, NewTypedRecord, Project, ProjectRepository,
-            RecordRepository, RecordType,
+            RecordRepository,
         };
         use std::{
             io::{BufRead, BufReader, Write},
             os::unix::net::UnixListener,
             thread,
         };
+        let interactive = record_type == forge_app::RecordType::Grilling;
         let repository = forge_store::SqliteProjectRepository::in_memory().unwrap();
         repository
             .register(&Project {
@@ -1029,7 +1055,7 @@ mod tests {
             .unwrap();
         let task = repository
             .open_typed_record(&NewTypedRecord {
-                record_type: RecordType::Task,
+                record_type,
                 task_kind: None,
                 body: "private full instructions".into(),
                 project_slugs: vec!["project".into()],
@@ -1052,13 +1078,13 @@ mod tests {
         let context = AgentDispatchContext {
             assignment: assignment.clone(),
             registered_project_folder: "/project".into(),
-            agent_workspace: Some("/worktree".into()),
+            agent_workspace: (!interactive).then(|| "/worktree".into()),
             dispatch_workspace: Some(DispatchWorkspace {
                 id: "workspace".into(),
             }),
             rendered_initial_prompt: "private full instructions".into(),
-            bootstrap_prompt: Some("short bootstrap".into()),
-            capability_delivery: Some(AssignmentCapabilityDelivery {
+            bootstrap_prompt: (!interactive).then(|| "short bootstrap".into()),
+            capability_delivery: (!interactive).then(|| AssignmentCapabilityDelivery {
                 endpoint: "http://127.0.0.1:45003".into(),
                 secret_file: "/secrets/assignment".into(),
                 cli_path: "/bin/forge".into(),
@@ -1104,16 +1130,34 @@ mod tests {
                 assert_eq!(request["method"], method);
                 if method == "tab.create" {
                     assert_eq!(
-                        request["params"]["env"]["FORGE_ASSIGNMENT_CAPABILITY_SECRET_FILE"],
-                        "/secrets/assignment"
+                        request["params"]["cwd"],
+                        if interactive { "/neutral" } else { "/worktree" }
                     );
+                    if interactive {
+                        assert!(request["params"].get("env").is_none());
+                    } else {
+                        assert_eq!(
+                            request["params"]["env"]["FORGE_ASSIGNMENT_CAPABILITY_SECRET_FILE"],
+                            "/secrets/assignment"
+                        );
+                    }
                 }
                 if method == "agent.start" {
                     assert_eq!(
                         request["params"]["args"],
-                        serde_json::json!(["--model", model, "short bootstrap"])
+                        serde_json::json!([
+                            "--model",
+                            model,
+                            if interactive {
+                                "private full instructions"
+                            } else {
+                                "short bootstrap"
+                            }
+                        ])
                     );
-                    assert!(!line.contains("private full instructions"));
+                    if !interactive {
+                        assert!(!line.contains("private full instructions"));
+                    }
                     assert!(!line.contains("/secrets/assignment"));
                 }
                 serde_json::to_writer(
@@ -1126,7 +1170,7 @@ mod tests {
         });
         let adapter = super::HerdrAdapter {
             socket_path: path.clone(),
-            dispatch_root: "/worktree".into(),
+            dispatch_root: "/neutral".into(),
         };
         adapter.provision(&context, &repository).unwrap();
         assert!(
@@ -1136,6 +1180,13 @@ mod tests {
                 .is_some()
         );
         server.join().unwrap();
+        if !interactive {
+            let mut missing_worktree = context.clone();
+            missing_worktree.agent_workspace = None;
+            assert!(
+                matches!(adapter.provision(&missing_worktree, &repository), Err(forge_app::AgentAdapterError::InvalidRequest(message)) if message.contains("Managed Worktree"))
+            );
+        }
         std::fs::remove_file(path).unwrap();
     }
 

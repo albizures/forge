@@ -1940,6 +1940,106 @@ impl AgentDispatchRepository for SqliteProjectRepository {
         })
     }
 
+    fn claim_record_agent_assignment(
+        &self,
+        record_id: u64,
+        assignment_id: &str,
+    ) -> Result<(AgentAssignment, bool), RegistrationError> {
+        if assignment_id.trim().is_empty() {
+            return Err(RegistrationError::new(
+                "invalid-assignment-id",
+                "assignment id must not be blank",
+            ));
+        }
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        let record = load_record(&transaction, record_id)?;
+        if !matches!(record.record_type, RecordType::Task | RecordType::Grilling) {
+            return Err(RegistrationError::new(
+                "unsupported-record-type",
+                "explicit dispatch supports only Tasks and Grillings",
+            ));
+        }
+        let existing = transaction.query_row("SELECT id, record_id, project_slug, profile_record_type, profile_revision, attempt_number, claimed_at_millis, state, closed_at_millis, closure_reason, state_changed_at_millis, next_retry_at_millis, retry_count FROM agent_assignments WHERE record_id = ?1 AND closed_at_millis IS NULL", [record_id.cast_signed()], |row| agent_assignment_from_row(row, &transaction)).optional().map_err(storage_error)?;
+        if let Some(assignment) = existing {
+            return Ok((assignment, true));
+        }
+        if record.status != RecordStatus::Open || record.project_slugs.len() != 1 {
+            return Err(RegistrationError::new(
+                "record-not-ready",
+                "dispatch requires an Open Record scoped to exactly one Project",
+            ));
+        }
+        let held: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM dispatch_holds WHERE record_id = ?1)",
+                [record_id.cast_signed()],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        if held {
+            return Err(RegistrationError::new(
+                "dispatch-held",
+                "dispatch requires explicit operator resume; investigate the Dispatch Hold",
+            ));
+        }
+        let blocked: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM record_relationships dependency LEFT JOIN records prerequisite ON prerequisite.id = dependency.to_id WHERE dependency.from_id = ?1 AND dependency.kind = 'depends-on' AND (prerequisite.id IS NULL OR prerequisite.status != 'done'))", [record_id.cast_signed()], |row| row.get(0)).map_err(storage_error)?;
+        if blocked {
+            return Err(RegistrationError::new(
+                "record-not-ready",
+                "Record has unresolved prerequisites",
+            ));
+        }
+        let retained: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM agent_assignments a JOIN agent_assignment_resources r ON r.assignment_id = a.id WHERE a.record_id = ?1 AND r.retired_at_millis IS NULL)", [record_id.cast_signed()], |row| row.get(0)).map_err(storage_error)?;
+        if retained {
+            return Err(RegistrationError::new(
+                "assignment-recovery-blocked",
+                "retained Assignment resources prohibit replacement; inspect Assignment evidence and resolve recovery blockers",
+            ));
+        }
+        let project_slug = &record.project_slugs[0];
+        let limit = effective_limit(&transaction, project_slug)?;
+        let used: i64 = transaction.query_row("SELECT COUNT(*) FROM agent_assignments a WHERE a.project_slug = ?1 AND (a.closed_at_millis IS NULL OR EXISTS (SELECT 1 FROM agent_assignment_resources r WHERE r.assignment_id = a.id AND r.retired_at_millis IS NULL))", [project_slug], |row| row.get(0)).map_err(storage_error)?;
+        if used >= i64::from(limit) {
+            return Err(RegistrationError::new(
+                "project-capacity",
+                "Project dispatch capacity is reserved; inspect open Assignments and recovery blockers",
+            ));
+        }
+        let revision: u32 = transaction
+            .query_row(
+                "SELECT MAX(revision) FROM agent_profiles WHERE record_type = ?1",
+                [record_type_name(record.record_type)],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        let profile = load_agent_profile(&transaction, record.record_type, revision)?;
+        let attempt_number: u32 = transaction.query_row("SELECT COALESCE(MAX(attempt_number), 0) + 1 FROM agent_assignments WHERE record_id = ?1", [record_id.cast_signed()], |row| row.get(0)).map_err(storage_error)?;
+        let claimed_at_millis = now_millis()?;
+        transaction.execute("INSERT INTO agent_assignments (id, record_id, project_slug, profile_record_type, profile_revision, attempt_number, claimed_at_millis, state_changed_at_millis, safe_dispatch_generation) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, 1)", params![assignment_id, record_id.cast_signed(), project_slug, record_type_name(record.record_type), revision, attempt_number, claimed_at_millis]).map_err(storage_error)?;
+        let assignment = AgentAssignment {
+            id: assignment_id.into(),
+            record_id,
+            project_slug: project_slug.clone(),
+            profile,
+            attempt_number,
+            claimed_at_millis: claimed_at_millis.cast_unsigned(),
+            state: AgentAssignmentState::Provisioning,
+            state_changed_at_millis: claimed_at_millis.cast_unsigned(),
+            next_retry_at_millis: 0,
+            retry_count: 0,
+            closed_at_millis: None,
+            closure_reason: None,
+        };
+        transaction.commit().map_err(storage_error)?;
+        Ok((assignment, false))
+    }
+
     fn agent_assignment(&self, assignment_id: &str) -> Result<AgentAssignment, RegistrationError> {
         let connection = self
             .connection
@@ -5950,6 +6050,240 @@ mod tests {
             store.show_record(eligible.id).unwrap().status,
             RecordStatus::Open
         );
+    }
+
+    #[test]
+    fn explicit_dispatch_selects_requested_task_and_reuses_open_assignment() {
+        let store = SqliteProjectRepository::in_memory().unwrap();
+        store.register(&project("alpha", "/repos/alpha")).unwrap();
+        let mut tasks = Vec::new();
+        for body in ["older", "requested"] {
+            tasks.push(
+                store
+                    .open_typed_record(&NewTypedRecord {
+                        record_type: RecordType::Task,
+                        task_kind: None,
+                        body: body.into(),
+                        project_slugs: vec!["alpha".into()],
+                        generated_by_ids: vec![],
+                    })
+                    .unwrap(),
+            );
+        }
+        let (assignment, already_assigned) = store
+            .claim_record_agent_assignment(tasks[1].id, "explicit")
+            .unwrap();
+        assert_eq!(assignment.record_id, tasks[1].id);
+        assert!(!already_assigned);
+        let (repeated, already_assigned) = store
+            .claim_record_agent_assignment(tasks[1].id, "duplicate")
+            .unwrap();
+        assert_eq!(repeated.id, "explicit");
+        assert!(already_assigned);
+        assert_eq!(store.list_open_agent_assignments().unwrap().len(), 1);
+        assert_eq!(
+            store
+                .claim_record_agent_assignment(tasks[0].id, "full")
+                .unwrap_err()
+                .code,
+            "project-capacity"
+        );
+    }
+
+    #[test]
+    fn explicit_dispatch_enforces_readiness_holds_and_closed_assignment_resources() {
+        let store = SqliteProjectRepository::in_memory().unwrap();
+        store.register(&project("alpha", "/repos/alpha")).unwrap();
+        store.register(&project("beta", "/repos/beta")).unwrap();
+        let open = |record_type, scopes: Vec<&str>| {
+            store
+                .open_typed_record(&NewTypedRecord {
+                    record_type,
+                    task_kind: None,
+                    body: "record".into(),
+                    project_slugs: scopes.into_iter().map(str::to_owned).collect(),
+                    generated_by_ids: vec![],
+                })
+                .unwrap()
+        };
+        for kind in [RecordType::Spec, RecordType::Wayfinder] {
+            let record = open(kind, vec!["alpha"]);
+            assert_eq!(
+                store
+                    .claim_record_agent_assignment(record.id, "unsupported")
+                    .unwrap_err()
+                    .code,
+                "unsupported-record-type"
+            );
+            assert!(store.list_agent_assignments(record.id).unwrap().is_empty());
+        }
+        let generic = store
+            .open_record(&NewRecord {
+                body: "generic".into(),
+                project_slugs: vec!["alpha".into()],
+                generated_by_ids: vec![],
+            })
+            .unwrap();
+        assert_eq!(
+            store
+                .claim_record_agent_assignment(generic.id, "generic")
+                .unwrap_err()
+                .code,
+            "unsupported-record-type"
+        );
+        let multi = open(RecordType::Grilling, vec!["alpha", "beta"]);
+        assert_eq!(
+            store
+                .claim_record_agent_assignment(multi.id, "multi")
+                .unwrap_err()
+                .code,
+            "record-not-ready"
+        );
+        let prerequisite = open(RecordType::Task, vec!["alpha"]);
+        let task = open(RecordType::Task, vec!["alpha"]);
+        store
+            .relate_records(task.id, prerequisite.id, RecordRelationshipKind::DependsOn)
+            .unwrap();
+        assert_eq!(
+            store
+                .claim_record_agent_assignment(task.id, "blocked")
+                .unwrap_err()
+                .code,
+            "record-not-ready"
+        );
+        store.start_record(prerequisite.id).unwrap();
+        store.done_record(prerequisite.id, Some("done")).unwrap();
+        store.hold_dispatch(task.id, "investigate").unwrap();
+        assert_eq!(
+            store
+                .claim_record_agent_assignment(task.id, "held")
+                .unwrap_err()
+                .code,
+            "dispatch-held"
+        );
+        assert!(store.dispatch_hold(task.id).unwrap().is_some());
+        let grilling = open(RecordType::Grilling, vec!["alpha"]);
+        let (assignment, _) = store
+            .claim_record_agent_assignment(grilling.id, "interactive")
+            .unwrap();
+        assert_eq!(assignment.profile.record_type, RecordType::Grilling);
+        store
+            .add_agent_assignment_resource(&NewAgentAssignmentResource {
+                assignment_id: assignment.id.clone(),
+                resource_kind: "agent-name".into(),
+                resource_id: "retained-agent".into(),
+            })
+            .unwrap();
+        store
+            .close_agent_assignment(
+                &assignment.id,
+                forge_app::AgentAssignmentClosureReason::Lost,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .claim_record_agent_assignment(grilling.id, "replacement")
+                .unwrap_err()
+                .code,
+            "assignment-recovery-blocked"
+        );
+        assert_eq!(
+            store
+                .list_agent_assignment_resources(&assignment.id)
+                .unwrap()[0]
+                .resource_id,
+            "retained-agent"
+        );
+        assert_eq!(store.list_agent_assignments(grilling.id).unwrap().len(), 1);
+        let in_progress = open(RecordType::Task, vec!["beta"]);
+        store.start_record(in_progress.id).unwrap();
+        assert_eq!(
+            store
+                .claim_record_agent_assignment(in_progress.id, "in-progress")
+                .unwrap_err()
+                .code,
+            "record-not-ready"
+        );
+    }
+
+    #[test]
+    fn concurrent_explicit_dispatch_reuses_one_assignment_across_connections() {
+        let path = std::env::temp_dir().join(format!(
+            "forge-explicit-{}-{}.sqlite",
+            std::process::id(),
+            super::now_millis().unwrap()
+        ));
+        let store = SqliteProjectRepository::open(&path).unwrap();
+        store.register(&project("alpha", "/repos/alpha")).unwrap();
+        let task = store
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Task,
+                task_kind: None,
+                body: "task".into(),
+                project_slugs: vec!["alpha".into()],
+                generated_by_ids: vec![],
+            })
+            .unwrap();
+        let repositories: Vec<_> = (0..4)
+            .map(|_| SqliteProjectRepository::open(&path).unwrap())
+            .collect();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+        let threads: Vec<_> = repositories
+            .into_iter()
+            .enumerate()
+            .map(|(index, repository)| {
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    repository
+                        .claim_record_agent_assignment(task.id, &format!("request-{index}"))
+                        .unwrap()
+                })
+            })
+            .collect();
+        let results: Vec<_> = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect();
+        assert_eq!(results.iter().filter(|(_, existing)| !existing).count(), 1);
+        assert!(
+            results
+                .iter()
+                .all(|(assignment, _)| assignment.id == results[0].0.id)
+        );
+        assert_eq!(store.list_open_agent_assignments().unwrap().len(), 1);
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn automatic_dispatch_ignores_grillings_and_keeps_oldest_task_order() {
+        let store = SqliteProjectRepository::in_memory().unwrap();
+        store.register(&project("alpha", "/repos/alpha")).unwrap();
+        let mut ids = Vec::new();
+        for record_type in [RecordType::Grilling, RecordType::Task, RecordType::Task] {
+            ids.push(
+                store
+                    .open_typed_record(&NewTypedRecord {
+                        record_type,
+                        task_kind: None,
+                        body: "work".into(),
+                        project_slugs: vec!["alpha".into()],
+                        generated_by_ids: vec![],
+                    })
+                    .unwrap()
+                    .id,
+            );
+        }
+        assert_eq!(
+            store
+                .claim_next_agent_assignment("alpha", "automatic")
+                .unwrap()
+                .unwrap()
+                .record_id,
+            ids[1]
+        );
+        assert!(store.list_agent_assignments(ids[0]).unwrap().is_empty());
     }
 
     #[test]

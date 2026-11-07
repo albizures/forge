@@ -48,8 +48,8 @@ use forge_rpc::{
     AddRecordCommentRequest, AgentAssignmentResponse, AgentDispatchApiServer,
     AgentDispatchProfileResponse, AgentDispatchReconcileResponse, AgentDispatchStatusRequest,
     AgentDispatchStatusResponse, AgentSubscriptionApiServer, CreateAgentSubscriptionRequest,
-    CreateManagedWorktreeRequest, DeleteRecordCommentRequest, DispatchGrillingRequest,
-    DoctorManagedWorktreesRequest, DoneRecordRequest, EditRecordRequest,
+    CreateManagedWorktreeRequest, DeleteRecordCommentRequest, DispatchRecordRequest,
+    DispatchRecordResponse, DoctorManagedWorktreesRequest, DoneRecordRequest, EditRecordRequest,
     ListManagedWorktreesRequest, ListManagedWorktreesResponse, ListRecordCommentsResponse,
     ListRecordUpdatesResponse, ListRecordsRequest, ListRecordsResponse,
     ManageAgentSubscriptionRequest, ManagedWorktreeResponse, ManagementStatus,
@@ -822,6 +822,9 @@ impl CapabilityDeliveryAdapter {
         &self,
         context: &AgentDispatchContext,
     ) -> Result<AgentDispatchContext, forge_app::AgentAdapterError> {
+        if context.assignment.profile.record_type == forge_app::RecordType::Grilling {
+            return Ok(context.clone());
+        }
         if context.assignment.profile.record_type != forge_app::RecordType::Task {
             return Err(forge_app::AgentAdapterError::InvalidRequest(
                 "bootstrap is only supported for Task Assignments".into(),
@@ -1042,15 +1045,27 @@ impl AgentDispatchApiServer for Daemon {
         result.map(Into::into).map_err(rpc_error)
     }
 
-    async fn grilling_dispatch(
+    async fn dispatch_record(
         &self,
-        request: DispatchGrillingRequest,
-    ) -> RpcResult<AgentAssignmentResponse> {
-        self.application
-            .dispatch_grilling(request.grilling_id)
-            .map(|assignment| {
-                self.delivery.publish(&self.application);
-                assignment.into()
+        request: DispatchRecordRequest,
+    ) -> RpcResult<DispatchRecordResponse> {
+        let result = self.application.dispatch_record(request.record_id);
+        self.delivery.publish(&self.application);
+        result
+            .map(|(assignment, already_assigned)| DispatchRecordResponse {
+                message: if already_assigned {
+                    format!(
+                        "Record {} is already assigned to {}",
+                        assignment.record_id, assignment.id
+                    )
+                } else {
+                    format!(
+                        "Record {} dispatched as {}",
+                        assignment.record_id, assignment.id
+                    )
+                },
+                assignment: assignment.into(),
+                already_assigned,
             })
             .map_err(rpc_error)
     }
@@ -2444,6 +2459,191 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct RecordingDispatchAdapter(
+        std::sync::Arc<std::sync::Mutex<Vec<forge_app::AgentDispatchContext>>>,
+    );
+
+    impl forge_app::AgentDispatchAdapterFactory for RecordingDispatchAdapter {
+        fn adapter_for(
+            &self,
+            _: &forge_app::AgentProfile,
+        ) -> Result<Box<dyn forge_app::AgentDispatchAdapter>, forge_app::AgentAdapterError>
+        {
+            Ok(Box::new(self.clone()))
+        }
+    }
+
+    impl forge_app::AgentDispatchAdapter for RecordingDispatchAdapter {
+        fn probe(&self) -> Result<(), forge_app::AgentAdapterError> {
+            Ok(())
+        }
+        fn provision(
+            &self,
+            context: &forge_app::AgentDispatchContext,
+            _: &dyn AgentDispatchRepository,
+        ) -> Result<(), forge_app::AgentAdapterError> {
+            self.0.lock().unwrap().push(context.clone());
+            Ok(())
+        }
+        fn observe(
+            &self,
+            _: &forge_app::AgentDispatchContext,
+        ) -> Result<forge_app::AgentObservation, forge_app::AgentAdapterError> {
+            Ok(forge_app::AgentObservation::Working)
+        }
+        fn recover(
+            &self,
+            context: &forge_app::AgentDispatchContext,
+        ) -> Result<forge_app::AgentObservation, forge_app::AgentAdapterError> {
+            self.observe(context)
+        }
+        fn retire(
+            &self,
+            _: &forge_app::AgentDispatchContext,
+            _: &dyn AgentDispatchRepository,
+        ) -> Result<(), forge_app::AgentAdapterError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn explicit_dispatch_prepares_only_task_worktrees_and_never_relaunches_duplicates() {
+        use forge_app::{AgentAssignmentState, ManagedWorktreeRepository};
+        let root = std::env::temp_dir().join(format!(
+            "forge-explicit-app-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        super::git(&repo, &["init"]).unwrap();
+        super::git(
+            &repo,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "base",
+            ],
+        )
+        .unwrap();
+        let base = super::git(&repo, &["rev-parse", "HEAD"]).unwrap();
+        let database = root.join("store.sqlite");
+        let store = SqliteProjectRepository::open(&database).unwrap();
+        store
+            .register(&Project {
+                slug: "alpha".into(),
+                registered_folder: repo.clone(),
+                origin_url: "https://example.test/alpha".into(),
+            })
+            .unwrap();
+        store
+            .set_worktree_root(Some(&root.join("worktrees")))
+            .unwrap();
+        store
+            .set_project_task_concurrency_limit("alpha", Some(2))
+            .unwrap();
+        let mut records = Vec::new();
+        for kind in [RecordType::Task, RecordType::Task, RecordType::Grilling] {
+            let record = store
+                .open_typed_record(&NewTypedRecord {
+                    record_type: kind,
+                    task_kind: None,
+                    body: "work".into(),
+                    project_slugs: vec!["alpha".into()],
+                    generated_by_ids: vec![],
+                })
+                .unwrap();
+            if kind == RecordType::Task {
+                store.set_task_base_commit(record.id, base.trim()).unwrap();
+            }
+            records.push(record);
+        }
+        let launches = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let app = Application::with_managed_worktrees_and_agent_dispatch(
+            Box::new(SqliteProjectRepository::open(&database).unwrap()),
+            Box::new(SqliteProjectRepository::open(&database).unwrap()),
+            Box::new(super::GitWorktreeAdapter),
+            Box::new(SqliteProjectRepository::open(&database).unwrap()),
+            Box::new(RecordingDispatchAdapter(launches.clone())),
+            Box::new(TestInspector),
+        );
+        let (task_assignment, existing) = app.dispatch_record(records[1].id).unwrap();
+        assert!(!existing);
+        assert_eq!(task_assignment.state, AgentAssignmentState::Provisioning);
+        assert!(
+            store
+                .list_agent_assignments(records[0].id)
+                .unwrap()
+                .is_empty()
+        );
+        let barrier = std::sync::Barrier::new(4);
+        let concurrent = std::thread::scope(|scope| {
+            let threads: Vec<_> = (0..4)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        app.dispatch_record(records[2].id).unwrap()
+                    })
+                })
+                .collect();
+            threads
+                .into_iter()
+                .map(|thread| thread.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            concurrent.iter().filter(|(_, existing)| !existing).count(),
+            1
+        );
+        let grilling_assignment = &concurrent.iter().find(|(_, existing)| !existing).unwrap().0;
+        assert!(
+            concurrent
+                .iter()
+                .all(|(assignment, _)| assignment.id == grilling_assignment.id)
+        );
+        assert_eq!(grilling_assignment.state, AgentAssignmentState::Working);
+        for (record, expected) in [
+            (records[1].id, task_assignment.id),
+            (records[2].id, grilling_assignment.id.clone()),
+        ] {
+            let (assignment, existing) = app.dispatch_record(record).unwrap();
+            assert!(existing);
+            assert_eq!(assignment.id, expected);
+        }
+        let contexts = launches.lock().unwrap();
+        assert_eq!(contexts.len(), 2);
+        assert!(
+            contexts[0]
+                .agent_workspace
+                .as_ref()
+                .unwrap()
+                .join(".git")
+                .exists()
+        );
+        assert!(
+            contexts[0]
+                .rendered_initial_prompt
+                .contains("Managed Worktree")
+        );
+        assert!(contexts[1].agent_workspace.is_none());
+        assert_eq!(
+            store.show_record(records[1].id).unwrap().status,
+            RecordStatus::Open
+        );
+        drop(contexts);
+        drop(app);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn recovery_validates_repository_branch_path_and_base() {
         use forge_app::ManagedWorktreeAdapter;
@@ -2656,7 +2856,7 @@ mod tests {
                 generated_by_ids: vec![],
             })
             .unwrap();
-        assert!(app.dispatch_grilling(grilling.id).is_err());
+        assert!(app.dispatch_record(grilling.id).is_err());
         let assignment = store
             .list_agent_assignments(grilling.id)
             .unwrap()

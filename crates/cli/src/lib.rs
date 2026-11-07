@@ -1,10 +1,10 @@
 //! Command-line adapter that calls the running Forge daemon.
 
 use forge_rpc::{
-    AddRecordCommentRequest, AgentAssignmentResponse, AgentDispatchApiClient,
-    AgentDispatchProfileResponse, AgentDispatchReconcileResponse, AgentDispatchStatusRequest,
-    AgentDispatchStatusResponse, DeleteRecordCommentRequest, DispatchGrillingRequest,
-    DoneRecordRequest, EditRecordRequest, ListManagedWorktreesResponse, ListRecordCommentsResponse,
+    AddRecordCommentRequest, AgentDispatchApiClient, AgentDispatchProfileResponse,
+    AgentDispatchReconcileResponse, AgentDispatchStatusRequest, AgentDispatchStatusResponse,
+    DeleteRecordCommentRequest, DispatchRecordRequest, DispatchRecordResponse, DoneRecordRequest,
+    EditRecordRequest, ListManagedWorktreesResponse, ListRecordCommentsResponse,
     ListRecordUpdatesResponse, ListRecordsRequest, ListRecordsResponse, ManagedWorktreeResponse,
     OpenGrillingUnderWayfinderRequest, OpenRecordRequest, OpenSpecRequest, OpenTaskRequest,
     OpenTaskUnderSpecRequest, OpenTaskUnderWayfinderRequest, OpenWayfinderRequest,
@@ -282,15 +282,15 @@ pub async fn request_agent_dispatch_reconcile(
     })
 }
 
-/// Dispatches one ready interactive Grilling Assignment.
-pub async fn request_dispatch_grilling(
+/// Explicitly dispatches a Task or interactive Grilling Assignment.
+pub async fn request_dispatch_record(
     url: &str,
-    grilling_id: u64,
-) -> Result<AgentAssignmentResponse, String> {
+    record_id: u64,
+) -> Result<DispatchRecordResponse, String> {
     client(url)?
-        .grilling_dispatch(DispatchGrillingRequest { grilling_id })
+        .dispatch_record(DispatchRecordRequest { record_id })
         .await
-        .map_err(|error| format!("could not dispatch Grilling through Forge daemon: {error}"))
+        .map_err(|error| format!("could not dispatch Record through Forge daemon: {error}"))
 }
 
 /// Starts the Task bound to an Assignment Capability.
