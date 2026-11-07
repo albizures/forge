@@ -1472,6 +1472,8 @@ pub trait AgentDispatchRepository: RecordRepository {
     ) -> Result<DispatchWorkspace, RegistrationError> {
         self.retain_dispatch_workspace(workspace)
     }
+    /// Clears the selected workspace only when no unresolved resources depend on it.
+    fn unset_dispatch_workspace(&self) -> Result<(), RegistrationError>;
     /// Sets or clears the daemon-wide absolute Herdr Unix socket path.
     fn set_herdr_socket_path(&self, path: Option<&Path>) -> Result<(), RegistrationError>;
     /// Returns the configured daemon-wide Herdr Unix socket path.
@@ -1805,6 +1807,9 @@ pub struct Application {
     dispatch: Option<Box<dyn RecordUpdateSubscriptionRepository>>,
     adapter_factory: Option<Box<dyn AgentDispatchAdapterFactory>>,
     inspector: Box<dyn RepositoryInspector>,
+    // Serialize provider verification with configuration writes. Atomic repository guards
+    // protect Assignments/resources without holding storage over provider calls.
+    provider_configuration: std::sync::Mutex<()>,
 }
 
 /// Stable operator-facing facts about one Project's dispatch capacity.
@@ -1821,6 +1826,14 @@ pub struct AgentDispatchStatus {
     pub herdr_socket_path: Option<PathBuf>,
     pub endpoint_diagnostic: String,
     pub project: Option<AgentDispatchProjectStatus>,
+}
+
+/// An effective Dispatcher configuration value and its origin.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DispatcherConfigEntry {
+    pub key: String,
+    pub value: Option<String>,
+    pub provenance: String,
 }
 
 /// Result of requesting a single daemon-owned reconciliation pass.
@@ -1854,6 +1867,7 @@ impl Application {
             worktree_adapter: None,
             dispatch: None,
             adapter_factory: None,
+            provider_configuration: std::sync::Mutex::new(()),
             inspector,
         }
     }
@@ -1872,6 +1886,7 @@ impl Application {
             worktree_adapter: Some(worktree_adapter),
             dispatch: None,
             adapter_factory: None,
+            provider_configuration: std::sync::Mutex::new(()),
             inspector,
         }
     }
@@ -1890,6 +1905,7 @@ impl Application {
             worktree_adapter: None,
             dispatch: Some(dispatch),
             adapter_factory: Some(adapter_factory),
+            provider_configuration: std::sync::Mutex::new(()),
             inspector,
         }
     }
@@ -1910,6 +1926,7 @@ impl Application {
             worktree_adapter: Some(worktree_adapter),
             dispatch: Some(dispatch),
             adapter_factory: Some(adapter_factory),
+            provider_configuration: std::sync::Mutex::new(()),
             inspector,
         }
     }
@@ -1956,7 +1973,93 @@ impl Application {
     ///
     /// Returns validation, configuration, or persistence failures.
     pub fn set_herdr_socket_path(&self, path: Option<&Path>) -> Result<(), RegistrationError> {
+        let _guard = self.provider_configuration.lock().map_err(|_| {
+            RegistrationError::new(
+                "configuration-lock",
+                "provider configuration lock is poisoned",
+            )
+        })?;
         self.dispatch()?.set_herdr_socket_path(path)
+    }
+
+    /// Reads effective provider configuration. Neither provider key has an implicit default.
+    #[allow(clippy::missing_errors_doc)]
+    pub fn dispatcher_config_get(
+        &self,
+        key: Option<&str>,
+    ) -> Result<Vec<DispatcherConfigEntry>, RegistrationError> {
+        let _guard = self.provider_configuration.lock().map_err(|_| {
+            RegistrationError::new(
+                "configuration-lock",
+                "provider configuration lock is poisoned",
+            )
+        })?;
+        let dispatch = self.dispatch()?;
+        let keys = match key {
+            None => vec!["herdr-socket", "workspace"],
+            Some("herdr-socket") => vec!["herdr-socket"],
+            Some("workspace") => vec!["workspace"],
+            Some(_) => {
+                return Err(RegistrationError::new(
+                    "unknown-dispatcher-config",
+                    "unknown Dispatcher configuration key",
+                ));
+            }
+        };
+        keys.into_iter()
+            .map(|key| {
+                let value = match key {
+                    "herdr-socket" => dispatch
+                        .herdr_socket_path()?
+                        .map(|path| path.to_string_lossy().into_owned()),
+                    _ => dispatch.dispatch_workspace()?.map(|workspace| workspace.id),
+                };
+                Ok(DispatcherConfigEntry {
+                    key: key.into(),
+                    provenance: if value.is_some() {
+                        "override"
+                    } else {
+                        "default"
+                    }
+                    .into(),
+                    value,
+                })
+            })
+            .collect()
+    }
+
+    /// Changes one provider configuration override using a required explicit value.
+    #[allow(clippy::missing_errors_doc)]
+    pub fn dispatcher_config_set(&self, key: &str, value: &str) -> Result<(), RegistrationError> {
+        match key {
+            "herdr-socket" => self.set_herdr_socket_path(Some(Path::new(value))),
+            "workspace" => self.select_dispatch_workspace(value).map(|_| ()),
+            _ => Err(RegistrationError::new(
+                "unknown-dispatcher-config",
+                "unknown Dispatcher configuration key",
+            )),
+        }
+    }
+
+    /// Explicitly restores an unconfigured provider key without contacting Herdr.
+    #[allow(clippy::missing_errors_doc)]
+    pub fn dispatcher_config_unset(&self, key: &str) -> Result<(), RegistrationError> {
+        match key {
+            "herdr-socket" => self.set_herdr_socket_path(None),
+            "workspace" => {
+                let _guard = self.provider_configuration.lock().map_err(|_| {
+                    RegistrationError::new(
+                        "configuration-lock",
+                        "provider configuration lock is poisoned",
+                    )
+                })?;
+                self.dispatch()?.unset_dispatch_workspace()
+            }
+            _ => Err(RegistrationError::new(
+                "unknown-dispatcher-config",
+                "unknown Dispatcher configuration key",
+            )),
+        }
     }
 
     /// Returns the seeded immutable Task Agent Profile.
@@ -2387,10 +2490,16 @@ impl Application {
         &self,
         id: &str,
     ) -> Result<DispatchWorkspace, RegistrationError> {
+        let _guard = self.provider_configuration.lock().map_err(|_| {
+            RegistrationError::new(
+                "configuration-lock",
+                "provider configuration lock is poisoned",
+            )
+        })?;
         if id.trim().is_empty() || id != id.trim() {
             return Err(RegistrationError::new(
                 "invalid-dispatch-workspace",
-                "HERDR_WORKSPACE_ID must be nonempty",
+                "workspace ID must be nonempty and have no surrounding whitespace",
             ));
         }
         let adapter = self

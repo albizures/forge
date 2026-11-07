@@ -3,10 +3,9 @@ use forge_cli::{
     render_agent_dispatch_status, render_human_status, render_json_status, render_managed_worktree,
     render_managed_worktrees, render_project_here, render_project_registered, render_record,
     render_record_comments, render_record_list, render_record_opened, render_record_updates,
-    request_add_record_comment, request_agent_dispatch_endpoint, request_agent_dispatch_profile,
-    request_agent_dispatch_project, request_agent_dispatch_reconcile,
-    request_agent_dispatch_status, request_delete_record_comment, request_dispatch_grilling,
-    request_done_record, request_edit_record, request_list_records,
+    request_add_record_comment, request_agent_dispatch_profile, request_agent_dispatch_project,
+    request_agent_dispatch_reconcile, request_agent_dispatch_status, request_delete_record_comment,
+    request_dispatch_grilling, request_done_record, request_edit_record, request_list_records,
     request_managed_worktree_create, request_managed_worktree_doctor,
     request_managed_worktree_info, request_managed_worktree_list, request_managed_worktree_recover,
     request_managed_worktree_remove, request_open_grilling_under_wayfinder, request_open_record,
@@ -15,9 +14,9 @@ use forge_cli::{
     request_project_setup_hook, request_record_comments, request_record_updates,
     request_register_project, request_relate_record, request_reopen_dispatch_task,
     request_resume_dispatch_task, request_retire_agent_assignment,
-    request_select_dispatch_workspace, request_set_acknowledgement_timeout, request_show_record,
-    request_start_assignment_task, request_start_record, request_status, request_unrelate_record,
-    request_worktree_root, resolve_endpoint as resolve_managed_endpoint,
+    request_set_acknowledgement_timeout, request_show_record, request_start_assignment_task,
+    request_start_record, request_status, request_unrelate_record, request_worktree_root,
+    resolve_endpoint as resolve_managed_endpoint,
 };
 use std::io::Read;
 
@@ -259,9 +258,11 @@ enum AssignmentCommand {
 }
 #[derive(Debug, Subcommand)]
 enum AgentDispatchCommand {
-    Endpoint(AgentDispatchEndpointArgs),
-    /// Select the existing workspace named by HERDR_WORKSPACE_ID.
-    WorkspaceSelect(AgentDispatchRequestArgs),
+    /// Inspect or explicitly change daemon-owned Dispatcher configuration.
+    Config {
+        #[command(subcommand)]
+        command: DispatcherConfigCommand,
+    },
     Profile(AgentDispatchRequestArgs),
     /// Create a Task Agent Profile revision with this acknowledgement timeout.
     ProfileAcknowledgementTimeoutSet(AgentDispatchTimeoutArgs),
@@ -282,10 +283,38 @@ enum AgentDispatchCommand {
     AssignmentResolveUnknown(AssignmentResolveUnknownArgs),
 }
 #[derive(Args, Debug)]
-struct AgentDispatchEndpointArgs {
-    /// Set this absolute Unix socket path. Omit to inspect current configuration.
+struct DispatcherConfigReadArgs {
+    /// Configuration key: herdr-socket or workspace. Omit to inspect all values.
+    key: Option<String>,
+    #[arg(long, value_name = "URL")]
+    server_url: Option<String>,
     #[arg(long)]
-    socket_path: Option<String>,
+    json: bool,
+}
+#[derive(Debug, Subcommand)]
+enum DispatcherConfigCommand {
+    /// Read effective values and default/override provenance.
+    Get(DispatcherConfigReadArgs),
+    /// Set an explicit override; workspace selection verifies an existing Herdr Workspace.
+    Set(DispatcherConfigSetArgs),
+    /// Remove an override when no unresolved Assignments/resources depend on it.
+    Unset(DispatcherConfigUnsetArgs),
+}
+#[derive(Args, Debug)]
+struct DispatcherConfigSetArgs {
+    /// Configuration key: herdr-socket or workspace.
+    key: String,
+    /// Absolute Herdr Unix socket path or existing Workspace ID.
+    value: String,
+    #[arg(long, value_name = "URL")]
+    server_url: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Args, Debug)]
+struct DispatcherConfigUnsetArgs {
+    /// Configuration key: herdr-socket or workspace.
+    key: String,
     #[arg(long, value_name = "URL")]
     server_url: Option<String>,
     #[arg(long)]
@@ -920,27 +949,56 @@ async fn agent_dispatch(command: AgentDispatchCommand) -> i32 {
                 }
             };
         }
-        AgentDispatchCommand::Endpoint(args) => (
-            request_agent_dispatch_endpoint(
-                &resolve_endpoint(args.server_url.as_deref()).await,
-                args.socket_path,
-            )
-            .await
-            .map(|value| serde_json::to_value(value).unwrap()),
-            args.json,
-        ),
-        AgentDispatchCommand::WorkspaceSelect(args) => (
-            match std::env::var("HERDR_WORKSPACE_ID") {
-                Ok(id) if !id.trim().is_empty() => request_select_dispatch_workspace(
-                    &resolve_endpoint(args.server_url.as_deref()).await,
-                    id,
-                )
-                .await
-                .map(|value| serde_json::to_value(value).unwrap()),
-                _ => Err("HERDR_WORKSPACE_ID must name an existing Herdr workspace".into()),
-            },
-            args.json,
-        ),
+        AgentDispatchCommand::Config { command } => {
+            let (result, json) = match command {
+                DispatcherConfigCommand::Get(args) => (
+                    forge_cli::request_dispatcher_config_get(
+                        &resolve_endpoint(args.server_url.as_deref()).await,
+                        args.key,
+                    )
+                    .await,
+                    args.json,
+                ),
+                DispatcherConfigCommand::Set(args) => (
+                    forge_cli::request_dispatcher_config_set(
+                        &resolve_endpoint(args.server_url.as_deref()).await,
+                        args.key,
+                        args.value,
+                    )
+                    .await,
+                    args.json,
+                ),
+                DispatcherConfigCommand::Unset(args) => (
+                    forge_cli::request_dispatcher_config_unset(
+                        &resolve_endpoint(args.server_url.as_deref()).await,
+                        args.key,
+                    )
+                    .await,
+                    args.json,
+                ),
+            };
+            return match result {
+                Ok(config) => {
+                    if json {
+                        println!("{}", serde_json::to_string(&config).unwrap());
+                    } else {
+                        for entry in config.entries {
+                            println!(
+                                "{}\t{}\t{}",
+                                entry.key,
+                                entry.value.as_deref().unwrap_or("unset"),
+                                entry.provenance
+                            );
+                        }
+                    }
+                    0
+                }
+                Err(error) => {
+                    eprintln!("forge dispatcher config: {error}");
+                    1
+                }
+            };
+        }
         AgentDispatchCommand::Profile(args) => (
             request_agent_dispatch_profile(&resolve_endpoint(args.server_url.as_deref()).await)
                 .await
@@ -1795,6 +1853,28 @@ mod tests {
         };
         assert_eq!(args.wayfinder, 43);
         assert_eq!(args.project.as_deref(), Some("alpha"));
+    }
+
+    #[test]
+    fn dispatcher_provider_configuration_requires_explicit_values() {
+        for args in [
+            vec!["config", "get"],
+            vec!["config", "get", "workspace"],
+            vec!["config", "set", "workspace", "workspace-42"],
+            vec!["config", "set", "herdr-socket", "/tmp/herdr.sock"],
+            vec!["config", "unset", "workspace"],
+            vec!["config", "unset", "herdr-socket"],
+        ] {
+            assert!(Cli::try_parse_from([vec!["forge", "dispatcher"], args].concat()).is_ok());
+        }
+        for args in [
+            vec!["config", "set", "workspace"],
+            vec!["config", "set", "herdr-socket"],
+            vec!["endpoint"],
+            vec!["workspace-select"],
+        ] {
+            assert!(Cli::try_parse_from([vec!["forge", "dispatcher"], args].concat()).is_err());
+        }
     }
 
     #[test]

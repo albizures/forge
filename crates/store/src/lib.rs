@@ -2578,11 +2578,38 @@ impl AgentDispatchRepository for SqliteProjectRepository {
             if current.flatten().as_deref() != Some(&workspace.id) {
                 return Err(RegistrationError::new(
                     "dispatch-workspace-busy",
-                    "assignments or retained resources prevent changing the workspace",
+                    "unresolved Assignments or retained resources prevent changing workspace; inspect dispatcher status and assignment-info, then safely retire/resolve Assignments before retrying",
                 ));
             }
         }
         Ok(workspace.clone())
+    }
+
+    fn unset_dispatch_workspace(&self) -> Result<(), RegistrationError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        let changed = connection.execute(
+            "UPDATE agent_dispatch_configuration SET dispatch_workspace_id = NULL, dispatch_workspace_root = NULL
+             WHERE singleton = 1
+               AND NOT EXISTS (SELECT 1 FROM agent_assignments WHERE closed_at_millis IS NULL)
+               AND NOT EXISTS (SELECT 1 FROM agent_assignment_resources WHERE retired_at_millis IS NULL)",
+            [],
+        ).map_err(storage_error)?;
+        if changed == 0 {
+            let current: Option<Option<String>> = connection.query_row(
+                "SELECT dispatch_workspace_id FROM agent_dispatch_configuration WHERE singleton = 1", [],
+                |row| row.get(0),
+            ).optional().map_err(storage_error)?;
+            if current.flatten().is_some() {
+                return Err(RegistrationError::new(
+                    "dispatch-workspace-busy",
+                    "unresolved Assignments or retained resources prevent unsetting workspace; inspect dispatcher status and assignment-info, then safely retire/resolve Assignments before retrying",
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn set_herdr_socket_path(&self, path: Option<&Path>) -> Result<(), RegistrationError> {
@@ -2596,7 +2623,29 @@ impl AgentDispatchRepository for SqliteProjectRepository {
             .connection
             .lock()
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
-        connection.execute("INSERT INTO agent_dispatch_configuration (singleton, herdr_socket_path) VALUES (1, ?1) ON CONFLICT(singleton) DO UPDATE SET herdr_socket_path = excluded.herdr_socket_path", [path.map(Path::to_string_lossy).as_deref()]).map_err(storage_error)?;
+        let value = path.map(Path::to_string_lossy);
+        let changed = connection.execute(
+            "INSERT INTO agent_dispatch_configuration (singleton, herdr_socket_path)
+             SELECT 1, ?1
+             WHERE NOT EXISTS (SELECT 1 FROM agent_assignments WHERE closed_at_millis IS NULL)
+               AND NOT EXISTS (SELECT 1 FROM agent_assignment_resources WHERE retired_at_millis IS NULL)
+             ON CONFLICT(singleton) DO UPDATE SET herdr_socket_path = excluded.herdr_socket_path
+             WHERE NOT EXISTS (SELECT 1 FROM agent_assignments WHERE closed_at_millis IS NULL)
+               AND NOT EXISTS (SELECT 1 FROM agent_assignment_resources WHERE retired_at_millis IS NULL)",
+            [value.as_deref()],
+        ).map_err(storage_error)?;
+        if changed == 0 {
+            let current: Option<Option<String>> = connection.query_row(
+                "SELECT herdr_socket_path FROM agent_dispatch_configuration WHERE singleton = 1", [],
+                |row| row.get(0),
+            ).optional().map_err(storage_error)?;
+            if current.flatten().as_deref() != value.as_deref() {
+                return Err(RegistrationError::new(
+                    "dispatch-endpoint-busy",
+                    "unresolved Assignments or retained resources prevent changing herdr-socket; inspect dispatcher status and assignment-info, then safely retire/resolve Assignments before retrying",
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -5135,6 +5184,8 @@ mod tests {
             "dispatch-workspace-conflict"
         );
 
+        // Provider configuration must be established before an Assignment reserves it.
+        asserts_project_configuration_persists(&store);
         let assignment = store
             .create_agent_assignment(&NewAgentAssignment {
                 id: "attempt-1".into(),
@@ -5195,8 +5246,6 @@ mod tests {
             retired,
             "retirement evidence is idempotent"
         );
-
-        asserts_project_configuration_persists(&store);
     }
 
     fn asserts_project_configuration_persists(store: &SqliteProjectRepository) {
@@ -5323,6 +5372,92 @@ mod tests {
             |row| row.get(0),
         ).unwrap();
         assert_eq!(root, None);
+    }
+
+    #[test]
+    fn socket_changes_and_unsets_preserve_configuration_while_assignment_is_open() {
+        let store = SqliteProjectRepository::in_memory().unwrap();
+        store
+            .set_herdr_socket_path(Some(Path::new("/tmp/first.sock")))
+            .unwrap();
+        store
+            .select_dispatch_workspace(&forge_app::DispatchWorkspace {
+                id: "selected".into(),
+            })
+            .unwrap();
+        store.register(&project("alpha", "/repos/alpha")).unwrap();
+        let task = store
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Task,
+                task_kind: None,
+                body: "work".into(),
+                project_slugs: vec!["alpha".into()],
+                generated_by_ids: vec![],
+            })
+            .unwrap();
+        store
+            .create_agent_assignment(&NewAgentAssignment {
+                id: "session".into(),
+                record_id: task.id,
+                project_slug: "alpha".into(),
+                profile_revision: 1,
+            })
+            .unwrap();
+        assert!(
+            store
+                .set_herdr_socket_path(Some(Path::new("/tmp/second.sock")))
+                .is_err()
+        );
+        assert!(store.set_herdr_socket_path(None).is_err());
+        assert!(store.unset_dispatch_workspace().is_err());
+        assert_eq!(
+            store.herdr_socket_path().unwrap(),
+            Some(PathBuf::from("/tmp/first.sock"))
+        );
+        assert_eq!(store.dispatch_workspace().unwrap().unwrap().id, "selected");
+        // Reapplying identical values is not a provider configuration change.
+        store
+            .set_herdr_socket_path(Some(Path::new("/tmp/first.sock")))
+            .unwrap();
+        store
+            .add_agent_assignment_resource(&NewAgentAssignmentResource {
+                assignment_id: "session".into(),
+                resource_kind: "agent-name".into(),
+                resource_id: "agent-1".into(),
+            })
+            .unwrap();
+        store
+            .close_agent_assignment("session", forge_app::AgentAssignmentClosureReason::Crashed)
+            .unwrap();
+        // Closed does not mean that provider resources are safe to abandon.
+        assert!(store.set_herdr_socket_path(None).is_err());
+        assert!(
+            store
+                .set_herdr_socket_path(Some(Path::new("/tmp/second.sock")))
+                .is_err()
+        );
+        assert!(store.unset_dispatch_workspace().is_err());
+        assert!(
+            store
+                .select_dispatch_workspace(&forge_app::DispatchWorkspace { id: "other".into() })
+                .is_err()
+        );
+        let info = store.agent_assignment_info("session").unwrap();
+        assert!(info.capacity_reserved());
+        assert_eq!(info.resources[0].resource_id, "agent-1");
+        assert!(info.resources[0].retired_at_millis.is_none());
+        store
+            .retire_agent_assignment_resource("session", "agent-name", "agent-1")
+            .unwrap();
+        store.unset_dispatch_workspace().unwrap();
+        store.set_herdr_socket_path(None).unwrap();
+        assert_eq!(store.dispatch_workspace().unwrap(), None);
+        assert_eq!(store.herdr_socket_path().unwrap(), None);
+        // Unsetting is repeat-safe, including before any configuration row exists.
+        store.unset_dispatch_workspace().unwrap();
+        let fresh = SqliteProjectRepository::in_memory().unwrap();
+        fresh.unset_dispatch_workspace().unwrap();
+        fresh.set_herdr_socket_path(None).unwrap();
     }
 
     #[test]

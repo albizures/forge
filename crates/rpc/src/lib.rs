@@ -62,18 +62,21 @@ pub trait ProjectApi {
 }
 #[rpc(client, server, namespace = "agentDispatch")]
 pub trait AgentDispatchApi {
-    #[method(name = "endpointGet")]
-    async fn endpoint_get(&self) -> RpcResult<AgentDispatchStatusResponse>;
-    #[method(name = "endpointSet")]
-    async fn endpoint_set(
+    #[method(name = "configGet")]
+    async fn config_get(
         &self,
-        request: SetAgentDispatchEndpointRequest,
-    ) -> RpcResult<AgentDispatchStatusResponse>;
-    #[method(name = "workspaceSelect")]
-    async fn workspace_select(
+        request: DispatcherConfigGetRequest,
+    ) -> RpcResult<DispatcherConfigResponse>;
+    #[method(name = "configSet")]
+    async fn config_set(
         &self,
-        request: SelectDispatchWorkspaceRequest,
-    ) -> RpcResult<DispatchWorkspaceResponse>;
+        request: DispatcherConfigSetRequest,
+    ) -> RpcResult<DispatcherConfigResponse>;
+    #[method(name = "configUnset")]
+    async fn config_unset(
+        &self,
+        request: DispatcherConfigUnsetRequest,
+    ) -> RpcResult<DispatcherConfigResponse>;
     #[method(name = "profile")]
     async fn profile(&self) -> RpcResult<AgentDispatchProfileResponse>;
     #[method(name = "profileAcknowledgementTimeoutSet")]
@@ -336,16 +339,41 @@ impl SystemStatusResponse {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct SelectDispatchWorkspaceRequest {
-    pub workspace_id: String,
+pub struct DispatcherConfigGetRequest {
+    pub key: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct DispatchWorkspaceResponse {
-    pub workspace_id: String,
+pub struct DispatcherConfigSetRequest {
+    pub key: String,
+    pub value: String,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct SetAgentDispatchEndpointRequest {
-    pub socket_path: Option<String>,
+pub struct DispatcherConfigUnsetRequest {
+    pub key: String,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DispatcherConfigEntryResponse {
+    pub key: String,
+    pub value: Option<String>,
+    pub provenance: String,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DispatcherConfigResponse {
+    pub entries: Vec<DispatcherConfigEntryResponse>,
+}
+impl From<Vec<forge_app::DispatcherConfigEntry>> for DispatcherConfigResponse {
+    fn from(entries: Vec<forge_app::DispatcherConfigEntry>) -> Self {
+        Self {
+            entries: entries
+                .into_iter()
+                .map(|entry| DispatcherConfigEntryResponse {
+                    key: entry.key,
+                    value: entry.value,
+                    provenance: entry.provenance,
+                })
+                .collect(),
+        }
+    }
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SetAgentDispatchProjectRequest {

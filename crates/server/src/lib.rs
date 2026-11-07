@@ -58,10 +58,9 @@ use forge_rpc::{
     ProjectApiServer, ProjectHereRequest, ProjectHereResponse, RecordApiServer, RecordIdRequest,
     RecordResponse, RecordUpdateSubscriptionResponse, RegisterProjectRequest,
     RegisterProjectResponse, RelateRecordRequest, RemoveManagedWorktreeRequest,
-    RetireAgentAssignmentRequest, RevisionIdentity, SetAgentDispatchEndpointRequest,
-    SetAgentDispatchProjectRequest, SetProjectSetupHookRequest, SetWorktreeRootRequest,
-    StartAssignmentTaskRequest, SystemApiServer, SystemStatusResponse, WorktreeApiServer,
-    WorktreeRootResponse,
+    RetireAgentAssignmentRequest, RevisionIdentity, SetAgentDispatchProjectRequest,
+    SetProjectSetupHookRequest, SetWorktreeRootRequest, StartAssignmentTaskRequest,
+    SystemApiServer, SystemStatusResponse, WorktreeApiServer, WorktreeRootResponse,
 };
 use forge_store::SqliteProjectRepository;
 use fs2::FileExt;
@@ -962,33 +961,35 @@ impl SystemApiServer for Daemon {
 
 #[async_trait]
 impl AgentDispatchApiServer for Daemon {
-    async fn endpoint_get(&self) -> RpcResult<AgentDispatchStatusResponse> {
+    async fn config_get(
+        &self,
+        request: forge_rpc::DispatcherConfigGetRequest,
+    ) -> RpcResult<forge_rpc::DispatcherConfigResponse> {
         self.application
-            .agent_dispatch_status(None)
+            .dispatcher_config_get(request.key.as_deref())
             .map(Into::into)
             .map_err(rpc_error)
     }
 
-    async fn endpoint_set(
+    async fn config_set(
         &self,
-        request: SetAgentDispatchEndpointRequest,
-    ) -> RpcResult<AgentDispatchStatusResponse> {
+        request: forge_rpc::DispatcherConfigSetRequest,
+    ) -> RpcResult<forge_rpc::DispatcherConfigResponse> {
         self.application
-            .set_herdr_socket_path(request.socket_path.as_deref().map(Path::new))
-            .and_then(|()| self.application.agent_dispatch_status(None))
+            .dispatcher_config_set(&request.key, &request.value)
+            .and_then(|()| self.application.dispatcher_config_get(Some(&request.key)))
             .map(Into::into)
             .map_err(rpc_error)
     }
 
-    async fn workspace_select(
+    async fn config_unset(
         &self,
-        request: forge_rpc::SelectDispatchWorkspaceRequest,
-    ) -> RpcResult<forge_rpc::DispatchWorkspaceResponse> {
+        request: forge_rpc::DispatcherConfigUnsetRequest,
+    ) -> RpcResult<forge_rpc::DispatcherConfigResponse> {
         self.application
-            .select_dispatch_workspace(&request.workspace_id)
-            .map(|workspace| forge_rpc::DispatchWorkspaceResponse {
-                workspace_id: workspace.id,
-            })
+            .dispatcher_config_unset(&request.key)
+            .and_then(|()| self.application.dispatcher_config_get(Some(&request.key)))
+            .map(Into::into)
             .map_err(rpc_error)
     }
 
@@ -2543,6 +2544,143 @@ mod tests {
         assert_eq!(invalid.facts, ["git-metadata-invalid"]);
         assert_eq!(invalid.blockers, ["git-metadata-invalid"]);
         adapter.remove(&directory, true).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn provider_configuration_verifies_workspace_and_rechecks_safety_after_provider_call() {
+        use forge_app::{AgentAssignmentClosureReason, AgentDispatchRepository};
+        use std::{
+            io::{BufRead, BufReader, Write},
+            os::unix::net::UnixListener,
+            thread,
+        };
+        let root = std::env::temp_dir().join(format!(
+            "forge-config-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let database = root.join("forge.sqlite3");
+        let socket = root.join("herdr.sock");
+        let store = SqliteProjectRepository::open(&database).unwrap();
+        store
+            .register(&Project {
+                slug: "alpha".into(),
+                registered_folder: "/repos/alpha".into(),
+                origin_url: "https://example.test/alpha.git".into(),
+            })
+            .unwrap();
+        let task = store
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Task,
+                task_kind: None,
+                body: "work".into(),
+                project_slugs: vec!["alpha".into()],
+                generated_by_ids: vec![],
+            })
+            .unwrap();
+        let listener = UnixListener::bind(&socket).unwrap();
+        let provider_database = database.clone();
+        let provider = thread::spawn(move || {
+            for (requested, returned) in [
+                ("selected", "selected"),
+                ("missing", "different"),
+                ("replacement", "replacement"),
+            ] {
+                let mut stream = listener.accept().unwrap().0;
+                let mut line = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .unwrap();
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(request["method"], "workspace.get");
+                assert_eq!(request["params"]["workspace_id"], requested);
+                if requested == "replacement" {
+                    // A concurrent provisioner reserves an Assignment after provider verification
+                    // begins. Persisting the selection must recheck in storage, not trust a preflight.
+                    let other = SqliteProjectRepository::open(&provider_database).unwrap();
+                    other
+                        .create_agent_assignment(&NewAgentAssignment {
+                            id: "concurrent".into(),
+                            record_id: task.id,
+                            project_slug: "alpha".into(),
+                            profile_revision: 1,
+                        })
+                        .unwrap();
+                }
+                serde_json::to_writer(
+                    &mut stream,
+                    &serde_json::json!({"result":{"workspace":{"workspace_id":returned}}}),
+                )
+                .unwrap();
+                stream.write_all(b"\n").unwrap();
+            }
+        });
+        let app = super::application_from_config(&super::DaemonConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            store_path: database,
+            managed: None,
+        })
+        .unwrap();
+        app.dispatcher_config_set("herdr-socket", socket.to_str().unwrap())
+            .unwrap();
+        app.dispatcher_config_set("workspace", "selected").unwrap();
+        assert!(app.dispatcher_config_set("workspace", "missing").is_err());
+        assert_eq!(store.dispatch_workspace().unwrap().unwrap().id, "selected");
+        assert_eq!(
+            app.dispatcher_config_set("workspace", "replacement")
+                .unwrap_err()
+                .code,
+            "dispatch-workspace-busy"
+        );
+        assert!(
+            app.dispatcher_config_set("herdr-socket", "/tmp/other.sock")
+                .is_err()
+        );
+        assert!(app.dispatcher_config_unset("workspace").is_err());
+        assert!(app.dispatcher_config_unset("herdr-socket").is_err());
+        assert_eq!(store.dispatch_workspace().unwrap().unwrap().id, "selected");
+        assert_eq!(store.herdr_socket_path().unwrap(), Some(socket));
+        provider.join().unwrap();
+        store
+            .close_agent_assignment("concurrent", AgentAssignmentClosureReason::Crashed)
+            .unwrap();
+        app.dispatcher_config_unset("workspace").unwrap();
+        app.dispatcher_config_unset("herdr-socket").unwrap();
+        assert!(
+            app.dispatcher_config_get(None)
+                .unwrap()
+                .iter()
+                .all(|entry| entry.value.is_none() && entry.provenance == "default")
+        );
+        let grilling = store
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Grilling,
+                task_kind: None,
+                body: "question".into(),
+                project_slugs: vec!["alpha".into()],
+                generated_by_ids: vec![],
+            })
+            .unwrap();
+        assert!(app.dispatch_grilling(grilling.id).is_err());
+        let assignment = store
+            .list_agent_assignments(grilling.id)
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert!(
+            store
+                .list_agent_assignment_resources(&assignment.id)
+                .unwrap()
+                .is_empty()
+        );
+        drop(app);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn test_application() -> Application {

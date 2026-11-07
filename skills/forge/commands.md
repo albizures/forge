@@ -72,9 +72,12 @@ Hooks execute shell commands in newly created Managed Worktrees. A failed hook r
 ## Dispatch administration
 
 ```sh
-forge dispatcher endpoint
-forge dispatcher endpoint --socket-path /absolute/path/to/herdr.sock
-forge dispatcher workspace-select
+forge dispatcher config get
+forge dispatcher config set herdr-socket /absolute/path/to/herdr.sock
+forge dispatcher config set workspace existing-workspace-id
+forge dispatcher config get workspace
+forge dispatcher config unset workspace
+forge dispatcher config unset herdr-socket
 forge dispatcher profile
 forge dispatcher profile-acknowledgement-timeout-set --timeout-millis 300000
 forge dispatcher project --project alpha --limit 2
@@ -84,7 +87,7 @@ forge dispatcher reconcile --json
 forge dispatcher grilling-dispatch 47 --json
 ```
 
-`workspace-select` uses the operator's `HERDR_WORKSPACE_ID` to select an existing Herdr Workspace. The endpoint is Herdr's absolute Unix socket path, not the Forge RPC endpoint. The Project command sets a dispatch limit (1–1024); omitting `--limit` clears its override, so it is not a read operation. Inspect with `status` instead. Profile timeout changes create a new Task Agent Profile revision.
+`config set workspace` verifies the explicitly named existing Herdr Workspace. `herdr-socket` is Herdr's absolute Unix socket path, not the Forge RPC endpoint. Reads show effective values and default/override provenance; `config unset` explicitly removes an override. Socket/Workspace changes are rejected while unresolved Assignments or retained resources depend on them; investigate with `status` and `assignment-info` before safe recovery. The Project command sets a dispatch limit (1–1024); omitting `--limit` clears its override, so it is not a read operation. Inspect with `status` instead. Profile timeout changes create a new Task Agent Profile revision.
 
 Reconciliation can provision agents and worktrees; it is not a read-only health check. Automatic dispatch selects eligible dependency-ready Open Tasks within Project capacity. Grilling dispatch explicitly launches interactive human-in-the-loop work without a Managed Worktree.
 

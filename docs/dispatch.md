@@ -12,14 +12,19 @@ and a Worktree Root, then select that workspace:
 
 ```sh
 forge config set worktreeRoot "$HOME/.forge/worktrees"
-forge dispatcher endpoint --socket-path /absolute/path/to/herdr.sock
-forge dispatcher endpoint
-HERDR_WORKSPACE_ID="your-workspace-id" forge dispatcher workspace-select
+forge dispatcher config set herdr-socket /absolute/path/to/herdr.sock
+forge dispatcher config set workspace your-workspace-id
+forge dispatcher config get
 forge dispatcher reconcile
 ```
 
-Examples use POSIX shell environment syntax. Relative socket paths are rejected.
-`endpoint` reports saved configuration, not reachability. A bounded reconciliation
+Relative socket paths are rejected. Workspace identity is an explicit argument;
+`HERDR_WORKSPACE_ID` is not required. `config get [key]` reports effective values
+and default/override provenance, not reachability. Both provider keys default to
+unconfigured. Use `config unset herdr-socket` or `config unset workspace` to
+remove an override explicitly. Socket/Workspace changes are rejected while
+unresolved Assignments or retained resources depend on them: inspect `status`
+and `assignment-info`, then follow safe recovery before retrying. A bounded reconciliation
 probes the provider and progresses eligible assignments; its response reports
 lease acquisition and assignments scanned. Socket/protocol/provider failures
 produce diagnostics under the daemon's durable retry policy.

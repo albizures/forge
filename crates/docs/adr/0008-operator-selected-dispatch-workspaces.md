@@ -12,7 +12,7 @@ Automatically replacing an uncertain agent risks concurrent work in the same wor
 
 ## Decision
 
-The operator selects an existing Herdr workspace with `HERDR_WORKSPACE_ID=... forge dispatcher workspace-select`. Forge verifies and persists its identity, uses it as a shared UI container, and never deletes it. Dispatch is blocked if no workspace is selected or the retained workspace cannot be verified. Each assignment receives a dedicated Forge-managed tab and its initial pane; a Task agent works in its Task's Managed Worktree, not the shared workspace root.
+The operator selects an existing Herdr workspace with `forge dispatcher config set workspace <workspace-id>`. Forge verifies and persists its identity, uses it as a shared UI container, and never deletes it. Dispatch is blocked if no workspace is selected or the retained workspace cannot be verified. Each assignment receives a dedicated Forge-managed tab and its initial pane; a Task agent works in its Task's Managed Worktree, not the shared workspace root.
 
 Forge reconciles using durable resource identities and authoritative evidence, not labels. Potentially live agents and uncertain resources reserve dispatch capacity, including when associated with a previously closed assignment. Forge does not replace an agent until it can establish the required safety facts. When it cannot establish process exit, it remains blocked and surfaces operator investigation rather than treating absence of a heartbeat or provider resource as proof.
 

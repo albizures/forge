@@ -189,41 +189,47 @@ pub async fn request_register_project(
         .await
         .map_err(|error| format!("could not register Project through Forge daemon: {error}"))
 }
-/// Requests the daemon-owned dispatch endpoint configuration.
+/// Reads effective Dispatcher configuration through the daemon.
 ///
 /// # Errors
-///
-/// Returns endpoint or daemon validation failures.
-pub async fn request_agent_dispatch_endpoint(
+/// Returns endpoint, key validation, or daemon failures.
+pub async fn request_dispatcher_config_get(
     url: &str,
-    socket_path: Option<String>,
-) -> Result<AgentDispatchStatusResponse, String> {
-    let client = client(url)?;
-    match socket_path {
-        Some(socket_path) => {
-            client
-                .endpoint_set(forge_rpc::SetAgentDispatchEndpointRequest {
-                    socket_path: Some(socket_path),
-                })
-                .await
-        }
-        None => client.endpoint_get().await,
-    }
-    .map_err(|error| format!("could not configure Agent Dispatch through Forge daemon: {error}"))
+    key: Option<String>,
+) -> Result<forge_rpc::DispatcherConfigResponse, String> {
+    client(url)?
+        .config_get(forge_rpc::DispatcherConfigGetRequest { key })
+        .await
+        .map_err(|error| format!("could not read Dispatcher configuration: {error}"))
 }
 
-/// Selects the Herdr workspace identity supplied by the invoking operator.
+/// Sets an explicit Dispatcher configuration value through the daemon.
 ///
 /// # Errors
-/// Returns endpoint or workspace verification failures.
-pub async fn request_select_dispatch_workspace(
+/// Returns endpoint, validation, provider verification, or resource-safety failures.
+pub async fn request_dispatcher_config_set(
     url: &str,
-    workspace_id: String,
-) -> Result<forge_rpc::DispatchWorkspaceResponse, String> {
+    key: String,
+    value: String,
+) -> Result<forge_rpc::DispatcherConfigResponse, String> {
     client(url)?
-        .workspace_select(forge_rpc::SelectDispatchWorkspaceRequest { workspace_id })
+        .config_set(forge_rpc::DispatcherConfigSetRequest { key, value })
         .await
-        .map_err(|error| format!("could not select Herdr workspace: {error}"))
+        .map_err(|error| format!("could not set Dispatcher configuration: {error}"))
+}
+
+/// Explicitly unsets a Dispatcher override through the daemon.
+///
+/// # Errors
+/// Returns endpoint, validation, or resource-safety failures.
+pub async fn request_dispatcher_config_unset(
+    url: &str,
+    key: String,
+) -> Result<forge_rpc::DispatcherConfigResponse, String> {
+    client(url)?
+        .config_unset(forge_rpc::DispatcherConfigUnsetRequest { key })
+        .await
+        .map_err(|error| format!("could not unset Dispatcher configuration: {error}"))
 }
 
 /// Requests the seeded Agent Dispatch Profile.
