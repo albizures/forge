@@ -1,4 +1,4 @@
-# Agent dispatch operations
+# Dispatcher operations
 
 Forge's daemon owns dispatch state, provider resources, and reconciliation.
 The CLI neither opens dispatch storage nor contacts Herdr directly. Herdr is a
@@ -18,11 +18,18 @@ forge dispatcher config get
 forge dispatcher reconcile
 ```
 
+`herdr-socket` is the **daemon-to-Herdr Unix socket**, not the CLI-to-Forge
+RPC URL. CLI endpoint resolution remains unchanged: `--server-url` overrides
+`FORGE_SERVER_URL`; without either override, Forgeup resolves the Active Forge
+Revision and its Managed Daemon. The CLI never connects directly to Herdr.
+
 Relative socket paths are rejected. Workspace identity is an explicit argument;
 `HERDR_WORKSPACE_ID` is not required. `config get [key]` reports effective values
 and default/override provenance, not reachability. Both provider keys default to
 unconfigured. Use `config unset herdr-socket` or `config unset workspace` to
-remove an override explicitly. Socket/Workspace changes are rejected while
+remove an override explicitly; a setter missing its value fails rather than
+clearing it. Safe removal blocks new provisioning until required configuration
+is restored; it does not retire existing Agents. Socket/Workspace changes are rejected while
 unresolved Assignments or retained resources depend on them: inspect `status`
 and `assignment-info`, then follow safe recovery before retrying. A bounded reconciliation
 probes the provider and progresses eligible assignments; its response reports
@@ -58,6 +65,29 @@ The profile identifies provider, agent kind, model, and prompt configuration.
 General model/prompt/profile overrides are not provided; acknowledgement timeout
 has its own grouped configuration key below.
 
+## Explicit Record dispatch
+
+Automatic scheduling remains oldest-ready-first for Tasks only. To select a
+particular eligible Task, or launch a ready interactive Grilling, use:
+
+```sh
+forge dispatcher dispatch <record-id>
+forge dispatcher dispatch <record-id> --json
+```
+
+Explicit Task selection attempts the requested Task even if an older Task is
+waiting. It still checks readiness, single-Project eligibility, dependencies,
+Project capacity, Dispatch Holds, assignment uniqueness, and retained-resource
+safety. Tasks use their Managed Worktrees; Grillings launch interactively without
+a Managed Worktree or Task bootstrap and are never scheduled automatically.
+Specs, Wayfinders, and generic Records are unsupported.
+
+Repeated or concurrent requests return the existing open Assignment, reporting
+`already assigned` (JSON: `already_assigned: true`) without another Agent launch
+or capacity reservation. A closed Assignment with unresolved resources blocks
+replacement. Explicit dispatch is not a recovery override: follow the
+[recovery runbook](assignment-recovery.md) before retrying.
+
 ## Launch and acknowledgement
 
 Forge persists a one-shot launch intent and acknowledgement deadline before
@@ -65,11 +95,17 @@ launching Pi. Launch arguments contain a short bootstrap and profile model,
 not rendered Task instructions or capability secrets. The capability is delivered
 through an owner-only secret file outside the Agent Workspace.
 
+Task Agents run the generated `forge assignment bootstrap` invocation using
+their delivered environment. The lower-level `forge assignment task-start`
+retains its Assignment Capability contract; operators should use bootstrap
+rather than manually copying credentials.
+
 The bootstrap authenticates its acknowledgement, separately starts the Task with
 bounded retries, and only then retrieves rendered instructions through an
 assignment-scoped authenticated read. Acknowledgement makes the Assignment
 Working; it does not itself start the Task. If start cannot be confirmed, the
-agent must not begin implementation.
+agent must not begin implementation. Failed instruction retrieval also stops
+bootstrap without permitting implementation.
 
 The acknowledgement timeout defaults to **300000 ms**, separately from startup
 timeout. Inspect the profile or create a timeout revision explicitly:

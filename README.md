@@ -58,7 +58,7 @@ forge record done <task-id> --resolution 'Implemented and verified'
 
 Records normally advance from `open` to `in-progress` to `done`. A Spec can be
 completed after its Tasks are done. For automatic execution, configure
-[agent dispatch](docs/dispatch.md) instead of manually starting the Task.
+[the Dispatcher](docs/dispatch.md) instead of manually starting the Task.
 
 ## Agent skills
 
@@ -87,7 +87,7 @@ npx skills add mattpocock/skills --skill grill-me writing-for-agents improve-cod
 | --- | --- |
 | [Records](docs/records.md) | Projects, scope, lifecycle, hierarchy, and provenance |
 | [Managed worktrees](docs/worktrees.md) | Manual checkout creation, safety checks, and repair |
-| [Agent dispatch](docs/dispatch.md) | Herdr setup, capacity, launch, and ownership boundaries |
+| [Dispatcher](docs/dispatch.md) | Configuration, explicit Record dispatch, launch, and ownership boundaries |
 | [Assignment recovery](docs/assignment-recovery.md) | Investigation, retirement, unknown resources, and holds |
 | [Forgeup operations](crates/docs/forgeup.md) | Revision registration, selection, daemon lifecycle, and recovery |
 | [Development](docs/development.md) | Source setup, manual daemon endpoints, browser/RPC, and verification |

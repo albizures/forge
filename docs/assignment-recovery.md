@@ -110,8 +110,12 @@ prove agent absence, redeliver a prompt or itself authorize replacement. Its JSO
 `resolves_recovery_blockers: false` and `authorizes_replacement: false` describe
 operation semantics, not a live eligibility verdict. Replacement still requires
 normal dispatch checks, including an eligible Open Task and no unresolved old
-Assignment/resource evidence. Inspect the resulting Assignment; never create a
-manual duplicate to work around withheld capacity.
+Assignment/resource evidence. `forge dispatcher dispatch <record-id>` applies
+the same safety checks: it returns an existing open Assignment rather than
+launching a duplicate and rejects replacement while old resource blockers remain.
+It does not bypass a Dispatch Hold. Grillings require explicit dispatch; they are
+never selected by automatic reconciliation. Inspect the resulting Assignment;
+never create a manual duplicate to work around withheld capacity.
 
 ## Verification and deployment limits
 

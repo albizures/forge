@@ -262,10 +262,14 @@ enum AgentDispatchCommand {
         #[command(subcommand)]
         command: DispatcherConfigCommand,
     },
+    /// Inspect the active immutable Task Agent Profile (read-only).
     Profile(AgentDispatchRequestArgs),
+    /// Inspect persisted Dispatcher state.
     Status(AgentDispatchStatusArgs),
+    /// Reconcile Assignments and provision eligible Tasks; not a read-only check.
     Reconcile(AgentDispatchRequestArgs),
-    /// Dispatch a ready Task or interactive Grilling by Record id.
+    /// Dispatch an eligible Task or interactive Grilling; return an existing open Assignment.
+    /// Readiness, capacity, Dispatch Holds, and recovery safety checks still apply.
     Dispatch(DispatchRecordArgs),
     /// Return an unassigned In Progress Task to Open.
     TaskReopen(DispatchTaskArgs),
@@ -1653,6 +1657,58 @@ mod tests {
             .to_string();
         assert!(!help.contains("bootstrap"));
         assert!(!help.contains("task-start"));
+        for canonical in [
+            "config",
+            "dispatch",
+            "profile",
+            "status",
+            "reconcile",
+            "assignment-retire",
+        ] {
+            assert!(
+                help.contains(canonical),
+                "missing {canonical} in Dispatcher help"
+            );
+        }
+        for removed in [
+            "grilling-dispatch",
+            "workspace-select",
+            "endpoint",
+            "profile-acknowledgement-timeout-set",
+        ] {
+            assert!(
+                !help.contains(removed),
+                "obsolete {removed} in Dispatcher help"
+            );
+        }
+        let config = command
+            .find_subcommand_mut("dispatcher")
+            .unwrap()
+            .find_subcommand_mut("config")
+            .unwrap();
+        let help = config.render_long_help().to_string();
+        for canonical in ["get", "set", "unset", "provenance"] {
+            assert!(help.contains(canonical));
+        }
+        let help = config
+            .find_subcommand_mut("set")
+            .unwrap()
+            .render_long_help()
+            .to_string();
+        for required in [
+            "<KEY>",
+            "<VALUE>",
+            "--project",
+            "herdr-socket",
+            "workspace",
+            "project-limit",
+            "acknowledgement-timeout-ms",
+        ] {
+            assert!(
+                help.contains(required),
+                "missing {required} in config set help"
+            );
+        }
     }
 
     #[test]

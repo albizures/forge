@@ -1,7 +1,8 @@
 use forge_app::{
     AgentAdapterError, AgentDispatchAdapter, AgentDispatchAdapterFactory, AgentDispatchContext,
-    AgentDispatchRepository, AgentObservation, AgentProfile, Application, NewTypedRecord, Project,
-    ProjectRepository, RecordRepository, RecordType, RegistrationError, RepositoryInspector,
+    AgentDispatchRepository, AgentObservation, AgentProfile, Application, DispatchWorkspace,
+    NewAgentAssignmentResource, NewTypedRecord, Project, ProjectRepository, RecordRepository,
+    RecordType, RegistrationError, RepositoryInspector,
 };
 use forge_server::{Daemon, router};
 use forge_store::SqliteProjectRepository;
@@ -28,11 +29,30 @@ impl AgentDispatchAdapter for InteractiveProvider {
     fn probe(&self) -> Result<(), AgentAdapterError> {
         Ok(())
     }
+    fn verify_workspace(&self, id: &str) -> Result<DispatchWorkspace, AgentAdapterError> {
+        assert_eq!(id, "operator-workspace");
+        Ok(DispatchWorkspace { id: id.into() })
+    }
     fn provision(
         &self,
         context: &AgentDispatchContext,
-        _: &dyn AgentDispatchRepository,
+        store: &dyn AgentDispatchRepository,
     ) -> Result<(), AgentAdapterError> {
+        assert_eq!(
+            store.herdr_socket_path().unwrap().as_deref(),
+            Some(Path::new("/tmp/herdr.sock"))
+        );
+        assert_eq!(
+            store.dispatch_workspace().unwrap().unwrap().id,
+            "operator-workspace"
+        );
+        store
+            .add_agent_assignment_resource(&NewAgentAssignmentResource {
+                assignment_id: context.assignment.id.clone(),
+                resource_kind: "pane".into(),
+                resource_id: "owned-pane".into(),
+            })
+            .unwrap();
         assert_eq!(context.assignment.profile.record_type, RecordType::Grilling);
         assert!(context.agent_workspace.is_none());
         self.0.fetch_add(1, Ordering::SeqCst);
@@ -49,10 +69,22 @@ impl AgentDispatchAdapter for InteractiveProvider {
     }
     fn retire(
         &self,
-        _: &AgentDispatchContext,
-        _: &dyn AgentDispatchRepository,
+        context: &AgentDispatchContext,
+        store: &dyn AgentDispatchRepository,
     ) -> Result<(), AgentAdapterError> {
-        panic!("dispatch must not retire")
+        assert!(context.assignment.closed_at_millis.is_some());
+        for resource in &context.resources {
+            if resource.resource_kind == "pane" {
+                store
+                    .retire_agent_assignment_resource(
+                        &context.assignment.id,
+                        "pane",
+                        &resource.resource_id,
+                    )
+                    .unwrap();
+            }
+        }
+        Ok(())
     }
 }
 struct NoInspector;
@@ -63,7 +95,7 @@ impl RepositoryInspector for NoInspector {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn explicit_dispatch_round_trips_and_reports_existing_assignment_without_relaunch() {
+async fn configuration_dispatch_and_recovery_round_trip_without_duplicate_launches() {
     let db = std::env::temp_dir().join(format!(
         "forge-record-dispatch-{}-{}.sqlite",
         std::process::id(),
@@ -110,6 +142,26 @@ async fn explicit_dispatch_round_trips_and_reports_existing_assignment_without_r
             .await
             .unwrap();
     });
+    let operator = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_forge"))
+            .arg("dispatcher")
+            .args(args)
+            .args(["--server-url", &url, "--json"])
+            .output()
+            .unwrap()
+    };
+    for args in [
+        vec!["config", "set", "herdr-socket", "/tmp/herdr.sock"],
+        vec!["config", "set", "workspace", "operator-workspace"],
+        vec!["config", "set", "project-limit", "2", "--project", "alpha"],
+    ] {
+        let output = operator(&args);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     let run = |id: &str, json: bool| {
         let mut command = Command::new(env!("CARGO_BIN_EXE_forge"));
         command.args(["dispatcher", "dispatch", id, "--server-url", &url]);
@@ -140,6 +192,36 @@ async fn explicit_dispatch_round_trips_and_reports_existing_assignment_without_r
     assert!(String::from_utf8_lossy(&unsupported.stderr).contains("only Tasks and Grillings"));
     assert_eq!(launches.load(Ordering::SeqCst), 1);
     assert_eq!(store.list_open_agent_assignments().unwrap().len(), 1);
+    let assignment = first["assignment"]["id"].as_str().unwrap();
+    // Config changes cannot strand a live Assignment or its retained resources.
+    for key in ["herdr-socket", "workspace"] {
+        assert!(!operator(&["config", "unset", key]).status.success());
+    }
+    let info = operator(&["assignment-info", assignment]);
+    assert!(info.status.success());
+    let info: serde_json::Value = serde_json::from_slice(&info.stdout).unwrap();
+    assert_eq!(info["capacity_reserved"], true);
+    let retired = operator(&["assignment-retire", assignment]);
+    assert!(
+        retired.status.success(),
+        "{}",
+        String::from_utf8_lossy(&retired.stderr)
+    );
+    let info = operator(&["assignment-info", assignment]);
+    let info: serde_json::Value = serde_json::from_slice(&info.stdout).unwrap();
+    assert!(info["closed_at_millis"].is_number());
+    assert_eq!(info["capacity_reserved"], false);
+    assert!(info["dispatch_hold"].is_string());
+    assert!(
+        !run(&ids[0], true).status.success(),
+        "retirement does not clear the hold"
+    );
+    assert_eq!(launches.load(Ordering::SeqCst), 1);
+    // With resources safely resolved, explicit removal is configuration-only.
+    for key in ["workspace", "herdr-socket"] {
+        assert!(operator(&["config", "unset", key]).status.success());
+    }
+    assert_eq!(launches.load(Ordering::SeqCst), 1);
     server.abort();
     let _ = server.await;
     drop(store);
