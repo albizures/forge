@@ -1590,6 +1590,13 @@ fn migrate_agent_profile_schema(connection: &Connection) -> Result<(), Registrat
     {
         connection.execute("ALTER TABLE agent_profiles ADD COLUMN acknowledgement_timeout_millis INTEGER NOT NULL DEFAULT 300000", []).map_err(storage_error)?;
     }
+    if !columns
+        .iter()
+        .any(|column| column == "acknowledgement_timeout_overridden")
+    {
+        connection.execute("ALTER TABLE agent_profiles ADD COLUMN acknowledgement_timeout_overridden INTEGER NOT NULL DEFAULT 0", []).map_err(storage_error)?;
+        connection.execute("UPDATE agent_profiles SET acknowledgement_timeout_overridden = 1 WHERE record_type = 'task' AND revision > 1", []).map_err(storage_error)?;
+    }
     Ok(())
 }
 
@@ -1613,7 +1620,7 @@ fn load_agent_profile(
     revision: u32,
 ) -> Result<AgentProfile, RegistrationError> {
     connection.query_row(
-        "SELECT record_type, revision, provider, agent_kind, model, prompt_template, retry_limit, retry_backoff_millis, startup_timeout_millis, unknown_state_grace_millis, acknowledgement_timeout_millis FROM agent_profiles WHERE record_type = ?1 AND revision = ?2",
+        "SELECT record_type, revision, provider, agent_kind, model, prompt_template, retry_limit, retry_backoff_millis, startup_timeout_millis, unknown_state_grace_millis, acknowledgement_timeout_millis, acknowledgement_timeout_overridden FROM agent_profiles WHERE record_type = ?1 AND revision = ?2",
         params![record_type_name(profile_record_type), revision],
         |row| Ok(AgentProfile {
             record_type: match row.get::<_, String>(0)?.as_str() {
@@ -1627,6 +1634,7 @@ fn load_agent_profile(
             retry_limit: row.get::<_, i64>(6)?.cast_unsigned().try_into().expect("retry limit fits u32"), retry_backoff_millis: row.get::<_, i64>(7)?.cast_unsigned(),
             startup_timeout_millis: row.get::<_, i64>(8)?.cast_unsigned(), unknown_state_grace_millis: row.get::<_, i64>(9)?.cast_unsigned(),
             acknowledgement_timeout_millis: row.get::<_, i64>(10)?.cast_unsigned(),
+            acknowledgement_timeout_overridden: row.get(11)?,
         }),
     ).map_err(|error| match error { rusqlite::Error::QueryReturnedNoRows => RegistrationError::new("agent-profile-not-found", "Agent Profile revision does not exist"), error => storage_error(error) })
 }
@@ -1840,9 +1848,9 @@ impl AgentDispatchRepository for SqliteProjectRepository {
 
     fn configure_task_acknowledgement_timeout(
         &self,
-        timeout_millis: u64,
+        timeout_millis: Option<u64>,
     ) -> Result<AgentProfile, RegistrationError> {
-        let timeout = i64::try_from(timeout_millis)
+        let timeout = i64::try_from(timeout_millis.unwrap_or(300_000))
             .ok()
             .filter(|v| *v > 0 && *v <= i64::MAX / 2)
             .ok_or_else(|| {
@@ -1858,7 +1866,7 @@ impl AgentDispatchRepository for SqliteProjectRepository {
         let transaction = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(storage_error)?;
-        transaction.execute("INSERT INTO agent_profiles (record_type, revision, provider, agent_kind, model, prompt_template, retry_limit, retry_backoff_millis, startup_timeout_millis, unknown_state_grace_millis, acknowledgement_timeout_millis) SELECT record_type, revision + 1, provider, agent_kind, model, prompt_template, retry_limit, retry_backoff_millis, startup_timeout_millis, unknown_state_grace_millis, ?1 FROM agent_profiles WHERE record_type = 'task' ORDER BY revision DESC LIMIT 1", [timeout]).map_err(storage_error)?;
+        transaction.execute("INSERT INTO agent_profiles (record_type, revision, provider, agent_kind, model, prompt_template, retry_limit, retry_backoff_millis, startup_timeout_millis, unknown_state_grace_millis, acknowledgement_timeout_millis, acknowledgement_timeout_overridden) SELECT record_type, revision + 1, provider, agent_kind, model, prompt_template, retry_limit, retry_backoff_millis, startup_timeout_millis, unknown_state_grace_millis, ?1, ?2 FROM agent_profiles WHERE record_type = 'task' ORDER BY revision DESC LIMIT 1", params![timeout, timeout_millis.is_some()]).map_err(storage_error)?;
         let revision: u32 = transaction
             .query_row(
                 "SELECT MAX(revision) FROM agent_profiles WHERE record_type = 'task'",
@@ -6079,7 +6087,7 @@ mod tests {
         let store = SqliteProjectRepository::in_memory().unwrap();
         let original = store.active_task_agent_profile().unwrap();
         let updated = store
-            .configure_task_acknowledgement_timeout(42_000)
+            .configure_task_acknowledgement_timeout(Some(42_000))
             .unwrap();
         assert_eq!(updated.revision, original.revision + 1);
         assert_eq!(updated.acknowledgement_timeout_millis, 42_000);
@@ -6094,7 +6102,11 @@ mod tests {
             original
         );
         assert_eq!(store.active_task_agent_profile().unwrap(), updated);
-        assert!(store.configure_task_acknowledgement_timeout(0).is_err());
+        assert!(
+            store
+                .configure_task_acknowledgement_timeout(Some(0))
+                .is_err()
+        );
         store.register(&project("alpha", "/repos/alpha")).unwrap();
         store
             .open_typed_record(&NewTypedRecord {

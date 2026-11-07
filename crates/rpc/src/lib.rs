@@ -79,16 +79,6 @@ pub trait AgentDispatchApi {
     ) -> RpcResult<DispatcherConfigResponse>;
     #[method(name = "profile")]
     async fn profile(&self) -> RpcResult<AgentDispatchProfileResponse>;
-    #[method(name = "profileAcknowledgementTimeoutSet")]
-    async fn profile_acknowledgement_timeout_set(
-        &self,
-        request: SetAcknowledgementTimeoutRequest,
-    ) -> RpcResult<AgentDispatchProfileResponse>;
-    #[method(name = "projectSet")]
-    async fn project_set(
-        &self,
-        request: SetAgentDispatchProjectRequest,
-    ) -> RpcResult<AgentDispatchStatusResponse>;
     #[method(name = "status")]
     async fn dispatch_status(
         &self,
@@ -341,15 +331,18 @@ impl SystemStatusResponse {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DispatcherConfigGetRequest {
     pub key: Option<String>,
+    pub project: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DispatcherConfigSetRequest {
     pub key: String,
     pub value: String,
+    pub project: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DispatcherConfigUnsetRequest {
     pub key: String,
+    pub project: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DispatcherConfigEntryResponse {
@@ -360,10 +353,13 @@ pub struct DispatcherConfigEntryResponse {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DispatcherConfigResponse {
     pub entries: Vec<DispatcherConfigEntryResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub applicability: Option<String>,
 }
 impl From<Vec<forge_app::DispatcherConfigEntry>> for DispatcherConfigResponse {
     fn from(entries: Vec<forge_app::DispatcherConfigEntry>) -> Self {
         Self {
+            applicability: None,
             entries: entries
                 .into_iter()
                 .map(|entry| DispatcherConfigEntryResponse {
@@ -374,11 +370,6 @@ impl From<Vec<forge_app::DispatcherConfigEntry>> for DispatcherConfigResponse {
                 .collect(),
         }
     }
-}
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct SetAgentDispatchProjectRequest {
-    pub project_slug: String,
-    pub task_concurrency_limit: Option<u16>,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AgentDispatchStatusRequest {
@@ -426,10 +417,6 @@ pub struct AgentDispatchProfileResponse {
     pub prompt_template: String,
     pub startup_timeout_millis: u64,
     pub acknowledgement_timeout_millis: u64,
-}
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct SetAcknowledgementTimeoutRequest {
-    pub timeout_millis: u64,
 }
 impl From<AgentProfile> for AgentDispatchProfileResponse {
     fn from(value: AgentProfile) -> Self {

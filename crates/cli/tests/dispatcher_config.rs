@@ -1,7 +1,8 @@
 use forge_app::{
     AgentAdapterError, AgentDispatchAdapter, AgentDispatchAdapterFactory, AgentDispatchContext,
     AgentDispatchRepository, AgentObservation, AgentProfile, Application, DispatchWorkspace,
-    Project, RegistrationError, RepositoryInspector,
+    NewTypedRecord, Project, ProjectRepository, RecordRepository, RecordType, RegistrationError,
+    RepositoryInspector,
 };
 use forge_server::{Daemon, router};
 use forge_store::SqliteProjectRepository;
@@ -64,9 +65,41 @@ impl RepositoryInspector for NoInspector {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn grouped_provider_configuration_round_trips_through_cli_and_daemon() {
+    let db = std::env::temp_dir().join(format!(
+        "forge-dispatch-config-{}-{}.sqlite",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let store = SqliteProjectRepository::open(&db).unwrap();
+    store
+        .register(&Project {
+            slug: "alpha".into(),
+            registered_folder: "/repos/alpha".into(),
+            origin_url: "https://example.com/alpha".into(),
+        })
+        .unwrap();
+    let open_task = || {
+        store
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Task,
+                task_kind: None,
+                body: "configured task".into(),
+                project_slugs: vec!["alpha".into()],
+                generated_by_ids: vec![],
+            })
+            .unwrap()
+    };
+    open_task();
+    let original_assignment = store
+        .claim_next_agent_assignment("alpha", "original")
+        .unwrap()
+        .unwrap();
     let app = Application::with_agent_dispatch(
         Box::new(SqliteProjectRepository::in_memory().unwrap()),
-        Box::new(SqliteProjectRepository::in_memory().unwrap()),
+        Box::new(SqliteProjectRepository::open(&db).unwrap()),
         Box::new(WorkspaceProvider),
         Box::new(NoInspector),
     );
@@ -101,14 +134,111 @@ async fn grouped_provider_configuration_round_trips_through_cli_and_daemon() {
         );
         serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
     };
+    let capacity = json(&["get", "project-limit", "--project", "alpha"]);
+    assert_eq!(
+        capacity["entries"][0],
+        serde_json::json!({"key":"project-limit", "value":"1", "provenance":"default"})
+    );
+    let capacity = json(&["set", "project-limit", "3", "--project", "alpha"]);
+    assert_eq!(capacity["entries"][0]["value"], "3");
+    assert_eq!(capacity["entries"][0]["provenance"], "override");
+    let aggregate = json(&["get", "--project", "alpha"]);
+    assert_eq!(aggregate["entries"].as_array().unwrap().len(), 4);
+    assert_eq!(aggregate["entries"][3], capacity["entries"][0]);
+    json(&["unset", "project-limit", "--project", "alpha"]);
+    let capacity = json(&["get", "project-limit", "--project", "alpha"]);
+    assert_eq!(capacity["entries"][0]["value"], "1");
+    assert_eq!(capacity["entries"][0]["provenance"], "default");
+    // Keep room for Assignments used to observe revision binding below.
+    json(&["set", "project-limit", "3", "--project", "alpha"]);
+    let timeout = json(&["set", "acknowledgement-timeout-ms", "42000"]);
+    assert_eq!(timeout["entries"][0]["value"], "42000");
+    assert_eq!(timeout["entries"][0]["provenance"], "override");
+    assert!(
+        timeout["applicability"]
+            .as_str()
+            .unwrap()
+            .contains("future Assignments only")
+    );
+    open_task();
+    let updated_assignment = store
+        .claim_next_agent_assignment("alpha", "updated")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        updated_assignment.profile.acknowledgement_timeout_millis,
+        42_000
+    );
+    assert!(updated_assignment.profile.revision > original_assignment.profile.revision);
+    assert_eq!(
+        store.agent_assignment("original").unwrap().profile,
+        original_assignment.profile
+    );
+    let reset = json(&["unset", "acknowledgement-timeout-ms"]);
+    assert_eq!(reset["entries"][0]["value"], "300000");
+    assert_eq!(reset["entries"][0]["provenance"], "default");
+    assert!(
+        reset["applicability"]
+            .as_str()
+            .unwrap()
+            .contains("future Assignments only")
+    );
+    open_task();
+    let default_assignment = store
+        .claim_next_agent_assignment("alpha", "restored")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        default_assignment.profile.acknowledgement_timeout_millis,
+        300_000
+    );
+    assert!(default_assignment.profile.revision > updated_assignment.profile.revision);
+    assert_eq!(
+        store.agent_assignment("original").unwrap().profile,
+        original_assignment.profile
+    );
+    assert_eq!(
+        store.agent_assignment("updated").unwrap().profile,
+        updated_assignment.profile
+    );
+    // Configuration tests below do not retire resources; finish these synthetic attempts first.
+    for id in ["original", "updated", "restored"] {
+        store
+            .close_agent_assignment(id, forge_app::AgentAssignmentClosureReason::Retired)
+            .unwrap();
+    }
     let defaults = json(&["get"]);
     assert_eq!(
         defaults,
         serde_json::json!({"entries":[
             {"key":"herdr-socket", "value":null, "provenance":"default"},
-            {"key":"workspace", "value":null, "provenance":"default"}
+            {"key":"workspace", "value":null, "provenance":"default"},
+            {"key":"acknowledgement-timeout-ms", "value":"300000", "provenance":"default"}
         ]})
     );
+    // An explicit value equal to the default is still an override, durably.
+    let explicit_default = json(&["set", "acknowledgement-timeout-ms", "300000"]);
+    assert_eq!(explicit_default["entries"][0]["provenance"], "override");
+    assert!(
+        SqliteProjectRepository::open(&db)
+            .unwrap()
+            .active_task_agent_profile()
+            .unwrap()
+            .acknowledgement_timeout_overridden
+    );
+    let human_timeout = run(&["unset", "acknowledgement-timeout-ms"], false);
+    assert!(human_timeout.status.success());
+    let human_timeout = String::from_utf8(human_timeout.stdout).unwrap();
+    assert!(human_timeout.contains("future Assignments only"));
+    assert!(human_timeout.contains("acknowledgement-timeout-ms\t300000\tdefault"));
+    assert!(
+        !SqliteProjectRepository::open(&db)
+            .unwrap()
+            .active_task_agent_profile()
+            .unwrap()
+            .acknowledgement_timeout_overridden
+    );
+    let profile_before_invalid = store.active_task_agent_profile().unwrap();
     let socket = json(&["set", "herdr-socket", "/tmp/herdr.sock"]);
     assert_eq!(socket["entries"][0]["value"], "/tmp/herdr.sock");
     assert_eq!(socket["entries"][0]["provenance"], "override");
@@ -125,12 +255,37 @@ async fn grouped_provider_configuration_round_trips_through_cli_and_daemon() {
         vec!["set", "herdr-socket"],
         vec!["unset", "unknown"],
         vec!["get", "unknown"],
+        vec!["set", "unknown", "value"],
+        vec!["get", "project-limit"],
+        vec!["unset", "project-limit"],
+        vec!["set", "project-limit", "3"],
+        vec!["get", "project-limit", "--project", "missing"],
+        vec!["set", "project-limit", "3", "--project", "missing"],
+        vec!["unset", "project-limit", "--project", "missing"],
+        vec!["get", "project-limit", "--project", ""],
+        vec!["set", "project-limit", "0", "--project", "alpha"],
+        vec!["set", "project-limit", "1025", "--project", "alpha"],
+        vec!["set", "project-limit", "-1", "--project", "alpha"],
+        vec!["set", "project-limit", "word", "--project", "alpha"],
+        vec!["set", "project-limit", "--project", "alpha"],
+        vec!["set", "acknowledgement-timeout-ms"],
+        vec!["set", "acknowledgement-timeout-ms", "0"],
+        vec!["set", "acknowledgement-timeout-ms", "word"],
+        vec!["set", "acknowledgement-timeout-ms", "18446744073709551615"],
     ] {
         let output = run(&args, true);
         assert!(!output.status.success(), "unexpected success for {args:?}");
         assert!(!output.stderr.is_empty());
     }
-    // Rejections do not mutate either override.
+    // Rejections do not mutate overrides or create profile revisions.
+    assert_eq!(
+        store.active_task_agent_profile().unwrap(),
+        profile_before_invalid
+    );
+    assert_eq!(
+        json(&["get", "project-limit", "--project", "alpha"])["entries"][0]["value"],
+        "3"
+    );
     assert_eq!(json(&["get", "workspace"]), workspace);
     assert_eq!(json(&["get", "herdr-socket"]), socket);
     let human = run(&["get", "workspace"], false);
@@ -143,4 +298,6 @@ async fn grouped_provider_configuration_round_trips_through_cli_and_daemon() {
     json(&["unset", "herdr-socket"]);
     assert_eq!(json(&["get"]), defaults);
     server.abort();
+    drop(store);
+    let _ = std::fs::remove_file(db);
 }

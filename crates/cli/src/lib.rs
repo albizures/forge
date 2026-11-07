@@ -196,9 +196,10 @@ pub async fn request_register_project(
 pub async fn request_dispatcher_config_get(
     url: &str,
     key: Option<String>,
+    project: Option<String>,
 ) -> Result<forge_rpc::DispatcherConfigResponse, String> {
     client(url)?
-        .config_get(forge_rpc::DispatcherConfigGetRequest { key })
+        .config_get(forge_rpc::DispatcherConfigGetRequest { key, project })
         .await
         .map_err(|error| format!("could not read Dispatcher configuration: {error}"))
 }
@@ -211,9 +212,14 @@ pub async fn request_dispatcher_config_set(
     url: &str,
     key: String,
     value: String,
+    project: Option<String>,
 ) -> Result<forge_rpc::DispatcherConfigResponse, String> {
     client(url)?
-        .config_set(forge_rpc::DispatcherConfigSetRequest { key, value })
+        .config_set(forge_rpc::DispatcherConfigSetRequest {
+            key,
+            value,
+            project,
+        })
         .await
         .map_err(|error| format!("could not set Dispatcher configuration: {error}"))
 }
@@ -225,9 +231,10 @@ pub async fn request_dispatcher_config_set(
 pub async fn request_dispatcher_config_unset(
     url: &str,
     key: String,
+    project: Option<String>,
 ) -> Result<forge_rpc::DispatcherConfigResponse, String> {
     client(url)?
-        .config_unset(forge_rpc::DispatcherConfigUnsetRequest { key })
+        .config_unset(forge_rpc::DispatcherConfigUnsetRequest { key, project })
         .await
         .map_err(|error| format!("could not unset Dispatcher configuration: {error}"))
 }
@@ -243,40 +250,6 @@ pub async fn request_agent_dispatch_profile(
     client(url)?.profile().await.map_err(|error| {
         format!("could not inspect Agent Dispatch profile through Forge daemon: {error}")
     })
-}
-
-/// Configures the Task Agent Profile acknowledgement timeout in milliseconds.
-pub async fn request_set_acknowledgement_timeout(
-    url: &str,
-    timeout_millis: u64,
-) -> Result<AgentDispatchProfileResponse, String> {
-    client(url)?
-        .profile_acknowledgement_timeout_set(forge_rpc::SetAcknowledgementTimeoutRequest {
-            timeout_millis,
-        })
-        .await
-        .map_err(|error| format!("could not configure acknowledgement timeout: {error}"))
-}
-
-/// Configures a registered Project's dispatch capacity.
-///
-/// # Errors
-///
-/// Returns endpoint or daemon validation failures.
-pub async fn request_agent_dispatch_project(
-    url: &str,
-    project_slug: String,
-    limit: Option<u16>,
-) -> Result<AgentDispatchStatusResponse, String> {
-    client(url)?
-        .project_set(forge_rpc::SetAgentDispatchProjectRequest {
-            project_slug,
-            task_concurrency_limit: limit,
-        })
-        .await
-        .map_err(|error| {
-            format!("could not configure Agent Dispatch Project through Forge daemon: {error}")
-        })
 }
 
 /// Requests stable dispatch diagnostics.

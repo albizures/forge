@@ -580,6 +580,8 @@ pub struct AgentProfile {
     pub retry_backoff_millis: u64,
     pub startup_timeout_millis: u64,
     pub acknowledgement_timeout_millis: u64,
+    /// Whether this revision has an explicit acknowledgement timeout override.
+    pub acknowledgement_timeout_overridden: bool,
     pub unknown_state_grace_millis: u64,
 }
 
@@ -1338,10 +1340,10 @@ pub trait AgentDispatchRepository: RecordRepository {
     ) -> Result<AgentProfile, RegistrationError>;
     /// Returns the active immutable Task profile revision.
     fn active_task_agent_profile(&self) -> Result<AgentProfile, RegistrationError>;
-    /// Creates a new Task profile revision with a distinct acknowledgement timeout.
+    /// Creates an immutable Task profile revision; None restores the default timeout.
     fn configure_task_acknowledgement_timeout(
         &self,
-        timeout_millis: u64,
+        timeout_millis: Option<u64>,
     ) -> Result<AgentProfile, RegistrationError>;
     /// Creates an Assignment with immutable profile provenance.
     fn create_agent_assignment(
@@ -1982,11 +1984,13 @@ impl Application {
         self.dispatch()?.set_herdr_socket_path(path)
     }
 
-    /// Reads effective provider configuration. Neither provider key has an implicit default.
+    /// Reads effective Dispatcher configuration and override provenance.
+    /// Project capacity is included only with explicit Project scope.
     #[allow(clippy::missing_errors_doc)]
     pub fn dispatcher_config_get(
         &self,
         key: Option<&str>,
+        project: Option<&str>,
     ) -> Result<Vec<DispatcherConfigEntry>, RegistrationError> {
         let _guard = self.provider_configuration.lock().map_err(|_| {
             RegistrationError::new(
@@ -1996,7 +2000,15 @@ impl Application {
         })?;
         let dispatch = self.dispatch()?;
         let keys = match key {
-            None => vec!["herdr-socket", "workspace"],
+            None if project.is_some() => vec![
+                "herdr-socket",
+                "workspace",
+                "acknowledgement-timeout-ms",
+                "project-limit",
+            ],
+            None => vec!["herdr-socket", "workspace", "acknowledgement-timeout-ms"],
+            Some("acknowledgement-timeout-ms") => vec!["acknowledgement-timeout-ms"],
+            Some("project-limit") => vec!["project-limit"],
             Some("herdr-socket") => vec!["herdr-socket"],
             Some("workspace") => vec!["workspace"],
             Some(_) => {
@@ -2008,6 +2020,34 @@ impl Application {
         };
         keys.into_iter()
             .map(|key| {
+                if key == "project-limit" {
+                    let project = Self::dispatcher_config_project(project)?;
+                    let configured = dispatch.project_task_concurrency_limit(project)?;
+                    let effective = dispatch.effective_project_task_concurrency_limit(project)?;
+                    return Ok(DispatcherConfigEntry {
+                        key: key.into(),
+                        value: Some(effective.to_string()),
+                        provenance: if configured.is_some() {
+                            "override"
+                        } else {
+                            "default"
+                        }
+                        .into(),
+                    });
+                }
+                if key == "acknowledgement-timeout-ms" {
+                    let profile = dispatch.active_task_agent_profile()?;
+                    return Ok(DispatcherConfigEntry {
+                        key: key.into(),
+                        value: Some(profile.acknowledgement_timeout_millis.to_string()),
+                        provenance: if profile.acknowledgement_timeout_overridden {
+                            "override"
+                        } else {
+                            "default"
+                        }
+                        .into(),
+                    });
+                }
                 let value = match key {
                     "herdr-socket" => dispatch
                         .herdr_socket_path()?
@@ -2028,10 +2068,35 @@ impl Application {
             .collect()
     }
 
-    /// Changes one provider configuration override using a required explicit value.
+    /// Changes one Dispatcher configuration override using a required explicit value.
     #[allow(clippy::missing_errors_doc)]
-    pub fn dispatcher_config_set(&self, key: &str, value: &str) -> Result<(), RegistrationError> {
+    pub fn dispatcher_config_set(
+        &self,
+        key: &str,
+        value: &str,
+        project: Option<&str>,
+    ) -> Result<(), RegistrationError> {
         match key {
+            "project-limit" => {
+                let project = Self::dispatcher_config_project(project)?;
+                let limit = value.parse::<u16>().map_err(|_| {
+                    RegistrationError::new(
+                        "invalid-project-limit",
+                        "project-limit must be an integer from 1 through 1024",
+                    )
+                })?;
+                self.set_project_task_concurrency_limit(project, Some(limit))
+            }
+            "acknowledgement-timeout-ms" => {
+                let timeout = value.parse::<u64>().map_err(|_| {
+                    RegistrationError::new(
+                        "invalid-acknowledgement-timeout",
+                        "acknowledgement-timeout-ms must be a positive integer in range",
+                    )
+                })?;
+                self.configure_task_acknowledgement_timeout(timeout)
+                    .map(|_| ())
+            }
             "herdr-socket" => self.set_herdr_socket_path(Some(Path::new(value))),
             "workspace" => self.select_dispatch_workspace(value).map(|_| ()),
             _ => Err(RegistrationError::new(
@@ -2041,10 +2106,22 @@ impl Application {
         }
     }
 
-    /// Explicitly restores an unconfigured provider key without contacting Herdr.
+    /// Explicitly restores the default, or an unconfigured provider key without contacting Herdr.
     #[allow(clippy::missing_errors_doc)]
-    pub fn dispatcher_config_unset(&self, key: &str) -> Result<(), RegistrationError> {
+    pub fn dispatcher_config_unset(
+        &self,
+        key: &str,
+        project: Option<&str>,
+    ) -> Result<(), RegistrationError> {
         match key {
+            "project-limit" => self.set_project_task_concurrency_limit(
+                Self::dispatcher_config_project(project)?,
+                None,
+            ),
+            "acknowledgement-timeout-ms" => self
+                .dispatch()?
+                .configure_task_acknowledgement_timeout(None)
+                .map(|_| ()),
             "herdr-socket" => self.set_herdr_socket_path(None),
             "workspace" => {
                 let _guard = self.provider_configuration.lock().map_err(|_| {
@@ -2060,6 +2137,17 @@ impl Application {
                 "unknown Dispatcher configuration key",
             )),
         }
+    }
+
+    fn dispatcher_config_project(project: Option<&str>) -> Result<&str, RegistrationError> {
+        project
+            .filter(|slug| !slug.trim().is_empty())
+            .ok_or_else(|| {
+                RegistrationError::new(
+                    "project-required",
+                    "project-limit requires explicit --project <slug> scope",
+                )
+            })
     }
 
     /// Returns the seeded immutable Task Agent Profile.
@@ -2129,7 +2217,7 @@ impl Application {
         timeout_millis: u64,
     ) -> Result<AgentProfile, RegistrationError> {
         self.dispatch()?
-            .configure_task_acknowledgement_timeout(timeout_millis)
+            .configure_task_acknowledgement_timeout(Some(timeout_millis))
     }
 
     /// Acknowledges an Assignment after transport-level capability authentication.

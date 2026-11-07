@@ -3,9 +3,9 @@ use forge_cli::{
     render_agent_dispatch_status, render_human_status, render_json_status, render_managed_worktree,
     render_managed_worktrees, render_project_here, render_project_registered, render_record,
     render_record_comments, render_record_list, render_record_opened, render_record_updates,
-    request_add_record_comment, request_agent_dispatch_profile, request_agent_dispatch_project,
-    request_agent_dispatch_reconcile, request_agent_dispatch_status, request_delete_record_comment,
-    request_dispatch_grilling, request_done_record, request_edit_record, request_list_records,
+    request_add_record_comment, request_agent_dispatch_profile, request_agent_dispatch_reconcile,
+    request_agent_dispatch_status, request_delete_record_comment, request_dispatch_grilling,
+    request_done_record, request_edit_record, request_list_records,
     request_managed_worktree_create, request_managed_worktree_doctor,
     request_managed_worktree_info, request_managed_worktree_list, request_managed_worktree_recover,
     request_managed_worktree_remove, request_open_grilling_under_wayfinder, request_open_record,
@@ -13,10 +13,9 @@ use forge_cli::{
     request_open_task_under_wayfinder, request_open_wayfinder, request_project_here,
     request_project_setup_hook, request_record_comments, request_record_updates,
     request_register_project, request_relate_record, request_reopen_dispatch_task,
-    request_resume_dispatch_task, request_retire_agent_assignment,
-    request_set_acknowledgement_timeout, request_show_record, request_start_assignment_task,
-    request_start_record, request_status, request_unrelate_record, request_worktree_root,
-    resolve_endpoint as resolve_managed_endpoint,
+    request_resume_dispatch_task, request_retire_agent_assignment, request_show_record,
+    request_start_assignment_task, request_start_record, request_status, request_unrelate_record,
+    request_worktree_root, resolve_endpoint as resolve_managed_endpoint,
 };
 use std::io::Read;
 
@@ -264,9 +263,6 @@ enum AgentDispatchCommand {
         command: DispatcherConfigCommand,
     },
     Profile(AgentDispatchRequestArgs),
-    /// Create a Task Agent Profile revision with this acknowledgement timeout.
-    ProfileAcknowledgementTimeoutSet(AgentDispatchTimeoutArgs),
-    Project(AgentDispatchProjectArgs),
     Status(AgentDispatchStatusArgs),
     Reconcile(AgentDispatchRequestArgs),
     /// Dispatch one ready Grilling to an interactive Agent without a Managed Worktree.
@@ -284,8 +280,10 @@ enum AgentDispatchCommand {
 }
 #[derive(Args, Debug)]
 struct DispatcherConfigReadArgs {
-    /// Configuration key: herdr-socket or workspace. Omit to inspect all values.
+    /// Configuration key. Omit to inspect global values (plus capacity with --project).
     key: Option<String>,
+    #[arg(long)]
+    project: Option<String>,
     #[arg(long, value_name = "URL")]
     server_url: Option<String>,
     #[arg(long)]
@@ -302,10 +300,12 @@ enum DispatcherConfigCommand {
 }
 #[derive(Args, Debug)]
 struct DispatcherConfigSetArgs {
-    /// Configuration key: herdr-socket or workspace.
+    /// herdr-socket, workspace, project-limit, or acknowledgement-timeout-ms.
     key: String,
-    /// Absolute Herdr Unix socket path or existing Workspace ID.
+    /// Required configuration value.
     value: String,
+    #[arg(long)]
+    project: Option<String>,
     #[arg(long, value_name = "URL")]
     server_url: Option<String>,
     #[arg(long)]
@@ -313,29 +313,10 @@ struct DispatcherConfigSetArgs {
 }
 #[derive(Args, Debug)]
 struct DispatcherConfigUnsetArgs {
-    /// Configuration key: herdr-socket or workspace.
+    /// herdr-socket, workspace, project-limit, or acknowledgement-timeout-ms.
     key: String,
-    #[arg(long, value_name = "URL")]
-    server_url: Option<String>,
     #[arg(long)]
-    json: bool,
-}
-#[derive(Args, Debug)]
-struct AgentDispatchTimeoutArgs {
-    #[arg(long)]
-    timeout_millis: u64,
-    #[arg(long, value_name = "URL")]
-    server_url: Option<String>,
-    #[arg(long)]
-    json: bool,
-}
-#[derive(Args, Debug)]
-struct AgentDispatchProjectArgs {
-    #[arg(long)]
-    project: String,
-    /// Set a limit from 1 through 1024; omit to clear the override.
-    #[arg(long)]
-    limit: Option<u16>,
+    project: Option<String>,
     #[arg(long, value_name = "URL")]
     server_url: Option<String>,
     #[arg(long)]
@@ -955,6 +936,7 @@ async fn agent_dispatch(command: AgentDispatchCommand) -> i32 {
                     forge_cli::request_dispatcher_config_get(
                         &resolve_endpoint(args.server_url.as_deref()).await,
                         args.key,
+                        args.project,
                     )
                     .await,
                     args.json,
@@ -964,6 +946,7 @@ async fn agent_dispatch(command: AgentDispatchCommand) -> i32 {
                         &resolve_endpoint(args.server_url.as_deref()).await,
                         args.key,
                         args.value,
+                        args.project,
                     )
                     .await,
                     args.json,
@@ -972,6 +955,7 @@ async fn agent_dispatch(command: AgentDispatchCommand) -> i32 {
                     forge_cli::request_dispatcher_config_unset(
                         &resolve_endpoint(args.server_url.as_deref()).await,
                         args.key,
+                        args.project,
                     )
                     .await,
                     args.json,
@@ -982,6 +966,9 @@ async fn agent_dispatch(command: AgentDispatchCommand) -> i32 {
                     if json {
                         println!("{}", serde_json::to_string(&config).unwrap());
                     } else {
+                        if let Some(applicability) = config.applicability {
+                            println!("{applicability}");
+                        }
                         for entry in config.entries {
                             println!(
                                 "{}\t{}\t{}",
@@ -1003,25 +990,6 @@ async fn agent_dispatch(command: AgentDispatchCommand) -> i32 {
             request_agent_dispatch_profile(&resolve_endpoint(args.server_url.as_deref()).await)
                 .await
                 .map(|value| serde_json::to_value(value).unwrap()),
-            args.json,
-        ),
-        AgentDispatchCommand::ProfileAcknowledgementTimeoutSet(args) => (
-            request_set_acknowledgement_timeout(
-                &resolve_endpoint(args.server_url.as_deref()).await,
-                args.timeout_millis,
-            )
-            .await
-            .map(|value| serde_json::to_value(value).unwrap()),
-            args.json,
-        ),
-        AgentDispatchCommand::Project(args) => (
-            request_agent_dispatch_project(
-                &resolve_endpoint(args.server_url.as_deref()).await,
-                args.project,
-                args.limit,
-            )
-            .await
-            .map(|value| serde_json::to_value(value).unwrap()),
             args.json,
         ),
         AgentDispatchCommand::Status(args) => (
@@ -1864,6 +1832,12 @@ mod tests {
             vec!["config", "set", "herdr-socket", "/tmp/herdr.sock"],
             vec!["config", "unset", "workspace"],
             vec!["config", "unset", "herdr-socket"],
+            vec!["config", "set", "project-limit", "3", "--project", "alpha"],
+            vec!["config", "get", "project-limit", "--project", "alpha"],
+            vec!["config", "unset", "project-limit", "--project", "alpha"],
+            vec!["config", "set", "acknowledgement-timeout-ms", "42000"],
+            vec!["config", "unset", "acknowledgement-timeout-ms"],
+            vec!["profile"],
         ] {
             assert!(Cli::try_parse_from([vec!["forge", "dispatcher"], args].concat()).is_ok());
         }
@@ -1872,6 +1846,14 @@ mod tests {
             vec!["config", "set", "herdr-socket"],
             vec!["endpoint"],
             vec!["workspace-select"],
+            vec!["project", "--project", "alpha", "--limit", "3"],
+            vec![
+                "profile-acknowledgement-timeout-set",
+                "--timeout-millis",
+                "42000",
+            ],
+            vec!["config", "set", "project-limit", "--project", "alpha"],
+            vec!["config", "set", "acknowledgement-timeout-ms"],
         ] {
             assert!(Cli::try_parse_from([vec!["forge", "dispatcher"], args].concat()).is_err());
         }

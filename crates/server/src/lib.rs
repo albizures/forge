@@ -58,9 +58,9 @@ use forge_rpc::{
     ProjectApiServer, ProjectHereRequest, ProjectHereResponse, RecordApiServer, RecordIdRequest,
     RecordResponse, RecordUpdateSubscriptionResponse, RegisterProjectRequest,
     RegisterProjectResponse, RelateRecordRequest, RemoveManagedWorktreeRequest,
-    RetireAgentAssignmentRequest, RevisionIdentity, SetAgentDispatchProjectRequest,
-    SetProjectSetupHookRequest, SetWorktreeRootRequest, StartAssignmentTaskRequest,
-    SystemApiServer, SystemStatusResponse, WorktreeApiServer, WorktreeRootResponse,
+    RetireAgentAssignmentRequest, RevisionIdentity, SetProjectSetupHookRequest,
+    SetWorktreeRootRequest, StartAssignmentTaskRequest, SystemApiServer, SystemStatusResponse,
+    WorktreeApiServer, WorktreeRootResponse,
 };
 use forge_store::SqliteProjectRepository;
 use fs2::FileExt;
@@ -966,7 +966,7 @@ impl AgentDispatchApiServer for Daemon {
         request: forge_rpc::DispatcherConfigGetRequest,
     ) -> RpcResult<forge_rpc::DispatcherConfigResponse> {
         self.application
-            .dispatcher_config_get(request.key.as_deref())
+            .dispatcher_config_get(request.key.as_deref(), request.project.as_deref())
             .map(Into::into)
             .map_err(rpc_error)
     }
@@ -976,9 +976,15 @@ impl AgentDispatchApiServer for Daemon {
         request: forge_rpc::DispatcherConfigSetRequest,
     ) -> RpcResult<forge_rpc::DispatcherConfigResponse> {
         self.application
-            .dispatcher_config_set(&request.key, &request.value)
-            .and_then(|()| self.application.dispatcher_config_get(Some(&request.key)))
-            .map(Into::into)
+            .dispatcher_config_set(&request.key, &request.value, request.project.as_deref())
+            .and_then(|()| self.application.dispatcher_config_get(Some(&request.key), request.project.as_deref()))
+            .map(|entries| {
+                let mut response: forge_rpc::DispatcherConfigResponse = entries.into();
+                if request.key == "acknowledgement-timeout-ms" {
+                    response.applicability = Some("New immutable Agent Profile revision applies to future Assignments only; existing Assignments retain their bound profiles.".into());
+                }
+                response
+            })
             .map_err(rpc_error)
     }
 
@@ -987,42 +993,21 @@ impl AgentDispatchApiServer for Daemon {
         request: forge_rpc::DispatcherConfigUnsetRequest,
     ) -> RpcResult<forge_rpc::DispatcherConfigResponse> {
         self.application
-            .dispatcher_config_unset(&request.key)
-            .and_then(|()| self.application.dispatcher_config_get(Some(&request.key)))
-            .map(Into::into)
+            .dispatcher_config_unset(&request.key, request.project.as_deref())
+            .and_then(|()| self.application.dispatcher_config_get(Some(&request.key), request.project.as_deref()))
+            .map(|entries| {
+                let mut response: forge_rpc::DispatcherConfigResponse = entries.into();
+                if request.key == "acknowledgement-timeout-ms" {
+                    response.applicability = Some("Default restored through a new immutable Agent Profile revision for future Assignments only; existing Assignments retain their bound profiles.".into());
+                }
+                response
+            })
             .map_err(rpc_error)
     }
 
     async fn profile(&self) -> RpcResult<AgentDispatchProfileResponse> {
         self.application
             .task_agent_profile()
-            .map(Into::into)
-            .map_err(rpc_error)
-    }
-
-    async fn profile_acknowledgement_timeout_set(
-        &self,
-        request: forge_rpc::SetAcknowledgementTimeoutRequest,
-    ) -> RpcResult<AgentDispatchProfileResponse> {
-        self.application
-            .configure_task_acknowledgement_timeout(request.timeout_millis)
-            .map(Into::into)
-            .map_err(rpc_error)
-    }
-
-    async fn project_set(
-        &self,
-        request: SetAgentDispatchProjectRequest,
-    ) -> RpcResult<AgentDispatchStatusResponse> {
-        self.application
-            .set_project_task_concurrency_limit(
-                &request.project_slug,
-                request.task_concurrency_limit,
-            )
-            .and_then(|()| {
-                self.application
-                    .agent_dispatch_status(Some(&request.project_slug))
-            })
             .map(Into::into)
             .map_err(rpc_error)
     }
@@ -2626,35 +2611,40 @@ mod tests {
             managed: None,
         })
         .unwrap();
-        app.dispatcher_config_set("herdr-socket", socket.to_str().unwrap())
+        app.dispatcher_config_set("herdr-socket", socket.to_str().unwrap(), None)
             .unwrap();
-        app.dispatcher_config_set("workspace", "selected").unwrap();
-        assert!(app.dispatcher_config_set("workspace", "missing").is_err());
+        app.dispatcher_config_set("workspace", "selected", None)
+            .unwrap();
+        assert!(
+            app.dispatcher_config_set("workspace", "missing", None)
+                .is_err()
+        );
         assert_eq!(store.dispatch_workspace().unwrap().unwrap().id, "selected");
         assert_eq!(
-            app.dispatcher_config_set("workspace", "replacement")
+            app.dispatcher_config_set("workspace", "replacement", None)
                 .unwrap_err()
                 .code,
             "dispatch-workspace-busy"
         );
         assert!(
-            app.dispatcher_config_set("herdr-socket", "/tmp/other.sock")
+            app.dispatcher_config_set("herdr-socket", "/tmp/other.sock", None)
                 .is_err()
         );
-        assert!(app.dispatcher_config_unset("workspace").is_err());
-        assert!(app.dispatcher_config_unset("herdr-socket").is_err());
+        assert!(app.dispatcher_config_unset("workspace", None).is_err());
+        assert!(app.dispatcher_config_unset("herdr-socket", None).is_err());
         assert_eq!(store.dispatch_workspace().unwrap().unwrap().id, "selected");
         assert_eq!(store.herdr_socket_path().unwrap(), Some(socket));
         provider.join().unwrap();
         store
             .close_agent_assignment("concurrent", AgentAssignmentClosureReason::Crashed)
             .unwrap();
-        app.dispatcher_config_unset("workspace").unwrap();
-        app.dispatcher_config_unset("herdr-socket").unwrap();
+        app.dispatcher_config_unset("workspace", None).unwrap();
+        app.dispatcher_config_unset("herdr-socket", None).unwrap();
         assert!(
-            app.dispatcher_config_get(None)
+            app.dispatcher_config_get(None, None)
                 .unwrap()
                 .iter()
+                .filter(|entry| entry.key != "acknowledgement-timeout-ms")
                 .all(|entry| entry.value.is_none() && entry.provenance == "default")
         );
         let grilling = store
