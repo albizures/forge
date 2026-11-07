@@ -1505,6 +1505,99 @@ mod tests {
     use super::{Cli, Command, RecordCommand, SpecCommand, TaskCommand, WayfinderCommand};
     use clap::Parser;
 
+    // These fixtures are parsed only: never invoke main, handlers, or a daemon.
+    fn skill_examples(document: &str) -> Result<Vec<(usize, Vec<String>)>, String> {
+        let mut in_shell = false;
+        let mut examples = Vec::new();
+        for (index, line) in document.lines().enumerate() {
+            let line = line.trim();
+            if line == "```sh" {
+                if in_shell {
+                    return Err(format!("nested shell fence at line {}", index + 1));
+                }
+                in_shell = true;
+                continue;
+            }
+            if line == "```" && in_shell {
+                in_shell = false;
+                continue;
+            }
+            if !in_shell || line.is_empty() {
+                continue;
+            }
+            let words = shlex::split(line)
+                .ok_or_else(|| format!("invalid shell quoting at line {}", index + 1))?;
+            let prefix = ["cargo", "run", "-p", "forge-cli", "--bin", "forge", "--"];
+            let args = if words
+                .iter()
+                .map(String::as_str)
+                .take(prefix.len())
+                .eq(prefix)
+            {
+                std::iter::once("forge".to_owned())
+                    .chain(words.into_iter().skip(prefix.len()))
+                    .collect()
+            } else if words.first().is_some_and(|word| word == "forge") {
+                words
+            } else {
+                return Err(format!("expected a Forge command at line {}", index + 1));
+            };
+            examples.push((index + 1, args));
+        }
+        if in_shell || examples.is_empty() {
+            return Err("unclosed shell fence or no examples".into());
+        }
+        Ok(examples)
+    }
+
+    #[test]
+    fn documented_skill_commands_parse_without_execution() {
+        use clap::CommandFactory;
+        let documents = [
+            ("SKILL.md", include_str!("../../../skills/forge/SKILL.md")),
+            (
+                "commands.md",
+                include_str!("../../../skills/forge/commands.md"),
+            ),
+        ];
+        let mut covered = std::collections::HashSet::new();
+        for (name, document) in documents {
+            for (line, args) in skill_examples(document).expect(name) {
+                match Cli::try_parse_from(&args) {
+                    Ok(_) => {
+                        covered.insert(args[1].clone());
+                    }
+                    Err(error) if error.kind() == clap::error::ErrorKind::DisplayHelp => {}
+                    Err(error) => panic!("{name}:{line}: {error}"),
+                }
+            }
+        }
+        for command in Cli::command().get_subcommands() {
+            assert!(
+                covered.contains(command.get_name()),
+                "missing skill example for {}",
+                command.get_name()
+            );
+        }
+    }
+
+    #[test]
+    fn documented_skill_extractor_preserves_arguments_and_rejects_bad_fixtures() {
+        let examples =
+            skill_examples("```sh\nforge record comment 42 --message 'two words'\n```").unwrap();
+        assert_eq!(examples[0].1.last().unwrap(), "two words");
+        for document in [
+            "no examples",
+            "```sh\nforge here",
+            "```sh\nforge record comment 42 --message 'unclosed\n```",
+            "```sh\nother command\n```",
+        ] {
+            assert!(skill_examples(document).is_err(), "{document}");
+        }
+        let examples = skill_examples("```sh\nforge nonexistent\n```").unwrap();
+        assert!(Cli::try_parse_from(&examples[0].1).is_err());
+    }
+
     #[test]
     fn build_info_is_shared_json_without_parsing_a_daemon_command() {
         let json = serde_json::to_value(forge_build_info::current()).unwrap();

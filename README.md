@@ -9,6 +9,9 @@ For Forgeup release and operational guidance, see
 Protocol is specified in
 [`crates/docs/management-protocol.md`](crates/docs/management-protocol.md).
 
+For agent workflows covering records, managed worktrees, dispatch, and assignment
+recovery, use [`skills/forge/SKILL.md`](skills/forge/SKILL.md).
+
 ## Prerequisites
 
 - Rust 1.98.0 or newer (the repository selects its toolchain with
@@ -320,7 +323,7 @@ This release does not provide automated Git evidence cleanup/repair, automatic p
 
 ## Safe agent launch and acknowledgement handoff (Spec #567)
 
-This handoff covers safe launch and acknowledgement, **not an operationally complete recovery feature**. The follow-on Spec #568, “Agent assignment investigation and safe recovery,” is still required for complete safe recovery and audited resolution of unknown resources.
+This section covers safe launch and acknowledgement. Spec #568 adds investigation, verified retirement and audited unknown-resource resolution; see the [Assignment recovery operator handoff](docs/assignment-recovery.md) for the ordered runbook, current verification evidence and release limitations. The historical #567 verification notes below do not represent the current recovery sign-off.
 
 Forge launches Pi through Herdr with a short bootstrap and the profile model, not the rendered Task instructions or capability secret in the launch arguments. The capability is delivered in an owner-only file. The bootstrap authenticates its acknowledgement, separately starts the Task with bounded retries, and only then retrieves the rendered instructions through an assignment-scoped authenticated read. Acknowledgement makes the Assignment Working; it is not itself a Task start. If start cannot be confirmed, the agent must not begin implementation.
 
@@ -357,7 +360,9 @@ Both flags are required; missing either leaves uncertainty untouched. The daemon
 
 Known resources, retirement-pending cleanup and any other unresolved resources still reserve capacity. Retry `assignment-retire` to finish verified known-resource cleanup; the assertion never bypasses it. Resolution does not clear the Dispatch Hold: explicitly review and use `resume <task-id>` separately when recovery is safe. This resolution RPC is on the same **trusted, unauthenticated operator surface**, not an Assignment Capability operation; agent credential-shaped payloads are rejected, but that validation is not client authentication. Keep daemon access restricted to trusted operators.
 
-### Verification and known limitations
+### Historical #567 verification and known limitations
+
+The provider tuple-mismatch finding below was subsequently addressed by #581 and reverified against live Herdr in #583. This does not establish cleanup of the older retained smoke artifacts. See the [current #568 handoff](docs/assignment-recovery.md#verification-handoff-and-remaining-limitations); default-parallel ownership-test and strict-lint limitations remain.
 
 - Task #569 verified bootstrap prompt execution and subsequent interactive use with Herdr 0.9.5 and Pi 1.5.0. Task #573 exercised the integrated flow with those versions and profile `gpt-5.6-terra`: the agent executed the bootstrap, acknowledged, started its Task and retrieved authenticated instructions from an isolated daemon.
 - Task #573 recorded `cargo test --workspace -- --test-threads=1` and `git diff --check` passing. A default-thread workspace test run failed two server ownership-lock/listener tests with `WouldBlock` and `AddrInUse`; an earlier default-thread run passed. Strict Clippy was reported failing on existing unrelated `forge-app` warnings in Tasks #570 and #571.

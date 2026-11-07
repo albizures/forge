@@ -21,6 +21,7 @@ axum = "0.8.8"
 forge-app = { path = "../app" }
 forge-server = { path = "../server" }
 forge-store = { path = "../store" }
+shlex = "2.0.1"
 
 [[bin]]
 name = "forge"
