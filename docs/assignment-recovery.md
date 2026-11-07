@@ -22,9 +22,9 @@ operational evidence as sensitive nonetheless.
 ## Investigate before changing state
 
 ```sh
-forge agent-dispatch assignment-info <assignment-id>
-forge agent-dispatch assignment-info <assignment-id> --json
-forge agent-dispatch status --project <slug>
+forge dispatcher assignment-info <assignment-id>
+forge dispatcher assignment-info <assignment-id> --json
+forge dispatcher status --project <slug>
 forge worktree info <task-id>
 forge worktree doctor
 ```
@@ -46,8 +46,8 @@ healthy agent just because its acknowledgement was late.
 ## Revoke and clean up known resources
 
 ```sh
-forge agent-dispatch assignment-retire <assignment-id> --json
-forge agent-dispatch assignment-info <assignment-id> --json
+forge dispatcher assignment-retire <assignment-id> --json
+forge dispatcher assignment-info <assignment-id> --json
 ```
 
 Retirement installs a Dispatch Hold and durable cleanup evidence, closes/revokes
@@ -74,9 +74,9 @@ unable to act. Remove unknown resources or otherwise make them safe. Only when
 both statements are actually true:
 
 ```sh
-forge agent-dispatch assignment-resolve-unknown <assignment-id> \
+forge dispatcher assignment-resolve-unknown <assignment-id> \
   --confirm-old-agent-cannot-act --confirm-unknown-resources-safe --json
-forge agent-dispatch assignment-info <assignment-id> --json
+forge dispatcher assignment-info <assignment-id> --json
 ```
 
 Both independent confirmations are mandatory; an open/unrevoked Assignment is
@@ -96,13 +96,13 @@ assuming the command's success means recovery is complete.
 After the previous Assignment is closed and all known and uncertain resources
 are safely resolved, review Task state, dependency readiness, Project capacity,
 workspace and worktree health. For an unassigned manual In Progress Task that
-should run again, explicitly use `forge agent-dispatch task-reopen <task-id>`;
+should run again, explicitly use `forge dispatcher task-reopen <task-id>`;
 retirement does not complete or automatically reopen the Task.
 
 ```sh
-forge agent-dispatch resume <task-id>
-forge agent-dispatch status --project <slug>
-forge agent-dispatch reconcile
+forge dispatcher resume <task-id>
+forge dispatcher status --project <slug>
+forge dispatcher reconcile
 ```
 
 `resume` only clears the operator-controlled hold. It does not resolve blockers,

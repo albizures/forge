@@ -87,9 +87,14 @@ enum Command {
         command: WorktreeCommand,
     },
     /// Configure and inspect daemon-owned Agent Dispatch.
-    AgentDispatch {
+    Dispatcher {
         #[command(subcommand)]
         command: AgentDispatchCommand,
+    },
+    /// Agent-side Assignment bootstrap and authenticated Task start.
+    Assignment {
+        #[command(subcommand)]
+        command: AssignmentCommand,
     },
 }
 #[derive(Debug, Subcommand)]
@@ -246,9 +251,14 @@ enum TaskCommand {
     UnderWayfinder(OpenTaskUnderWayfinderArgs),
 }
 #[derive(Debug, Subcommand)]
-enum AgentDispatchCommand {
+enum AssignmentCommand {
     /// Acknowledge and start the delivered Assignment before printing its instructions.
     Bootstrap,
+    /// Start the Task bound to an Assignment Capability.
+    TaskStart(AssignmentTaskStartArgs),
+}
+#[derive(Debug, Subcommand)]
+enum AgentDispatchCommand {
     Endpoint(AgentDispatchEndpointArgs),
     /// Select the existing workspace named by HERDR_WORKSPACE_ID.
     WorkspaceSelect(AgentDispatchRequestArgs),
@@ -260,8 +270,6 @@ enum AgentDispatchCommand {
     Reconcile(AgentDispatchRequestArgs),
     /// Dispatch one ready Grilling to an interactive Agent without a Managed Worktree.
     GrillingDispatch(DispatchGrillingArgs),
-    /// Start the Task bound to an Assignment Capability.
-    TaskStart(AssignmentTaskStartArgs),
     /// Return an unassigned In Progress Task to Open.
     TaskReopen(DispatchTaskArgs),
     /// Clear an operator-controlled Dispatch Hold.
@@ -707,7 +715,8 @@ async fn main() {
         Command::Config { command } => config(command).await,
         Command::Project { command } => project(command).await,
         Command::Worktree { command } => worktree(command).await,
-        Command::AgentDispatch { command } => agent_dispatch(command).await,
+        Command::Dispatcher { command } => agent_dispatch(command).await,
+        Command::Assignment { command } => assignment(command).await,
     };
     std::process::exit(exit_code);
 }
@@ -849,6 +858,44 @@ async fn worktree(command: WorktreeCommand) -> i32 {
     }
 }
 
+async fn assignment(command: AssignmentCommand) -> i32 {
+    let result = match command {
+        AssignmentCommand::Bootstrap => {
+            return match forge_cli::assignment_bootstrap().await {
+                Ok(instructions) => {
+                    println!("{instructions}");
+                    0
+                }
+                Err(error) => {
+                    eprintln!("forge assignment bootstrap: {error}");
+                    1
+                }
+            };
+        }
+        AssignmentCommand::TaskStart(args) => {
+            request_start_assignment_task(
+                &resolve_endpoint(args.server_url.as_deref()).await,
+                args.assignment_id,
+                args.capability_id,
+                args.correlation_id,
+                args.task_id,
+            )
+            .await
+        }
+    };
+    match result {
+        Ok(value) => {
+            // Task-start retains the same JSON rendering in both output modes.
+            println!("{}", serde_json::to_value(value).unwrap());
+            0
+        }
+        Err(error) => {
+            eprintln!("forge assignment task-start: {error}");
+            1
+        }
+    }
+}
+
 async fn agent_dispatch(command: AgentDispatchCommand) -> i32 {
     let (result, json) = match command {
         AgentDispatchCommand::AssignmentInfo(args) => {
@@ -868,19 +915,7 @@ async fn agent_dispatch(command: AgentDispatchCommand) -> i32 {
                     0
                 }
                 Err(error) => {
-                    eprintln!("forge agent-dispatch assignment-info: {error}");
-                    1
-                }
-            };
-        }
-        AgentDispatchCommand::Bootstrap => {
-            return match forge_cli::assignment_bootstrap().await {
-                Ok(instructions) => {
-                    println!("{instructions}");
-                    0
-                }
-                Err(error) => {
-                    eprintln!("forge agent-dispatch bootstrap: {error}");
+                    eprintln!("forge dispatcher assignment-info: {error}");
                     1
                 }
             };
@@ -955,18 +990,6 @@ async fn agent_dispatch(command: AgentDispatchCommand) -> i32 {
             .map(|value| serde_json::to_value(value).unwrap()),
             args.json,
         ),
-        AgentDispatchCommand::TaskStart(args) => (
-            request_start_assignment_task(
-                &resolve_endpoint(args.server_url.as_deref()).await,
-                args.assignment_id,
-                args.capability_id,
-                args.correlation_id,
-                args.task_id,
-            )
-            .await
-            .map(|value| serde_json::to_value(value).unwrap()),
-            args.json,
-        ),
         AgentDispatchCommand::TaskReopen(args) => (
             request_reopen_dispatch_task(
                 &resolve_endpoint(args.server_url.as_deref()).await,
@@ -1002,7 +1025,7 @@ async fn agent_dispatch(command: AgentDispatchCommand) -> i32 {
                     0
                 }
                 Err(error) => {
-                    eprintln!("forge agent-dispatch resume: {error}");
+                    eprintln!("forge dispatcher resume: {error}");
                     1
                 }
             };
@@ -1032,7 +1055,7 @@ async fn agent_dispatch(command: AgentDispatchCommand) -> i32 {
                     0
                 }
                 Err(error) => {
-                    eprintln!("forge agent-dispatch assignment-resolve-unknown: {error}");
+                    eprintln!("forge dispatcher assignment-resolve-unknown: {error}");
                     1
                 }
             };
@@ -1058,7 +1081,7 @@ async fn agent_dispatch(command: AgentDispatchCommand) -> i32 {
                 }
                 Err(error) => {
                     eprintln!(
-                        "forge agent-dispatch assignment-retire: {error}. Cleanup may be incomplete; inspect assignment-info before any replacement."
+                        "forge dispatcher assignment-retire: {error}. Cleanup may be incomplete; inspect assignment-info before any replacement."
                     );
                     1
                 }
@@ -1079,7 +1102,7 @@ async fn agent_dispatch(command: AgentDispatchCommand) -> i32 {
             0
         }
         Err(error) => {
-            eprintln!("forge agent-dispatch: {error}");
+            eprintln!("forge dispatcher: {error}");
             1
         }
     }
@@ -1548,6 +1571,58 @@ mod tests {
             return Err("unclosed shell fence or no examples".into());
         }
         Ok(examples)
+    }
+
+    #[test]
+    fn dispatcher_and_assignment_command_paths() {
+        use clap::CommandFactory;
+        for args in [
+            vec!["forge", "dispatcher", "status"],
+            vec!["forge", "dispatcher", "reconcile"],
+            vec!["forge", "dispatcher", "profile"],
+            vec!["forge", "dispatcher", "resume", "42"],
+            vec!["forge", "dispatcher", "task-reopen", "42"],
+            vec!["forge", "dispatcher", "assignment-info", "a"],
+            vec!["forge", "dispatcher", "assignment-retire", "a"],
+            vec!["forge", "dispatcher", "assignment-resolve-unknown", "a"],
+            vec!["forge", "assignment", "bootstrap"],
+            vec![
+                "forge",
+                "assignment",
+                "task-start",
+                "42",
+                "--assignment-id",
+                "a",
+                "--capability-id",
+                "c",
+                "--correlation-id",
+                "r",
+            ],
+        ] {
+            Cli::try_parse_from(&args).unwrap_or_else(|error| panic!("{args:?}: {error}"));
+        }
+        for args in [
+            vec!["forge", "agent-dispatch", "status"],
+            vec!["forge", "agent-dispatch", "bootstrap"],
+            vec!["forge", "agent-dispatch", "task-start", "42"],
+            vec!["forge", "dispatcher", "bootstrap"],
+            vec!["forge", "dispatcher", "task-start", "42"],
+            vec!["forge", "assignment", "task-start", "42"],
+        ] {
+            assert!(Cli::try_parse_from(&args).is_err(), "{args:?}");
+        }
+        let mut command = Cli::command();
+        let help = command.render_long_help().to_string();
+        assert!(help.contains("dispatcher"));
+        assert!(help.contains("assignment"));
+        assert!(!help.contains("agent-dispatch"));
+        let help = command
+            .find_subcommand_mut("dispatcher")
+            .unwrap()
+            .render_long_help()
+            .to_string();
+        assert!(!help.contains("bootstrap"));
+        assert!(!help.contains("task-start"));
     }
 
     #[test]

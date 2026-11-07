@@ -863,7 +863,7 @@ impl CapabilityDeliveryAdapter {
                 )
             })?;
         let mut delivered = context.clone();
-        delivered.bootstrap_prompt = Some("Run `\"$FORGE_ASSIGNMENT_FORGE_CLI\" agent-dispatch bootstrap` now. Only if it succeeds, follow the instructions it prints. If it fails, stop and wait; do not begin work.".into());
+        delivered.bootstrap_prompt = Some("Run `\"$FORGE_ASSIGNMENT_FORGE_CLI\" assignment bootstrap` now. Only if it succeeds, follow the instructions it prints. If it fails, stop and wait; do not begin work.".into());
         delivered.capability_delivery = Some(AssignmentCapabilityDelivery {
             endpoint: self.daemon_url.clone(),
             secret_file,

@@ -485,14 +485,14 @@ impl From<forge_app::AgentAssignmentInfo> for AgentAssignmentInfoResponse {
         let recovery_blockers = value.recovery_blockers();
         let assignment = value.assignment;
         let operations = vec![
-            format!("forge agent-dispatch assignment-info {}", assignment.id),
+            format!("forge dispatcher assignment-info {}", assignment.id),
             format!("forge worktree info {}", assignment.record_id),
-            format!("forge agent-dispatch assignment-retire {}", assignment.id),
+            format!("forge dispatcher assignment-retire {}", assignment.id),
             format!(
-                "forge agent-dispatch assignment-resolve-unknown {} --confirm-old-agent-cannot-act --confirm-unknown-resources-safe",
+                "forge dispatcher assignment-resolve-unknown {} --confirm-old-agent-cannot-act --confirm-unknown-resources-safe",
                 assignment.id
             ),
-            format!("forge agent-dispatch resume {}", assignment.record_id),
+            format!("forge dispatcher resume {}", assignment.record_id),
         ];
         Self {
             id: assignment.id,

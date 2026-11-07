@@ -12,10 +12,10 @@ and a Worktree Root, then select that workspace:
 
 ```sh
 forge config set worktreeRoot "$HOME/.forge/worktrees"
-forge agent-dispatch endpoint --socket-path /absolute/path/to/herdr.sock
-forge agent-dispatch endpoint
-HERDR_WORKSPACE_ID="your-workspace-id" forge agent-dispatch workspace-select
-forge agent-dispatch reconcile
+forge dispatcher endpoint --socket-path /absolute/path/to/herdr.sock
+forge dispatcher endpoint
+HERDR_WORKSPACE_ID="your-workspace-id" forge dispatcher workspace-select
+forge dispatcher reconcile
 ```
 
 Examples use POSIX shell environment syntax. Relative socket paths are rejected.
@@ -42,10 +42,10 @@ Each Project defaults to capacity **1**. Set an override from 1 through 1024, or
 omit `--limit` to restore the default:
 
 ```sh
-forge agent-dispatch project --project alpha --limit 2
-forge agent-dispatch status --project alpha
-forge agent-dispatch project --project alpha
-forge agent-dispatch profile
+forge dispatcher project --project alpha --limit 2
+forge dispatcher status --project alpha
+forge dispatcher project --project alpha
+forge dispatcher profile
 ```
 
 The profile identifies provider, agent kind, model, and prompt configuration.
@@ -69,8 +69,8 @@ The acknowledgement timeout defaults to **300000 ms**, separately from startup
 timeout. Inspect the profile or create a timeout revision explicitly:
 
 ```sh
-forge agent-dispatch profile
-forge agent-dispatch profile-acknowledgement-timeout-set --timeout-millis 300000
+forge dispatcher profile
+forge dispatcher profile-acknowledgement-timeout-set --timeout-millis 300000
 ```
 
 A missed deadline or interrupted uncertain launch retains the Assignment,
@@ -104,8 +104,8 @@ not directly mutate Assignments.
 Start with retained evidence:
 
 ```sh
-forge agent-dispatch assignment-info <assignment-id>
-forge agent-dispatch status --project <slug>
+forge dispatcher assignment-info <assignment-id>
+forge dispatcher status --project <slug>
 forge worktree info <task-id>
 forge worktree doctor
 ```

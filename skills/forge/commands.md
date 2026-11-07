@@ -72,16 +72,16 @@ Hooks execute shell commands in newly created Managed Worktrees. A failed hook r
 ## Dispatch administration
 
 ```sh
-forge agent-dispatch endpoint
-forge agent-dispatch endpoint --socket-path /absolute/path/to/herdr.sock
-forge agent-dispatch workspace-select
-forge agent-dispatch profile
-forge agent-dispatch profile-acknowledgement-timeout-set --timeout-millis 300000
-forge agent-dispatch project --project alpha --limit 2
-forge agent-dispatch project --project alpha
-forge agent-dispatch status --project alpha --json
-forge agent-dispatch reconcile --json
-forge agent-dispatch grilling-dispatch 47 --json
+forge dispatcher endpoint
+forge dispatcher endpoint --socket-path /absolute/path/to/herdr.sock
+forge dispatcher workspace-select
+forge dispatcher profile
+forge dispatcher profile-acknowledgement-timeout-set --timeout-millis 300000
+forge dispatcher project --project alpha --limit 2
+forge dispatcher project --project alpha
+forge dispatcher status --project alpha --json
+forge dispatcher reconcile --json
+forge dispatcher grilling-dispatch 47 --json
 ```
 
 `workspace-select` uses the operator's `HERDR_WORKSPACE_ID` to select an existing Herdr Workspace. The endpoint is Herdr's absolute Unix socket path, not the Forge RPC endpoint. The Project command sets a dispatch limit (1–1024); omitting `--limit` clears its override, so it is not a read operation. Inspect with `status` instead. Profile timeout changes create a new Task Agent Profile revision.
@@ -91,15 +91,15 @@ Reconciliation can provision agents and worktrees; it is not a read-only health 
 ## Assignment bootstrap and recovery
 
 ```sh
-forge agent-dispatch bootstrap
-forge agent-dispatch assignment-info assignment-example --json
-forge agent-dispatch assignment-retire assignment-example --json
-forge agent-dispatch assignment-resolve-unknown assignment-example --confirm-old-agent-cannot-act --confirm-unknown-resources-safe --json
-forge agent-dispatch resume 44 --json
-forge agent-dispatch task-reopen 44 --json
+forge assignment bootstrap
+forge dispatcher assignment-info assignment-example --json
+forge dispatcher assignment-retire assignment-example --json
+forge dispatcher assignment-resolve-unknown assignment-example --confirm-old-agent-cannot-act --confirm-unknown-resources-safe --json
+forge dispatcher resume 44 --json
+forge dispatcher task-reopen 44 --json
 ```
 
-Agents use `bootstrap` with their delivered environment, not operator recovery commands. The lower-level `agent-dispatch task-start` requires assignment/capability/correlation arguments; use bootstrap rather than manually copying credentials to command arguments.
+Agents use `bootstrap` with their delivered environment, not operator recovery commands. The lower-level `assignment task-start` requires assignment/capability/correlation arguments; use bootstrap rather than manually copying credentials to command arguments.
 
 Operators: inspect `assignment-info` before recovery; it reads persisted evidence without contacting the provider. Retirement revokes Assignment access and attempts verified provider cleanup. Unresolved resources can continue reserving capacity after retirement, and the Dispatch Hold remains separate. Investigate before retrying or replacing an agent.
 

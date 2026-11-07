@@ -48,7 +48,7 @@ Use the Record Body for Markdown work content. Creation supports `--body -` for 
 When launched with Forge Assignment Capability Delivery, bootstrap before beginning work:
 
 ```sh
-forge agent-dispatch bootstrap
+forge assignment bootstrap
 ```
 
 Bootstrap reads `FORGE_ASSIGNMENT_ID`, `FORGE_ASSIGNMENT_DAEMON_URL`, and the owner-only file named by `FORGE_ASSIGNMENT_CAPABILITY_SECRET_FILE`. It acknowledges the Assignment, confirms the bound Task has started, and only then prints instructions. If any step fails or is uncertain, stop implementation and report the diagnostic. Keep the capability secret out of prompts, comments, shell arguments, and logs.

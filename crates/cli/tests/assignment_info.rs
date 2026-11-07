@@ -97,13 +97,7 @@ async fn assignment_info_cli_renders_human_and_json_diagnostics() {
     });
     let run = |id: &str, json: bool| {
         let mut command = Command::new(env!("CARGO_BIN_EXE_forge"));
-        command.args([
-            "agent-dispatch",
-            "assignment-info",
-            id,
-            "--server-url",
-            &url,
-        ]);
+        command.args(["dispatcher", "assignment-info", id, "--server-url", &url]);
         if json {
             command.arg("--json");
         }
@@ -157,7 +151,7 @@ async fn assignment_info_cli_renders_human_and_json_diagnostics() {
     }
     for json in [false, true] {
         let mut command = Command::new(env!("CARGO_BIN_EXE_forge"));
-        command.args(["agent-dispatch", "resume", "1", "--server-url", &url]);
+        command.args(["dispatcher", "resume", "1", "--server-url", &url]);
         if json {
             command.arg("--json");
         }

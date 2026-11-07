@@ -153,7 +153,7 @@ A Forge-owned, durable association between one Record and an externally managed 
 _Avoid_: record agent metadata, agent link
 
 **Dispatcher**:
-Forge’s scheduling and dispatch application service that selects eligible Tasks, creates their Managed Worktrees when needed, and provisions their Agent Assignments.
+Forge’s scheduling and dispatch application service that automatically selects eligible Tasks and accepts explicit dispatch requests for eligible Tasks and Grillings. It provisions their Agent Assignments, with Managed Worktrees required for Tasks; Grillings require explicit dispatch because they involve human participation.
 _Avoid_: agent dispatcher, Herdr dispatcher
 
 **Assignment Capability**:

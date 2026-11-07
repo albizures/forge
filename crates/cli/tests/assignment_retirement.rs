@@ -152,13 +152,7 @@ async fn retirement_cli_retries_failed_cleanup_and_reports_remaining_uncertainty
         });
         let run = |operation: &str, json: bool| {
             let mut command = Command::new(env!("CARGO_BIN_EXE_forge"));
-            command.args([
-                "agent-dispatch",
-                operation,
-                "retire-me",
-                "--server-url",
-                &url,
-            ]);
+            command.args(["dispatcher", operation, "retire-me", "--server-url", &url]);
             if json {
                 command.arg("--json");
             }
@@ -200,7 +194,7 @@ async fn retirement_cli_retries_failed_cleanup_and_reports_remaining_uncertainty
             let resolve = |flags: &[&str]| {
                 Command::new(env!("CARGO_BIN_EXE_forge"))
                     .args([
-                        "agent-dispatch",
+                        "dispatcher",
                         "assignment-resolve-unknown",
                         "retire-me",
                         "--server-url",
