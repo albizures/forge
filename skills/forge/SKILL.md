@@ -23,12 +23,13 @@ Ordinary commands resolve the Active Forge Revision through Forgeup and verify t
 forge here
 ```
 
-Confirm the intended Project before creating project-scoped work. If it cannot be determined, ask the human to select or register it. Creation commands require explicit Project or parent arguments where applicable; `here` does not supply implicit creation scope. Use a scope-free generic Record or standalone Task only when work is deliberately outside a Project.
+Select the Forge Workspace explicitly with `--workspace` or infer it from canonical client cwd. Outside registered roots, use an explicit Workspace or qualified Project selector; bare Record IDs do not select a Workspace. Confirm the intended Project before creating project-scoped work. If it cannot be determined, ask the human to select or register it. Creation commands require explicit Project or parent arguments where applicable; `here` does not supply implicit creation scope. Use a scope-free generic Record or standalone Task only when work is deliberately outside a Project.
 
 - Spec: exactly one Project; may parent Tasks.
-- Wayfinder: one or more Projects; may parent Tasks and Grillings.
-- Task: leaf work, standalone or under a Spec/Wayfinder. A Wayfinder Task selects exactly one of its Projects; a Spec Task inherits its Project.
-- Grilling: human-in-the-loop leaf child of a Wayfinder; inherits its Project Scope unless a non-empty subset is selected.
+- Initiative: Workspace-owned coordination Record with zero or more Projects; Specs and Wayfinders may attach to it without becoming children.
+- Wayfinder: zero or more Projects in one Workspace; may parent Tasks and Grillings.
+- Task: leaf work, standalone or under a Spec/Wayfinder. A Project-scoped Wayfinder Task selects exactly one of its Projects; a Projectless Wayfinder Task remains Projectless; a Spec Task inherits its Project.
+- Grilling: human-in-the-loop leaf child of a Wayfinder; inherits its Project Scope unless a non-empty subset is selected. A Projectless parent supplies empty scope.
 - Generic Record: explicit Project Scope, including deliberately empty scope.
 
 Use the Record Body for Markdown work content. Creation supports `--body -` for stdin; titles are not separate flags. Task Kind is optional `research`, `prototype`, or `review`; ordinary implementation Tasks need no kind. Scope, typed parent membership, and Task Kind are fixed when opened.
@@ -41,7 +42,7 @@ Use the Record Body for Markdown work content. Creation supports `--body -` for 
 4. Record substantive outcomes with `record comment --message`. Comments are immutable; revise a non-Done Record's canonical content with `record edit --body`.
 5. Complete In Progress work with `record done`. Completion Resolution is optional free text, not a required slug. Complete a parent only after its children are Done.
 
-`record list --status open` is an inventory, not a readiness guarantee: dependencies and dispatch constraints still apply. This CLI does not expose the old `ready`, `next`, Initiative, or store-management commands. If a required capability is absent, report that gap rather than inventing a command or editing persistence directly.
+`record list --status open` is a Workspace-local inventory, not a readiness guarantee. Use `ready` for executable workflow state, adding `--planning`, `--include-hitl`, or `--blocked` as needed. Workflow readiness is separate from provider dispatchability. Cross-Workspace scope, membership, dependency and provenance changes are rejected. This CLI does not expose `next` or store-management commands. If a required capability is absent, report that gap rather than inventing a command or editing persistence directly.
 
 ## Assigned agents
 

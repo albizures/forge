@@ -392,6 +392,8 @@ async fn workspace_project_registration_selection_and_configuration_use_the_real
             &spec_id,
             "--body",
             "Linked checkout",
+            "--workspace",
+            "one",
             "--json",
         ],
         &fixture.0,

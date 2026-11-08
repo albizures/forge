@@ -61,6 +61,13 @@ enum Command {
         #[command(subcommand)]
         command: RecordCommand,
     },
+    /// List workflow-ready work in the selected Workspace (no dispatch setup required).
+    Ready(ReadyRecordsArgs),
+    /// Manage Workspace-owned Initiatives.
+    Initiative {
+        #[command(subcommand)]
+        command: InitiativeCommand,
+    },
     /// Manage Specs.
     Spec {
         #[command(subcommand)]
@@ -237,13 +244,32 @@ enum AddCommand {
     },
 }
 #[derive(Debug, Subcommand)]
+enum InitiativeCommand {
+    /// Open an Initiative; Project scope may be empty or contain several Projects.
+    Open(OpenWayfinderArgs),
+}
+#[derive(Args, Debug)]
+#[allow(clippy::struct_excessive_bools)] // Independent workflow and output switches, not state.
+struct ReadyRecordsArgs {
+    #[arg(long)]
+    planning: bool,
+    #[arg(long)]
+    include_hitl: bool,
+    #[arg(long)]
+    blocked: bool,
+    #[arg(long, value_name = "URL")]
+    server_url: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Debug, Subcommand)]
 enum SpecCommand {
     /// Open a Spec with exactly one Project.
     Open(OpenSpecArgs),
 }
 #[derive(Debug, Subcommand)]
 enum WayfinderCommand {
-    /// Open a Wayfinder with one or more Projects.
+    /// Open a Wayfinder with zero or more Projects in the selected Workspace.
     Open(OpenWayfinderArgs),
 }
 #[derive(Debug, Subcommand)]
@@ -422,9 +448,9 @@ enum RecordCommand {
     Start(RecordIdArgs),
     /// Complete an in-progress Record.
     Done(DoneRecordArgs),
-    /// Link Records with `--kind child-of`, `--kind depends-on`, or `--kind generated-by`.
+    /// Link Records with child-of, depends-on, generated-by, or initiative membership.
     Relate(RelationshipArgs),
-    /// Remove a Record Relationship with `--kind child-of`, `--kind depends-on`, or `--kind generated-by`.
+    /// Remove a child-of, depends-on, generated-by, or initiative Relationship.
     Unrelate(RelationshipArgs),
     /// Add an immutable Comment to a Record.
     Comment(AddRecordCommentArgs),
@@ -444,7 +470,7 @@ struct ListRecordsArgs {
     #[arg(long, value_parser = ["open", "in-progress", "done"])]
     status: Option<String>,
     /// Restrict results to a Record Type.
-    #[arg(long = "type", value_parser = ["generic", "spec", "task", "wayfinder", "grilling"])]
+    #[arg(long = "type", value_parser = ["generic", "spec", "task", "wayfinder", "grilling", "initiative"])]
     record_type: Option<String>,
     /// Restrict results to a Task Kind.
     #[arg(long = "kind", value_parser = ["research", "prototype", "review"])]
@@ -504,7 +530,7 @@ struct DoneRecordArgs {
 #[derive(Args, Debug)]
 struct RelationshipArgs {
     from_id: u64,
-    #[arg(long, value_parser = ["child-of", "depends-on", "generated-by"])]
+    #[arg(long, value_parser = ["child-of", "depends-on", "generated-by", "initiative"])]
     kind: String,
     #[arg(long = "to")]
     to_id: u64,
@@ -535,7 +561,7 @@ struct OpenWayfinderArgs {
     #[arg(long)]
     body: String,
     /// A Project in the Wayfinder's immutable Project Scope.
-    #[arg(long = "project", value_name = "SLUG", required = true)]
+    #[arg(long = "project", value_name = "SLUG")]
     project: Vec<String>,
     /// Record that generated this Record. Repeat for multiple generators.
     #[arg(long = "generated-by", value_name = "ID")]
@@ -676,81 +702,26 @@ async fn run(cli: Cli) -> i32 {
             project,
             json,
         } => here(server_url.as_deref(), cli.workspace, project, json).await,
-        Command::Record { command } => match command {
-            RecordCommand::Open(args) => open_record(args).await,
-            RecordCommand::Show(args) => record_result(
-                "show",
-                args.json,
-                request_show_record(&resolve_endpoint(args.server_url.as_deref()).await, args.id)
-                    .await,
-            ),
-            RecordCommand::List(args) => list_records(args).await,
-            RecordCommand::Edit(args) => record_result(
-                "edit",
-                args.json,
-                request_edit_record(
-                    &resolve_endpoint(args.server_url.as_deref()).await,
-                    args.id,
-                    &args.body,
-                )
-                .await,
-            ),
-            RecordCommand::Start(args) => record_result(
-                "start",
-                args.json,
-                request_start_record(&resolve_endpoint(args.server_url.as_deref()).await, args.id)
-                    .await,
-            ),
-            RecordCommand::Done(args) => record_result(
-                "done",
-                args.json,
-                request_done_record(
-                    &resolve_endpoint(args.server_url.as_deref()).await,
-                    args.id,
-                    args.resolution,
-                )
-                .await,
-            ),
-            RecordCommand::Relate(args) => record_result(
-                "relate",
-                args.json,
-                request_relate_record(
-                    &resolve_endpoint(args.server_url.as_deref()).await,
-                    args.from_id,
-                    args.to_id,
-                    args.kind,
-                )
-                .await,
-            ),
-            RecordCommand::Unrelate(args) => record_result(
-                "unrelate",
-                args.json,
-                request_unrelate_record(
-                    &resolve_endpoint(args.server_url.as_deref()).await,
-                    args.from_id,
-                    args.to_id,
-                    args.kind,
-                )
-                .await,
-            ),
-            RecordCommand::Comment(args) => record_comment(args).await,
-            RecordCommand::CommentDelete(args) => delete_record_comment(args).await,
-            RecordCommand::Comments(args) => record_comments(args).await,
-            RecordCommand::Updates(args) => record_updates(args).await,
-        },
+        Command::Record { command } => run_record(command, cli.workspace).await,
+        Command::Ready(args) => ready_records(args, cli.workspace).await,
+        Command::Initiative {
+            command: InitiativeCommand::Open(args),
+        } => open_initiative(args, cli.workspace).await,
         Command::Spec { command } => match command {
-            SpecCommand::Open(args) => open_spec(args).await,
+            SpecCommand::Open(args) => open_spec(args, cli.workspace).await,
         },
         Command::Wayfinder { command } => match command {
-            WayfinderCommand::Open(args) => open_wayfinder(args).await,
+            WayfinderCommand::Open(args) => open_wayfinder(args, cli.workspace).await,
         },
         Command::Grilling { command } => match command {
-            GrillingCommand::Open(args) => open_grilling_under_wayfinder(args).await,
+            GrillingCommand::Open(args) => open_grilling_under_wayfinder(args, cli.workspace).await,
         },
         Command::Task { command } => match command {
-            TaskCommand::Open(args) => open_task(args).await,
-            TaskCommand::UnderSpec(args) => open_task_under_spec(args).await,
-            TaskCommand::UnderWayfinder(args) => open_task_under_wayfinder(args).await,
+            TaskCommand::Open(args) => open_task(args, cli.workspace).await,
+            TaskCommand::UnderSpec(args) => open_task_under_spec(args, cli.workspace).await,
+            TaskCommand::UnderWayfinder(args) => {
+                open_task_under_wayfinder(args, cli.workspace).await
+            }
         },
         Command::Config { command } => config(command).await,
         Command::Project { command } => project(command).await,
@@ -759,6 +730,77 @@ async fn run(cli: Cli) -> i32 {
         Command::Assignment { command } => assignment(command).await,
     }
 }
+async fn run_record(command: RecordCommand, workspace: Option<String>) -> i32 {
+    match command {
+        RecordCommand::Open(args) => open_record(args, workspace).await,
+        RecordCommand::List(args) => list_records(args, workspace).await,
+        RecordCommand::Show(args) => record_result(
+            "show",
+            args.json,
+            request_show_record(
+                selected_record_endpoint(args.server_url.as_deref(), workspace.as_deref()).await,
+                args.id,
+            )
+            .await,
+        ),
+        RecordCommand::Edit(args) => record_result(
+            "edit",
+            args.json,
+            request_edit_record(
+                selected_record_endpoint(args.server_url.as_deref(), workspace.as_deref()).await,
+                args.id,
+                &args.body,
+            )
+            .await,
+        ),
+        RecordCommand::Start(args) => record_result(
+            "start",
+            args.json,
+            request_start_record(
+                selected_record_endpoint(args.server_url.as_deref(), workspace.as_deref()).await,
+                args.id,
+            )
+            .await,
+        ),
+        RecordCommand::Done(args) => record_result(
+            "done",
+            args.json,
+            request_done_record(
+                selected_record_endpoint(args.server_url.as_deref(), workspace.as_deref()).await,
+                args.id,
+                args.resolution,
+            )
+            .await,
+        ),
+        RecordCommand::Relate(args) => record_result(
+            "relate",
+            args.json,
+            request_relate_record(
+                selected_record_endpoint(args.server_url.as_deref(), workspace.as_deref()).await,
+                args.from_id,
+                args.to_id,
+                args.kind,
+            )
+            .await,
+        ),
+        RecordCommand::Unrelate(args) => record_result(
+            "unrelate",
+            args.json,
+            request_unrelate_record(
+                selected_record_endpoint(args.server_url.as_deref(), workspace.as_deref()).await,
+                args.from_id,
+                args.to_id,
+                args.kind,
+            )
+            .await,
+        ),
+        RecordCommand::Comment(args) => record_comment(args, workspace).await,
+        RecordCommand::CommentDelete(args) => delete_record_comment(args, workspace).await,
+        RecordCommand::Comments(args) => record_comments(args, workspace).await,
+        RecordCommand::Updates(args) => record_updates(args, workspace).await,
+    }
+}
+
 async fn config(command: ConfigCommand) -> i32 {
     let (key, root, set, url, json) = match command {
         ConfigCommand::Get(args) => (args.key, None, false, args.server_url, args.json),
@@ -1291,10 +1333,77 @@ async fn add_project(
         }
     }
 }
-async fn list_records(args: ListRecordsArgs) -> i32 {
+async fn ready_records(args: ReadyRecordsArgs, workspace: Option<String>) -> i32 {
+    match forge_cli::request_ready_records(
+        selected_record_endpoint(args.server_url.as_deref(), workspace.as_deref()).await,
+        args.planning,
+        args.include_hitl,
+        args.blocked,
+    )
+    .await
+    {
+        Ok(response) => {
+            if args.json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&response).expect("readiness serializes")
+                );
+            } else {
+                for item in response.records {
+                    println!(
+                        "{} {} ({}){}",
+                        item.record.record_type,
+                        item.record.id,
+                        item.record.status,
+                        if item.blocked_by.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" blocked by {:?}", item.blocked_by)
+                        }
+                    );
+                }
+            }
+            0
+        }
+        Err(error) => {
+            eprintln!("forge ready: {error}");
+            1
+        }
+    }
+}
+
+async fn open_initiative(args: OpenWayfinderArgs, workspace: Option<String>) -> i32 {
+    let body = match read_body(args.body, "initiative open") {
+        Ok(body) => body,
+        Err(code) => return code,
+    };
+    open_typed_result(
+        "initiative open",
+        args.json,
+        forge_cli::request_open_initiative(
+            selected_record_endpoint(args.server_url.as_deref(), workspace.as_deref()).await,
+            &body,
+            args.project,
+            args.generated_by_ids,
+        )
+        .await,
+    )
+}
+
+async fn selected_record_endpoint(
+    flag: Option<&str>,
+    workspace: Option<&str>,
+) -> forge_cli::RecordEndpoint {
+    forge_cli::RecordEndpoint {
+        url: resolve_endpoint(flag).await,
+        workspace: workspace.map(str::to_owned),
+    }
+}
+
+async fn list_records(args: ListRecordsArgs, workspace: Option<String>) -> i32 {
     let status = args.status.map(|status| status.replace('-', "_"));
     match request_list_records(
-        &resolve_endpoint(args.server_url.as_deref()).await,
+        selected_record_endpoint(args.server_url.as_deref(), workspace.as_deref()).await,
         args.project,
         status,
         args.record_type,
@@ -1320,9 +1429,9 @@ async fn list_records(args: ListRecordsArgs) -> i32 {
     }
 }
 
-async fn record_comment(args: AddRecordCommentArgs) -> i32 {
+async fn record_comment(args: AddRecordCommentArgs, workspace: Option<String>) -> i32 {
     match request_add_record_comment(
-        &resolve_endpoint(args.server_url.as_deref()).await,
+        selected_record_endpoint(args.server_url.as_deref(), workspace.as_deref()).await,
         args.id,
         &args.message,
         args.author,
@@ -1346,9 +1455,9 @@ async fn record_comment(args: AddRecordCommentArgs) -> i32 {
         }
     }
 }
-async fn delete_record_comment(args: DeleteRecordCommentArgs) -> i32 {
+async fn delete_record_comment(args: DeleteRecordCommentArgs, workspace: Option<String>) -> i32 {
     match request_delete_record_comment(
-        &resolve_endpoint(args.server_url.as_deref()).await,
+        selected_record_endpoint(args.server_url.as_deref(), workspace.as_deref()).await,
         args.record_id,
         args.comment_id,
     )
@@ -1380,9 +1489,12 @@ fn normalize_comment_delete(arguments: impl IntoIterator<Item = String>) -> Vec<
     }
     arguments
 }
-async fn record_comments(args: RecordIdArgs) -> i32 {
-    match request_record_comments(&resolve_endpoint(args.server_url.as_deref()).await, args.id)
-        .await
+async fn record_comments(args: RecordIdArgs, workspace: Option<String>) -> i32 {
+    match request_record_comments(
+        selected_record_endpoint(args.server_url.as_deref(), workspace.as_deref()).await,
+        args.id,
+    )
+    .await
     {
         Ok(comments) => {
             println!(
@@ -1402,8 +1514,12 @@ async fn record_comments(args: RecordIdArgs) -> i32 {
         }
     }
 }
-async fn record_updates(args: RecordIdArgs) -> i32 {
-    match request_record_updates(&resolve_endpoint(args.server_url.as_deref()).await, args.id).await
+async fn record_updates(args: RecordIdArgs, workspace: Option<String>) -> i32 {
+    match request_record_updates(
+        selected_record_endpoint(args.server_url.as_deref(), workspace.as_deref()).await,
+        args.id,
+    )
+    .await
     {
         Ok(updates) => {
             println!(
@@ -1462,13 +1578,13 @@ fn read_body(body: String, operation: &str) -> Result<String, i32> {
     Ok(contents)
 }
 
-async fn open_record(args: OpenRecordArgs) -> i32 {
+async fn open_record(args: OpenRecordArgs, workspace: Option<String>) -> i32 {
     let body = match read_body(args.body, "record open") {
         Ok(body) => body,
         Err(exit_code) => return exit_code,
     };
     match request_open_record(
-        &resolve_endpoint(args.server_url.as_deref()).await,
+        selected_record_endpoint(args.server_url.as_deref(), workspace.as_deref()).await,
         &body,
         args.project,
         args.generated_by_ids,
@@ -1493,7 +1609,7 @@ async fn open_record(args: OpenRecordArgs) -> i32 {
     }
 }
 
-async fn open_spec(args: OpenSpecArgs) -> i32 {
+async fn open_spec(args: OpenSpecArgs, workspace: Option<String>) -> i32 {
     let body = match read_body(args.body, "spec open") {
         Ok(body) => body,
         Err(exit_code) => return exit_code,
@@ -1502,7 +1618,7 @@ async fn open_spec(args: OpenSpecArgs) -> i32 {
         "spec open",
         args.json,
         request_open_spec(
-            &resolve_endpoint(args.server_url.as_deref()).await,
+            selected_record_endpoint(args.server_url.as_deref(), workspace.as_deref()).await,
             &body,
             args.project,
             args.generated_by_ids,
@@ -1511,7 +1627,7 @@ async fn open_spec(args: OpenSpecArgs) -> i32 {
     )
 }
 
-async fn open_wayfinder(args: OpenWayfinderArgs) -> i32 {
+async fn open_wayfinder(args: OpenWayfinderArgs, workspace: Option<String>) -> i32 {
     let body = match read_body(args.body, "wayfinder open") {
         Ok(body) => body,
         Err(exit_code) => return exit_code,
@@ -1520,7 +1636,7 @@ async fn open_wayfinder(args: OpenWayfinderArgs) -> i32 {
         "wayfinder open",
         args.json,
         request_open_wayfinder(
-            &resolve_endpoint(args.server_url.as_deref()).await,
+            selected_record_endpoint(args.server_url.as_deref(), workspace.as_deref()).await,
             &body,
             args.project,
             args.generated_by_ids,
@@ -1529,7 +1645,7 @@ async fn open_wayfinder(args: OpenWayfinderArgs) -> i32 {
     )
 }
 
-async fn open_task(args: OpenTaskArgs) -> i32 {
+async fn open_task(args: OpenTaskArgs, workspace: Option<String>) -> i32 {
     let body = match read_body(args.body, "task open") {
         Ok(body) => body,
         Err(exit_code) => return exit_code,
@@ -1538,7 +1654,7 @@ async fn open_task(args: OpenTaskArgs) -> i32 {
         "task open",
         args.json,
         request_open_task(
-            &resolve_endpoint(args.server_url.as_deref()).await,
+            selected_record_endpoint(args.server_url.as_deref(), workspace.as_deref()).await,
             &body,
             args.project,
             args.task_kind,
@@ -1548,7 +1664,7 @@ async fn open_task(args: OpenTaskArgs) -> i32 {
     )
 }
 
-async fn open_task_under_spec(args: OpenTaskUnderSpecArgs) -> i32 {
+async fn open_task_under_spec(args: OpenTaskUnderSpecArgs, workspace: Option<String>) -> i32 {
     let body = match read_body(args.body, "task under-spec") {
         Ok(body) => body,
         Err(exit_code) => return exit_code,
@@ -1557,7 +1673,7 @@ async fn open_task_under_spec(args: OpenTaskUnderSpecArgs) -> i32 {
         "task under-spec",
         args.json,
         request_open_task_under_spec(
-            &resolve_endpoint(args.server_url.as_deref()).await,
+            selected_record_endpoint(args.server_url.as_deref(), workspace.as_deref()).await,
             &body,
             args.spec,
             args.task_kind,
@@ -1567,7 +1683,10 @@ async fn open_task_under_spec(args: OpenTaskUnderSpecArgs) -> i32 {
     )
 }
 
-async fn open_grilling_under_wayfinder(args: OpenGrillingUnderWayfinderArgs) -> i32 {
+async fn open_grilling_under_wayfinder(
+    args: OpenGrillingUnderWayfinderArgs,
+    workspace: Option<String>,
+) -> i32 {
     let body = match read_body(args.body, "grilling open") {
         Ok(body) => body,
         Err(exit_code) => return exit_code,
@@ -1576,7 +1695,7 @@ async fn open_grilling_under_wayfinder(args: OpenGrillingUnderWayfinderArgs) -> 
         "grilling open",
         args.json,
         request_open_grilling_under_wayfinder(
-            &resolve_endpoint(args.server_url.as_deref()).await,
+            selected_record_endpoint(args.server_url.as_deref(), workspace.as_deref()).await,
             &body,
             args.wayfinder,
             args.project,
@@ -1586,7 +1705,10 @@ async fn open_grilling_under_wayfinder(args: OpenGrillingUnderWayfinderArgs) -> 
     )
 }
 
-async fn open_task_under_wayfinder(args: OpenTaskUnderWayfinderArgs) -> i32 {
+async fn open_task_under_wayfinder(
+    args: OpenTaskUnderWayfinderArgs,
+    workspace: Option<String>,
+) -> i32 {
     let body = match read_body(args.body, "task under-wayfinder") {
         Ok(body) => body,
         Err(exit_code) => return exit_code,
@@ -1595,7 +1717,7 @@ async fn open_task_under_wayfinder(args: OpenTaskUnderWayfinderArgs) -> i32 {
         "task under-wayfinder",
         args.json,
         request_open_task_under_wayfinder(
-            &resolve_endpoint(args.server_url.as_deref()).await,
+            selected_record_endpoint(args.server_url.as_deref(), workspace.as_deref()).await,
             &body,
             args.wayfinder,
             args.project,

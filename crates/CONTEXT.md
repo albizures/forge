@@ -121,11 +121,11 @@ An immutable, human-referenceable identifier for a Project, unique within its Fo
 _Avoid_: project name
 
 **Record**:
-Forge’s generic primary entity for representing work across multiple workflows. Its common capabilities form the foundation from which more specific Record types, such as Specs, Tasks, and Epics, impose additional constraints.
+Forge’s generic primary entity for representing work across multiple workflows, belonging to exactly one Forge Workspace. Its common capabilities form the foundation from which more specific Record types impose additional constraints.
 _Avoid_: v1 entity
 
 **Record Type**:
-The immutable kind selected when a Record opens. Generic Record, Spec, Task, Wayfinder, and Grilling are the Record Types.
+The immutable kind selected when a Record opens. Generic Record, Spec, Task, Wayfinder, Grilling, and Initiative are the Record Types.
 _Avoid_: category, label
 
 **Record Identifier**:
@@ -137,19 +137,31 @@ A Record type that defines planned work for exactly one Project and may parent T
 _Avoid_: specification, issue
 
 **Task**:
-A leaf Record type that represents a unit of work with exactly one Project Scope when opened under a Wayfinder, selected from that Wayfinder's Project Scope. It may also be opened under one Spec, from which it receives its Project Scope, or opened without a parent. Its membership and scope are immutable after opening. A branch may be recorded as its work output but is not Forge lifecycle or relationship state.
+A leaf Record type that represents a unit of work with exactly one Project when opened under a Project-scoped Wayfinder, selected from that Wayfinder's Project Scope; a Projectless Wayfinder's Task remains Projectless. It may also be opened under one Spec, from which it receives its Project Scope, or opened without a parent. Its membership and scope are immutable after opening. A branch may be recorded as its work output but is not Forge lifecycle or relationship state.
 _Avoid_: subtask, to-do
 
 **Task Kind**:
 An optional immutable semantic classification of a Task: Research, Prototype, or Review. It does not alter the Task lifecycle, dependency behavior, or branch-output handling.
 _Avoid_: task type, profile
 
+**Initiative**:
+A Workspace-owned coordination Record with zero or more Projects in its Project Scope. Specs and Wayfinders may belong to one Initiative without becoming its children.
+_Avoid_: parent Spec, daemon-wide initiative
+
+**Initiative Membership**:
+A non-hierarchical Record Relationship attaching a Spec or Wayfinder to one Initiative in the same Forge Workspace.
+_Avoid_: parentage, dependency
+
+**Workflow Readiness**:
+The eligibility of an Open Task, explicitly included Grilling, or planning Record to proceed once its direct prerequisites are Done. It is independent of dispatch configuration and provider availability.
+_Avoid_: dispatchability, provider readiness
+
 **Wayfinder**:
-A planning-map Record type with one or more Projects in its Project Scope. It may parent Tasks and Grillings.
+A planning-map Record type with zero or more Projects in its Project Scope within one Forge Workspace. It may parent Tasks and Grillings.
 _Avoid_: plan, container
 
 **Grilling**:
-A human-in-the-loop decision Record type that is a leaf child of one Wayfinder. Its immutable Project Scope contains one or more Projects selected from its parent Wayfinder's Project Scope. It is included in the executable frontier only when a caller explicitly includes human-in-the-loop work.
+A human-in-the-loop decision Record type that is a leaf child of one Wayfinder. Its immutable Project Scope selects one or more Projects from a Project-scoped parent, or remains empty under a Projectless Wayfinder. It is included in the executable frontier only when a caller explicitly includes human-in-the-loop work.
 _Avoid_: question, approval
 
 **Agent Assignment**:
@@ -260,7 +272,7 @@ A directed Record Relationship from a Blocked Record to a Prerequisite Record. A
 _Avoid_: blocker, prerequisite link
 
 **Generated-By Relationship**:
-A directed, many-to-many, cross-Project-Scope provenance Record Relationship from a generated Record to the Record whose work or output caused its creation; any Record Types may participate. It does not imply parenthood, dependency, or lifecycle control.
+A directed, many-to-many provenance Record Relationship across Project Scopes within one Forge Workspace, from a generated Record to the Record whose work or output caused its creation; any Record Types may participate. It does not imply parenthood, dependency, or lifecycle control.
 _Avoid_: generator link, derived from
 
 **Blocked Record**:
@@ -276,7 +288,7 @@ An optional immutable, non-blank free-text explanation recorded when a Record be
 _Avoid_: outcome code
 
 **Parent Record**:
-A Record whose work includes the work represented by one or more Child Records through the parent/child Relationship kind. It may become Done only when all of its Child Records are Done at that time. A Spec shares its Project Scope with every Child Record; a Wayfinder may have a multi-Project Scope while its Task and Grilling children select non-empty subsets of that scope.
+A Record whose work includes the work represented by one or more Child Records through the parent/child Relationship kind. It may become Done only when all of its Child Records are Done at that time. A Spec shares its Project Scope with every Child Record; a Project-scoped Wayfinder's children select eligible non-empty subsets, while a Projectless Wayfinder's children inherit empty scope.
 _Avoid_: container, owner
 
 **Child Record**:
@@ -284,5 +296,5 @@ A Record that represents work forming part of a Parent Record’s work and may i
 _Avoid_: subtask
 
 **Project Scope**:
-The distinct zero or more Projects to which a Record’s work relates, explicitly selected and fixed when the Record is opened. An empty Project Scope identifies work outside any Project context; a non-empty scope tells agents which Projects may supply relevant context or receive changes; related Parent and Child Records have identical scopes.
+The distinct zero or more Projects to which a Record’s work relates, explicitly selected and fixed when the Record is opened. An empty Project Scope identifies work outside any Project context but still within one Forge Workspace; a non-empty scope tells agents which Projects may supply relevant context or receive changes; Spec children inherit their parent's scope, while Wayfinder children inherit or select an eligible subset.
 _Avoid_: project ownership, project assignment

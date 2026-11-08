@@ -16,8 +16,8 @@ pub(super) fn initialize(connection: &Connection) -> Result<(), RegistrationErro
     BEGIN SELECT RAISE(ABORT, 'Workspace ID and root are immutable'); END;",
         )
         .map_err(storage_error)?;
-    // Projects require ownership now; record/Assignment ownership is populated by
-    // their follow-on slices. RESTRICT also protects retained closed Assignments.
+    // Projects and Records require ownership. Assignment ownership is populated by
+    // its follow-on slice. RESTRICT also protects retained closed Assignments.
     for table in ["projects", "records", "agent_assignments"] {
         let mut statement = connection
             .prepare(&format!("PRAGMA table_info({table})"))

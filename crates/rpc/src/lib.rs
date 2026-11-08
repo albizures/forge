@@ -2,6 +2,8 @@
 
 mod workspaces;
 pub use workspaces::*;
+mod record_selection;
+pub use record_selection::*;
 
 use forge_app::{
     AgentDispatchProjectStatus, AgentDispatchReconcileResult, AgentDispatchStatus, AgentProfile,
@@ -187,51 +189,106 @@ pub trait WorktreeApi {
 
 #[rpc(client, server, namespace = "record")]
 pub trait RecordApi {
+    #[method(name = "openInitiative")]
+    async fn open_initiative(
+        &self,
+        request: SelectedRecordRequest<OpenRecordRequest>,
+    ) -> RpcResult<RecordResponse>;
+    #[method(name = "ready")]
+    async fn ready(
+        &self,
+        request: SelectedRecordRequest<ReadyRecordsRequest>,
+    ) -> RpcResult<ReadyRecordsResponse>;
     #[method(name = "open")]
-    async fn open(&self, request: OpenRecordRequest) -> RpcResult<RecordResponse>;
+    async fn open(
+        &self,
+        request: SelectedRecordRequest<OpenRecordRequest>,
+    ) -> RpcResult<RecordResponse>;
     #[method(name = "openSpec")]
-    async fn open_spec(&self, request: OpenSpecRequest) -> RpcResult<RecordResponse>;
+    async fn open_spec(
+        &self,
+        request: SelectedRecordRequest<OpenSpecRequest>,
+    ) -> RpcResult<RecordResponse>;
     #[method(name = "openTask")]
-    async fn open_task(&self, request: OpenTaskRequest) -> RpcResult<RecordResponse>;
+    async fn open_task(
+        &self,
+        request: SelectedRecordRequest<OpenTaskRequest>,
+    ) -> RpcResult<RecordResponse>;
     #[method(name = "openWayfinder")]
-    async fn open_wayfinder(&self, request: OpenWayfinderRequest) -> RpcResult<RecordResponse>;
+    async fn open_wayfinder(
+        &self,
+        request: SelectedRecordRequest<OpenWayfinderRequest>,
+    ) -> RpcResult<RecordResponse>;
     #[method(name = "openTaskUnderSpec")]
     async fn open_task_under_spec(
         &self,
-        request: OpenTaskUnderSpecRequest,
+        request: SelectedRecordRequest<OpenTaskUnderSpecRequest>,
     ) -> RpcResult<RecordResponse>;
     #[method(name = "openTaskUnderWayfinder")]
     async fn open_task_under_wayfinder(
         &self,
-        request: OpenTaskUnderWayfinderRequest,
+        request: SelectedRecordRequest<OpenTaskUnderWayfinderRequest>,
     ) -> RpcResult<RecordResponse>;
     #[method(name = "openGrillingUnderWayfinder")]
     async fn open_grilling_under_wayfinder(
         &self,
-        request: OpenGrillingUnderWayfinderRequest,
+        request: SelectedRecordRequest<OpenGrillingUnderWayfinderRequest>,
     ) -> RpcResult<RecordResponse>;
     #[method(name = "show")]
-    async fn show(&self, request: RecordIdRequest) -> RpcResult<RecordResponse>;
+    async fn show(
+        &self,
+        request: SelectedRecordRequest<RecordIdRequest>,
+    ) -> RpcResult<RecordResponse>;
     #[method(name = "list")]
-    async fn list(&self, request: ListRecordsRequest) -> RpcResult<ListRecordsResponse>;
+    async fn list(
+        &self,
+        request: SelectedRecordRequest<ListRecordsRequest>,
+    ) -> RpcResult<ListRecordsResponse>;
     #[method(name = "edit")]
-    async fn edit(&self, request: EditRecordRequest) -> RpcResult<RecordResponse>;
+    async fn edit(
+        &self,
+        request: SelectedRecordRequest<EditRecordRequest>,
+    ) -> RpcResult<RecordResponse>;
     #[method(name = "start")]
-    async fn start(&self, request: RecordIdRequest) -> RpcResult<RecordResponse>;
+    async fn start(
+        &self,
+        request: SelectedRecordRequest<RecordIdRequest>,
+    ) -> RpcResult<RecordResponse>;
     #[method(name = "done")]
-    async fn done(&self, request: DoneRecordRequest) -> RpcResult<RecordResponse>;
+    async fn done(
+        &self,
+        request: SelectedRecordRequest<DoneRecordRequest>,
+    ) -> RpcResult<RecordResponse>;
     #[method(name = "relate")]
-    async fn relate(&self, request: RelateRecordRequest) -> RpcResult<RecordResponse>;
+    async fn relate(
+        &self,
+        request: SelectedRecordRequest<RelateRecordRequest>,
+    ) -> RpcResult<RecordResponse>;
     #[method(name = "unrelate")]
-    async fn unrelate(&self, request: RelateRecordRequest) -> RpcResult<RecordResponse>;
+    async fn unrelate(
+        &self,
+        request: SelectedRecordRequest<RelateRecordRequest>,
+    ) -> RpcResult<RecordResponse>;
     #[method(name = "updates")]
-    async fn updates(&self, request: RecordIdRequest) -> RpcResult<ListRecordUpdatesResponse>;
+    async fn updates(
+        &self,
+        request: SelectedRecordRequest<RecordIdRequest>,
+    ) -> RpcResult<ListRecordUpdatesResponse>;
     #[method(name = "comment")]
-    async fn comment(&self, request: AddRecordCommentRequest) -> RpcResult<RecordCommentResponse>;
+    async fn comment(
+        &self,
+        request: SelectedRecordRequest<AddRecordCommentRequest>,
+    ) -> RpcResult<RecordCommentResponse>;
     #[method(name = "comments")]
-    async fn comments(&self, request: RecordIdRequest) -> RpcResult<ListRecordCommentsResponse>;
+    async fn comments(
+        &self,
+        request: SelectedRecordRequest<RecordIdRequest>,
+    ) -> RpcResult<ListRecordCommentsResponse>;
     #[method(name = "commentDelete")]
-    async fn comment_delete(&self, request: DeleteRecordCommentRequest) -> RpcResult<()>;
+    async fn comment_delete(
+        &self,
+        request: SelectedRecordRequest<DeleteRecordCommentRequest>,
+    ) -> RpcResult<()>;
 }
 
 /// Immutable daemon build facts reported through the management protocol.
@@ -804,7 +861,7 @@ pub struct OpenSpecRequest {
     pub project_slug: String,
     pub generated_by_ids: Vec<u64>,
 }
-/// Opens a Wayfinder with a non-empty Project Scope.
+/// Opens a Wayfinder with zero or more Projects in its selected Workspace.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct OpenWayfinderRequest {
     pub body: String,
@@ -852,6 +909,23 @@ pub struct ProjectScopeRequest {
 pub struct RecordIdRequest {
     pub id: u64,
 }
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
+pub struct ReadyRecordsRequest {
+    pub planning: bool,
+    pub include_hitl: bool,
+    pub blocked: bool,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ReadyRecordResponse {
+    pub record: RecordResponse,
+    pub blocked_by: Vec<u64>,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ReadyRecordsResponse {
+    pub records: Vec<ReadyRecordResponse>,
+}
+
 /// Optional Record discovery filters. Both filters combine with AND.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ListRecordsRequest {
@@ -977,6 +1051,7 @@ fn record_relationship_kind_name(kind: RecordRelationshipKind) -> String {
         RecordRelationshipKind::ParentChild => "parent-child",
         RecordRelationshipKind::DependsOn => "depends-on",
         RecordRelationshipKind::GeneratedBy => "generated-by",
+        RecordRelationshipKind::Initiative => "initiative",
     }
     .into()
 }
@@ -997,6 +1072,7 @@ fn record_type_name(record_type: forge_app::RecordType) -> String {
         forge_app::RecordType::Task => "task",
         forge_app::RecordType::Wayfinder => "wayfinder",
         forge_app::RecordType::Grilling => "grilling",
+        forge_app::RecordType::Initiative => "initiative",
     }
     .into()
 }
@@ -1035,6 +1111,7 @@ pub struct RecordRelationshipResponse {
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RecordResponse {
+    pub workspace_id: String,
     pub id: u64,
     pub record_type: String,
     pub task_kind: Option<String>,
@@ -1047,6 +1124,7 @@ pub struct RecordResponse {
 impl From<Record> for RecordResponse {
     fn from(record: Record) -> Self {
         Self {
+            workspace_id: record.workspace_id,
             id: record.id,
             record_type: record_type_name(record.record_type),
             task_kind: record.task_kind.map(task_kind_name),
@@ -1064,6 +1142,7 @@ impl From<Record> for RecordResponse {
                         RecordRelationshipKind::ParentChild => "parent-child",
                         RecordRelationshipKind::DependsOn => "depends-on",
                         RecordRelationshipKind::GeneratedBy => "generated-by",
+                        RecordRelationshipKind::Initiative => "initiative",
                     }
                     .into(),
                     from_id: relationship.from_id,

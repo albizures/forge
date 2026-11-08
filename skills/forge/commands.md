@@ -30,7 +30,7 @@ forge workspace remove personal
 
 A Forge Workspace owns a fixed canonical filesystem root; it is distinct from a Herdr terminal container. IDs and roots are immutable, display names are editable, and equal or overlapping roots (including symlink aliases) are rejected. `show` and `here` prefer `--workspace`, otherwise infer from canonical cwd; outside all registered roots, supply an explicit selector. There is no saved default. Listing and registration work without selection. Removal requires an empty registration and leaves files and provider containers untouched.
 
-Project registration, selection and Project-owned configuration use Workspace ownership. Record-wide Workspace confinement, the fixed Workspace-rooted Managed Worktree layout, and Workspace-owned dispatch configuration are separate follow-on slices; registration alone does not establish those contracts.
+Projects and every Record belong to one Forge Workspace. Record commands select it by `--workspace`, a qualified Project selector, or canonical client cwd. Bare Record IDs do not select a Workspace; outside registered roots, pass `--workspace`. Mixed-Workspace Project scopes, parentage, Initiative membership, dependencies and provenance are rejected atomically. Lists without a Project filter include only the selected Workspace. The fixed Workspace-rooted Managed Worktree layout and Workspace-owned dispatch configuration remain follow-on slices.
 
 ## Open work
 
@@ -38,7 +38,9 @@ Project registration, selection and Project-owned configuration use Workspace ow
 forge record open --body 'Work outside a Project' --no-projects
 forge record open --body 'Cross-project work' --project alpha --project beta
 forge spec open --body 'Deliver the capability' --project alpha
+forge initiative open --body 'Coordinate delivery' --workspace personal --project alpha --project beta
 forge wayfinder open --body 'Explore the route' --project alpha --project beta
+forge wayfinder open --body 'Workspace-wide discovery' --workspace personal
 forge task open --body 'Deliberately scope-free investigation' --kind research
 forge task open --body 'Standalone implementation' --project alpha
 forge task under-spec --body - --spec 42
@@ -46,7 +48,7 @@ forge task under-wayfinder --body 'Compare alternatives' --wayfinder 43 --projec
 forge grilling open --body 'Resolve the scope decision' --wayfinder 43 --project alpha --project beta
 ```
 
-Use `--body -` to read creation content from stdin. Supply stdin yourself; running that example alone waits for input. Repeat `--generated-by` for multiple generators. A multi-Project Wayfinder Task needs an explicit selected Project; a single-Project Wayfinder can supply it. A Grilling can omit Project flags to inherit its Wayfinder's entire scope.
+Use `--body -` to read creation content from stdin. Supply stdin yourself; running that example alone waits for input. Repeat `--generated-by` for multiple generators. A multi-Project Wayfinder Task needs an explicit selected Project; a single-Project Wayfinder can supply it. A Grilling can omit Project flags to inherit its Wayfinder's entire scope. Initiatives and Wayfinders may have empty Project scope within a selected Workspace; children of a Projectless Wayfinder also have empty scope. Empty Project scope never means daemon-wide ownership.
 
 ## Inspect, edit, relate, complete
 
@@ -60,14 +62,25 @@ forge record relate 44 --kind depends-on --to 45
 forge record unrelate 44 --kind depends-on --to 45
 forge record relate 44 --kind generated-by --to 41
 forge record relate 46 --kind child-of --to 42
+forge record relate 42 --kind initiative --to 40
+forge record unrelate 42 --kind initiative --to 40
 forge record start 44
 forge record comment 44 --message 'Verified the outcome and recorded evidence.' --author operator
 forge record done 44 --resolution 'Implemented and verified'
 ```
 
-For `child-of`, the first ID is the child; use typed creation commands for typed parent membership. Relationship handlers enforce Record Type constraints; generic relationship syntax is not a way to reparent typed work. Dependencies must be satisfied before starting; an agent-owned In Progress Task cannot gain a new dependency. Generated-By Relationships may cross Project Scopes and imply neither ordering nor lifecycle control.
+For `child-of`, the first ID is the child; use typed creation commands for typed parent membership. Relationship handlers enforce Record Type constraints; generic relationship syntax is not a way to reparent typed work. Dependencies must be satisfied before starting; an agent-owned In Progress Task cannot gain a new dependency. Generated-By Relationships may cross Project Scopes within one Workspace and imply neither ordering nor lifecycle control. A Spec or Wayfinder may attach to one Initiative in the same Workspace; membership is independent of parentage and can be detached explicitly.
 
-List status values are `open`, `in-progress`, and `done`; Record Types are `generic`, `spec`, `task`, `wayfinder`, and `grilling`. A list without a Project filter is not automatically restricted by the current folder. `record updates` is the Forge-authored Update Log, not editable history. Body edits and comment messages are inline strings, unlike creation's stdin support; do not assume `--body -` works for edit or that file flags exist.
+List status values are `open`, `in-progress`, and `done`; Record Types are `generic`, `spec`, `task`, `wayfinder`, `grilling`, and `initiative`. A list without a Project filter remains confined to the selected Workspace, not the containing Project. `record updates` is the Forge-authored Update Log, not editable history. Body edits and comment messages are inline strings, unlike creation's stdin support; do not assume `--body -` works for edit or that file flags exist.
+
+## Workflow readiness and planning
+
+```sh
+forge ready --workspace personal --json
+forge ready --workspace personal --planning --include-hitl --blocked --json
+```
+
+`ready` lists Open Tasks whose direct prerequisites are Done. `--planning` also includes Specs, Wayfinders and Initiatives; `--include-hitl` includes Grillings. `--blocked` retains candidates with unfinished prerequisites in `blocked_by`. Results remain Workspace-local. This is workflow readiness, independent of provider availability or dispatch setup; it does not promise that an Agent can be provisioned.
 
 ## Managed Worktrees and hooks
 

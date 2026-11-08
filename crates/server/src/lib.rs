@@ -1374,8 +1374,64 @@ impl AgentSubscriptionApiServer for Daemon {
 
 #[async_trait]
 impl RecordApiServer for Daemon {
-    async fn open(&self, request: OpenRecordRequest) -> RpcResult<RecordResponse> {
-        self.application
+    async fn open_initiative(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<OpenRecordRequest>,
+    ) -> RpcResult<RecordResponse> {
+        let forge_rpc::SelectedRecordRequest {
+            selection,
+            record: mut request,
+        } = request;
+        let application =
+            self.record_application(&selection, &mut request.project_scope.project_slugs)?;
+        application
+            .open_typed_record_with_generators(
+                forge_app::RecordType::Initiative,
+                &request.body,
+                request.project_scope.project_slugs,
+                None,
+                request.generated_by_ids,
+            )
+            .map(|record| {
+                self.delivery.publish(&self.application);
+                record.into()
+            })
+            .map_err(rpc_error)
+    }
+
+    async fn ready(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<forge_rpc::ReadyRecordsRequest>,
+    ) -> RpcResult<forge_rpc::ReadyRecordsResponse> {
+        let forge_rpc::SelectedRecordRequest {
+            selection,
+            record: request,
+        } = request;
+        self.record_application(&selection, &mut [])?
+            .ready_records(request.planning, request.include_hitl, request.blocked)
+            .map(|records| forge_rpc::ReadyRecordsResponse {
+                records: records
+                    .into_iter()
+                    .map(|item| forge_rpc::ReadyRecordResponse {
+                        record: item.record.into(),
+                        blocked_by: item.blocked_by,
+                    })
+                    .collect(),
+            })
+            .map_err(rpc_error)
+    }
+
+    async fn open(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<OpenRecordRequest>,
+    ) -> RpcResult<RecordResponse> {
+        let forge_rpc::SelectedRecordRequest {
+            selection,
+            record: mut request,
+        } = request;
+        let application =
+            self.record_application(&selection, &mut request.project_scope.project_slugs)?;
+        application
             .open_record_with_generators(
                 &request.body,
                 request.project_scope.project_slugs,
@@ -1388,8 +1444,17 @@ impl RecordApiServer for Daemon {
             .map_err(rpc_error)
     }
 
-    async fn open_spec(&self, request: OpenSpecRequest) -> RpcResult<RecordResponse> {
-        self.application
+    async fn open_spec(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<OpenSpecRequest>,
+    ) -> RpcResult<RecordResponse> {
+        let forge_rpc::SelectedRecordRequest {
+            selection,
+            record: mut request,
+        } = request;
+        let application =
+            self.record_application(&selection, std::slice::from_mut(&mut request.project_slug))?;
+        application
             .open_typed_record_with_generators(
                 forge_app::RecordType::Spec,
                 &request.body,
@@ -1404,8 +1469,17 @@ impl RecordApiServer for Daemon {
             .map_err(rpc_error)
     }
 
-    async fn open_task(&self, request: OpenTaskRequest) -> RpcResult<RecordResponse> {
-        self.application
+    async fn open_task(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<OpenTaskRequest>,
+    ) -> RpcResult<RecordResponse> {
+        let forge_rpc::SelectedRecordRequest {
+            selection,
+            record: mut request,
+        } = request;
+        let application =
+            self.record_application(&selection, request.project_slug.as_mut_slice())?;
+        application
             .open_typed_record_with_generators(
                 forge_app::RecordType::Task,
                 &request.body,
@@ -1420,8 +1494,17 @@ impl RecordApiServer for Daemon {
             .map_err(rpc_error)
     }
 
-    async fn open_wayfinder(&self, request: OpenWayfinderRequest) -> RpcResult<RecordResponse> {
-        self.application
+    async fn open_wayfinder(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<OpenWayfinderRequest>,
+    ) -> RpcResult<RecordResponse> {
+        let forge_rpc::SelectedRecordRequest {
+            selection,
+            record: mut request,
+        } = request;
+        let application =
+            self.record_application(&selection, &mut request.project_scope.project_slugs)?;
+        application
             .open_typed_record_with_generators(
                 forge_app::RecordType::Wayfinder,
                 &request.body,
@@ -1438,9 +1521,14 @@ impl RecordApiServer for Daemon {
 
     async fn open_task_under_spec(
         &self,
-        request: OpenTaskUnderSpecRequest,
+        request: forge_rpc::SelectedRecordRequest<OpenTaskUnderSpecRequest>,
     ) -> RpcResult<RecordResponse> {
-        self.application
+        let forge_rpc::SelectedRecordRequest {
+            selection,
+            record: request,
+        } = request;
+        let application = self.record_application(&selection, &mut [])?;
+        application
             .open_task_under_spec(
                 &request.body,
                 request.spec_id,
@@ -1456,9 +1544,15 @@ impl RecordApiServer for Daemon {
 
     async fn open_task_under_wayfinder(
         &self,
-        request: OpenTaskUnderWayfinderRequest,
+        request: forge_rpc::SelectedRecordRequest<OpenTaskUnderWayfinderRequest>,
     ) -> RpcResult<RecordResponse> {
-        self.application
+        let forge_rpc::SelectedRecordRequest {
+            selection,
+            record: mut request,
+        } = request;
+        let application =
+            self.record_application(&selection, request.project_slug.as_mut_slice())?;
+        application
             .open_task_under_wayfinder(
                 &request.body,
                 request.wayfinder_id,
@@ -1475,9 +1569,18 @@ impl RecordApiServer for Daemon {
 
     async fn open_grilling_under_wayfinder(
         &self,
-        request: OpenGrillingUnderWayfinderRequest,
+        request: forge_rpc::SelectedRecordRequest<OpenGrillingUnderWayfinderRequest>,
     ) -> RpcResult<RecordResponse> {
-        self.application
+        let forge_rpc::SelectedRecordRequest {
+            selection,
+            record: mut request,
+        } = request;
+        let projects = request
+            .project_scope
+            .as_mut()
+            .map_or(&mut [][..], |scope| scope.project_slugs.as_mut_slice());
+        let application = self.record_application(&selection, projects)?;
+        application
             .open_grilling_under_wayfinder(
                 &request.body,
                 request.wayfinder_id,
@@ -1491,14 +1594,30 @@ impl RecordApiServer for Daemon {
             .map_err(rpc_error)
     }
 
-    async fn show(&self, request: RecordIdRequest) -> RpcResult<RecordResponse> {
-        self.application
+    async fn show(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<RecordIdRequest>,
+    ) -> RpcResult<RecordResponse> {
+        let forge_rpc::SelectedRecordRequest {
+            selection,
+            record: request,
+        } = request;
+        self.record_application(&selection, &mut [])?
             .show_record(request.id)
             .map(Into::into)
             .map_err(rpc_error)
     }
 
-    async fn list(&self, request: ListRecordsRequest) -> RpcResult<ListRecordsResponse> {
+    async fn list(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<ListRecordsRequest>,
+    ) -> RpcResult<ListRecordsResponse> {
+        let forge_rpc::SelectedRecordRequest {
+            selection,
+            record: mut request,
+        } = request;
+        let application =
+            self.record_application(&selection, request.project_slug.as_mut_slice())?;
         let status = request.status.as_deref().map(record_status).transpose()?;
         let record_type = request
             .record_type
@@ -1506,7 +1625,7 @@ impl RecordApiServer for Daemon {
             .map(record_type)
             .transpose()?;
         let task_kind = request.task_kind.as_deref().map(task_kind).transpose()?;
-        self.application
+        application
             .list_records(request.project_slug, status, record_type, task_kind)
             .map(|records| ListRecordsResponse {
                 records: records.into_iter().map(Into::into).collect(),
@@ -1514,8 +1633,15 @@ impl RecordApiServer for Daemon {
             .map_err(rpc_error)
     }
 
-    async fn edit(&self, request: EditRecordRequest) -> RpcResult<RecordResponse> {
-        self.application
+    async fn edit(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<EditRecordRequest>,
+    ) -> RpcResult<RecordResponse> {
+        let forge_rpc::SelectedRecordRequest {
+            selection,
+            record: request,
+        } = request;
+        self.record_application(&selection, &mut [])?
             .edit_record(request.id, &request.body)
             .map(|record| {
                 self.delivery.publish(&self.application);
@@ -1524,8 +1650,15 @@ impl RecordApiServer for Daemon {
             .map_err(rpc_error)
     }
 
-    async fn start(&self, request: RecordIdRequest) -> RpcResult<RecordResponse> {
-        self.application
+    async fn start(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<RecordIdRequest>,
+    ) -> RpcResult<RecordResponse> {
+        let forge_rpc::SelectedRecordRequest {
+            selection,
+            record: request,
+        } = request;
+        self.record_application(&selection, &mut [])?
             .start_record(request.id)
             .map(|record| {
                 self.delivery.publish(&self.application);
@@ -1534,8 +1667,15 @@ impl RecordApiServer for Daemon {
             .map_err(rpc_error)
     }
 
-    async fn done(&self, request: DoneRecordRequest) -> RpcResult<RecordResponse> {
-        self.application
+    async fn done(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<DoneRecordRequest>,
+    ) -> RpcResult<RecordResponse> {
+        let forge_rpc::SelectedRecordRequest {
+            selection,
+            record: request,
+        } = request;
+        self.record_application(&selection, &mut [])?
             .done_record(request.id, request.completion_resolution.as_deref())
             .map(|record| {
                 self.delivery.publish(&self.application);
@@ -1544,9 +1684,16 @@ impl RecordApiServer for Daemon {
             .map_err(rpc_error)
     }
 
-    async fn relate(&self, request: RelateRecordRequest) -> RpcResult<RecordResponse> {
+    async fn relate(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<RelateRecordRequest>,
+    ) -> RpcResult<RecordResponse> {
+        let forge_rpc::SelectedRecordRequest {
+            selection,
+            record: request,
+        } = request;
         let kind = relationship_kind(&request.kind)?;
-        self.application
+        self.record_application(&selection, &mut [])?
             .relate_records(request.from_id, request.to_id, kind)
             .map(|record| {
                 self.delivery.publish(&self.application);
@@ -1555,9 +1702,16 @@ impl RecordApiServer for Daemon {
             .map_err(rpc_error)
     }
 
-    async fn unrelate(&self, request: RelateRecordRequest) -> RpcResult<RecordResponse> {
+    async fn unrelate(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<RelateRecordRequest>,
+    ) -> RpcResult<RecordResponse> {
+        let forge_rpc::SelectedRecordRequest {
+            selection,
+            record: request,
+        } = request;
         let kind = relationship_kind(&request.kind)?;
-        self.application
+        self.record_application(&selection, &mut [])?
             .unrelate_records(request.from_id, request.to_id, kind)
             .map(|record| {
                 self.delivery.publish(&self.application);
@@ -1566,8 +1720,15 @@ impl RecordApiServer for Daemon {
             .map_err(rpc_error)
     }
 
-    async fn updates(&self, request: RecordIdRequest) -> RpcResult<ListRecordUpdatesResponse> {
-        self.application
+    async fn updates(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<RecordIdRequest>,
+    ) -> RpcResult<ListRecordUpdatesResponse> {
+        let forge_rpc::SelectedRecordRequest {
+            selection,
+            record: request,
+        } = request;
+        self.record_application(&selection, &mut [])?
             .list_record_updates(request.id)
             .map(|updates| ListRecordUpdatesResponse {
                 updates: updates.into_iter().map(Into::into).collect(),
@@ -1577,9 +1738,13 @@ impl RecordApiServer for Daemon {
 
     async fn comment(
         &self,
-        request: AddRecordCommentRequest,
+        request: forge_rpc::SelectedRecordRequest<AddRecordCommentRequest>,
     ) -> RpcResult<forge_rpc::RecordCommentResponse> {
-        self.application
+        let forge_rpc::SelectedRecordRequest {
+            selection,
+            record: request,
+        } = request;
+        self.record_application(&selection, &mut [])?
             .add_record_comment(request.record_id, &request.body, request.author.as_deref())
             .map(|comment| {
                 self.delivery.publish(&self.application);
@@ -1588,8 +1753,15 @@ impl RecordApiServer for Daemon {
             .map_err(rpc_error)
     }
 
-    async fn comments(&self, request: RecordIdRequest) -> RpcResult<ListRecordCommentsResponse> {
-        self.application
+    async fn comments(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<RecordIdRequest>,
+    ) -> RpcResult<ListRecordCommentsResponse> {
+        let forge_rpc::SelectedRecordRequest {
+            selection,
+            record: request,
+        } = request;
+        self.record_application(&selection, &mut [])?
             .list_record_comments(request.id)
             .map(|comments| ListRecordCommentsResponse {
                 comments: comments.into_iter().map(Into::into).collect(),
@@ -1597,10 +1769,72 @@ impl RecordApiServer for Daemon {
             .map_err(rpc_error)
     }
 
-    async fn comment_delete(&self, request: DeleteRecordCommentRequest) -> RpcResult<()> {
-        self.application
+    async fn comment_delete(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<DeleteRecordCommentRequest>,
+    ) -> RpcResult<()> {
+        let forge_rpc::SelectedRecordRequest {
+            selection,
+            record: request,
+        } = request;
+        self.record_application(&selection, &mut [])?
             .delete_record_comment(request.record_id, request.comment_id)
             .inspect(|()| self.delivery.publish(&self.application))
+            .map_err(rpc_error)
+    }
+}
+
+impl Daemon {
+    fn record_application(
+        &self,
+        selection: &forge_rpc::RecordSelection,
+        projects: &mut [String],
+    ) -> RpcResult<forge_app::Application> {
+        let cwd = selection.cwd.as_deref().map(std::path::Path::new);
+        if cwd.is_some_and(|cwd| !cwd.is_absolute()) {
+            return Err(rpc_error(RegistrationError::new(
+                "invalid-folder",
+                "client cwd must be absolute",
+            )));
+        }
+        let mut project_workspace = None;
+        for project in projects.iter().filter(|project| project.contains('/')) {
+            let reference = forge_app::ProjectReference::parse(project).map_err(rpc_error)?;
+            if project_workspace
+                .as_ref()
+                .is_some_and(|owner| owner != &reference.workspace_id)
+            {
+                return Err(rpc_error(RegistrationError::new(
+                    "cross-workspace-record",
+                    "Record Projects must share one Workspace",
+                )));
+            }
+            project_workspace = Some(reference.workspace_id);
+        }
+        if selection.workspace.is_none() && project_workspace.is_none() && cwd.is_none() {
+            return Err(rpc_error(RegistrationError::new(
+                "workspace-selection-required",
+                "supply a Workspace or an absolute client cwd",
+            )));
+        }
+        let cwd = cwd.unwrap_or_else(|| std::path::Path::new("/"));
+        let workspace = self
+            .application
+            .select_workspace(
+                selection.workspace.as_deref(),
+                project_workspace.as_deref(),
+                cwd,
+            )
+            .map_err(rpc_error)?;
+        for project in projects {
+            *project = self
+                .application
+                .select_project(Some(&workspace.id), Some(project), cwd)
+                .map_err(rpc_error)?
+                .reference;
+        }
+        self.application
+            .records_in_workspace(&workspace.id)
             .map_err(rpc_error)
     }
 }
@@ -1652,9 +1886,10 @@ fn record_type(record_type: &str) -> RpcResult<RecordType> {
         "task" => Ok(RecordType::Task),
         "wayfinder" => Ok(RecordType::Wayfinder),
         "grilling" => Ok(RecordType::Grilling),
+        "initiative" => Ok(RecordType::Initiative),
         _ => Err(rpc_error(RegistrationError::new(
             "invalid-record-type",
-            "Record type must be generic, spec, task, wayfinder, or grilling",
+            "Record type must be generic, spec, task, wayfinder, grilling, or initiative",
         ))),
     }
 }
@@ -1664,9 +1899,10 @@ fn relationship_kind(kind: &str) -> RpcResult<forge_app::RecordRelationshipKind>
         "child-of" => Ok(forge_app::RecordRelationshipKind::ParentChild),
         "depends-on" => Ok(forge_app::RecordRelationshipKind::DependsOn),
         "generated-by" => Ok(forge_app::RecordRelationshipKind::GeneratedBy),
+        "initiative" => Ok(forge_app::RecordRelationshipKind::Initiative),
         _ => Err(rpc_error(RegistrationError::new(
             "unsupported-relationship-kind",
-            "Relationship kind must be child-of, depends-on, or generated-by",
+            "Relationship kind must be child-of, depends-on, generated-by, or initiative",
         ))),
     }
 }
@@ -1934,6 +2170,7 @@ fn relationship_kind_name(kind: forge_app::RecordRelationshipKind) -> &'static s
         forge_app::RecordRelationshipKind::ParentChild => "parent-child",
         forge_app::RecordRelationshipKind::DependsOn => "depends-on",
         forge_app::RecordRelationshipKind::GeneratedBy => "generated-by",
+        forge_app::RecordRelationshipKind::Initiative => "initiative",
     }
 }
 
@@ -4207,6 +4444,9 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn typed_rpc_client_round_trips_through_the_listener() {
+        fn selected<T>(record: T) -> forge_rpc::SelectedRecordRequest<T> {
+            forge_rpc::SelectedRecordRequest::selected("test", record)
+        }
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
@@ -4247,13 +4487,13 @@ mod tests {
         assert_eq!(here, project);
 
         let record = client
-            .open(OpenRecordRequest {
+            .open(selected(OpenRecordRequest {
                 body: "A daemon-backed Record".into(),
                 project_scope: ProjectScopeRequest {
                     project_slugs: vec![project.reference.clone()],
                 },
                 generated_by_ids: vec![],
-            })
+            }))
             .await
             .unwrap();
         assert_eq!(record.id, 1);
@@ -4263,40 +4503,40 @@ mod tests {
             std::slice::from_ref(&project.reference)
         );
         let updates = client
-            .updates(RecordIdRequest { id: record.id })
+            .updates(selected(RecordIdRequest { id: record.id }))
             .await
             .unwrap();
         assert_eq!(updates.updates.len(), 1);
         assert_eq!(updates.updates[0].kind, "created");
         assert_eq!(
             client
-                .list(ListRecordsRequest {
+                .list(selected(ListRecordsRequest {
                     project_slug: Some(project.reference.clone()),
                     status: Some("open".into()),
                     record_type: None,
                     task_kind: None,
-                })
+                }))
                 .await
                 .unwrap()
                 .records,
             vec![record.clone()]
         );
         let spec = client
-            .open_spec(OpenSpecRequest {
+            .open_spec(selected(OpenSpecRequest {
                 body: "A daemon-backed Spec".into(),
                 project_slug: project.reference.clone(),
                 generated_by_ids: vec![],
-            })
+            }))
             .await
             .unwrap();
         assert_eq!(spec.record_type, "spec");
         let task = client
-            .open_task_under_spec(OpenTaskUnderSpecRequest {
+            .open_task_under_spec(selected(OpenTaskUnderSpecRequest {
                 body: "A daemon-backed Task".into(),
                 spec_id: spec.id,
                 task_kind: None,
                 generated_by_ids: vec![],
-            })
+            }))
             .await
             .unwrap();
         assert_eq!(task.record_type, "task");
@@ -4304,71 +4544,71 @@ mod tests {
         assert_eq!(task.relationships[0].parent_id, spec.id);
         assert_eq!(
             client
-                .open_task(OpenTaskRequest {
+                .open_task(selected(OpenTaskRequest {
                     body: "Standalone daemon-backed Task".into(),
                     project_slug: None,
                     task_kind: None,
                     generated_by_ids: vec![],
-                })
+                }))
                 .await
                 .unwrap()
                 .record_type,
             "task"
         );
         let wayfinder = client
-            .open_wayfinder(OpenWayfinderRequest {
+            .open_wayfinder(selected(OpenWayfinderRequest {
                 body: "A daemon-backed Wayfinder".into(),
                 project_scope: ProjectScopeRequest {
                     project_slugs: vec![project.reference.clone()],
                 },
                 generated_by_ids: vec![],
-            })
+            }))
             .await
             .unwrap();
         let wayfinder_task = client
-            .open_task_under_wayfinder(OpenTaskUnderWayfinderRequest {
+            .open_task_under_wayfinder(selected(OpenTaskUnderWayfinderRequest {
                 body: "A scoped daemon-backed Task".into(),
                 wayfinder_id: wayfinder.id,
                 project_slug: None,
                 task_kind: None,
                 generated_by_ids: vec![],
-            })
+            }))
             .await
             .unwrap();
         assert_eq!(wayfinder.record_type, "wayfinder");
         assert_eq!(wayfinder_task.project_scope, wayfinder.project_scope);
         assert_eq!(wayfinder_task.relationships[0].parent_id, wayfinder.id);
         let grilling = client
-            .open_grilling_under_wayfinder(OpenGrillingUnderWayfinderRequest {
+            .open_grilling_under_wayfinder(selected(OpenGrillingUnderWayfinderRequest {
                 body: "A daemon-backed Grilling".into(),
                 wayfinder_id: wayfinder.id,
                 project_scope: None,
                 generated_by_ids: vec![],
-            })
+            }))
             .await
             .unwrap();
         assert_eq!(grilling.record_type, "grilling");
         assert_eq!(grilling.project_scope, wayfinder.project_scope);
         assert_eq!(grilling.relationships[0].parent_id, wayfinder.id);
         let wayfinders = client
-            .list(ListRecordsRequest {
+            .list(selected(ListRecordsRequest {
                 project_slug: Some(project.reference.clone()),
                 status: None,
                 record_type: Some("wayfinder".into()),
                 task_kind: None,
-            })
+            }))
             .await
             .unwrap();
         assert_eq!(wayfinders.records.len(), 1);
         assert_eq!(wayfinders.records[0].id, wayfinder.id);
         assert_eq!(wayfinders.records[0].record_type, "wayfinder");
         let specs = client
-            .list(ListRecordsRequest {
+            .list(selected(ListRecordsRequest {
                 project_slug: None,
                 status: None,
                 record_type: Some("spec".into()),
                 task_kind: None,
-            })
+            }))
             .await
             .unwrap();
         assert_eq!(specs.records.len(), 1);
@@ -4376,62 +4616,62 @@ mod tests {
         assert_eq!(specs.records[0].record_type, "spec");
         assert!(
             client
-                .open_task_under_spec(OpenTaskUnderSpecRequest {
+                .open_task_under_spec(selected(OpenTaskUnderSpecRequest {
                     body: "Invalid child".into(),
                     spec_id: record.id,
                     task_kind: None,
                     generated_by_ids: vec![],
-                })
+                }))
                 .await
                 .is_err()
         );
         assert!(
             client
-                .list(ListRecordsRequest {
+                .list(selected(ListRecordsRequest {
                     project_slug: None,
                     status: None,
                     record_type: Some("invalid".into()),
                     task_kind: None,
-                })
+                }))
                 .await
                 .is_err()
         );
         let edited = client
-            .edit(EditRecordRequest {
+            .edit(selected(EditRecordRequest {
                 id: record.id,
                 body: "Revised Record".into(),
-            })
+            }))
             .await
             .unwrap();
         assert_eq!(edited.body, "Revised Record");
         let in_progress = client
-            .start(RecordIdRequest { id: record.id })
+            .start(selected(RecordIdRequest { id: record.id }))
             .await
             .unwrap();
         assert_eq!(in_progress.status, "in_progress");
         let done = client
-            .done(DoneRecordRequest {
+            .done(selected(DoneRecordRequest {
                 id: record.id,
                 completion_resolution: Some("complete".into()),
-            })
+            }))
             .await
             .unwrap();
         assert_eq!(done.completion_resolution.as_deref(), Some("complete"));
         assert!(
             client
-                .start(RecordIdRequest { id: record.id })
+                .start(selected(RecordIdRequest { id: record.id }))
                 .await
                 .is_err()
         );
         assert_eq!(
             client
-                .open(OpenRecordRequest {
+                .open(selected(OpenRecordRequest {
                     body: "Unscoped".into(),
                     project_scope: ProjectScopeRequest {
                         project_slugs: vec![],
                     },
                     generated_by_ids: vec![],
-                })
+                }))
                 .await
                 .unwrap()
                 .project_scope

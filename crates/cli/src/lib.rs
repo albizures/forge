@@ -1,5 +1,9 @@
 //! Command-line adapter that calls the running Forge daemon.
 
+mod record_selection;
+pub use record_selection::RecordEndpoint;
+use record_selection::record_client;
+
 use forge_rpc::{
     AddRecordCommentRequest, AgentDispatchApiClient, AgentDispatchProfileResponse,
     AgentDispatchReconcileResponse, AgentDispatchStatusRequest, AgentDispatchStatusResponse,
@@ -9,10 +13,9 @@ use forge_rpc::{
     OpenGrillingUnderWayfinderRequest, OpenRecordRequest, OpenSpecRequest, OpenTaskRequest,
     OpenTaskUnderSpecRequest, OpenTaskUnderWayfinderRequest, OpenWayfinderRequest,
     ProjectApiClient, ProjectHereRequest, ProjectHereResponse, ProjectScopeRequest,
-    RecordApiClient, RecordIdRequest, RecordResponse, RegisterProjectRequest,
-    RegisterProjectResponse, RelateRecordRequest, RetireAgentAssignmentRequest,
-    StartAssignmentTaskRequest, SystemApiClient, SystemStatusResponse, WorktreeApiClient,
-    WorktreeRootResponse,
+    RecordIdRequest, RecordResponse, RegisterProjectRequest, RegisterProjectResponse,
+    RelateRecordRequest, RetireAgentAssignmentRequest, StartAssignmentTaskRequest, SystemApiClient,
+    SystemStatusResponse, WorktreeApiClient, WorktreeRootResponse,
 };
 use jsonrpsee::http_client::HttpClientBuilder;
 use sha2::{Digest, Sha256};
@@ -696,12 +699,12 @@ pub fn render_project_here(project: &ProjectHereResponse) -> String {
 ///
 /// Returns an endpoint or daemon validation error.
 pub async fn request_open_record(
-    url: &str,
+    url: impl Into<RecordEndpoint>,
     body: &str,
     project_slugs: Vec<String>,
     generated_by_ids: Vec<u64>,
 ) -> Result<RecordResponse, String> {
-    client(url)?
+    record_client(url)?
         .open(OpenRecordRequest {
             body: body.into(),
             project_scope: ProjectScopeRequest { project_slugs },
@@ -718,18 +721,56 @@ pub fn render_record_opened(record: &RecordResponse) -> String {
     )
 }
 
+/// Opens a Workspace-owned Initiative through the daemon.
+/// # Errors
+/// Returns selection, endpoint or validation errors.
+pub async fn request_open_initiative(
+    url: impl Into<RecordEndpoint>,
+    body: &str,
+    project_slugs: Vec<String>,
+    generated_by_ids: Vec<u64>,
+) -> Result<RecordResponse, String> {
+    record_client(url)?
+        .open_initiative(OpenRecordRequest {
+            body: body.into(),
+            project_scope: ProjectScopeRequest { project_slugs },
+            generated_by_ids,
+        })
+        .await
+        .map_err(record_error("open Initiative"))
+}
+
+/// Lists workflow readiness without requiring provider configuration.
+/// # Errors
+/// Returns selection, endpoint or validation errors.
+pub async fn request_ready_records(
+    url: impl Into<RecordEndpoint>,
+    planning: bool,
+    include_hitl: bool,
+    blocked: bool,
+) -> Result<forge_rpc::ReadyRecordsResponse, String> {
+    record_client(url)?
+        .ready(forge_rpc::ReadyRecordsRequest {
+            planning,
+            include_hitl,
+            blocked,
+        })
+        .await
+        .map_err(record_error("ready"))
+}
+
 /// Opens a Spec through the daemon.
 ///
 /// # Errors
 ///
 /// Returns an endpoint or daemon validation error.
 pub async fn request_open_spec(
-    url: &str,
+    url: impl Into<RecordEndpoint>,
     body: &str,
     project_slug: String,
     generated_by_ids: Vec<u64>,
 ) -> Result<RecordResponse, String> {
-    client(url)?
+    record_client(url)?
         .open_spec(OpenSpecRequest {
             body: body.into(),
             project_slug,
@@ -745,12 +786,12 @@ pub async fn request_open_spec(
 ///
 /// Returns an endpoint or daemon validation error.
 pub async fn request_open_wayfinder(
-    url: &str,
+    url: impl Into<RecordEndpoint>,
     body: &str,
     project_slugs: Vec<String>,
     generated_by_ids: Vec<u64>,
 ) -> Result<RecordResponse, String> {
-    client(url)?
+    record_client(url)?
         .open_wayfinder(OpenWayfinderRequest {
             body: body.into(),
             project_scope: ProjectScopeRequest { project_slugs },
@@ -766,13 +807,13 @@ pub async fn request_open_wayfinder(
 ///
 /// Returns an endpoint or daemon validation error.
 pub async fn request_open_task(
-    url: &str,
+    url: impl Into<RecordEndpoint>,
     body: &str,
     project_slug: Option<String>,
     task_kind: Option<String>,
     generated_by_ids: Vec<u64>,
 ) -> Result<RecordResponse, String> {
-    client(url)?
+    record_client(url)?
         .open_task(OpenTaskRequest {
             body: body.into(),
             project_slug,
@@ -789,13 +830,13 @@ pub async fn request_open_task(
 ///
 /// Returns an endpoint or daemon validation error.
 pub async fn request_open_task_under_spec(
-    url: &str,
+    url: impl Into<RecordEndpoint>,
     body: &str,
     spec_id: u64,
     task_kind: Option<String>,
     generated_by_ids: Vec<u64>,
 ) -> Result<RecordResponse, String> {
-    client(url)?
+    record_client(url)?
         .open_task_under_spec(OpenTaskUnderSpecRequest {
             body: body.into(),
             spec_id,
@@ -812,14 +853,14 @@ pub async fn request_open_task_under_spec(
 ///
 /// Returns an endpoint or daemon validation error.
 pub async fn request_open_task_under_wayfinder(
-    url: &str,
+    url: impl Into<RecordEndpoint>,
     body: &str,
     wayfinder_id: u64,
     project_slug: Option<String>,
     task_kind: Option<String>,
     generated_by_ids: Vec<u64>,
 ) -> Result<RecordResponse, String> {
-    client(url)?
+    record_client(url)?
         .open_task_under_wayfinder(OpenTaskUnderWayfinderRequest {
             body: body.into(),
             wayfinder_id,
@@ -837,13 +878,13 @@ pub async fn request_open_task_under_wayfinder(
 ///
 /// Returns an endpoint or daemon validation error.
 pub async fn request_open_grilling_under_wayfinder(
-    url: &str,
+    url: impl Into<RecordEndpoint>,
     body: &str,
     wayfinder_id: u64,
     project_slugs: Option<Vec<String>>,
     generated_by_ids: Vec<u64>,
 ) -> Result<RecordResponse, String> {
-    client(url)?
+    record_client(url)?
         .open_grilling_under_wayfinder(OpenGrillingUnderWayfinderRequest {
             body: body.into(),
             wayfinder_id,
@@ -860,23 +901,21 @@ pub async fn request_open_grilling_under_wayfinder(
 ///
 /// Returns an endpoint or daemon validation error.
 pub async fn request_list_records(
-    url: &str,
+    url: impl Into<RecordEndpoint>,
     project_slug: Option<String>,
     status: Option<String>,
     record_type: Option<String>,
     task_kind: Option<String>,
 ) -> Result<ListRecordsResponse, String> {
-    RecordApiClient::list(
-        &client(url)?,
-        ListRecordsRequest {
+    record_client(url)?
+        .list(ListRecordsRequest {
             project_slug,
             status,
             record_type,
             task_kind,
-        },
-    )
-    .await
-    .map_err(record_error("list"))
+        })
+        .await
+        .map_err(record_error("list"))
 }
 
 /// Requests a Record lifecycle operation through the daemon.
@@ -884,8 +923,11 @@ pub async fn request_list_records(
 /// # Errors
 ///
 /// Returns an endpoint or daemon validation error.
-pub async fn request_show_record(url: &str, id: u64) -> Result<RecordResponse, String> {
-    client(url)?
+pub async fn request_show_record(
+    url: impl Into<RecordEndpoint>,
+    id: u64,
+) -> Result<RecordResponse, String> {
+    record_client(url)?
         .show(RecordIdRequest { id })
         .await
         .map_err(record_error("show"))
@@ -893,8 +935,12 @@ pub async fn request_show_record(url: &str, id: u64) -> Result<RecordResponse, S
 /// # Errors
 ///
 /// Returns an endpoint or daemon validation error.
-pub async fn request_edit_record(url: &str, id: u64, body: &str) -> Result<RecordResponse, String> {
-    client(url)?
+pub async fn request_edit_record(
+    url: impl Into<RecordEndpoint>,
+    id: u64,
+    body: &str,
+) -> Result<RecordResponse, String> {
+    record_client(url)?
         .edit(EditRecordRequest {
             id,
             body: body.into(),
@@ -905,8 +951,11 @@ pub async fn request_edit_record(url: &str, id: u64, body: &str) -> Result<Recor
 /// # Errors
 ///
 /// Returns an endpoint or daemon validation error.
-pub async fn request_start_record(url: &str, id: u64) -> Result<RecordResponse, String> {
-    client(url)?
+pub async fn request_start_record(
+    url: impl Into<RecordEndpoint>,
+    id: u64,
+) -> Result<RecordResponse, String> {
+    record_client(url)?
         .start(RecordIdRequest { id })
         .await
         .map_err(record_error("start"))
@@ -915,11 +964,11 @@ pub async fn request_start_record(url: &str, id: u64) -> Result<RecordResponse, 
 ///
 /// Returns an endpoint or daemon validation error.
 pub async fn request_done_record(
-    url: &str,
+    url: impl Into<RecordEndpoint>,
     id: u64,
     completion_resolution: Option<String>,
 ) -> Result<RecordResponse, String> {
-    client(url)?
+    record_client(url)?
         .done(DoneRecordRequest {
             id,
             completion_resolution,
@@ -933,12 +982,12 @@ pub async fn request_done_record(
 ///
 /// Returns an endpoint or daemon validation error.
 pub async fn request_relate_record(
-    url: &str,
+    url: impl Into<RecordEndpoint>,
     from_id: u64,
     to_id: u64,
     kind: String,
 ) -> Result<RecordResponse, String> {
-    client(url)?
+    record_client(url)?
         .relate(RelateRecordRequest {
             from_id,
             to_id,
@@ -953,12 +1002,12 @@ pub async fn request_relate_record(
 ///
 /// Returns an endpoint or daemon validation error.
 pub async fn request_unrelate_record(
-    url: &str,
+    url: impl Into<RecordEndpoint>,
     from_id: u64,
     to_id: u64,
     kind: String,
 ) -> Result<RecordResponse, String> {
-    client(url)?
+    record_client(url)?
         .unrelate(RelateRecordRequest {
             from_id,
             to_id,
@@ -973,12 +1022,12 @@ pub async fn request_unrelate_record(
 ///
 /// Returns an endpoint or daemon validation error.
 pub async fn request_add_record_comment(
-    url: &str,
+    url: impl Into<RecordEndpoint>,
     record_id: u64,
     body: &str,
     author: Option<String>,
 ) -> Result<forge_rpc::RecordCommentResponse, String> {
-    client(url)?
+    record_client(url)?
         .comment(AddRecordCommentRequest {
             record_id,
             body: body.into(),
@@ -990,10 +1039,10 @@ pub async fn request_add_record_comment(
 /// # Errors
 /// Returns an endpoint or daemon validation error.
 pub async fn request_record_comments(
-    url: &str,
+    url: impl Into<RecordEndpoint>,
     id: u64,
 ) -> Result<ListRecordCommentsResponse, String> {
-    client(url)?
+    record_client(url)?
         .comments(RecordIdRequest { id })
         .await
         .map_err(record_error("comments"))
@@ -1001,11 +1050,11 @@ pub async fn request_record_comments(
 /// # Errors
 /// Returns an endpoint or daemon validation error.
 pub async fn request_delete_record_comment(
-    url: &str,
+    url: impl Into<RecordEndpoint>,
     record_id: u64,
     comment_id: u64,
 ) -> Result<(), String> {
-    client(url)?
+    record_client(url)?
         .comment_delete(DeleteRecordCommentRequest {
             record_id,
             comment_id,
@@ -1016,10 +1065,10 @@ pub async fn request_delete_record_comment(
 /// # Errors
 /// Returns an endpoint or daemon validation error.
 pub async fn request_record_updates(
-    url: &str,
+    url: impl Into<RecordEndpoint>,
     id: u64,
 ) -> Result<ListRecordUpdatesResponse, String> {
-    client(url)?
+    record_client(url)?
         .updates(RecordIdRequest { id })
         .await
         .map_err(record_error("updates"))
@@ -1224,7 +1273,7 @@ mod tests {
                     None
                 } else {
                     Some(
-                        serde_json::json!({"id":7,"record_type":"task","task_kind":null,"body":"task","project_scope":{"project_slugs":[]},"status":"in_progress","completion_resolution":null,"relationships":[]}),
+                        serde_json::json!({"workspace_id":"test","id":7,"record_type":"task","task_kind":null,"body":"task","project_scope":{"project_slugs":[]},"status":"in_progress","completion_resolution":null,"relationships":[]}),
                     )
                 }
             } else if method.ends_with("assignmentInstructions") {
@@ -1357,6 +1406,7 @@ mod tests {
     fn record_list_renders_records_in_response_order() {
         let records = ListRecordsResponse {
             records: vec![RecordResponse {
+                workspace_id: "test".into(),
                 id: 4,
                 record_type: "generic".into(),
                 task_kind: None,
@@ -1395,6 +1445,7 @@ mod tests {
     fn record_output_identifies_the_new_record() {
         assert_eq!(
             render_record_opened(&RecordResponse {
+                workspace_id: "test".into(),
                 id: 4,
                 record_type: "generic".into(),
                 task_kind: None,

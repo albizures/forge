@@ -11,6 +11,8 @@ mod workspaces;
 pub use workspaces::{Workspace, WorkspaceRepository};
 mod projects;
 pub use projects::{ProjectReference, canonical_project_root};
+mod record_planning;
+pub use record_planning::RecordReadiness;
 
 /// A Project registered with Forge.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -41,6 +43,8 @@ pub enum RecordRelationshipKind {
     ParentChild,
     DependsOn,
     GeneratedBy,
+    /// Non-hierarchical membership of a Spec or Wayfinder in an Initiative.
+    Initiative,
 }
 
 /// An endpoint-neutral typed Relationship between two Records.
@@ -67,6 +71,7 @@ pub enum RecordType {
     Task,
     Wayfinder,
     Grilling,
+    Initiative,
 }
 
 /// Optional immutable metadata that classifies a Task without changing its workflow semantics.
@@ -80,6 +85,8 @@ pub enum TaskKind {
 /// A unit of work whose immutable type governs its scope and hierarchy.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Record {
+    /// Immutable owning Forge Workspace.
+    pub workspace_id: String,
     /// Opaque, positive identity assigned by persistence.
     pub id: u64,
     /// Immutable type selected at opening.
@@ -426,6 +433,21 @@ pub struct ManagedWorktreeInfo {
 
 /// Persistence operations for generic Records.
 pub trait RecordRepository: ProjectRepository {
+    /// Returns a request-local repository confined to an existing Workspace.
+    ///
+    /// # Errors
+    /// Returns an error when Workspace selection is unsupported or invalid.
+    fn records_in_workspace(
+        &self,
+        workspace: &str,
+    ) -> Result<Box<dyn RecordRepository>, RegistrationError> {
+        let _ = workspace;
+        Err(RegistrationError::new(
+            "workspace-records-unavailable",
+            "Workspace-confined Records are unavailable",
+        ))
+    }
+
     /// Opens a Record after validating that all selected Projects exist.
     ///
     /// # Errors
@@ -1856,7 +1878,7 @@ pub struct Application {
     worktree_adapter: Option<Box<dyn ManagedWorktreeAdapter>>,
     dispatch: Option<Box<dyn RecordUpdateSubscriptionRepository>>,
     adapter_factory: Option<Box<dyn AgentDispatchAdapterFactory>>,
-    inspector: Box<dyn RepositoryInspector>,
+    inspector: std::sync::Arc<dyn RepositoryInspector>,
     // Serialize provider verification with configuration writes. Atomic repository guards
     // protect Assignments/resources without holding storage over provider calls.
     provider_configuration: std::sync::Mutex<()>,
@@ -1919,7 +1941,7 @@ impl Application {
             dispatch: None,
             adapter_factory: None,
             provider_configuration: std::sync::Mutex::new(()),
-            inspector,
+            inspector: inspector.into(),
         }
     }
 
@@ -1939,7 +1961,7 @@ impl Application {
             dispatch: None,
             adapter_factory: None,
             provider_configuration: std::sync::Mutex::new(()),
-            inspector,
+            inspector: inspector.into(),
         }
     }
 
@@ -1959,7 +1981,7 @@ impl Application {
             dispatch: Some(dispatch),
             adapter_factory: Some(adapter_factory),
             provider_configuration: std::sync::Mutex::new(()),
-            inspector,
+            inspector: inspector.into(),
         }
     }
 
@@ -1981,8 +2003,27 @@ impl Application {
             dispatch: Some(dispatch),
             adapter_factory: Some(adapter_factory),
             provider_configuration: std::sync::Mutex::new(()),
-            inspector,
+            inspector: inspector.into(),
         }
+    }
+
+    /// Creates a request-local application for Record operations in one Workspace.
+    /// Dispatch, provider configuration and Worktree operations are deliberately unavailable
+    /// by this record-only composition; it never changes the daemon's default selection.
+    ///
+    /// # Errors
+    /// Returns a user-facing error for missing or unsupported Workspace selection.
+    pub fn records_in_workspace(&self, workspace: &str) -> Result<Self, RegistrationError> {
+        Ok(Self {
+            records: self.records.records_in_workspace(workspace)?,
+            workspaces: None,
+            managed_worktrees: None,
+            worktree_adapter: None,
+            dispatch: None,
+            adapter_factory: None,
+            inspector: self.inspector.clone(),
+            provider_configuration: std::sync::Mutex::new(()),
+        })
     }
 
     fn managed_worktrees(&self) -> Result<&dyn ManagedWorktreeRepository, RegistrationError> {
@@ -3161,7 +3202,7 @@ impl Application {
         self.open_typed_record(RecordType::Spec, body, vec![project_slug], None)
     }
 
-    /// Opens a Wayfinder with a non-empty immutable Project Scope.
+    /// Opens a Wayfinder with immutable Project Scope, possibly Projectless within a selected Workspace.
     ///
     /// # Errors
     ///
@@ -3581,6 +3622,7 @@ mod tests {
         fn open_record(&self, record: &NewRecord) -> Result<Record, RegistrationError> {
             let mut records = self.records.lock().unwrap();
             let record = Record {
+                workspace_id: "test".into(),
                 id: (records.len() + 1) as u64,
                 record_type: RecordType::Generic,
                 task_kind: None,
@@ -3596,6 +3638,7 @@ mod tests {
         fn open_typed_record(&self, record: &NewTypedRecord) -> Result<Record, RegistrationError> {
             let mut records = self.records.lock().unwrap();
             let record = Record {
+                workspace_id: "test".into(),
                 id: (records.len() + 1) as u64,
                 record_type: record.record_type,
                 task_kind: record.task_kind,
@@ -3645,6 +3688,7 @@ mod tests {
                 task_kind,
                 body: body.to_owned(),
                 project_slugs: spec.project_slugs,
+                workspace_id: spec.workspace_id,
                 status: RecordStatus::Open,
                 completion_resolution: None,
                 relationships: vec![relationship.clone()],
@@ -3703,6 +3747,7 @@ mod tests {
                 task_kind,
                 body: body.to_owned(),
                 project_slugs: vec![project_slug],
+                workspace_id: wayfinder.workspace_id,
                 status: RecordStatus::Open,
                 completion_resolution: None,
                 relationships: vec![relationship.clone()],
@@ -3762,6 +3807,7 @@ mod tests {
                 child_id: grilling_id,
             };
             let grilling = Record {
+                workspace_id: wayfinder.workspace_id,
                 id: grilling_id,
                 record_type: RecordType::Grilling,
                 task_kind: None,
@@ -4312,6 +4358,7 @@ mod tests {
     fn task_repository() -> Repository {
         Repository {
             records: Mutex::new(vec![Record {
+                workspace_id: "test".into(),
                 id: 7,
                 record_type: RecordType::Task,
                 task_kind: None,
@@ -4370,6 +4417,7 @@ mod tests {
     #[test]
     fn worktree_eligibility_requires_an_open_single_project_task() {
         let mut record = Record {
+            workspace_id: "test".into(),
             id: 7,
             record_type: RecordType::Task,
             task_kind: None,
@@ -4644,6 +4692,7 @@ mod tests {
                 .open_record("body", vec!["zeta".into(), "alpha".into()])
                 .unwrap(),
             Record {
+                workspace_id: "test".into(),
                 id: 1,
                 record_type: RecordType::Generic,
                 task_kind: None,

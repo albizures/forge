@@ -56,7 +56,7 @@ async fn handler(
             None
         } else {
             Some(serde_json::json!({
-                "id":7, "record_type":"task", "task_kind":null, "body":"task",
+                "workspace_id":"test", "id":7, "record_type":"task", "task_kind":null, "body":"task",
                 "project_scope":{"project_slugs":[]},
                 "status":if matches!(calls.scenario, Scenario::UnconfirmedStart) {"open"} else {"in_progress"},
                 "completion_resolution":null, "relationships":[]

@@ -2,7 +2,7 @@
 
 use std::{
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -20,11 +20,13 @@ use forge_app::{
 };
 use rusqlite::{Connection, ErrorCode, OptionalExtension, params};
 
+mod record_workspaces;
 mod workspaces;
 
 /// SQLite-backed Project and Record storage.
 pub struct SqliteProjectRepository {
-    connection: Mutex<Connection>,
+    connection: Arc<Mutex<Connection>>,
+    record_workspace: Option<String>,
 }
 
 impl SqliteProjectRepository {
@@ -62,8 +64,9 @@ impl SqliteProjectRepository {
             );
             CREATE TABLE IF NOT EXISTS records (
                 id INTEGER PRIMARY KEY NOT NULL,
-                record_type TEXT NOT NULL CHECK (record_type IN ('generic', 'spec', 'task', 'wayfinder', 'grilling')),
+                record_type TEXT NOT NULL CHECK (record_type IN ('generic', 'spec', 'task', 'wayfinder', 'grilling', 'initiative')),
                 task_kind TEXT CHECK (task_kind IN ('research', 'prototype', 'review')),
+                workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT,
                 body TEXT NOT NULL,
                 status TEXT NOT NULL CHECK (status IN ('open', 'in_progress', 'done')),
                 completion_resolution TEXT
@@ -78,7 +81,7 @@ impl SqliteProjectRepository {
                 to_id INTEGER NOT NULL REFERENCES records(id),
                 parent_id INTEGER REFERENCES records(id),
                 child_id INTEGER REFERENCES records(id) UNIQUE,
-                kind TEXT NOT NULL CHECK (kind IN ('parent-child', 'depends-on', 'generated-by')),
+                kind TEXT NOT NULL CHECK (kind IN ('parent-child', 'depends-on', 'generated-by', 'initiative')),
                 PRIMARY KEY (from_id, to_id, kind)
             );
             CREATE TABLE IF NOT EXISTS record_updates (
@@ -90,7 +93,7 @@ impl SqliteProjectRepository {
                 to_status TEXT,
                 related_record_id INTEGER REFERENCES records(id),
                 comment_id INTEGER,
-                relationship_kind TEXT CHECK (relationship_kind IN ('parent-child', 'depends-on', 'generated-by'))
+                relationship_kind TEXT CHECK (relationship_kind IN ('parent-child', 'depends-on', 'generated-by', 'initiative'))
             );
             CREATE TABLE IF NOT EXISTS record_comments (
                 id INTEGER PRIMARY KEY NOT NULL,
@@ -227,8 +230,10 @@ impl SqliteProjectRepository {
         migrate_managed_worktree_schema(&connection)?;
         seed_agent_profiles(&connection)?;
         workspaces::initialize(&connection)?;
+        record_workspaces::initialize(&connection)?;
         Ok(Self {
-            connection: Mutex::new(connection),
+            connection: Arc::new(Mutex::new(connection)),
+            record_workspace: None,
         })
     }
 }
@@ -667,7 +672,15 @@ impl ManagedWorktreeRepository for SqliteProjectRepository {
 }
 
 impl RecordRepository for SqliteProjectRepository {
+    fn records_in_workspace(
+        &self,
+        workspace: &str,
+    ) -> Result<Box<dyn RecordRepository>, RegistrationError> {
+        Ok(Box::new(self.in_record_workspace(workspace)?))
+    }
+
     fn set_task_base_commit(&self, record_id: u64, commit: &str) -> Result<(), RegistrationError> {
+        self.record_workspace(record_id)?;
         if commit.trim().is_empty() {
             return Err(RegistrationError::new(
                 "invalid-base-commit",
@@ -704,6 +717,7 @@ impl RecordRepository for SqliteProjectRepository {
     }
 
     fn task_base_commit(&self, record_id: u64) -> Result<Option<String>, RegistrationError> {
+        self.record_workspace(record_id)?;
         let connection = self
             .connection
             .lock()
@@ -725,25 +739,15 @@ impl RecordRepository for SqliteProjectRepository {
             .lock()
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
         let transaction = connection.transaction().map_err(storage_error)?;
-        for slug in &record.project_slugs {
-            let exists: bool = transaction
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM projects WHERE slug = ?1)",
-                    [slug],
-                    |row| row.get(0),
-                )
-                .map_err(storage_error)?;
-            if !exists {
-                return Err(RegistrationError::new(
-                    "project-not-found",
-                    format!("Project `{slug}` is not registered"),
-                ));
-            }
-        }
+        let workspace = record_workspaces::creation_workspace(
+            &transaction,
+            self.record_workspace.as_deref(),
+            &record.project_slugs,
+        )?;
         transaction
             .execute(
-                "INSERT INTO records (record_type, body, status) VALUES ('generic', ?1, 'open')",
-                [&record.body],
+                "INSERT INTO records (record_type, body, status, workspace_id) VALUES ('generic', ?1, 'open', ?2)",
+                params![record.body, workspace],
             )
             .map_err(storage_error)?;
         let sqlite_id = transaction.last_insert_rowid();
@@ -770,11 +774,15 @@ impl RecordRepository for SqliteProjectRepository {
             .lock()
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
         let transaction = connection.transaction().map_err(storage_error)?;
-        validate_projects(&transaction, &record.project_slugs)?;
+        let workspace = record_workspaces::creation_workspace(
+            &transaction,
+            self.record_workspace.as_deref(),
+            &record.project_slugs,
+        )?;
         transaction
             .execute(
-                "INSERT INTO records (record_type, task_kind, body, status) VALUES (?1, ?2, ?3, 'open')",
-                params![record_type_name(record.record_type), task_kind_name(record.task_kind), record.body],
+                "INSERT INTO records (record_type, task_kind, body, status, workspace_id) VALUES (?1, ?2, ?3, 'open', ?4)",
+                params![record_type_name(record.record_type), task_kind_name(record.task_kind), record.body, workspace],
             )
             .map_err(storage_error)?;
         let id = transaction.last_insert_rowid().cast_unsigned();
@@ -805,6 +813,8 @@ impl RecordRepository for SqliteProjectRepository {
             .lock()
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
         let transaction = connection.transaction().map_err(storage_error)?;
+        self.ensure_record_workspace(&transaction, spec_id)?;
+        let workspace = record_workspaces::owner(&transaction, spec_id)?;
         let spec = load_record(&transaction, spec_id)?;
         if spec.record_type != RecordType::Spec {
             return Err(RegistrationError::new(
@@ -814,8 +824,8 @@ impl RecordRepository for SqliteProjectRepository {
         }
         transaction
             .execute(
-                "INSERT INTO records (record_type, task_kind, body, status) VALUES ('task', ?1, ?2, 'open')",
-                params![task_kind_name(task_kind), body],
+                "INSERT INTO records (record_type, task_kind, body, status, workspace_id) VALUES ('task', ?1, ?2, 'open', ?3)",
+                params![task_kind_name(task_kind), body, workspace],
             )
             .map_err(storage_error)?;
         let task_id = transaction.last_insert_rowid().cast_unsigned();
@@ -867,6 +877,8 @@ impl RecordRepository for SqliteProjectRepository {
             .lock()
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
         let transaction = connection.transaction().map_err(storage_error)?;
+        self.ensure_record_workspace(&transaction, wayfinder_id)?;
+        let workspace = record_workspaces::owner(&transaction, wayfinder_id)?;
         let wayfinder = load_record(&transaction, wayfinder_id)?;
         if wayfinder.record_type != RecordType::Wayfinder {
             return Err(RegistrationError::new(
@@ -874,15 +886,16 @@ impl RecordRepository for SqliteProjectRepository {
                 "a Task may be opened under a Wayfinder only",
             ));
         }
-        let project_slug = match (project_slug, wayfinder.project_slugs.as_slice()) {
-            (Some(project_slug), scope) if scope.contains(&project_slug) => project_slug,
+        let project_slugs = match (project_slug, wayfinder.project_slugs.as_slice()) {
+            (None, []) => vec![],
+            (Some(project_slug), scope) if scope.contains(&project_slug) => vec![project_slug],
             (Some(_), _) => {
                 return Err(RegistrationError::new(
                     "scope-mismatch",
                     "Task Project must belong to the Wayfinder scope",
                 ));
             }
-            (None, [project_slug]) => project_slug.clone(),
+            (None, [project_slug]) => vec![project_slug.clone()],
             (None, _) => {
                 return Err(RegistrationError::new(
                     "missing-project",
@@ -892,17 +905,19 @@ impl RecordRepository for SqliteProjectRepository {
         };
         transaction
             .execute(
-                "INSERT INTO records (record_type, task_kind, body, status) VALUES ('task', ?1, ?2, 'open')",
-                params![task_kind_name(task_kind), body],
+                "INSERT INTO records (record_type, task_kind, body, status, workspace_id) VALUES ('task', ?1, ?2, 'open', ?3)",
+                params![task_kind_name(task_kind), body, workspace],
             )
             .map_err(storage_error)?;
         let task_id = transaction.last_insert_rowid().cast_unsigned();
-        transaction
-            .execute(
-                "INSERT INTO record_projects (record_id, project_slug) VALUES (?1, ?2)",
-                params![task_id.cast_signed(), project_slug],
-            )
-            .map_err(storage_error)?;
+        for project_slug in project_slugs {
+            transaction
+                .execute(
+                    "INSERT INTO record_projects (record_id, project_slug) VALUES (?1, ?2)",
+                    params![task_id.cast_signed(), project_slug],
+                )
+                .map_err(storage_error)?;
+        }
         transaction
             .execute(
                 "INSERT INTO record_relationships (from_id, to_id, parent_id, child_id, kind) VALUES (?1, ?2, ?2, ?1, 'parent-child')",
@@ -944,6 +959,8 @@ impl RecordRepository for SqliteProjectRepository {
             .lock()
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
         let transaction = connection.transaction().map_err(storage_error)?;
+        self.ensure_record_workspace(&transaction, wayfinder_id)?;
+        let workspace = record_workspaces::owner(&transaction, wayfinder_id)?;
         let wayfinder = load_record(&transaction, wayfinder_id)?;
         if wayfinder.record_type != RecordType::Wayfinder {
             return Err(RegistrationError::new(
@@ -953,10 +970,10 @@ impl RecordRepository for SqliteProjectRepository {
         }
         let mut project_slugs = project_slugs.unwrap_or(wayfinder.project_slugs.clone());
         project_slugs.sort();
-        if project_slugs.is_empty() {
+        if project_slugs.is_empty() && !wayfinder.project_slugs.is_empty() {
             return Err(RegistrationError::new(
                 "empty-project-scope",
-                "a Grilling must have at least one Project in its scope",
+                "a Project-scoped Wayfinder's Grilling must select at least one Project",
             ));
         }
         if project_slugs.windows(2).any(|pair| pair[0] == pair[1]) {
@@ -976,8 +993,8 @@ impl RecordRepository for SqliteProjectRepository {
         }
         transaction
             .execute(
-                "INSERT INTO records (record_type, body, status) VALUES ('grilling', ?1, 'open')",
-                [body],
+                "INSERT INTO records (record_type, body, status, workspace_id) VALUES ('grilling', ?1, 'open', ?2)",
+                params![body, workspace],
             )
             .map_err(storage_error)?;
         let grilling_id = transaction.last_insert_rowid().cast_unsigned();
@@ -1023,12 +1040,21 @@ impl RecordRepository for SqliteProjectRepository {
             .connection
             .lock()
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
-        let ids = match (&filter.project_slug, filter.status) {
-            (Some(project), Some(status)) => connection.prepare("SELECT record.id FROM records record JOIN record_projects scope ON scope.record_id = record.id WHERE scope.project_slug = ?1 AND record.status = ?2 ORDER BY record.id DESC").map_err(storage_error)?.query_map(params![project, status_name(status)], |row| row.get(0)).map_err(storage_error)?.collect::<Result<Vec<i64>, _>>().map_err(storage_error)?,
-            (Some(project), None) => connection.prepare("SELECT record.id FROM records record JOIN record_projects scope ON scope.record_id = record.id WHERE scope.project_slug = ?1 ORDER BY record.id DESC").map_err(storage_error)?.query_map([project], |row| row.get(0)).map_err(storage_error)?.collect::<Result<Vec<i64>, _>>().map_err(storage_error)?,
-            (None, Some(status)) => connection.prepare("SELECT id FROM records WHERE status = ?1 ORDER BY id DESC").map_err(storage_error)?.query_map([status_name(status)], |row| row.get(0)).map_err(storage_error)?.collect::<Result<Vec<i64>, _>>().map_err(storage_error)?,
-            (None, None) => connection.prepare("SELECT id FROM records ORDER BY id DESC").map_err(storage_error)?.query_map([], |row| row.get(0)).map_err(storage_error)?.collect::<Result<Vec<i64>, _>>().map_err(storage_error)?,
-        };
+        if let Some(project) = &filter.project_slug {
+            record_workspaces::creation_workspace(
+                &connection,
+                self.record_workspace.as_deref(),
+                std::slice::from_ref(project),
+            )?;
+        }
+        let ids = connection.prepare(
+            "SELECT record.id FROM records record
+             WHERE (?1 IS NULL OR record.workspace_id = ?1)
+               AND (?2 IS NULL OR EXISTS(SELECT 1 FROM record_projects scope WHERE scope.record_id = record.id AND scope.project_slug = ?2))
+               AND (?3 IS NULL OR record.status = ?3)
+             ORDER BY record.id DESC"
+        ).map_err(storage_error)?.query_map(params![self.record_workspace, filter.project_slug, filter.status.map(status_name)], |row| row.get::<_, i64>(0))
+            .map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)?;
         let records = ids
             .into_iter()
             .map(|id| load_record(&connection, id.cast_unsigned()))
@@ -1051,10 +1077,12 @@ impl RecordRepository for SqliteProjectRepository {
             .connection
             .lock()
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        self.ensure_record_workspace(&connection, id)?;
         load_record(&connection, id)
     }
 
     fn edit_record(&self, id: u64, body: &str) -> Result<Record, RegistrationError> {
+        self.record_workspace(id)?;
         let mut connection = self
             .connection
             .lock()
@@ -1076,6 +1104,7 @@ impl RecordRepository for SqliteProjectRepository {
     }
 
     fn start_record(&self, id: u64) -> Result<Record, RegistrationError> {
+        self.record_workspace(id)?;
         let mut connection = self
             .connection
             .lock()
@@ -1147,6 +1176,7 @@ impl RecordRepository for SqliteProjectRepository {
         id: u64,
         completion_resolution: Option<&str>,
     ) -> Result<Record, RegistrationError> {
+        self.record_workspace(id)?;
         let mut connection = self
             .connection
             .lock()
@@ -1198,6 +1228,9 @@ impl RecordRepository for SqliteProjectRepository {
         let transaction = connection.transaction().map_err(storage_error)?;
         let child = load_record(&transaction, child_id)?;
         let parent = load_record(&transaction, parent_id)?;
+        self.ensure_record_workspace(&transaction, child_id)?;
+        self.ensure_record_workspace(&transaction, parent_id)?;
+        record_workspaces::same_workspace(&transaction, child_id, parent_id)?;
         insert_relationship(&transaction, &child, &parent, kind)?;
         insert_update(
             &transaction,
@@ -1226,6 +1259,8 @@ impl RecordRepository for SqliteProjectRepository {
         parent_id: u64,
         kind: RecordRelationshipKind,
     ) -> Result<Record, RegistrationError> {
+        self.record_workspace(child_id)?;
+        self.record_workspace(parent_id)?;
         let mut connection = self
             .connection
             .lock()
@@ -1260,8 +1295,9 @@ impl RecordRepository for SqliteProjectRepository {
                     && matches!(child.record_type, RecordType::Task | RecordType::Spec)
                     || child.record_type == RecordType::Task
                         && parent.record_type == RecordType::Grilling
-                        && child.project_slugs.len() == 1
-                        && parent.project_slugs.contains(&child.project_slugs[0])) =>
+                        && (child.project_slugs.is_empty() && parent.project_slugs.is_empty()
+                            || child.project_slugs.len() == 1
+                                && parent.project_slugs.contains(&child.project_slugs[0]))) =>
             {
                 return Err(RegistrationError::new(
                     "invalid-relationship",
@@ -1274,6 +1310,7 @@ impl RecordRepository for SqliteProjectRepository {
             RecordRelationshipKind::ParentChild => "parent-child",
             RecordRelationshipKind::DependsOn => "depends-on",
             RecordRelationshipKind::GeneratedBy => "generated-by",
+            RecordRelationshipKind::Initiative => "initiative",
         };
         let deleted = transaction
             .execute(
@@ -1314,6 +1351,7 @@ impl RecordRepository for SqliteProjectRepository {
         body: &str,
         author: Option<&str>,
     ) -> Result<RecordComment, RegistrationError> {
+        self.record_workspace(id)?;
         let mut connection = self
             .connection
             .lock()
@@ -1340,6 +1378,7 @@ impl RecordRepository for SqliteProjectRepository {
     }
 
     fn list_record_comments(&self, id: u64) -> Result<Vec<RecordComment>, RegistrationError> {
+        self.record_workspace(id)?;
         let connection = self
             .connection
             .lock()
@@ -1353,6 +1392,7 @@ impl RecordRepository for SqliteProjectRepository {
         id: u64,
         comment_id: RecordCommentId,
     ) -> Result<(), RegistrationError> {
+        self.record_workspace(id)?;
         let mut connection = self
             .connection
             .lock()
@@ -1379,6 +1419,7 @@ impl RecordRepository for SqliteProjectRepository {
     }
 
     fn list_record_updates(&self, id: u64) -> Result<Vec<RecordUpdate>, RegistrationError> {
+        self.record_workspace(id)?;
         let connection = self
             .connection
             .lock()
@@ -3205,6 +3246,7 @@ fn relationship_kind_name(kind: RecordRelationshipKind) -> &'static str {
         RecordRelationshipKind::ParentChild => "parent-child",
         RecordRelationshipKind::DependsOn => "depends-on",
         RecordRelationshipKind::GeneratedBy => "generated-by",
+        RecordRelationshipKind::Initiative => "initiative",
     }
 }
 fn parse_relationship_kind(kind: &str) -> rusqlite::Result<RecordRelationshipKind> {
@@ -3212,6 +3254,7 @@ fn parse_relationship_kind(kind: &str) -> rusqlite::Result<RecordRelationshipKin
         "parent-child" => Ok(RecordRelationshipKind::ParentChild),
         "depends-on" => Ok(RecordRelationshipKind::DependsOn),
         "generated-by" => Ok(RecordRelationshipKind::GeneratedBy),
+        "initiative" => Ok(RecordRelationshipKind::Initiative),
         _ => Err(rusqlite::Error::InvalidQuery),
     }
 }
@@ -3283,8 +3326,9 @@ fn insert_relationship(
                 && matches!(child.record_type, RecordType::Task | RecordType::Spec)
                 || child.record_type == RecordType::Task
                     && parent.record_type == RecordType::Grilling
-                    && child.project_slugs.len() == 1
-                    && parent.project_slugs.contains(&child.project_slugs[0]);
+                    && (child.project_slugs.is_empty() && parent.project_slugs.is_empty()
+                        || child.project_slugs.len() == 1
+                            && parent.project_slugs.contains(&child.project_slugs[0]));
             if !valid_dependency {
                 return Err(RegistrationError::new(
                     "invalid-relationship",
@@ -3302,6 +3346,9 @@ fn insert_relationship(
                 ));
             }
             transaction.execute("INSERT INTO record_relationships (from_id, to_id, kind) VALUES (?1, ?2, 'depends-on')", params![child.id.cast_signed(), parent.id.cast_signed()]).map_err(|error| if matches!(error.sqlite_error_code(), Some(ErrorCode::ConstraintViolation)) { RegistrationError::new("duplicate-relationship", "Relationship already exists") } else { storage_error(error) })?;
+        }
+        RecordRelationshipKind::Initiative => {
+            record_workspaces::attach_initiative(transaction, child, parent)?;
         }
         RecordRelationshipKind::GeneratedBy => {
             if child.status != RecordStatus::Open {
@@ -3511,20 +3558,32 @@ fn validate_projects(
     connection: &Connection,
     project_slugs: &[String],
 ) -> Result<(), RegistrationError> {
+    let mut workspace = None;
     for slug in project_slugs {
-        let exists: bool = connection
+        let owner: String = connection
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM projects WHERE slug = ?1)",
+                "SELECT workspace_id FROM projects WHERE slug = ?1",
                 [slug],
                 |row| row.get(0),
             )
-            .map_err(storage_error)?;
-        if !exists {
+            .optional()
+            .map_err(storage_error)?
+            .ok_or_else(|| {
+                RegistrationError::new(
+                    "project-not-found",
+                    format!("Project `{slug}` is not registered"),
+                )
+            })?;
+        if workspace
+            .as_ref()
+            .is_some_and(|workspace| workspace != &owner)
+        {
             return Err(RegistrationError::new(
-                "project-not-found",
-                format!("Project `{slug}` is not registered"),
+                "cross-workspace-record",
+                "all Projects in a Record's scope must belong to one Workspace",
             ));
         }
+        workspace = Some(owner);
     }
     Ok(())
 }
@@ -3550,6 +3609,7 @@ fn add_generated_by_relationships(
             ));
         }
         load_record(connection, generator_id)?;
+        record_workspaces::same_workspace(connection, generated_id, generator_id)?;
         connection
             .execute(
                 "INSERT INTO record_relationships (from_id, to_id, kind) VALUES (?1, ?2, 'generated-by')",
@@ -3596,17 +3656,11 @@ fn validate_typed_record(record: &NewTypedRecord) -> Result<(), RegistrationErro
             "invalid-project-scope",
             "a standalone Task may have at most one Project in its scope",
         )),
-        RecordType::Wayfinder if record.project_slugs.is_empty() => Err(RegistrationError::new(
-            "invalid-project-scope",
-            "a Wayfinder must have at least one Project in its scope",
-        )),
-        RecordType::Grilling if record.project_slugs.is_empty() => Err(RegistrationError::new(
-            "invalid-project-scope",
-            "a Grilling must have at least one Project in its scope",
-        )),
-        RecordType::Spec | RecordType::Task | RecordType::Wayfinder | RecordType::Grilling => {
-            Ok(())
-        }
+        RecordType::Spec
+        | RecordType::Task
+        | RecordType::Wayfinder
+        | RecordType::Grilling
+        | RecordType::Initiative => Ok(()),
     }
 }
 
@@ -3617,6 +3671,7 @@ fn record_type_name(record_type: RecordType) -> &'static str {
         RecordType::Task => "task",
         RecordType::Wayfinder => "wayfinder",
         RecordType::Grilling => "grilling",
+        RecordType::Initiative => "initiative",
     }
 }
 
@@ -3649,6 +3704,7 @@ fn record_type(value: &str) -> Result<RecordType, RegistrationError> {
         "task" => Ok(RecordType::Task),
         "wayfinder" => Ok(RecordType::Wayfinder),
         "grilling" => Ok(RecordType::Grilling),
+        "initiative" => Ok(RecordType::Initiative),
         _ => Err(RegistrationError::new(
             "storage",
             "stored Record has an invalid type",
@@ -3709,10 +3765,12 @@ fn load_record(connection: &Connection, id: u64) -> Result<Record, RegistrationE
             (from_id, to_id, Some(parent_id), Some(child_id), kind) if kind == "parent-child" => Ok(RecordRelationship { kind: RecordRelationshipKind::ParentChild, from_id, to_id, parent_id, child_id }),
             (from_id, to_id, None, None, kind) if kind == "depends-on" => Ok(RecordRelationship { kind: RecordRelationshipKind::DependsOn, from_id, to_id, parent_id: 0, child_id: 0 }),
             (from_id, to_id, None, None, kind) if kind == "generated-by" => Ok(RecordRelationship { kind: RecordRelationshipKind::GeneratedBy, from_id, to_id, parent_id: 0, child_id: 0 }),
+            (from_id, to_id, None, None, kind) if kind == "initiative" => Ok(RecordRelationship { kind: RecordRelationshipKind::Initiative, from_id, to_id, parent_id: 0, child_id: 0 }),
             _ => Err(RegistrationError::new("storage", "stored Record has an invalid Relationship kind")),
         })
         .collect::<Result<Vec<_>, RegistrationError>>()?;
     Ok(Record {
+        workspace_id: record_workspaces::owner(connection, id)?,
         id,
         record_type: record_type(&stored_record_type)?,
         task_kind: task_kind(stored_task_kind)?,
@@ -3744,7 +3802,7 @@ fn migrate_record_type_schema(connection: &Connection) -> Result<(), Registratio
     if !columns.iter().any(|column| column == "record_type") {
         connection
             .execute_batch(
-                "ALTER TABLE records ADD COLUMN record_type TEXT NOT NULL DEFAULT 'generic' CHECK (record_type IN ('generic', 'spec', 'task', 'wayfinder', 'grilling'));",
+                "ALTER TABLE records ADD COLUMN record_type TEXT NOT NULL DEFAULT 'generic' CHECK (record_type IN ('generic', 'spec', 'task', 'wayfinder', 'grilling', 'initiative'));",
             )
             .map_err(storage_error)?;
         return Ok(());
@@ -3757,10 +3815,22 @@ fn migrate_record_type_schema(connection: &Connection) -> Result<(), Registratio
             |row| row.get(0),
         )
         .map_err(storage_error)?;
-    if schema.contains("'wayfinder'") && schema.contains("'grilling'") {
+    if schema.contains("'initiative'") {
         return Ok(());
     }
 
+    if !columns.iter().any(|column| column == "workspace_id") {
+        connection
+            .execute_batch(
+                "ALTER TABLE records ADD COLUMN workspace_id TEXT REFERENCES workspaces(id);",
+            )
+            .map_err(storage_error)?;
+    }
+    if !columns.iter().any(|column| column == "task_kind") {
+        connection
+            .execute_batch("ALTER TABLE records ADD COLUMN task_kind TEXT;")
+            .map_err(storage_error)?;
+    }
     connection
         .execute_batch("PRAGMA foreign_keys = OFF;")
         .map_err(storage_error)?;
@@ -3768,15 +3838,19 @@ fn migrate_record_type_schema(connection: &Connection) -> Result<(), Registratio
         let transaction = connection.unchecked_transaction().map_err(storage_error)?;
         transaction
             .execute_batch(
-                "CREATE TABLE records_new (
+                "DROP TRIGGER IF EXISTS record_project_workspace;
+                 DROP TRIGGER IF EXISTS record_relationship_workspace;
+                 CREATE TABLE records_new (
                     id INTEGER PRIMARY KEY NOT NULL,
-                    record_type TEXT NOT NULL CHECK (record_type IN ('generic', 'spec', 'task', 'wayfinder', 'grilling')),
+                    record_type TEXT NOT NULL CHECK (record_type IN ('generic', 'spec', 'task', 'wayfinder', 'grilling', 'initiative')),
+                    workspace_id TEXT REFERENCES workspaces(id) ON DELETE RESTRICT,
+                    task_kind TEXT CHECK (task_kind IN ('research', 'prototype', 'review')),
                     body TEXT NOT NULL,
                     status TEXT NOT NULL CHECK (status IN ('open', 'in_progress', 'done')),
                     completion_resolution TEXT
                 );
-                INSERT INTO records_new (id, record_type, body, status, completion_resolution)
-                    SELECT id, record_type, body, status, completion_resolution FROM records;
+                INSERT INTO records_new (id, record_type, body, status, completion_resolution, workspace_id, task_kind)
+                    SELECT id, record_type, body, status, completion_resolution, workspace_id, task_kind FROM records;
                 DROP TABLE records;
                 ALTER TABLE records_new RENAME TO records;",
             )
@@ -3815,11 +3889,11 @@ fn migrate_record_relationship_schema(connection: &Connection) -> Result<(), Reg
             |row| row.get(0),
         )
         .map_err(storage_error)?;
-    if schema.contains("from_id") && schema.contains("generated-by") {
+    if schema.contains("from_id") && schema.contains("'initiative'") {
         return Ok(());
     }
     if schema.contains("from_id") {
-        connection.execute_batch("PRAGMA foreign_keys = OFF; ALTER TABLE record_relationships RENAME TO record_relationships_old; CREATE TABLE record_relationships (from_id INTEGER NOT NULL REFERENCES records(id), to_id INTEGER NOT NULL REFERENCES records(id), parent_id INTEGER REFERENCES records(id), child_id INTEGER REFERENCES records(id) UNIQUE, kind TEXT NOT NULL CHECK (kind IN ('parent-child', 'depends-on', 'generated-by')), PRIMARY KEY (from_id, to_id, kind)); INSERT INTO record_relationships SELECT from_id, to_id, parent_id, child_id, kind FROM record_relationships_old; DROP TABLE record_relationships_old; PRAGMA foreign_keys = ON;").map_err(storage_error)?;
+        connection.execute_batch("PRAGMA foreign_keys = OFF; ALTER TABLE record_relationships RENAME TO record_relationships_old; CREATE TABLE record_relationships (from_id INTEGER NOT NULL REFERENCES records(id), to_id INTEGER NOT NULL REFERENCES records(id), parent_id INTEGER REFERENCES records(id), child_id INTEGER REFERENCES records(id) UNIQUE, kind TEXT NOT NULL CHECK (kind IN ('parent-child', 'depends-on', 'generated-by', 'initiative')), PRIMARY KEY (from_id, to_id, kind)); INSERT INTO record_relationships SELECT from_id, to_id, parent_id, child_id, kind FROM record_relationships_old; DROP TABLE record_relationships_old; PRAGMA foreign_keys = ON;").map_err(storage_error)?;
         return Ok(());
     }
     connection.execute_batch("PRAGMA foreign_keys = OFF;
@@ -3827,7 +3901,7 @@ fn migrate_record_relationship_schema(connection: &Connection) -> Result<(), Reg
         CREATE TABLE record_relationships (
             from_id INTEGER NOT NULL REFERENCES records(id), to_id INTEGER NOT NULL REFERENCES records(id),
             parent_id INTEGER REFERENCES records(id), child_id INTEGER REFERENCES records(id) UNIQUE,
-            kind TEXT NOT NULL CHECK (kind IN ('parent-child', 'depends-on', 'generated-by')), PRIMARY KEY (from_id, to_id, kind)
+            kind TEXT NOT NULL CHECK (kind IN ('parent-child', 'depends-on', 'generated-by', 'initiative')), PRIMARY KEY (from_id, to_id, kind)
         );
         INSERT INTO record_relationships (from_id, to_id, parent_id, child_id, kind)
             SELECT child_id, parent_id, parent_id, child_id, kind FROM record_relationships_old;
@@ -3902,16 +3976,16 @@ mod tests {
     struct SqliteProjectRepository;
     impl SqliteProjectRepository {
         fn in_memory() -> Result<Repository, RegistrationError> {
-            Self::seed(Repository::in_memory()?)
+            Self::seed(&Repository::in_memory()?)
         }
         fn open(path: &std::path::Path) -> Result<Repository, RegistrationError> {
-            Self::seed(Repository::open(path)?)
+            Self::seed(&Repository::open(path)?)
         }
-        fn seed(repository: Repository) -> Result<Repository, RegistrationError> {
+        fn seed(repository: &Repository) -> Result<Repository, RegistrationError> {
             if repository.workspace("test").is_err() {
                 repository.create_workspace("test", "Test", std::path::Path::new("/"))?;
             }
-            Ok(repository)
+            repository.in_record_workspace("test")
         }
     }
     use forge_app::{
@@ -4827,7 +4901,7 @@ mod tests {
     }
 
     #[test]
-    fn migrates_typed_records_and_widens_the_record_type_constraint() {
+    fn rejects_pre_workspace_typed_records_without_adopting_them() {
         let path = std::env::temp_dir().join(format!(
             "forge-store-record-type-migration-{}.sqlite",
             SystemTime::now()
@@ -4863,48 +4937,13 @@ mod tests {
             INSERT INTO record_relationships VALUES (3, 2, 2, 3, 'parent-child');").unwrap();
         drop(connection);
 
-        let store = SqliteProjectRepository::open(&path).unwrap();
-        assert_eq!(
-            store.show_record(1).unwrap().record_type,
-            RecordType::Generic
-        );
-        assert_eq!(store.show_record(2).unwrap().record_type, RecordType::Spec);
-        let task = store.show_record(3).unwrap();
-        assert_eq!(task.record_type, RecordType::Task);
-        assert_eq!(task.project_slugs, ["alpha"]);
-        assert_eq!(task.relationships[0].parent_id, 2);
-        assert_eq!(task.completion_resolution.as_deref(), Some("complete"));
-        assert_eq!(
-            store
-                .open_typed_record(&NewTypedRecord {
-                    record_type: RecordType::Wayfinder,
-                    task_kind: None,
-                    body: "wayfinder".into(),
-                    project_slugs: vec!["alpha".into()],
-                    generated_by_ids: vec![],
-                })
-                .unwrap()
-                .record_type,
-            RecordType::Wayfinder
-        );
-        assert_eq!(
-            store
-                .open_typed_record(&NewTypedRecord {
-                    record_type: RecordType::Grilling,
-                    task_kind: None,
-                    body: "grilling".into(),
-                    project_slugs: vec!["alpha".into()],
-                    generated_by_ids: vec![],
-                })
-                .unwrap()
-                .record_type,
-            RecordType::Grilling
-        );
+        let error = SqliteProjectRepository::open(&path).err().unwrap();
+        assert_eq!(error.code, "record-workspace-required");
         std::fs::remove_file(path).unwrap();
     }
 
     #[test]
-    fn migrates_existing_records_to_generic_without_losing_related_data() {
+    fn rejects_pre_workspace_generic_records_without_adopting_them() {
         let path = std::env::temp_dir().join(format!(
             "forge-store-migration-{}.sqlite",
             SystemTime::now()
@@ -4932,29 +4971,8 @@ mod tests {
             INSERT INTO record_comments VALUES (11, 7, 2, 'agent', 'comment');").unwrap();
         drop(connection);
 
-        let store = SqliteProjectRepository::open(&path).unwrap();
-        let connection = store.connection.lock().unwrap();
-        assert!(connection
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'record_update_subscriptions')",
-                [],
-                |row| row.get::<_, bool>(0),
-            )
-            .unwrap());
-        drop(connection);
-        let record = store.show_record(7).unwrap();
-        assert_eq!(record.record_type, RecordType::Generic);
-        assert_eq!(record.body, "legacy");
-        assert_eq!(record.project_slugs, ["alpha"]);
-        assert_eq!(record.status, RecordStatus::Done);
-        assert_eq!(record.completion_resolution.as_deref(), Some("complete"));
-        assert_eq!(record.relationships[0].parent_id, 6);
-        assert_eq!(
-            store.show_record(6).unwrap().record_type,
-            RecordType::Generic
-        );
-        assert_eq!(store.list_record_updates(7).unwrap()[0].id.0, 9);
-        assert_eq!(store.list_record_comments(7).unwrap()[0].id.0, 11);
+        let error = SqliteProjectRepository::open(&path).err().unwrap();
+        assert_eq!(error.code, "record-workspace-required");
         std::fs::remove_file(path).unwrap();
     }
 
