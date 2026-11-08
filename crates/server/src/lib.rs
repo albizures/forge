@@ -62,8 +62,7 @@ use forge_rpc::{
     RecordResponse, RecordUpdateSubscriptionResponse, RegisterProjectRequest,
     RegisterProjectResponse, RelateRecordRequest, RemoveManagedWorktreeRequest,
     RetireAgentAssignmentRequest, RevisionIdentity, SetProjectSetupHookRequest,
-    SetWorktreeRootRequest, StartAssignmentTaskRequest, SystemApiServer, SystemStatusResponse,
-    WorktreeApiServer, WorktreeRootResponse,
+    StartAssignmentTaskRequest, SystemApiServer, SystemStatusResponse, WorktreeApiServer,
 };
 use forge_store::SqliteProjectRepository;
 use fs2::FileExt;
@@ -622,7 +621,13 @@ impl ManagedWorktreeAdapter for GitWorktreeAdapter {
                 removable: false,
             };
         }
-        if git(path, &["rev-parse", "--is-inside-work-tree"]).as_deref() != Ok("true") {
+        if !path.join(".git").is_file()
+            || git(path, &["rev-parse", "--is-inside-work-tree"]).as_deref() != Ok("true")
+            || git(path, &["rev-parse", "--show-toplevel"])
+                .ok()
+                .and_then(|root| fs::canonicalize(root).ok())
+                != fs::canonicalize(path).ok()
+        {
             return WorktreeSafetyAssessment {
                 facts: vec!["git-metadata-invalid".into()],
                 blockers: vec!["git-metadata-invalid".into()],
@@ -1224,32 +1229,30 @@ impl AgentDispatchApiServer for Daemon {
 
 #[async_trait]
 impl WorktreeApiServer for Daemon {
-    async fn root_get(&self) -> RpcResult<WorktreeRootResponse> {
-        self.application
-            .worktree_root()
-            .map(|root| WorktreeRootResponse {
-                root: root.map(|path| path.to_string_lossy().into_owned()),
-            })
-            .map_err(rpc_error)
-    }
-    async fn root_set(&self, request: SetWorktreeRootRequest) -> RpcResult<WorktreeRootResponse> {
-        self.application
-            .set_worktree_root(request.root.as_deref().map(Path::new))
-            .and_then(|()| self.application.worktree_root())
-            .map(|root| WorktreeRootResponse {
-                root: root.map(|path| path.to_string_lossy().into_owned()),
-            })
-            .map_err(rpc_error)
-    }
-    async fn setup_hook_set(&self, request: SetProjectSetupHookRequest) -> RpcResult<()> {
+    async fn setup_hook_set(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<SetProjectSetupHookRequest>,
+    ) -> RpcResult<()> {
+        let forge_rpc::SelectedRecordRequest {
+            selection,
+            record: mut request,
+        } = request;
+        self.record_application(&selection, std::slice::from_mut(&mut request.project_slug))?;
         self.application
             .set_project_setup_hook(&request.project_slug, request.hook.as_deref())
             .map_err(rpc_error)
     }
     async fn create(
         &self,
-        request: CreateManagedWorktreeRequest,
+        request: forge_rpc::SelectedRecordRequest<CreateManagedWorktreeRequest>,
     ) -> RpcResult<ManagedWorktreeResponse> {
+        let forge_rpc::SelectedRecordRequest {
+            selection,
+            record: request,
+        } = request;
+        self.record_application(&selection, &mut [])?
+            .show_record(request.record_id)
+            .map_err(rpc_error)?;
         let result = self
             .application
             .create_managed_worktree(request.record_id, &request.branch, &request.base)
@@ -1260,15 +1263,32 @@ impl WorktreeApiServer for Daemon {
     }
     async fn recover(
         &self,
-        request: forge_rpc::RecoverManagedWorktreeRequest,
+        request: forge_rpc::SelectedRecordRequest<forge_rpc::RecoverManagedWorktreeRequest>,
     ) -> RpcResult<ManagedWorktreeResponse> {
+        let forge_rpc::SelectedRecordRequest {
+            selection,
+            record: request,
+        } = request;
+        self.record_application(&selection, &mut [])?
+            .show_record(request.record_id)
+            .map_err(rpc_error)?;
         self.application
             .recover_managed_worktree(request.record_id, request.confirm_no_active_agent)
             .and_then(|_| self.application.managed_worktree_info(request.record_id))
             .map(Into::into)
             .map_err(rpc_error)
     }
-    async fn info(&self, request: RecordIdRequest) -> RpcResult<ManagedWorktreeResponse> {
+    async fn info(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<RecordIdRequest>,
+    ) -> RpcResult<ManagedWorktreeResponse> {
+        let forge_rpc::SelectedRecordRequest {
+            selection,
+            record: request,
+        } = request;
+        self.record_application(&selection, &mut [])?
+            .show_record(request.id)
+            .map_err(rpc_error)?;
         self.application
             .managed_worktree_info(request.id)
             .map(Into::into)
@@ -1276,27 +1296,47 @@ impl WorktreeApiServer for Daemon {
     }
     async fn list(
         &self,
-        request: ListManagedWorktreesRequest,
+        request: forge_rpc::SelectedRecordRequest<ListManagedWorktreesRequest>,
     ) -> RpcResult<ListManagedWorktreesResponse> {
+        let forge_rpc::SelectedRecordRequest {
+            selection,
+            record: request,
+        } = request;
+        let workspace = self.record_workspace(&selection, &mut [])?;
         self.application
-            .list_managed_worktrees(request.include_all)
+            .list_workspace_managed_worktrees(&workspace, request.include_all)
             .map(|worktrees| ListManagedWorktreesResponse {
                 worktrees: worktrees.into_iter().map(Into::into).collect(),
             })
             .map_err(rpc_error)
     }
-    async fn remove(&self, request: RemoveManagedWorktreeRequest) -> RpcResult<()> {
+    async fn remove(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<RemoveManagedWorktreeRequest>,
+    ) -> RpcResult<()> {
+        let forge_rpc::SelectedRecordRequest {
+            selection,
+            record: request,
+        } = request;
+        self.record_application(&selection, &mut [])?
+            .show_record(request.record_id)
+            .map_err(rpc_error)?;
         self.application
             .remove_managed_worktree(request.record_id, request.force)
             .map_err(rpc_error)
     }
     async fn doctor(
         &self,
-        request: DoctorManagedWorktreesRequest,
+        request: forge_rpc::SelectedRecordRequest<DoctorManagedWorktreesRequest>,
     ) -> RpcResult<ListManagedWorktreesResponse> {
+        let forge_rpc::SelectedRecordRequest {
+            selection,
+            record: request,
+        } = request;
+        let workspace = self.record_workspace(&selection, &mut [])?;
         let worktrees = self
             .application
-            .list_managed_worktrees(false)
+            .list_workspace_managed_worktrees(&workspace, false)
             .map_err(rpc_error)?;
         if request.repair {
             for worktree in &worktrees {
@@ -1790,6 +1830,17 @@ impl Daemon {
         selection: &forge_rpc::RecordSelection,
         projects: &mut [String],
     ) -> RpcResult<forge_app::Application> {
+        let workspace = self.record_workspace(selection, projects)?;
+        self.application
+            .records_in_workspace(&workspace)
+            .map_err(rpc_error)
+    }
+
+    fn record_workspace(
+        &self,
+        selection: &forge_rpc::RecordSelection,
+        projects: &mut [String],
+    ) -> RpcResult<String> {
         let cwd = selection.cwd.as_deref().map(std::path::Path::new);
         if cwd.is_some_and(|cwd| !cwd.is_absolute()) {
             return Err(rpc_error(RegistrationError::new(
@@ -1833,9 +1884,7 @@ impl Daemon {
                 .map_err(rpc_error)?
                 .reference;
         }
-        self.application
-            .records_in_workspace(&workspace.id)
-            .map_err(rpc_error)
+        Ok(workspace.id)
     }
 }
 
@@ -2801,7 +2850,6 @@ mod tests {
     }
 
     fn explicit_dispatch_fixture() -> (PathBuf, SqliteProjectRepository, Vec<forge_app::Record>) {
-        use forge_app::ManagedWorktreeRepository;
         let root = std::env::temp_dir().join(format!(
             "forge-explicit-app-{}",
             SystemTime::now()
@@ -2829,10 +2877,8 @@ mod tests {
         let base = super::git(&repo, &["rev-parse", "HEAD"]).unwrap();
         let database = root.join("store.sqlite");
         let store = SqliteProjectRepository::open(&database).unwrap();
+        forge_app::WorkspaceRepository::create_workspace(&store, "test", "Test", &root).unwrap();
         super::test_projects::register(&store, "alpha", Some(&repo));
-        store
-            .set_worktree_root(Some(&root.join("worktrees")))
-            .unwrap();
         store
             .set_project_task_concurrency_limit("alpha", Some(2))
             .unwrap();

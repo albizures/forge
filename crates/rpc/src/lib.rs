@@ -43,8 +43,6 @@ pub const AGENT_DISPATCH_ASSIGNMENT_INFO_METHOD: &str = "agentDispatch_assignmen
 pub const AGENT_SUBSCRIPTION_CREATE_METHOD: &str = "agentSubscription.create";
 pub const AGENT_SUBSCRIPTION_RENEW_METHOD: &str = "agentSubscription.renew";
 pub const AGENT_SUBSCRIPTION_DELETE_METHOD: &str = "agentSubscription.delete";
-pub const WORKTREE_ROOT_GET_METHOD: &str = "worktree.rootGet";
-pub const WORKTREE_ROOT_SET_METHOD: &str = "worktree.rootSet";
 pub const WORKTREE_SETUP_HOOK_SET_METHOD: &str = "worktree.setupHookSet";
 pub const WORKTREE_CREATE_METHOD: &str = "worktree.create";
 pub const WORKTREE_INFO_METHOD: &str = "worktree.info";
@@ -155,35 +153,40 @@ pub trait AgentSubscriptionApi {
 
 #[rpc(client, server, namespace = "worktree")]
 pub trait WorktreeApi {
-    #[method(name = "rootGet")]
-    async fn root_get(&self) -> RpcResult<WorktreeRootResponse>;
-    #[method(name = "rootSet")]
-    async fn root_set(&self, request: SetWorktreeRootRequest) -> RpcResult<WorktreeRootResponse>;
     #[method(name = "setupHookSet")]
-    async fn setup_hook_set(&self, request: SetProjectSetupHookRequest) -> RpcResult<()>;
+    async fn setup_hook_set(
+        &self,
+        request: SelectedRecordRequest<SetProjectSetupHookRequest>,
+    ) -> RpcResult<()>;
     #[method(name = "create")]
     async fn create(
         &self,
-        request: CreateManagedWorktreeRequest,
+        request: SelectedRecordRequest<CreateManagedWorktreeRequest>,
     ) -> RpcResult<ManagedWorktreeResponse>;
     #[method(name = "recover")]
     async fn recover(
         &self,
-        request: RecoverManagedWorktreeRequest,
+        request: SelectedRecordRequest<RecoverManagedWorktreeRequest>,
     ) -> RpcResult<ManagedWorktreeResponse>;
     #[method(name = "info")]
-    async fn info(&self, request: RecordIdRequest) -> RpcResult<ManagedWorktreeResponse>;
+    async fn info(
+        &self,
+        request: SelectedRecordRequest<RecordIdRequest>,
+    ) -> RpcResult<ManagedWorktreeResponse>;
     #[method(name = "list")]
     async fn list(
         &self,
-        request: ListManagedWorktreesRequest,
+        request: SelectedRecordRequest<ListManagedWorktreesRequest>,
     ) -> RpcResult<ListManagedWorktreesResponse>;
     #[method(name = "remove")]
-    async fn remove(&self, request: RemoveManagedWorktreeRequest) -> RpcResult<()>;
+    async fn remove(
+        &self,
+        request: SelectedRecordRequest<RemoveManagedWorktreeRequest>,
+    ) -> RpcResult<()>;
     #[method(name = "doctor")]
     async fn doctor(
         &self,
-        request: DoctorManagedWorktreesRequest,
+        request: SelectedRecordRequest<DoctorManagedWorktreesRequest>,
     ) -> RpcResult<ListManagedWorktreesResponse>;
 }
 
@@ -744,19 +747,12 @@ fn record_update_kind_filter_name(filter: RecordUpdateKindFilter) -> String {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct SetWorktreeRootRequest {
-    pub root: Option<String>,
-}
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct WorktreeRootResponse {
-    pub root: Option<String>,
-}
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SetProjectSetupHookRequest {
     pub project_slug: String,
     pub hook: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateManagedWorktreeRequest {
     pub record_id: u64,
     pub branch: String,
@@ -768,6 +764,7 @@ pub struct RemoveManagedWorktreeRequest {
     pub force: bool,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct RecoverManagedWorktreeRequest {
     pub record_id: u64,
     pub confirm_no_active_agent: bool,

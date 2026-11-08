@@ -181,10 +181,6 @@ impl SqliteProjectRepository {
                 reason TEXT NOT NULL,
                 correlation_id TEXT NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS managed_worktree_configuration (
-                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-                worktree_root TEXT
-            );
             CREATE TABLE IF NOT EXISTS project_managed_worktree_configuration (
                 project_slug TEXT PRIMARY KEY NOT NULL REFERENCES projects(slug),
                 setup_hook TEXT NOT NULL
@@ -398,39 +394,52 @@ impl ProjectRepository for SqliteProjectRepository {
     }
 }
 
+fn workspace_worktree_path(
+    connection: &Connection,
+    record_id: u64,
+) -> Result<PathBuf, RegistrationError> {
+    let record = load_record(connection, record_id)?;
+    if record.record_type != RecordType::Task || record.project_slugs.len() != 1 {
+        return Err(RegistrationError::new(
+            "worktree-ineligible-record",
+            "Managed Worktrees require a single-Project Task",
+        ));
+    }
+    let (root, slug): (String, String) = connection.query_row(
+        "SELECT w.root, p.local_slug FROM projects p JOIN workspaces w ON w.id = p.workspace_id WHERE p.slug = ?1 AND p.workspace_id = ?2",
+        params![record.project_slugs[0], record.workspace_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).map_err(storage_error)?;
+    Ok(managed_worktree_path(Path::new(&root), &slug, record_id))
+}
+
 impl ManagedWorktreeRepository for SqliteProjectRepository {
-    fn set_worktree_root(&self, root: Option<&Path>) -> Result<(), RegistrationError> {
-        if root.is_some_and(|root| !root.is_absolute()) {
-            return Err(RegistrationError::new(
-                "invalid-worktree-root",
-                "Worktree Root must be an absolute path",
-            ));
-        }
+    fn worktree_path(&self, record_id: u64) -> Result<PathBuf, RegistrationError> {
+        self.record_workspace(record_id)?;
         let connection = self
             .connection
             .lock()
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
-        connection.execute(
-            "INSERT INTO managed_worktree_configuration (singleton, worktree_root) VALUES (1, ?1) ON CONFLICT(singleton) DO UPDATE SET worktree_root = excluded.worktree_root",
-            [root.map(|path| path.to_string_lossy().into_owned())],
-        ).map_err(storage_error)?;
-        Ok(())
+        workspace_worktree_path(&connection, record_id)
     }
 
-    fn worktree_root(&self) -> Result<Option<PathBuf>, RegistrationError> {
+    fn ensure_worktree_removable(&self, record_id: u64) -> Result<(), RegistrationError> {
+        self.record_workspace(record_id)?;
         let connection = self
             .connection
             .lock()
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
-        connection
-            .query_row(
-                "SELECT worktree_root FROM managed_worktree_configuration WHERE singleton = 1",
-                [],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .optional()
-            .map_err(storage_error)
-            .map(|root| root.flatten().map(PathBuf::from))
+        let retained: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM agent_assignments a WHERE a.record_id = ?1 AND (a.closed_at_millis IS NULL OR EXISTS (SELECT 1 FROM agent_assignment_resources r WHERE r.assignment_id = a.id AND r.retired_at_millis IS NULL)))",
+            [record_id.cast_signed()], |row| row.get(0),
+        ).map_err(storage_error)?;
+        if retained {
+            return Err(RegistrationError::new(
+                "worktree-in-use",
+                "Managed Worktree is retained by an open Assignment or unresolved resources; reconcile it before removal",
+            ));
+        }
+        Ok(())
     }
 
     fn set_project_setup_hook(
@@ -500,6 +509,7 @@ impl ManagedWorktreeRepository for SqliteProjectRepository {
         record_id: u64,
         path: &Path,
     ) -> Result<WorktreeClaim, RegistrationError> {
+        self.record_workspace(record_id)?;
         let mut connection = self
             .connection
             .lock()
@@ -532,23 +542,11 @@ impl ManagedWorktreeRepository for SqliteProjectRepository {
                 "Task already has a Worktree Claim",
             ));
         }
-        let root: Option<String> = tx
-            .query_row(
-                "SELECT worktree_root FROM managed_worktree_configuration WHERE singleton = 1",
-                [],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(storage_error)?
-            .flatten();
-        let root = root.ok_or_else(|| {
-            RegistrationError::new("worktree-root-unset", "Worktree Root is not configured")
-        })?;
         let slug = &record.project_slugs[0];
-        if managed_worktree_path(Path::new(&root), slug, record_id) != path {
+        if workspace_worktree_path(&tx, record_id)? != path {
             return Err(RegistrationError::new(
                 "recovery-path-changed",
-                "Worktree Root changed during recovery",
+                "Recovery requires the fixed Workspace-rooted Managed Worktree path",
             ));
         }
         tx.execute("INSERT INTO worktree_claims (record_id, project_slug, path, state) VALUES (?1, ?2, ?3, 'active')", params![record_id.cast_signed(), slug, path.to_string_lossy()]).map_err(storage_error)?;
@@ -558,6 +556,7 @@ impl ManagedWorktreeRepository for SqliteProjectRepository {
     }
 
     fn reserve_worktree_claim(&self, record_id: u64) -> Result<WorktreeClaim, RegistrationError> {
+        self.record_workspace(record_id)?;
         let mut connection = self
             .connection
             .lock()
@@ -573,27 +572,12 @@ impl ManagedWorktreeRepository for SqliteProjectRepository {
                 "a Dispatcher Managed Worktree requires an Open Task scoped to exactly one Project",
             ));
         }
-        let root: Option<String> = transaction
-            .query_row(
-                "SELECT worktree_root FROM managed_worktree_configuration WHERE singleton = 1",
-                [],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(storage_error)?
-            .flatten();
-        let root = root.ok_or_else(|| {
-            RegistrationError::new(
-                "worktree-root-unset",
-                "configure a Worktree Root before creating a Managed Worktree",
-            )
-        })?;
+        let path = workspace_worktree_path(&transaction, record_id)?;
         let project_slug = record
             .project_slugs
             .into_iter()
             .next()
             .expect("eligible Record has one Project");
-        let path = managed_worktree_path(Path::new(&root), &project_slug, record_id);
         transaction.execute("INSERT INTO worktree_claims (record_id, project_slug, path, state) VALUES (?1, ?2, ?3, 'reserving')", params![record_id.cast_signed(), project_slug, path.to_string_lossy()]).map_err(|error| if matches!(error.sqlite_error_code(), Some(ErrorCode::ConstraintViolation)) { RegistrationError::new("worktree-claim-exists", "Record already has a Worktree Claim") } else { storage_error(error) })?;
         let claim =
             load_worktree_claim(&transaction, record_id)?.expect("inserted Claim is visible");
@@ -602,6 +586,7 @@ impl ManagedWorktreeRepository for SqliteProjectRepository {
     }
 
     fn activate_worktree_claim(&self, record_id: u64) -> Result<WorktreeClaim, RegistrationError> {
+        self.record_workspace(record_id)?;
         transition_worktree_claim(&self.connection, record_id, "reserving", "active")
     }
 
@@ -609,6 +594,7 @@ impl ManagedWorktreeRepository for SqliteProjectRepository {
         &self,
         record_id: u64,
     ) -> Result<WorktreeClaim, RegistrationError> {
+        self.record_workspace(record_id)?;
         let connection = self
             .connection
             .lock()
@@ -626,6 +612,7 @@ impl ManagedWorktreeRepository for SqliteProjectRepository {
     }
 
     fn worktree_claim(&self, record_id: u64) -> Result<Option<WorktreeClaim>, RegistrationError> {
+        self.record_workspace(record_id)?;
         let connection = self
             .connection
             .lock()
@@ -638,7 +625,7 @@ impl ManagedWorktreeRepository for SqliteProjectRepository {
             .connection
             .lock()
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
-        connection.prepare("SELECT record_id, project_slug, path, state FROM worktree_claims ORDER BY record_id").map_err(storage_error)?.query_map([], worktree_claim_from_row).map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)
+        connection.prepare("SELECT c.record_id, c.project_slug, c.path, c.state FROM worktree_claims c JOIN records r ON r.id = c.record_id WHERE (?1 IS NULL OR r.workspace_id = ?1) ORDER BY c.record_id").map_err(storage_error)?.query_map([self.record_workspace.as_deref()], worktree_claim_from_row).map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)
     }
 
     fn worktree_claims_requiring_cleanup(&self) -> Result<Vec<WorktreeClaim>, RegistrationError> {
@@ -646,10 +633,11 @@ impl ManagedWorktreeRepository for SqliteProjectRepository {
             .connection
             .lock()
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
-        connection.prepare("SELECT record_id, project_slug, path, state FROM worktree_claims WHERE state = 'cleanup-required' ORDER BY record_id").map_err(storage_error)?.query_map([], worktree_claim_from_row).map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)
+        connection.prepare("SELECT c.record_id, c.project_slug, c.path, c.state FROM worktree_claims c JOIN records r ON r.id = c.record_id WHERE c.state = 'cleanup-required' AND (?1 IS NULL OR r.workspace_id = ?1) ORDER BY c.record_id").map_err(storage_error)?.query_map([self.record_workspace.as_deref()], worktree_claim_from_row).map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)
     }
 
     fn delete_worktree_claim(&self, record_id: u64) -> Result<(), RegistrationError> {
+        self.ensure_worktree_removable(record_id)?;
         let connection = self
             .connection
             .lock()
@@ -1499,10 +1487,7 @@ fn transition_worktree_claim(
 
 fn migrate_managed_worktree_schema(connection: &Connection) -> Result<(), RegistrationError> {
     connection.execute_batch(
-        "CREATE TABLE IF NOT EXISTS managed_worktree_configuration (
-            singleton INTEGER PRIMARY KEY CHECK (singleton = 1), worktree_root TEXT
-        );
-        CREATE TABLE IF NOT EXISTS project_managed_worktree_configuration (
+        "CREATE TABLE IF NOT EXISTS project_managed_worktree_configuration (
             project_slug TEXT PRIMARY KEY NOT NULL REFERENCES projects(slug), setup_hook TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS worktree_claims (
@@ -5722,9 +5707,6 @@ mod tests {
     fn recovery_requires_hold_and_exact_path_and_retains_hold() {
         let store = SqliteProjectRepository::in_memory().unwrap();
         store.register(&project("alpha", "/repos/alpha")).unwrap();
-        store
-            .set_worktree_root(Some(Path::new("/worktrees")))
-            .unwrap();
         let task = store
             .open_typed_record(&NewTypedRecord {
                 record_type: RecordType::Task,
@@ -5734,7 +5716,7 @@ mod tests {
                 generated_by_ids: vec![],
             })
             .unwrap();
-        let path = PathBuf::from(format!("/worktrees/alpha/{}", task.id));
+        let path = PathBuf::from(format!("/.forge/worktrees/alpha/{}", task.id));
         assert_eq!(
             store
                 .recover_worktree_claim(task.id, &path)
@@ -5765,26 +5747,12 @@ mod tests {
     }
 
     #[test]
-    fn persists_worktree_configuration_and_claim_lifecycle() {
+    fn persists_project_hooks_and_workspace_worktree_claim_lifecycle() {
         let store = SqliteProjectRepository::in_memory().unwrap();
         store.register(&project("alpha", "/repos/alpha")).unwrap();
-        assert_eq!(
-            store
-                .set_worktree_root(Some(Path::new("relative")))
-                .unwrap_err()
-                .code,
-            "invalid-worktree-root"
-        );
-        store
-            .set_worktree_root(Some(Path::new("/worktrees")))
-            .unwrap();
         store
             .set_project_setup_hook("alpha", Some("cargo test"))
             .unwrap();
-        assert_eq!(
-            store.worktree_root().unwrap(),
-            Some(PathBuf::from("/worktrees"))
-        );
         assert_eq!(
             store.project_setup_hook("alpha").unwrap().as_deref(),
             Some("cargo test")
@@ -5802,7 +5770,7 @@ mod tests {
         let reserved = store.reserve_worktree_claim(task.id).unwrap();
         assert_eq!(
             reserved.path,
-            PathBuf::from(format!("/worktrees/alpha/{}", task.id))
+            PathBuf::from(format!("/.forge/worktrees/alpha/{}", task.id))
         );
         assert_eq!(reserved.state, forge_app::WorktreeClaimState::Reserving);
         assert_eq!(

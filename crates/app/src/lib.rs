@@ -333,16 +333,48 @@ pub fn is_worktree_eligible(record: &Record) -> bool {
 /// Derives the only path Forge may use for a Record's Managed Worktree.
 #[must_use]
 pub fn managed_worktree_path(root: &Path, project_slug: &str, record_id: u64) -> PathBuf {
-    root.join(project_slug).join(record_id.to_string())
+    root.join(".forge/worktrees")
+        .join(project_slug)
+        .join(record_id.to_string())
+}
+
+/// Validates the fixed placement against canonical existing ancestors before Git or filesystem
+/// effects. Symlink redirection (including dangling links) is never used for managed checkouts.
+///
+/// # Errors
+/// Returns an actionable error for missing Workspace roots or redirected path components.
+pub fn validate_managed_worktree_placement(path: &Path) -> Result<(), RegistrationError> {
+    let invalid = || {
+        RegistrationError::new(
+            "managed-worktree-path-invalid",
+            "Managed Worktree placement is missing or redirected by a symlink; restore the fixed Workspace path before retrying",
+        )
+    };
+    let root = path.ancestors().nth(4).ok_or_else(invalid)?;
+    if std::fs::canonicalize(root).map_err(|_| invalid())? != root {
+        return Err(invalid());
+    }
+    for ancestor in path.ancestors().take(4) {
+        match std::fs::symlink_metadata(ancestor) {
+            Ok(_) => {
+                if std::fs::canonicalize(ancestor).map_err(|_| invalid())? != ancestor {
+                    return Err(invalid());
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(invalid()),
+        }
+    }
+    Ok(())
 }
 
 /// Persistence boundary for managed-worktree configuration and claims.
 #[allow(clippy::missing_errors_doc)]
 pub trait ManagedWorktreeRepository: RecordRepository {
-    /// Sets or clears the absolute user-wide Worktree Root.
-    fn set_worktree_root(&self, root: Option<&Path>) -> Result<(), RegistrationError>;
-    /// Returns the configured user-wide Worktree Root.
-    fn worktree_root(&self) -> Result<Option<PathBuf>, RegistrationError>;
+    /// Returns the fixed Workspace-rooted placement for a single-Project Task.
+    fn worktree_path(&self, record_id: u64) -> Result<PathBuf, RegistrationError>;
+    /// Rejects removal while an Assignment or unresolved resources retain the checkout.
+    fn ensure_worktree_removable(&self, record_id: u64) -> Result<(), RegistrationError>;
     /// Sets or clears a Project Setup Hook.
     fn set_project_setup_hook(
         &self,
@@ -2879,7 +2911,18 @@ impl Application {
         }
         if let Some(claim) = managed.worktree_claim(record_id)? {
             return match claim.state {
-                WorktreeClaimState::Active => Ok(claim),
+                WorktreeClaimState::Active => {
+                    let info = self.managed_worktree_info(record_id)?;
+                    if info.safety.facts.iter().any(|fact| {
+                        matches!(fact.as_str(), "checkout-missing" | "git-metadata-invalid")
+                    }) {
+                        return Err(RegistrationError::new(
+                            "managed-worktree-invalid",
+                            "Retained Managed Worktree is missing or invalid; inspect and repair it before retrying",
+                        ));
+                    }
+                    Ok(claim)
+                }
                 WorktreeClaimState::Reserving | WorktreeClaimState::CleanupRequired => {
                     Err(RegistrationError::new(
                         "claim-requires-recovery",
@@ -2888,6 +2931,7 @@ impl Application {
                 }
             };
         }
+        validate_managed_worktree_placement(&managed.worktree_path(record_id)?)?;
         let claim = managed.reserve_worktree_claim(record_id)?;
         let project = match managed.project(&claim.project_slug) {
             Ok(project) => project,
@@ -2972,14 +3016,9 @@ impl Application {
             record_id,
             "Operator worktree recovery; resume only after verification",
         )?;
-        let root = managed.worktree_root()?.ok_or_else(|| {
-            RegistrationError::new(
-                "worktree-root-unset",
-                "configure a Worktree Root before recovery",
-            )
-        })?;
         let project = managed.project(&record.project_slugs[0])?;
-        let path = managed_worktree_path(&root, &project.reference, record_id);
+        let path = managed.worktree_path(record_id)?;
+        validate_managed_worktree_placement(&path)?;
         let base = managed.task_base_commit(record_id)?.ok_or_else(|| {
             RegistrationError::new(
                 "task-base-commit-unavailable",
@@ -2993,24 +3032,6 @@ impl Application {
             &base,
         )?;
         managed.recover_worktree_claim(record_id, &path)
-    }
-
-    /// Configures the absolute user-wide Worktree Root.
-    ///
-    /// # Errors
-    ///
-    /// Returns persistence or path-validation failures.
-    pub fn set_worktree_root(&self, root: Option<&Path>) -> Result<(), RegistrationError> {
-        self.managed_worktrees()?.set_worktree_root(root)
-    }
-
-    /// Returns the configured user-wide Worktree Root.
-    ///
-    /// # Errors
-    ///
-    /// Returns persistence failures.
-    pub fn worktree_root(&self) -> Result<Option<PathBuf>, RegistrationError> {
-        self.managed_worktrees()?.worktree_root()
     }
 
     /// Configures a registered Project's Setup Hook.
@@ -3036,20 +3057,41 @@ impl Application {
         &self,
         include_all: bool,
     ) -> Result<Vec<ManagedWorktreeInfo>, RegistrationError> {
+        self.list_workspace_worktrees(None, include_all)
+    }
+
+    /// Lists only the selected Workspace's Claims, assessing no foreign checkout.
+    ///
+    /// # Errors
+    /// Returns invalid selection, persistence, or placement failures.
+    pub fn list_workspace_managed_worktrees(
+        &self,
+        workspace: &str,
+        include_all: bool,
+    ) -> Result<Vec<ManagedWorktreeInfo>, RegistrationError> {
+        self.records.records_in_workspace(workspace)?;
+        self.list_workspace_worktrees(Some(workspace), include_all)
+    }
+
+    fn list_workspace_worktrees(
+        &self,
+        workspace: Option<&str>,
+        include_all: bool,
+    ) -> Result<Vec<ManagedWorktreeInfo>, RegistrationError> {
         let managed = self.managed_worktrees()?;
         let claims = if include_all {
             managed.worktree_claims()?
         } else {
             managed.worktree_claims_requiring_cleanup()?
         };
-        let adapter = self.worktree_adapter()?;
-        Ok(claims
-            .into_iter()
-            .map(|claim| ManagedWorktreeInfo {
-                safety: adapter.assess(&claim.path),
-                claim,
-            })
-            .collect())
+        let mut result = Vec::new();
+        for claim in claims {
+            let record = managed.show_record(claim.record_id)?;
+            if workspace.is_none_or(|workspace| record.workspace_id == workspace) {
+                result.push(self.managed_worktree_info(claim.record_id)?);
+            }
+        }
+        Ok(result)
     }
 
     /// Returns a Managed Worktree Claim and its local safety assessment.
@@ -3067,10 +3109,28 @@ impl Application {
             .ok_or_else(|| {
                 RegistrationError::new("claim-not-found", "Task has no Managed Worktree Claim")
             })?;
-        Ok(ManagedWorktreeInfo {
-            safety: self.worktree_adapter()?.assess(&claim.path),
-            claim,
-        })
+        let expected = self.managed_worktrees()?.worktree_path(record_id)?;
+        if claim.path != expected {
+            return Err(RegistrationError::new(
+                "managed-worktree-path-invalid",
+                "Retained checkout is outside the fixed Workspace layout; repair its placement explicitly",
+            ));
+        }
+        validate_managed_worktree_placement(&claim.path)?;
+        let mut safety = self.worktree_adapter()?.assess(&claim.path);
+        match self
+            .managed_worktrees()?
+            .ensure_worktree_removable(record_id)
+        {
+            Ok(()) => {}
+            Err(error) if error.code == "worktree-in-use" => {
+                safety.facts.push("worktree-in-use".into());
+                safety.blockers.push("worktree-in-use".into());
+                safety.removable = false;
+            }
+            Err(error) => return Err(error),
+        }
+        Ok(ManagedWorktreeInfo { claim, safety })
     }
 
     /// Removes a Managed Worktree after local safety checks, unless explicitly forced.
@@ -3083,6 +3143,8 @@ impl Application {
         record_id: u64,
         force: bool,
     ) -> Result<(), RegistrationError> {
+        self.managed_worktrees()?
+            .ensure_worktree_removable(record_id)?;
         let info = self.managed_worktree_info(record_id)?;
         if info.claim.state != WorktreeClaimState::Active && !force {
             return Err(RegistrationError::new(
@@ -3110,6 +3172,8 @@ impl Application {
     ///
     /// Returns a cleanup or Git adapter failure.
     pub fn repair_managed_worktree(&self, record_id: u64) -> Result<(), RegistrationError> {
+        self.managed_worktrees()?
+            .ensure_worktree_removable(record_id)?;
         let info = self.managed_worktree_info(record_id)?;
         if let Err(error) = self.worktree_adapter()?.remove(&info.claim.path, true) {
             self.managed_worktrees()?
@@ -4167,12 +4231,16 @@ mod tests {
         }
     }
     impl ManagedWorktreeRepository for Repository {
-        fn set_worktree_root(&self, _: Option<&Path>) -> Result<(), RegistrationError> {
-            Ok(())
+        fn worktree_path(&self, record_id: u64) -> Result<PathBuf, RegistrationError> {
+            Ok(managed_worktree_path(
+                Path::new("/"),
+                &self.show_record(record_id)?.project_slugs[0],
+                record_id,
+            ))
         }
 
-        fn worktree_root(&self) -> Result<Option<PathBuf>, RegistrationError> {
-            Ok(Some(PathBuf::from("/worktrees")))
+        fn ensure_worktree_removable(&self, _: u64) -> Result<(), RegistrationError> {
+            Ok(())
         }
 
         fn set_project_setup_hook(
@@ -4204,11 +4272,7 @@ mod tests {
             let claim = WorktreeClaim {
                 record_id,
                 project_slug: record.project_slugs[0].clone(),
-                path: managed_worktree_path(
-                    Path::new("/worktrees"),
-                    &record.project_slugs[0],
-                    record_id,
-                ),
+                path: managed_worktree_path(Path::new("/"), &record.project_slugs[0], record_id),
                 state: WorktreeClaimState::Reserving,
             };
             self.claims.lock().unwrap().push(claim.clone());
@@ -4388,7 +4452,7 @@ mod tests {
 
         let claim = app.prepare_dispatch_worktree(7).unwrap();
         assert_eq!(claim.state, WorktreeClaimState::Active);
-        assert_eq!(claim.path, PathBuf::from("/worktrees/alpha/7"));
+        assert_eq!(claim.path, PathBuf::from("/.forge/worktrees/alpha/7"));
         assert_eq!(app.prepare_dispatch_worktree(7).unwrap(), claim);
     }
 
@@ -4429,8 +4493,8 @@ mod tests {
         };
         assert!(is_worktree_eligible(&record));
         assert_eq!(
-            managed_worktree_path(Path::new("/worktrees"), "alpha", record.id),
-            PathBuf::from("/worktrees/alpha/7")
+            managed_worktree_path(Path::new("/"), "alpha", record.id),
+            PathBuf::from("/.forge/worktrees/alpha/7")
         );
         record.status = RecordStatus::Done;
         assert!(!is_worktree_eligible(&record));

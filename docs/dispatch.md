@@ -8,10 +8,10 @@ provider adapter: provider state is never proof of Forge Task completion.
 
 The adapter requires Herdr Socket API protocol **22**, schema version **1**, and
 an operator-selected existing Herdr workspace. Configure an absolute socket path
-and a Worktree Root, then select that workspace:
+then select that provider workspace. Managed Worktrees use the fixed
+`<forge-workspace-root>/.forge/worktrees/<project-slug>/<record-id>` layout:
 
 ```sh
-forge config set worktreeRoot "$HOME/.forge/worktrees"
 forge dispatcher config set herdr-socket /absolute/path/to/herdr.sock
 forge dispatcher config set workspace your-workspace-id
 forge dispatcher config get

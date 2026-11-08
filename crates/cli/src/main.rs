@@ -18,7 +18,7 @@ use forge_cli::{
     request_relate_record, request_reopen_dispatch_task, request_resume_dispatch_task,
     request_retire_agent_assignment, request_select_project, request_show_record,
     request_start_assignment_task, request_start_record, request_status, request_unrelate_record,
-    request_worktree_root, resolve_endpoint as resolve_managed_endpoint,
+    resolve_endpoint as resolve_managed_endpoint,
 };
 use std::io::Read;
 
@@ -88,17 +88,13 @@ enum Command {
         #[command(subcommand)]
         command: TaskCommand,
     },
-    /// Configure managed Worktrees.
-    Config {
-        #[command(subcommand)]
-        command: ConfigCommand,
-    },
     /// Configure a Project.
     Project {
         #[command(subcommand)]
         command: ProjectCommand,
     },
-    /// Manage Forge-owned Worktrees.
+    /// Manage Task checkouts at <workspace-root>/.forge/worktrees/<project-slug>/<record-id>.
+    /// Select a Workspace explicitly or by cwd; placement cannot be overridden.
     Worktree {
         #[command(subcommand)]
         command: WorktreeCommand,
@@ -113,28 +109,6 @@ enum Command {
         #[command(subcommand)]
         command: AssignmentCommand,
     },
-}
-#[derive(Debug, Subcommand)]
-enum ConfigCommand {
-    Get(ConfigGetArgs),
-    Set(ConfigSetArgs),
-}
-#[derive(Args, Debug)]
-struct ConfigGetArgs {
-    key: String,
-    #[arg(long, value_name = "URL")]
-    server_url: Option<String>,
-    #[arg(long)]
-    json: bool,
-}
-#[derive(Args, Debug)]
-struct ConfigSetArgs {
-    key: String,
-    value: String,
-    #[arg(long, value_name = "URL")]
-    server_url: Option<String>,
-    #[arg(long)]
-    json: bool,
 }
 #[derive(Debug, Subcommand)]
 enum ProjectCommand {
@@ -169,7 +143,9 @@ struct ProjectSetupHookClearArgs {
 }
 #[derive(Debug, Subcommand)]
 enum WorktreeCommand {
+    /// Create a checkout at its fixed Workspace path for an Open single-Project Task.
     Create(WorktreeCreateArgs),
+    /// Adopt an unclaimed checkout at the same fixed path after operator verification.
     Recover(WorktreeRecoverArgs),
     Info(WorktreeIdArgs),
     List(WorktreeListArgs),
@@ -723,9 +699,8 @@ async fn run(cli: Cli) -> i32 {
                 open_task_under_wayfinder(args, cli.workspace).await
             }
         },
-        Command::Config { command } => config(command).await,
-        Command::Project { command } => project(command).await,
-        Command::Worktree { command } => worktree(command).await,
+        Command::Project { command } => project(command, cli.workspace).await,
+        Command::Worktree { command } => worktree(command, cli.workspace).await,
         Command::Dispatcher { command } => agent_dispatch(command).await,
         Command::Assignment { command } => assignment(command).await,
     }
@@ -801,31 +776,7 @@ async fn run_record(command: RecordCommand, workspace: Option<String>) -> i32 {
     }
 }
 
-async fn config(command: ConfigCommand) -> i32 {
-    let (key, root, set, url, json) = match command {
-        ConfigCommand::Get(args) => (args.key, None, false, args.server_url, args.json),
-        ConfigCommand::Set(args) => (args.key, Some(args.value), true, args.server_url, args.json),
-    };
-    if key != "worktreeRoot" {
-        eprintln!("forge config: unsupported key `{key}`; supported key: worktreeRoot");
-        return 1;
-    }
-    match request_worktree_root(&resolve_endpoint(url.as_deref()).await, root, set).await {
-        Ok(response) => {
-            if json {
-                println!("{}", serde_json::to_string(&response).unwrap());
-            } else {
-                println!("{}", response.root.as_deref().unwrap_or("unset"));
-            }
-            0
-        }
-        Err(error) => {
-            eprintln!("forge config: {error}");
-            1
-        }
-    }
-}
-async fn project(command: ProjectCommand) -> i32 {
+async fn project(command: ProjectCommand, workspace: Option<String>) -> i32 {
     let ProjectCommand::SetupHook { command } = command;
     let (project, hook, server_url, json) = match command {
         ProjectSetupHookCommand::Set(args) => {
@@ -834,7 +785,7 @@ async fn project(command: ProjectCommand) -> i32 {
         ProjectSetupHookCommand::Clear(args) => (args.project, None, args.server_url, args.json),
     };
     match request_project_setup_hook(
-        &resolve_endpoint(server_url.as_deref()).await,
+        selected_record_endpoint(server_url.as_deref(), workspace.as_deref()).await,
         project,
         hook,
     )
@@ -854,11 +805,11 @@ async fn project(command: ProjectCommand) -> i32 {
         }
     }
 }
-async fn worktree(command: WorktreeCommand) -> i32 {
+async fn worktree(command: WorktreeCommand, workspace: Option<String>) -> i32 {
     let (result, json) = match command {
         WorktreeCommand::Create(args) => (
             request_managed_worktree_create(
-                &resolve_endpoint(args.server_url.as_deref()).await,
+                selected_record_endpoint(args.server_url.as_deref(), workspace.as_deref()).await,
                 args.task,
                 args.branch,
                 args.base,
@@ -869,7 +820,7 @@ async fn worktree(command: WorktreeCommand) -> i32 {
         ),
         WorktreeCommand::Recover(args) => (
             request_managed_worktree_recover(
-                &resolve_endpoint(args.server_url.as_deref()).await,
+                selected_record_endpoint(args.server_url.as_deref(), workspace.as_deref()).await,
                 args.task,
                 args.confirm_no_active_agent,
             )
@@ -879,7 +830,7 @@ async fn worktree(command: WorktreeCommand) -> i32 {
         ),
         WorktreeCommand::Info(args) => (
             request_managed_worktree_info(
-                &resolve_endpoint(args.server_url.as_deref()).await,
+                selected_record_endpoint(args.server_url.as_deref(), workspace.as_deref()).await,
                 args.task,
             )
             .await
@@ -888,7 +839,7 @@ async fn worktree(command: WorktreeCommand) -> i32 {
         ),
         WorktreeCommand::List(args) => (
             request_managed_worktree_list(
-                &resolve_endpoint(args.server_url.as_deref()).await,
+                selected_record_endpoint(args.server_url.as_deref(), workspace.as_deref()).await,
                 args.include_all,
             )
             .await
@@ -897,7 +848,7 @@ async fn worktree(command: WorktreeCommand) -> i32 {
         ),
         WorktreeCommand::Remove(args) => (
             request_managed_worktree_remove(
-                &resolve_endpoint(args.server_url.as_deref()).await,
+                selected_record_endpoint(args.server_url.as_deref(), workspace.as_deref()).await,
                 args.task,
                 args.force,
             )
@@ -907,7 +858,7 @@ async fn worktree(command: WorktreeCommand) -> i32 {
         ),
         WorktreeCommand::Doctor(args) => (
             request_managed_worktree_doctor(
-                &resolve_endpoint(args.server_url.as_deref()).await,
+                selected_record_endpoint(args.server_url.as_deref(), workspace.as_deref()).await,
                 args.repair,
             )
             .await
@@ -2125,7 +2076,7 @@ mod tests {
     fn managed_worktree_commands_parse_the_public_contract() {
         assert!(
             Cli::try_parse_from(["forge", "config", "set", "worktreeRoot", "/tmp/worktrees"])
-                .is_ok()
+                .is_err()
         );
         assert!(
             Cli::try_parse_from([

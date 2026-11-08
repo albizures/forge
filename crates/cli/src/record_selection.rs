@@ -60,6 +60,24 @@ macro_rules! requests {
         }
     }
 }
+macro_rules! worktree_requests {
+    ($($local:ident => $method:ident($request:ty) -> $response:ty;)+) => {
+        impl RecordClient {
+            $(pub(super) async fn $local(&self, record: $request) -> Result<$response, jsonrpsee::core::client::Error> {
+                forge_rpc::WorktreeApiClient::$method(&self.client, SelectedRecordRequest { selection: self.selection.clone(), record }).await
+            })+
+        }
+    }
+}
+worktree_requests! {
+    worktree_setup_hook => setup_hook_set(forge_rpc::SetProjectSetupHookRequest) -> ();
+    worktree_create => create(forge_rpc::CreateManagedWorktreeRequest) -> forge_rpc::ManagedWorktreeResponse;
+    worktree_recover => recover(forge_rpc::RecoverManagedWorktreeRequest) -> forge_rpc::ManagedWorktreeResponse;
+    worktree_info => info(RecordIdRequest) -> forge_rpc::ManagedWorktreeResponse;
+    worktree_list => list(forge_rpc::ListManagedWorktreesRequest) -> forge_rpc::ListManagedWorktreesResponse;
+    worktree_remove => remove(forge_rpc::RemoveManagedWorktreeRequest) -> ();
+    worktree_doctor => doctor(forge_rpc::DoctorManagedWorktreesRequest) -> forge_rpc::ListManagedWorktreesResponse;
+}
 requests! {
     open_initiative(OpenRecordRequest) -> RecordResponse;
     ready(ReadyRecordsRequest) -> ReadyRecordsResponse;

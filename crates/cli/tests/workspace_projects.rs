@@ -400,20 +400,27 @@ async fn workspace_project_registration_selection_and_configuration_use_the_real
     )))
     .unwrap();
     let task_id = task["id"].as_u64().unwrap().to_string();
-    store
-        .set_worktree_root(Some(&one.join("execution")))
-        .unwrap();
     let worktree: serde_json::Value = serde_json::from_str(&success(run(
         &[
-            "worktree", "create", &task_id, "--branch", "managed", "--base", "HEAD", "--json",
+            "worktree",
+            "create",
+            &task_id,
+            "--workspace",
+            "one",
+            "--branch",
+            "managed",
+            "--base",
+            "HEAD",
+            "--json",
         ],
         &fixture.0,
     )))
     .unwrap();
     let managed = Path::new(worktree["path"].as_str().unwrap());
+    assert_eq!(managed, one.join(".forge/worktrees/api").join(&task_id));
     rejected(
         run(&["add", "project", ".", "managed-linked"], managed),
-        "main worktree",
+        ".forge/worktrees subtree",
     );
     assert!(store.project("one/managed-linked").is_err());
     #[cfg(unix)]

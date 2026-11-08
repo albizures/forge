@@ -77,7 +77,7 @@ A checked-out folder of a Repository. Only its main checkout may be a Project Ro
 _Avoid_: Forge Workspace, Project
 
 **Managed Worktree**:
-A Worktree created and durably tracked by the Dispatcher for an eligible Task under its Project. Forge does not automatically remove it while its Task has an open Agent Assignment or after the Task is Done.
+A Worktree created and durably tracked by Forge for an eligible Task under its Project, within that Project's Forge Workspace. It is retained while the Task has an open Agent Assignment and is not automatically removed when the Task is Done.
 _Avoid_: task checkout, Forge workspace
 
 **Worktree Claim**:
@@ -93,8 +93,8 @@ The immutable commit recorded for a Task from its Project Root's `HEAD` when the
 _Avoid_: dispatch base, checkout evidence
 
 **Worktree Root**:
-The user-configured folder beneath which Forge places Managed Worktrees by Project Slug and Record Identifier.
-_Avoid_: worktree base, checkout directory
+The reserved folder within a Forge Workspace beneath which Forge groups Managed Worktrees by Project Slug and Record Identifier.
+_Avoid_: Forge Workspace root, Project Root
 
 **Project Setup Hook**:
 An optional Project-configured shell command run in a newly created Managed Worktree. A failed hook leaves the worktree for explicit operator repair and prevents automatic dispatch retry.

@@ -15,7 +15,7 @@ use forge_rpc::{
     ProjectApiClient, ProjectHereRequest, ProjectHereResponse, ProjectScopeRequest,
     RecordIdRequest, RecordResponse, RegisterProjectRequest, RegisterProjectResponse,
     RelateRecordRequest, RetireAgentAssignmentRequest, StartAssignmentTaskRequest, SystemApiClient,
-    SystemStatusResponse, WorktreeApiClient, WorktreeRootResponse,
+    SystemStatusResponse,
 };
 use jsonrpsee::http_client::HttpClientBuilder;
 use sha2::{Digest, Sha256};
@@ -530,38 +530,18 @@ pub async fn request_select_project(
         .await
         .map_err(|error| format!("could not find Project through Forge daemon: {error}"))
 }
-/// Requests or configures the daemon-owned Worktree Root.
-///
-/// # Errors
-///
-/// Returns endpoint or daemon validation failures.
-pub async fn request_worktree_root(
-    url: &str,
-    root: Option<String>,
-    set: bool,
-) -> Result<WorktreeRootResponse, String> {
-    let client = client(url)?;
-    if set {
-        client
-            .root_set(forge_rpc::SetWorktreeRootRequest { root })
-            .await
-    } else {
-        client.root_get().await
-    }
-    .map_err(|error| format!("could not configure Worktree Root through Forge daemon: {error}"))
-}
 /// Configures a Project Setup Hook through the daemon.
 ///
 /// # Errors
 ///
 /// Returns endpoint or daemon validation failures.
 pub async fn request_project_setup_hook(
-    url: &str,
+    url: impl Into<RecordEndpoint>,
     project_slug: String,
     hook: Option<String>,
 ) -> Result<(), String> {
-    client(url)?
-        .setup_hook_set(forge_rpc::SetProjectSetupHookRequest { project_slug, hook })
+    record_selection::record_client(url)?
+        .worktree_setup_hook(forge_rpc::SetProjectSetupHookRequest { project_slug, hook })
         .await
         .map_err(|error| {
             format!("could not configure Project Setup Hook through Forge daemon: {error}")
@@ -573,13 +553,13 @@ pub async fn request_project_setup_hook(
 ///
 /// Returns endpoint, lifecycle, or Git failures.
 pub async fn request_managed_worktree_create(
-    url: &str,
+    url: impl Into<RecordEndpoint>,
     record_id: u64,
     branch: String,
     base: String,
 ) -> Result<ManagedWorktreeResponse, String> {
-    client(url)?
-        .create(forge_rpc::CreateManagedWorktreeRequest {
+    record_selection::record_client(url)?
+        .worktree_create(forge_rpc::CreateManagedWorktreeRequest {
             record_id,
             branch,
             base,
@@ -592,12 +572,12 @@ pub async fn request_managed_worktree_create(
 /// # Errors
 /// Returns endpoint, validation, or persistence failures.
 pub async fn request_managed_worktree_recover(
-    url: &str,
+    url: impl Into<RecordEndpoint>,
     record_id: u64,
     confirmed: bool,
 ) -> Result<ManagedWorktreeResponse, String> {
-    client(url)?
-        .recover(forge_rpc::RecoverManagedWorktreeRequest {
+    record_selection::record_client(url)?
+        .worktree_recover(forge_rpc::RecoverManagedWorktreeRequest {
             record_id,
             confirm_no_active_agent: confirmed,
         })
@@ -610,11 +590,11 @@ pub async fn request_managed_worktree_recover(
 ///
 /// Returns endpoint or missing-claim failures.
 pub async fn request_managed_worktree_info(
-    url: &str,
+    url: impl Into<RecordEndpoint>,
     record_id: u64,
 ) -> Result<ManagedWorktreeResponse, String> {
-    client(url)?
-        .info(RecordIdRequest { id: record_id })
+    record_selection::record_client(url)?
+        .worktree_info(RecordIdRequest { id: record_id })
         .await
         .map_err(record_error("inspect Managed Worktree"))
 }
@@ -624,15 +604,13 @@ pub async fn request_managed_worktree_info(
 ///
 /// Returns endpoint or persistence failures.
 pub async fn request_managed_worktree_list(
-    url: &str,
+    url: impl Into<RecordEndpoint>,
     include_all: bool,
 ) -> Result<ListManagedWorktreesResponse, String> {
-    WorktreeApiClient::list(
-        &client(url)?,
-        forge_rpc::ListManagedWorktreesRequest { include_all },
-    )
-    .await
-    .map_err(record_error("list Managed Worktrees"))
+    record_selection::record_client(url)?
+        .worktree_list(forge_rpc::ListManagedWorktreesRequest { include_all })
+        .await
+        .map_err(record_error("list Managed Worktrees"))
 }
 /// Removes one Managed Worktree through the daemon.
 ///
@@ -640,12 +618,12 @@ pub async fn request_managed_worktree_list(
 ///
 /// Returns endpoint or removal-safety failures.
 pub async fn request_managed_worktree_remove(
-    url: &str,
+    url: impl Into<RecordEndpoint>,
     record_id: u64,
     force: bool,
 ) -> Result<(), String> {
-    client(url)?
-        .remove(forge_rpc::RemoveManagedWorktreeRequest { record_id, force })
+    record_selection::record_client(url)?
+        .worktree_remove(forge_rpc::RemoveManagedWorktreeRequest { record_id, force })
         .await
         .map_err(record_error("remove Managed Worktree"))
 }
@@ -655,11 +633,11 @@ pub async fn request_managed_worktree_remove(
 ///
 /// Returns endpoint or repair failures.
 pub async fn request_managed_worktree_doctor(
-    url: &str,
+    url: impl Into<RecordEndpoint>,
     repair: bool,
 ) -> Result<ListManagedWorktreesResponse, String> {
-    client(url)?
-        .doctor(forge_rpc::DoctorManagedWorktreesRequest { repair })
+    record_selection::record_client(url)?
+        .worktree_doctor(forge_rpc::DoctorManagedWorktreesRequest { repair })
         .await
         .map_err(record_error("doctor Managed Worktrees"))
 }

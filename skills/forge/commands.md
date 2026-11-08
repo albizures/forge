@@ -85,8 +85,6 @@ forge ready --workspace personal --planning --include-hitl --blocked --json
 ## Managed Worktrees and hooks
 
 ```sh
-forge config get worktreeRoot
-forge config set worktreeRoot /absolute/path/to/worktrees
 forge project setup-hook set --project alpha 'cargo fetch'
 forge project setup-hook clear --project alpha
 forge worktree create 44 --branch feat/forge-44 --base main --json
@@ -98,7 +96,7 @@ forge worktree recover 44 --confirm-no-active-agent --json
 forge worktree remove 44 --json
 ```
 
-Configure an absolute Worktree Root before creation. Inspect the Task's Base Commit and ownership before choosing branch/base; automatic dispatch uses the captured Base Commit and deterministic Task Branch. An example `main` is not authorization to change the dispatch base or bypass an existing Worktree Claim.
+Select a Forge Workspace with `--workspace` or canonical cwd; worktree IDs, lists and doctor operations stay within it. Placement is fixed at `<workspace-root>/.forge/worktrees/<project-slug>/<record-id>`, including nested Projects. Restore redirected/symlinked placement before retrying; force does not bypass containment or open-Assignment/resource guards. Inspect the Task's Base Commit and ownership before choosing branch/base; automatic dispatch uses the captured Base Commit and deterministic Task Branch. An example `main` is not authorization to change the dispatch base or bypass an existing Worktree Claim.
 
 Hooks execute shell commands in newly created Managed Worktrees. A failed hook retains evidence and blocks automatic retry. `doctor` diagnoses; `--repair` mutates. `recover --confirm-no-active-agent` is an operator assertion requiring verification that no agent is active. Removal is safety-checked; inspect dirty, missing, invalid, or agent-owned state rather than forcing cleanup. Forge does not automatically remove a Managed Worktree when its Task completes.
 
