@@ -7,14 +7,22 @@ provider adapter: provider state is never proof of Forge Task completion.
 ## Configure dispatch
 
 The adapter requires Herdr Socket API protocol **22**, schema version **1**, and
-an operator-selected existing Herdr workspace. Configure an absolute socket path
-then select that provider workspace. Managed Worktrees use the fixed
+an operator-selected existing Herdr Workspace. Each **Forge Workspace** independently
+selects a Task profile revision, a Grilling profile revision, and an exclusive
+Herdr container identity. Select the Forge Workspace with `--workspace <id>` or
+canonical cwd containment; there is no saved default. Qualified `--project
+<workspace>/<slug>` also routes configuration/status; conflicting selectors fail.
+Outside a registered root, supply an explicit selector. Configure an absolute socket path
+then select the profiles and provider identity. Managed Worktrees use the fixed
 `<forge-workspace-root>/.forge/worktrees/<project-slug>/<record-id>` layout:
 
 ```sh
 forge dispatcher config set herdr-socket /absolute/path/to/herdr.sock
-forge dispatcher config set workspace your-workspace-id
+forge dispatcher config set task-profile 1
+forge dispatcher config set grilling-profile 1
+forge dispatcher config set workspace your-herdr-workspace-id
 forge dispatcher config get
+forge dispatcher status --json
 forge dispatcher reconcile
 ```
 
@@ -23,31 +31,46 @@ RPC URL. CLI endpoint resolution remains unchanged: `--server-url` overrides
 `FORGE_SERVER_URL`; without either override, Forgeup resolves the Active Forge
 Revision and its Managed Daemon. The CLI never connects directly to Herdr.
 
-Relative socket paths are rejected. Workspace identity is an explicit argument;
-`HERDR_WORKSPACE_ID` is not required. `config get [key]` reports effective values
-and default/override provenance, not reachability. Both provider keys default to
-unconfigured. Use `config unset herdr-socket` or `config unset workspace` to
-remove an override explicitly; a setter missing its value fails rather than
-clearing it. Safe removal blocks new provisioning until required configuration
-is restored; it does not retire existing Agents. Socket/Workspace changes are rejected while
-unresolved Assignments or retained resources depend on them: inspect `status`
-and `assignment-info`, then follow safe recovery before retrying. A bounded reconciliation
-probes the provider and progresses eligible assignments; its response reports
-lease acquisition and assignments scanned. Socket/protocol/provider failures
-produce diagnostics under the daemon's durable retry policy.
+Relative socket paths are rejected. Herdr identity is an explicit argument;
+`HERDR_WORKSPACE_ID` is not used. The socket is **daemon-owned**; profile selections
+and Herdr binding are **Workspace-owned**; capacity and setup hooks remain
+**Project-owned**. `config get [key]` reports effective values, ownership and
+default/override provenance without contacting Herdr. The acknowledgement timeout
+belongs to the selected immutable Task profile revision, not an independent
+Workspace setting. `profile [--kind task|grilling]` inspects that Workspace's selected
+revision. Profile selections and binding start unset; both selections are required,
+even when dispatching only one Record Type.
 
-Forge retains and verifies the selected workspace identity. Missing or unverifiable
-workspace state blocks dispatch. Forge creates an unfocused dedicated tab and
-uses its initial pane per Assignment; Task tabs run in their Managed Worktree,
-never the Project Registered Folder. Forge does not own or delete the shared
-workspace. See [the workspace ownership decision](../crates/docs/adr/0008-operator-selected-dispatch-workspaces.md).
+Use `config unset <key>` explicitly; a setter missing its value fails rather than
+clearing it. Binding changes/removal are rejected while that Workspace has live
+Assignments or retained resources, including closed uncertain attempts. Socket
+changes apply the same guard **daemon-wide**. A safe socket change invalidates every
+Workspace's provider verification: repeat `config set workspace <bound-id>` in
+each Workspace to verify it against the new endpoint. These operations never
+retire Agents or delete a provider container; inspect `assignment-info` and follow
+safe recovery before retrying.
+
+`dispatcher status` separates **configured** (both supported profile selections
+and a binding) from **dispatchable now**. It reports actionable missing/invalid
+profile, missing binding, unreachable provider, missing provider identity and
+unverifiable/stale binding blockers. Status probes Herdr; local configuration reads,
+registration, Records, planning and workflow `ready` remain usable during outages.
+Forge revalidates availability and exact identity before provisioning; provider
+outages block new claims/launches without consuming Task retries. Reconciliation
+can provision work, so use status rather than reconcile for read-only diagnostics.
+
+Forge retains the exact provider identity in each Assignment. It never creates,
+adopts by label, replaces or deletes a Herdr Workspace. A missing or unverifiable
+identity blocks dispatch. Forge creates an unfocused dedicated tab and uses its
+initial pane per Assignment; Task tabs run in their Managed Worktree, never the
+Project root. Other Herdr tabs remain operator-owned. See [the workspace ownership decision](../crates/docs/adr/0008-operator-selected-dispatch-workspaces.md).
 
 ## Capacity and selection
 
 Forge selects the oldest dependency-ready, single-Project Open Task when Project
 capacity is available. It atomically creates a Provisioning Assignment to reserve
 capacity, then prepares `feat/forge-<task-id>` in a Task Managed Worktree. Its
-immutable Base Commit is captured from the Registered Folder's `HEAD` when the
+immutable Base Commit is captured from the Project root's `HEAD` when the
 Task opens.
 
 Each Project defaults to capacity **1**. Set an override from 1 through 1024, or
@@ -62,8 +85,12 @@ forge dispatcher profile
 ```
 
 The profile identifies provider, agent kind, model, and prompt configuration.
-General model/prompt/profile overrides are not provided; acknowledgement timeout
-has its own grouped configuration key below.
+The current catalog contains seeded Task and Grilling revisions, plus Task timeout
+revisions created by configuration. `task-profile` and `grilling-profile` select
+existing supported revisions independently per Workspace; unknown revisions are
+rejected atomically. General model/prompt overrides and a new profile-document
+format are not provided. Changing a selection affects future claims only;
+existing Assignments and recovery retain their original revision and provider identity.
 
 ## Explicit Record dispatch
 

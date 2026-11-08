@@ -53,12 +53,20 @@ impl HerdrAdapterFactory {
         }
     }
 
-    pub fn adapter_for(&self, profile: &AgentProfile) -> Result<HerdrAdapter, AgentAdapterError> {
-        if profile.provider != "herdr" || profile.agent_kind != "pi" {
+    pub fn validate_profile(profile: &AgentProfile) -> Result<(), AgentAdapterError> {
+        if profile.provider != "herdr"
+            || profile.agent_kind != "pi"
+            || profile.model.trim().is_empty()
+        {
             return Err(AgentAdapterError::Endpoint(
                 "unsupported agent profile".into(),
             ));
         }
+        Ok(())
+    }
+
+    pub fn adapter_for(&self, profile: &AgentProfile) -> Result<HerdrAdapter, AgentAdapterError> {
+        Self::validate_profile(profile)?;
         let socket_path = match (&self.socket_path, &self.configuration_store) {
             (Some(path), _) => Some(path.clone()),
             (None, Some(store)) => SqliteProjectRepository::open(store)
@@ -428,6 +436,7 @@ impl HerdrAdapter {
             })
     }
 
+    #[cfg(test)]
     fn dispatch_workspace(
         &self,
         resources: &dyn AgentDispatchRepository,
@@ -454,9 +463,8 @@ impl HerdrAdapter {
         let workspace = context.dispatch_workspace.as_ref().ok_or_else(|| {
             AgentAdapterError::Conflict("Forge Dispatch Workspace identity was not retained".into())
         })?;
-        let found = self.request("workspace.get", json!({"workspace_id": workspace.id}))?;
-        Self::matching_resource(&found, "workspace", &[("workspace_id", &workspace.id)])?;
-        Ok(workspace.id.clone())
+        let found = self.verify_workspace(&workspace.id)?;
+        Ok(found.id)
     }
 
     fn root_pane(&self, workspace: &str, tab: &str) -> Result<String, AgentAdapterError> {
@@ -752,10 +760,6 @@ impl AgentDispatchAdapter for HerdrAdapter {
         self.snapshot().map(|_| ())
     }
 
-    fn dispatch_available(&self, resources: &dyn AgentDispatchRepository) -> bool {
-        self.dispatch_workspace(resources).is_ok()
-    }
-
     fn verify_workspace(
         &self,
         id: &str,
@@ -774,7 +778,7 @@ impl AgentDispatchAdapter for HerdrAdapter {
         let prompt = provisioning_prompt(context)?;
         self.probe()?;
         let label = Self::label(context)?;
-        let workspace = self.dispatch_workspace(resources)?;
+        let workspace = self.dispatch_workspace_from_context(context)?;
         self.provision_resources(context, resources, prompt, &label, &workspace)
     }
 

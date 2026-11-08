@@ -21,6 +21,7 @@ use forge_app::{
 use rusqlite::{Connection, ErrorCode, OptionalExtension, params};
 
 mod record_workspaces;
+mod workspace_dispatch;
 mod workspaces;
 
 /// SQLite-backed Project and Record storage.
@@ -227,6 +228,7 @@ impl SqliteProjectRepository {
         seed_agent_profiles(&connection)?;
         workspaces::initialize(&connection)?;
         record_workspaces::initialize(&connection)?;
+        workspace_dispatch::initialize(&connection)?;
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
             record_workspace: None,
@@ -2086,13 +2088,8 @@ impl AgentDispatchRepository for SqliteProjectRepository {
                 "Project dispatch capacity is reserved; inspect open Assignments and recovery blockers",
             ));
         }
-        let revision: u32 = transaction
-            .query_row(
-                "SELECT MAX(revision) FROM agent_profiles WHERE record_type = ?1",
-                [record_type_name(record.record_type)],
-                |row| row.get(0),
-            )
-            .map_err(storage_error)?;
+        let revision =
+            workspace_dispatch::selected_revision(&transaction, record_id, record.record_type)?;
         let profile = load_agent_profile(&transaction, record.record_type, revision)?;
         let attempt_number: u32 = transaction.query_row("SELECT COALESCE(MAX(attempt_number), 0) + 1 FROM agent_assignments WHERE record_id = ?1", [record_id.cast_signed()], |row| row.get(0)).map_err(storage_error)?;
         let claimed_at_millis = now_millis()?;
@@ -2274,13 +2271,8 @@ impl AgentDispatchRepository for SqliteProjectRepository {
             let Some(record_id) = record_id else {
                 return Ok(None);
             };
-            let revision: u32 = connection
-                .query_row(
-                    "SELECT MAX(revision) FROM agent_profiles WHERE record_type = 'task'",
-                    [],
-                    |row| row.get(0),
-                )
-                .map_err(storage_error)?;
+            let revision =
+                workspace_dispatch::selected_revision(&connection, record_id, RecordType::Task)?;
             let profile = load_agent_profile(&connection, RecordType::Task, revision)?;
             let attempt: u32 = connection.query_row("SELECT COALESCE(MAX(attempt_number), 0) + 1 FROM agent_assignments WHERE record_id = ?1", [record_id.cast_signed()], |row| row.get::<_, i64>(0)).map_err(storage_error)?.cast_unsigned().try_into().expect("attempt number fits u32");
             let claimed_at_millis = now_millis()?;
@@ -2675,6 +2667,23 @@ impl AgentDispatchRepository for SqliteProjectRepository {
             .optional()
             .map_err(storage_error)
             .map(|path| path.map(PathBuf::from))
+    }
+
+    fn assignment_dispatch_workspace(
+        &self,
+        assignment_id: &str,
+    ) -> Result<Option<DispatchWorkspace>, RegistrationError> {
+        let connection = self.connection.lock().map_err(|_| {
+            RegistrationError::new("storage", "Assignment storage lock is poisoned")
+        })?;
+        let identity: Option<String> = connection
+            .query_row(
+                "SELECT dispatch_workspace_id FROM agent_assignments WHERE id = ?1",
+                [assignment_id],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        Ok(identity.map(|id| DispatchWorkspace { id }))
     }
 
     fn dispatch_workspace(&self) -> Result<Option<DispatchWorkspace>, RegistrationError> {
@@ -3969,6 +3978,22 @@ mod tests {
         fn seed(repository: &Repository) -> Result<Repository, RegistrationError> {
             if repository.workspace("test").is_err() {
                 repository.create_workspace("test", "Test", std::path::Path::new("/"))?;
+                for kind in [forge_app::RecordType::Task, forge_app::RecordType::Grilling] {
+                    forge_app::WorkspaceDispatchRepository::select_workspace_profile(
+                        repository,
+                        "test",
+                        kind,
+                        Some(1),
+                    )?;
+                }
+                forge_app::WorkspaceDispatchRepository::retain_verified_workspace_binding(
+                    repository,
+                    "test",
+                    Some(&forge_app::DispatchWorkspace {
+                        id: "test-provider".into(),
+                    }),
+                    0,
+                )?;
             }
             repository.in_record_workspace("test")
         }
@@ -3979,8 +4004,9 @@ mod tests {
         NewTypedRecord, Project, ProjectRepository, Record, RecordListFilter,
         RecordRelationshipKind, RecordRepository, RecordStatus, RecordType, RecordUpdateKind,
         RecordUpdateKindFilter, RecordUpdateSubscriptionRepository, TaskKind,
-        assignment_acknowledge, assignment_add_comment, assignment_complete_task,
-        assignment_context, assignment_create_record_update_subscription, assignment_start_task,
+        WorkspaceDispatchRepository, assignment_acknowledge, assignment_add_comment,
+        assignment_complete_task, assignment_context, assignment_create_record_update_subscription,
+        assignment_start_task,
     };
     use std::{
         path::{Path, PathBuf},
@@ -5810,6 +5836,12 @@ mod tests {
     }
 
     impl forge_app::AgentDispatchAdapter for FakeAdapter {
+        fn verify_workspace(
+            &self,
+            id: &str,
+        ) -> Result<forge_app::DispatchWorkspace, forge_app::AgentAdapterError> {
+            Ok(forge_app::DispatchWorkspace { id: id.into() })
+        }
         fn probe(&self) -> Result<(), forge_app::AgentAdapterError> {
             Ok(())
         }
@@ -6492,7 +6524,7 @@ mod tests {
         let store = SqliteProjectRepository::in_memory().unwrap();
         let original = store.active_task_agent_profile().unwrap();
         let updated = store
-            .configure_task_acknowledgement_timeout(Some(42_000))
+            .configure_workspace_acknowledgement_timeout("test", Some(42_000))
             .unwrap();
         assert_eq!(updated.revision, original.revision + 1);
         assert_eq!(updated.acknowledgement_timeout_millis, 42_000);

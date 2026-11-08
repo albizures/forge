@@ -1,0 +1,519 @@
+//! Production composition against the Herdr socket seam (no provider resources by label).
+use super::*;
+use forge_app::{
+    AgentDispatchRepository, NewTypedRecord, ProjectRepository, RecordRepository, RecordType,
+    WorkspaceDispatchRepository, WorkspaceRepository,
+};
+use serde_json::{Value, json};
+use std::{
+    io::{BufRead, BufReader},
+    os::unix::net::UnixListener,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+};
+
+#[derive(Default)]
+struct ProviderState {
+    calls: Vec<Value>,
+    missing: bool,
+    mismatch: bool,
+    gets: usize,
+    lose_on_get: Option<usize>,
+}
+struct Provider {
+    path: PathBuf,
+    state: Arc<Mutex<ProviderState>>,
+    stop: Arc<AtomicBool>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+impl Provider {
+    fn new(path: PathBuf) -> Self {
+        let listener = UnixListener::bind(&path).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let state = Arc::new(Mutex::new(ProviderState::default()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker = {
+            let state = state.clone();
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::SeqCst) {
+                    let (mut stream, _) = match listener.accept() {
+                        Ok(stream) => stream,
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                            continue;
+                        }
+                        Err(error) => panic!("{error}"),
+                    };
+                    let mut line = String::new();
+                    BufReader::new(stream.try_clone().unwrap())
+                        .read_line(&mut line)
+                        .unwrap();
+                    let request: Value = serde_json::from_str(&line).unwrap();
+                    let response = {
+                        let mut state = state.lock().unwrap();
+                        state.calls.push(request.clone());
+                        let result = match request["method"].as_str().unwrap() {
+                            "ping" => json!({"type":"pong", "protocol":22}),
+                            "session.snapshot" => {
+                                json!({"type":"session_snapshot", "snapshot":{"protocol":22,"schema_version":1,"workspaces":[]}})
+                            }
+                            "workspace.get" => {
+                                state.gets += 1;
+                                if state.lose_on_get == Some(state.gets) {
+                                    state.missing = true;
+                                }
+                                if state.missing {
+                                    json!({"absent":true})
+                                } else {
+                                    json!({"workspace":{"workspace_id": if state.mismatch { json!("wrong-identity") } else { request["params"]["workspace_id"].clone() }}})
+                                }
+                            }
+                            "tab.create" => {
+                                json!({"tab":{"tab_id":"tab"},"root_pane":{"pane_id":"pane"}})
+                            }
+                            "agent.start" => json!({"type":"agent_started"}),
+                            method => panic!("unexpected provider operation {method}"),
+                        };
+                        if result["absent"] == true {
+                            json!({"error":{"code":"not_found", "message":"missing"}})
+                        } else {
+                            json!({"result":result})
+                        }
+                    };
+                    serde_json::to_writer(&mut stream, &response).unwrap();
+                    stream.write_all(b"\n").unwrap();
+                }
+            })
+        };
+        Self {
+            path,
+            state,
+            stop,
+            worker: Some(worker),
+        }
+    }
+    fn reset(&self) {
+        *self.state.lock().unwrap() = ProviderState::default();
+    }
+    fn no_provisioning(&self) {
+        assert!(self.state.lock().unwrap().calls.iter().all(|call| matches!(
+            call["method"].as_str(),
+            Some("ping" | "session.snapshot" | "workspace.get")
+        )));
+    }
+}
+impl Drop for Provider {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        self.worker.take().unwrap().join().unwrap();
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+struct Fixture {
+    root: PathBuf,
+    database: PathBuf,
+}
+impl Fixture {
+    fn new() -> Self {
+        let root = std::env::temp_dir().join(format!(
+            "forge604-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let fixture = Self {
+            database: root.join("store.sqlite"),
+            root,
+        };
+        let store = fixture.store();
+        for workspace in ["one", "two"] {
+            let path = fixture.root.join(workspace);
+            std::fs::create_dir_all(&path).unwrap();
+            store.create_workspace(workspace, workspace, &path).unwrap();
+            store
+                .register(&forge_app::Project {
+                    reference: format!("{workspace}/api"),
+                    workspace_id: workspace.into(),
+                    slug: "api".into(),
+                    project_root: path.canonicalize().unwrap(),
+                    origin_url: "https://example.test/api.git".into(),
+                })
+                .unwrap();
+        }
+        fixture
+    }
+    fn store(&self) -> SqliteProjectRepository {
+        SqliteProjectRepository::open(&self.database).unwrap()
+    }
+    fn app(&self) -> Application {
+        application_from_config(&DaemonConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            store_path: self.database.clone(),
+            managed: None,
+        })
+        .unwrap()
+    }
+    fn configure(&self, app: &Application, provider: &Provider, workspace: &str) {
+        assert!(provider.path.starts_with(&self.root));
+        app.workspace_dispatch_config_set(
+            workspace,
+            "herdr-socket",
+            provider.path.to_str().unwrap(),
+            None,
+        )
+        .unwrap();
+        for key in ["task-profile", "grilling-profile"] {
+            app.workspace_dispatch_config_set(workspace, key, "1", None)
+                .unwrap();
+        }
+        app.workspace_dispatch_config_set(
+            workspace,
+            "workspace",
+            &format!("herdr-{workspace}"),
+            None,
+        )
+        .unwrap();
+    }
+    fn grilling(&self, workspace: &str) -> forge_app::Record {
+        self.store()
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Grilling,
+                task_kind: None,
+                body: "decision".into(),
+                project_slugs: vec![format!("{workspace}/api")],
+                generated_by_ids: vec![],
+            })
+            .unwrap()
+    }
+}
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+fn has(ready: &forge_app::WorkspaceDispatchReadiness, code: &str) -> bool {
+    ready.blockers.iter().any(|blocker| blocker.code == code)
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn production_readiness_distinguishes_configuration_outage_and_exact_identity() {
+    let fixture = Fixture::new();
+    let app = fixture.app();
+    let initial = app.workspace_dispatch_readiness("one").unwrap();
+    assert!(!initial.configured && !initial.dispatchable);
+    for code in [
+        "task-profile-missing",
+        "grilling-profile-missing",
+        "binding-missing",
+        "provider-unreachable",
+    ] {
+        assert!(has(&initial, code), "{initial:?}");
+    }
+    let grilling = fixture.grilling("one");
+    assert!(app.dispatch_record(grilling.id).is_err());
+    assert!(
+        fixture
+            .store()
+            .list_agent_assignments(grilling.id)
+            .unwrap()
+            .is_empty()
+    );
+    let provider = Provider::new(fixture.root.join("herdr.sock"));
+    fixture.configure(&app, &provider, "one");
+    fixture.configure(&app, &provider, "two");
+    assert!(
+        app.workspace_dispatch_readiness("one")
+            .unwrap()
+            .dispatchable
+    );
+    assert!(
+        app.workspace_dispatch_readiness("two")
+            .unwrap()
+            .dispatchable
+    );
+    assert_eq!(
+        app.workspace_dispatch_config_set("two", "workspace", "herdr-one", None)
+            .unwrap_err()
+            .code,
+        "dispatch-workspace-conflict"
+    );
+    let before = fixture
+        .store()
+        .workspace_dispatch_configuration("one")
+        .unwrap();
+    for (key, value) in [
+        ("task-profile", "999"),
+        ("grilling-profile", "0"),
+        ("task-profile", "invalid"),
+        ("unknown", "value"),
+    ] {
+        assert!(
+            app.workspace_dispatch_config_set("one", key, value, None)
+                .is_err()
+        );
+    }
+    assert_eq!(
+        fixture
+            .store()
+            .workspace_dispatch_configuration("one")
+            .unwrap(),
+        before
+    );
+    app.workspace_dispatch_config_unset("one", "grilling-profile", None)
+        .unwrap();
+    let incomplete = app.workspace_dispatch_readiness("one").unwrap();
+    assert!(has(&incomplete, "grilling-profile-missing"));
+    assert!(!incomplete.configured && !incomplete.dispatchable);
+    assert!(app.dispatch_record(grilling.id).is_err());
+    assert!(
+        fixture
+            .store()
+            .list_agent_assignments(grilling.id)
+            .unwrap()
+            .is_empty()
+    );
+    app.workspace_dispatch_config_set("one", "grilling-profile", "1", None)
+        .unwrap();
+    provider.state.lock().unwrap().missing = true;
+    let missing = app.workspace_dispatch_readiness("one").unwrap();
+    assert!(missing.configured && !missing.dispatchable);
+    assert!(has(&missing, "binding-missing-provider-identity"));
+    assert!(app.dispatch_record(grilling.id).is_err());
+    provider.reset();
+    provider.state.lock().unwrap().mismatch = true;
+    assert!(has(
+        &app.workspace_dispatch_readiness("one").unwrap(),
+        "binding-unverifiable"
+    ));
+    provider.reset();
+    provider.no_provisioning();
+    drop(provider);
+    let unavailable = app.workspace_dispatch_readiness("one").unwrap();
+    assert!(unavailable.configured && !unavailable.dispatchable);
+    assert!(has(&unavailable, "provider-unreachable"));
+    assert!(
+        app.workspace_dispatch_config_get("one", None, Some("one/api"))
+            .is_ok()
+    );
+    app.workspace_dispatch_config_set("one", "task-profile", "1", None)
+        .unwrap();
+    app.workspace_dispatch_config_set("one", "project-limit", "3", Some("one/api"))
+        .unwrap();
+    assert_eq!(
+        fixture
+            .store()
+            .effective_project_task_concurrency_limit("two/api")
+            .unwrap(),
+        1
+    );
+    assert!(
+        app.workspace_dispatch_config_set("one", "project-limit", "4", Some("two/api"))
+            .is_err()
+    );
+    let _planned = fixture.grilling("two");
+    let provider = Provider::new(fixture.root.join("replacement.sock"));
+    app.workspace_dispatch_config_set("one", "herdr-socket", provider.path.to_str().unwrap(), None)
+        .unwrap();
+    for workspace in ["one", "two"] {
+        assert!(has(
+            &app.workspace_dispatch_readiness(workspace).unwrap(),
+            "binding-unverified"
+        ));
+        app.workspace_dispatch_config_set(
+            workspace,
+            "workspace",
+            &format!("herdr-{workspace}"),
+            None,
+        )
+        .unwrap();
+        assert!(
+            app.workspace_dispatch_readiness(workspace)
+                .unwrap()
+                .dispatchable
+        );
+    }
+    drop(app);
+    assert!(
+        fixture
+            .app()
+            .workspace_dispatch_readiness("one")
+            .unwrap()
+            .dispatchable
+    );
+    provider.no_provisioning();
+}
+
+#[test]
+fn provider_identity_loss_between_readiness_and_provisioning_has_no_launch_side_effects() {
+    let fixture = Fixture::new();
+    let app = fixture.app();
+    let provider = Provider::new(fixture.root.join("herdr.sock"));
+    fixture.configure(&app, &provider, "one");
+    let record = fixture.grilling("one");
+    assert!(
+        app.workspace_dispatch_readiness("one")
+            .unwrap()
+            .dispatchable
+    );
+    provider.reset();
+    // Three successful checks cover readiness and the bound-revision gate. Lose the
+    // identity at the provider adapter boundary, before capability delivery or tab.create.
+    provider.state.lock().unwrap().lose_on_get = Some(4);
+    let (assignment, _) = app.dispatch_record(record.id).unwrap();
+    assert_eq!(
+        assignment.state,
+        forge_app::AgentAssignmentState::Provisioning
+    );
+    assert_eq!(assignment.retry_count, 0);
+    assert!(
+        fixture
+            .store()
+            .list_agent_assignment_resources(&assignment.id)
+            .unwrap()
+            .is_empty()
+    );
+    provider.no_provisioning();
+    drop(app);
+    fixture
+        .app()
+        .reconcile_agent_dispatch("restarted", 1000)
+        .unwrap();
+    provider.no_provisioning();
+    assert_eq!(
+        fixture
+            .store()
+            .agent_assignment(&assignment.id)
+            .unwrap()
+            .retry_count,
+        0
+    );
+}
+
+#[test]
+fn automatic_scheduling_has_no_global_readiness_or_latest_profile_bypass() {
+    let fixture = Fixture::new();
+    let app = fixture.app();
+    let provider = Provider::new(fixture.root.join("herdr.sock"));
+    fixture.configure(&app, &provider, "one");
+    let one_profile = fixture
+        .store()
+        .configure_workspace_acknowledgement_timeout("one", Some(42_000))
+        .unwrap();
+    app.workspace_dispatch_config_set("two", "task-profile", "1", None)
+        .unwrap();
+    let two_profile = fixture
+        .store()
+        .configure_workspace_acknowledgement_timeout("two", Some(99_000))
+        .unwrap();
+    assert!(two_profile.revision > one_profile.revision);
+    let store = fixture.store();
+    let mut records = Vec::new();
+    for workspace in ["one", "two"] {
+        let root = fixture.root.join(workspace);
+        git(&root, &["init"]).unwrap();
+        git(
+            &root,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.test",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "base",
+            ],
+        )
+        .unwrap();
+        let base = git(&root, &["rev-parse", "HEAD"]).unwrap();
+        let task = store
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Task,
+                task_kind: None,
+                body: "implement".into(),
+                project_slugs: vec![format!("{workspace}/api")],
+                generated_by_ids: vec![],
+            })
+            .unwrap();
+        store.set_task_base_commit(task.id, base.trim()).unwrap();
+        records.push(task);
+    }
+    app.reconcile_agent_dispatch("scheduler", 1_000).unwrap();
+    let assignments = store.list_agent_assignments(records[0].id).unwrap();
+    assert_eq!(assignments.len(), 1);
+    assert_eq!(assignments[0].profile, one_profile);
+    assert!(
+        store
+            .list_agent_assignments(records[1].id)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        forge_app::ManagedWorktreeRepository::worktree_claim(&store, records[1].id)
+            .unwrap()
+            .is_none()
+    );
+    provider.no_provisioning();
+}
+
+#[test]
+fn production_grilling_launch_uses_its_selected_revision_and_retained_container() {
+    let fixture = Fixture::new();
+    let app = fixture.app();
+    let provider = Provider::new(fixture.root.join("herdr.sock"));
+    fixture.configure(&app, &provider, "one");
+    fixture.configure(&app, &provider, "two");
+    let record = fixture.grilling("two");
+    let (assignment, duplicate) = app.dispatch_record(record.id).unwrap();
+    assert!(!duplicate);
+    assert_eq!(assignment.state, forge_app::AgentAssignmentState::Working);
+    assert_eq!(
+        fixture
+            .store()
+            .assignment_dispatch_workspace(&assignment.id)
+            .unwrap()
+            .unwrap()
+            .id,
+        "herdr-two"
+    );
+    let calls = provider.state.lock().unwrap();
+    let tab = calls
+        .calls
+        .iter()
+        .find(|call| call["method"] == "tab.create")
+        .unwrap();
+    assert_eq!(tab["params"]["workspace_id"], "herdr-two");
+    assert_eq!(
+        calls
+            .calls
+            .iter()
+            .filter(|call| call["method"] == "agent.start")
+            .count(),
+        1
+    );
+    assert!(calls.calls.iter().all(|call| !matches!(
+        call["method"].as_str(),
+        Some("workspace.create" | "workspace.delete")
+    )));
+    drop(calls);
+    app.workspace_dispatch_config_set("two", "task-profile", "1", None)
+        .unwrap();
+    assert!(
+        app.workspace_dispatch_config_unset("two", "workspace", None)
+            .is_err()
+    );
+    assert!(
+        app.workspace_dispatch_config_unset("one", "herdr-socket", None)
+            .is_err()
+    );
+    app.workspace_dispatch_config_unset("one", "workspace", None)
+        .unwrap();
+    assert!(app.dispatch_record(record.id).unwrap().1);
+}

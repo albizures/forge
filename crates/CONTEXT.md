@@ -201,7 +201,7 @@ The bounded Forge information an Agent Assignment may read: its assigned Record 
 _Avoid_: project visibility, record graph access
 
 **Agent Profile**:
-A versioned Forge-owned configuration selected by exactly one Record Type that specifies how Forge provisions an Agent, including its adapter, model, retry policy, and initial-prompt template.
+A versioned Forge-owned configuration for a Record Type that specifies how Forge provisions an Agent, including its adapter, model, retry policy, and initial-prompt template. Forge Workspaces select profiles for Task and Grilling dispatch, and Assignments retain their bound revisions.
 _Avoid_: agent configuration, record profile
 
 **Agent Workspace**:
@@ -209,7 +209,7 @@ The filesystem folder in which an Agent works for an Agent Assignment. A Task Ag
 _Avoid_: agent project, agent checkout
 
 **Forge Dispatch Workspace**:
-An operator-selected Herdr Workspace shared by Forge-dispatched Agents. Forge retains its exact identity and manages each Agent Assignment's dedicated tab, but does not own or delete the Workspace.
+An existing operator-selected Herdr Workspace bound exclusively to one Forge Workspace within a daemon/store. It contains dedicated Agent Assignment tabs but is neither a Forge-owned filesystem root nor a container Forge owns or deletes.
 _Avoid_: Project workspace, task workspace
 
 **Assignment Recovery Blocker**:

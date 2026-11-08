@@ -6,6 +6,8 @@
 mod herdr;
 #[cfg(test)]
 mod test_projects;
+#[cfg(all(test, unix))]
+mod workspace_dispatch_tests;
 mod workspaces;
 
 use std::{
@@ -804,6 +806,9 @@ struct ServerAgentDispatchAdapterFactory {
 }
 
 impl AgentDispatchAdapterFactory for ServerAgentDispatchAdapterFactory {
+    fn validate_profile(&self, profile: &AgentProfile) -> Result<(), forge_app::AgentAdapterError> {
+        HerdrAdapterFactory::validate_profile(profile)
+    }
     fn adapter_for(
         &self,
         profile: &AgentProfile,
@@ -893,10 +898,6 @@ impl AgentDispatchAdapter for CapabilityDeliveryAdapter {
         self.inner.probe()
     }
 
-    fn dispatch_available(&self, resources: &dyn forge_app::AgentDispatchRepository) -> bool {
-        self.inner.dispatch_available(resources)
-    }
-
     fn verify_workspace(
         &self,
         id: &str,
@@ -909,6 +910,13 @@ impl AgentDispatchAdapter for CapabilityDeliveryAdapter {
         context: &AgentDispatchContext,
         resources: &dyn forge_app::AgentDispatchRepository,
     ) -> Result<(), forge_app::AgentAdapterError> {
+        self.inner.probe()?;
+        let binding = context.dispatch_workspace.as_ref().ok_or_else(|| {
+            forge_app::AgentAdapterError::Conflict(
+                "Assignment has no retained provider binding".into(),
+            )
+        })?;
+        self.inner.verify_workspace(&binding.id)?;
         self.inner.provision(&self.context(context)?, resources)
     }
 
@@ -982,21 +990,35 @@ impl SystemApiServer for Daemon {
 impl AgentDispatchApiServer for Daemon {
     async fn config_get(
         &self,
-        request: forge_rpc::DispatcherConfigGetRequest,
+        request: forge_rpc::SelectedRecordRequest<forge_rpc::DispatcherConfigGetRequest>,
     ) -> RpcResult<forge_rpc::DispatcherConfigResponse> {
+        let forge_rpc::SelectedRecordRequest {
+            selection,
+            record: mut request,
+        } = request;
+        let workspace = self.record_workspace(&selection, request.project.as_mut_slice())?;
         self.application
-            .dispatcher_config_get(request.key.as_deref(), request.project.as_deref())
+            .workspace_dispatch_config_get(
+                &workspace,
+                request.key.as_deref(),
+                request.project.as_deref(),
+            )
             .map(Into::into)
             .map_err(rpc_error)
     }
 
     async fn config_set(
         &self,
-        request: forge_rpc::DispatcherConfigSetRequest,
+        request: forge_rpc::SelectedRecordRequest<forge_rpc::DispatcherConfigSetRequest>,
     ) -> RpcResult<forge_rpc::DispatcherConfigResponse> {
+        let forge_rpc::SelectedRecordRequest {
+            selection,
+            record: mut request,
+        } = request;
+        let workspace = self.record_workspace(&selection, request.project.as_mut_slice())?;
         self.application
-            .dispatcher_config_set(&request.key, &request.value, request.project.as_deref())
-            .and_then(|()| self.application.dispatcher_config_get(Some(&request.key), request.project.as_deref()))
+            .workspace_dispatch_config_set(&workspace, &request.key, &request.value, request.project.as_deref())
+            .and_then(|()| self.application.workspace_dispatch_config_get(&workspace, Some(&request.key), request.project.as_deref()))
             .map(|entries| {
                 let mut response: forge_rpc::DispatcherConfigResponse = entries.into();
                 if request.key == "acknowledgement-timeout-ms" {
@@ -1009,11 +1031,16 @@ impl AgentDispatchApiServer for Daemon {
 
     async fn config_unset(
         &self,
-        request: forge_rpc::DispatcherConfigUnsetRequest,
+        request: forge_rpc::SelectedRecordRequest<forge_rpc::DispatcherConfigUnsetRequest>,
     ) -> RpcResult<forge_rpc::DispatcherConfigResponse> {
+        let forge_rpc::SelectedRecordRequest {
+            selection,
+            record: mut request,
+        } = request;
+        let workspace = self.record_workspace(&selection, request.project.as_mut_slice())?;
         self.application
-            .dispatcher_config_unset(&request.key, request.project.as_deref())
-            .and_then(|()| self.application.dispatcher_config_get(Some(&request.key), request.project.as_deref()))
+            .workspace_dispatch_config_unset(&workspace, &request.key, request.project.as_deref())
+            .and_then(|()| self.application.workspace_dispatch_config_get(&workspace, Some(&request.key), request.project.as_deref()))
             .map(|entries| {
                 let mut response: forge_rpc::DispatcherConfigResponse = entries.into();
                 if request.key == "acknowledgement-timeout-ms" {
@@ -1024,21 +1051,45 @@ impl AgentDispatchApiServer for Daemon {
             .map_err(rpc_error)
     }
 
-    async fn profile(&self) -> RpcResult<AgentDispatchProfileResponse> {
+    async fn profile(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<forge_rpc::AgentDispatchProfileRequest>,
+    ) -> RpcResult<AgentDispatchProfileResponse> {
+        let workspace = self.record_workspace(&request.selection, &mut [])?;
+        let kind = match request.record.kind.as_str() {
+            "task" => RecordType::Task,
+            "grilling" => RecordType::Grilling,
+            _ => {
+                return Err(rpc_error(RegistrationError::new(
+                    "invalid-profile-kind",
+                    "select task or grilling",
+                )));
+            }
+        };
         self.application
-            .task_agent_profile()
+            .selected_agent_profile(&workspace, kind)
             .map(Into::into)
             .map_err(rpc_error)
     }
 
     async fn dispatch_status(
         &self,
-        request: AgentDispatchStatusRequest,
+        request: forge_rpc::SelectedRecordRequest<AgentDispatchStatusRequest>,
     ) -> RpcResult<AgentDispatchStatusResponse> {
-        self.application
+        let forge_rpc::SelectedRecordRequest {
+            selection,
+            record: mut request,
+        } = request;
+        let workspace = self.record_workspace(&selection, request.project_slug.as_mut_slice())?;
+        let status = self
+            .application
             .agent_dispatch_status(request.project_slug.as_deref())
-            .map(Into::into)
-            .map_err(rpc_error)
+            .map_err(rpc_error)?;
+        let readiness = self
+            .application
+            .workspace_dispatch_readiness(&workspace)
+            .map_err(rpc_error)?;
+        Ok((status, readiness).into())
     }
 
     async fn reconcile(&self) -> RpcResult<AgentDispatchReconcileResponse> {
@@ -1063,8 +1114,15 @@ impl AgentDispatchApiServer for Daemon {
 
     async fn dispatch_record(
         &self,
-        request: DispatchRecordRequest,
+        request: forge_rpc::SelectedRecordRequest<DispatchRecordRequest>,
     ) -> RpcResult<DispatchRecordResponse> {
+        let forge_rpc::SelectedRecordRequest {
+            selection,
+            record: request,
+        } = request;
+        self.record_application(&selection, &mut [])?
+            .show_record(request.record_id)
+            .map_err(rpc_error)?;
         let result = self.application.dispatch_record(request.record_id);
         self.delivery.publish(&self.application);
         result
@@ -2817,6 +2875,12 @@ mod tests {
     }
 
     impl forge_app::AgentDispatchAdapter for RecordingDispatchAdapter {
+        fn verify_workspace(
+            &self,
+            id: &str,
+        ) -> Result<forge_app::DispatchWorkspace, forge_app::AgentAdapterError> {
+            Ok(forge_app::DispatchWorkspace { id: id.into() })
+        }
         fn probe(&self) -> Result<(), forge_app::AgentAdapterError> {
             Ok(())
         }
@@ -2879,6 +2943,24 @@ mod tests {
         let store = SqliteProjectRepository::open(&database).unwrap();
         forge_app::WorkspaceRepository::create_workspace(&store, "test", "Test", &root).unwrap();
         super::test_projects::register(&store, "alpha", Some(&repo));
+        for kind in [RecordType::Task, RecordType::Grilling] {
+            forge_app::WorkspaceDispatchRepository::select_workspace_profile(
+                &store,
+                "test",
+                kind,
+                Some(1),
+            )
+            .unwrap();
+        }
+        forge_app::WorkspaceDispatchRepository::retain_verified_workspace_binding(
+            &store,
+            "test",
+            Some(&forge_app::DispatchWorkspace {
+                id: "selected".into(),
+            }),
+            0,
+        )
+        .unwrap();
         store
             .set_project_task_concurrency_limit("alpha", Some(2))
             .unwrap();
@@ -3167,37 +3249,59 @@ mod tests {
         store: &SqliteProjectRepository,
         socket: &Path,
     ) {
-        app.dispatcher_config_set("herdr-socket", socket.to_str().unwrap(), None)
+        app.workspace_dispatch_config_set("test", "herdr-socket", socket.to_str().unwrap(), None)
             .unwrap();
-        app.dispatcher_config_set("workspace", "selected", None)
+        app.workspace_dispatch_config_set("test", "workspace", "selected", None)
             .unwrap();
         assert!(
-            app.dispatcher_config_set("workspace", "missing", None)
+            app.workspace_dispatch_config_set("test", "workspace", "missing", None)
                 .is_err()
         );
-        assert_eq!(store.dispatch_workspace().unwrap().unwrap().id, "selected");
         assert_eq!(
-            app.dispatcher_config_set("workspace", "replacement", None)
+            forge_app::WorkspaceDispatchRepository::workspace_dispatch_configuration(store, "test")
+                .unwrap()
+                .binding
+                .unwrap()
+                .id,
+            "selected"
+        );
+        assert_eq!(
+            app.workspace_dispatch_config_set("test", "workspace", "replacement", None)
                 .unwrap_err()
                 .code,
             "dispatch-workspace-busy"
         );
         assert!(
-            app.dispatcher_config_set("herdr-socket", "/tmp/other.sock", None)
+            app.workspace_dispatch_config_set("test", "herdr-socket", "/tmp/other.sock", None)
                 .is_err()
         );
-        assert!(app.dispatcher_config_unset("workspace", None).is_err());
-        assert!(app.dispatcher_config_unset("herdr-socket", None).is_err());
-        assert_eq!(store.dispatch_workspace().unwrap().unwrap().id, "selected");
+        assert!(
+            app.workspace_dispatch_config_unset("test", "workspace", None)
+                .is_err()
+        );
+        assert!(
+            app.workspace_dispatch_config_unset("test", "herdr-socket", None)
+                .is_err()
+        );
+        assert_eq!(
+            forge_app::WorkspaceDispatchRepository::workspace_dispatch_configuration(store, "test")
+                .unwrap()
+                .binding
+                .unwrap()
+                .id,
+            "selected"
+        );
         assert_eq!(store.herdr_socket_path().unwrap().as_deref(), Some(socket));
     }
 
     #[cfg(unix)]
     fn verify_unconfigured_dispatch(app: &Application, store: &SqliteProjectRepository) {
-        app.dispatcher_config_unset("workspace", None).unwrap();
-        app.dispatcher_config_unset("herdr-socket", None).unwrap();
+        app.workspace_dispatch_config_unset("test", "workspace", None)
+            .unwrap();
+        app.workspace_dispatch_config_unset("test", "herdr-socket", None)
+            .unwrap();
         assert!(
-            app.dispatcher_config_get(None, None)
+            app.workspace_dispatch_config_get("test", None, None)
                 .unwrap()
                 .iter()
                 .filter(|entry| entry.key != "acknowledgement-timeout-ms")
@@ -3213,14 +3317,9 @@ mod tests {
             })
             .unwrap();
         assert!(app.dispatch_record(grilling.id).is_err());
-        let assignment = store
-            .list_agent_assignments(grilling.id)
-            .unwrap()
-            .pop()
-            .unwrap();
         assert!(
             store
-                .list_agent_assignment_resources(&assignment.id)
+                .list_agent_assignments(grilling.id)
                 .unwrap()
                 .is_empty()
         );

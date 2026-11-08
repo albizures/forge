@@ -9,6 +9,11 @@ use std::{
 
 mod workspaces;
 pub use workspaces::{Workspace, WorkspaceRepository};
+mod workspace_dispatch;
+pub use workspace_dispatch::{
+    DispatchBlocker, WorkspaceDispatchConfiguration, WorkspaceDispatchReadiness,
+    WorkspaceDispatchRepository,
+};
 mod projects;
 pub use projects::{ProjectReference, canonical_project_root};
 mod record_planning;
@@ -922,10 +927,6 @@ pub trait AgentDispatchAdapter: Send + Sync {
             "workspace selection is unsupported".into(),
         ))
     }
-    /// Whether provider-level prerequisites permit provisioning without consuming task retries.
-    fn dispatch_available(&self, _resources: &dyn AgentDispatchRepository) -> bool {
-        true
-    }
     fn provision(
         &self,
         context: &AgentDispatchContext,
@@ -949,6 +950,9 @@ pub trait AgentDispatchAdapter: Send + Sync {
 /// Selects the concrete provider adapter from immutable profile provenance.
 #[allow(clippy::missing_errors_doc)]
 pub trait AgentDispatchAdapterFactory: Send + Sync {
+    fn validate_profile(&self, _profile: &AgentProfile) -> Result<(), AgentAdapterError> {
+        Ok(())
+    }
     fn adapter_for(
         &self,
         profile: &AgentProfile,
@@ -1153,6 +1157,11 @@ pub fn reconcile_agent_dispatch<F: AgentDispatchAdapterFactory + ?Sized>(
         {
             continue;
         }
+        if assignment.state == AgentAssignmentState::Provisioning
+            && !workspace_dispatch::provisioning_available(repository, factory, &assignment)
+        {
+            continue;
+        }
         let adapter = match factory.adapter_for(&assignment.profile) {
             Ok(adapter) => adapter,
             Err(error) => {
@@ -1166,11 +1175,6 @@ pub fn reconcile_agent_dispatch<F: AgentDispatchAdapterFactory + ?Sized>(
                 continue;
             }
         };
-        if assignment.state == AgentAssignmentState::Provisioning
-            && !adapter.dispatch_available(repository)
-        {
-            continue;
-        }
         let outcome = if assignment.state == AgentAssignmentState::Unknown {
             reconcile_recovery(repository, adapter.as_ref(), &assignment)?
         } else {
@@ -1277,7 +1281,7 @@ fn agent_dispatch_context(
         assignment: assignment.clone(),
         project_root: project.project_root,
         agent_workspace,
-        dispatch_workspace: repository.dispatch_workspace()?,
+        dispatch_workspace: repository.assignment_dispatch_workspace(&assignment.id)?,
         bootstrap_prompt: None,
         rendered_initial_prompt: format!(
             "{}\n\n{}{}",
@@ -1415,7 +1419,7 @@ pub struct DispatchHold {
 
 /// Durable persistence boundary for provider-neutral dispatch foundations.
 #[allow(clippy::missing_errors_doc)]
-pub trait AgentDispatchRepository: RecordRepository {
+pub trait AgentDispatchRepository: RecordRepository + WorkspaceDispatchRepository {
     /// Returns the operator-cleared automatic-dispatch block, if any.
     fn dispatch_hold(&self, record_id: u64) -> Result<Option<DispatchHold>, RegistrationError>;
     /// Creates or replaces the durable block on automatic dispatch.
@@ -1561,7 +1565,12 @@ pub trait AgentDispatchRepository: RecordRepository {
     ) -> Result<Vec<AgentAssignmentResource>, RegistrationError>;
     /// Returns the prepared active Managed Worktree used as the Agent's process cwd.
     fn agent_workspace(&self, record_id: u64) -> Result<Option<PathBuf>, RegistrationError>;
-    /// Returns the durable identity of Forge's shared dispatch workspace.
+    /// Returns the immutable provider container bound when this attempt was created.
+    fn assignment_dispatch_workspace(
+        &self,
+        assignment_id: &str,
+    ) -> Result<Option<DispatchWorkspace>, RegistrationError>;
+    /// Legacy development configuration; not used by dispatch or operator routing.
     fn dispatch_workspace(&self) -> Result<Option<DispatchWorkspace>, RegistrationError>;
     /// Persists the shared workspace identity immediately after it is created.
     fn retain_dispatch_workspace(
@@ -1935,6 +1944,7 @@ pub struct AgentDispatchStatus {
 /// An effective Dispatcher configuration value and its origin.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DispatcherConfigEntry {
+    pub ownership: String,
     pub key: String,
     pub value: Option<String>,
     pub provenance: String,
@@ -2109,161 +2119,6 @@ impl Application {
         self.dispatch()?.set_herdr_socket_path(path)
     }
 
-    /// Reads effective Dispatcher configuration and override provenance.
-    /// Project capacity is included only with explicit Project scope.
-    #[allow(clippy::missing_errors_doc)]
-    pub fn dispatcher_config_get(
-        &self,
-        key: Option<&str>,
-        project: Option<&str>,
-    ) -> Result<Vec<DispatcherConfigEntry>, RegistrationError> {
-        let _guard = self.provider_configuration.lock().map_err(|_| {
-            RegistrationError::new(
-                "configuration-lock",
-                "provider configuration lock is poisoned",
-            )
-        })?;
-        let dispatch = self.dispatch()?;
-        let keys = match key {
-            None if project.is_some() => vec![
-                "herdr-socket",
-                "workspace",
-                "acknowledgement-timeout-ms",
-                "project-limit",
-            ],
-            None => vec!["herdr-socket", "workspace", "acknowledgement-timeout-ms"],
-            Some("acknowledgement-timeout-ms") => vec!["acknowledgement-timeout-ms"],
-            Some("project-limit") => vec!["project-limit"],
-            Some("herdr-socket") => vec!["herdr-socket"],
-            Some("workspace") => vec!["workspace"],
-            Some(_) => {
-                return Err(RegistrationError::new(
-                    "unknown-dispatcher-config",
-                    "unknown Dispatcher configuration key",
-                ));
-            }
-        };
-        keys.into_iter()
-            .map(|key| {
-                if key == "project-limit" {
-                    let project = Self::dispatcher_config_project(project)?;
-                    let configured = dispatch.project_task_concurrency_limit(project)?;
-                    let effective = dispatch.effective_project_task_concurrency_limit(project)?;
-                    return Ok(DispatcherConfigEntry {
-                        key: key.into(),
-                        value: Some(effective.to_string()),
-                        provenance: if configured.is_some() {
-                            "override"
-                        } else {
-                            "default"
-                        }
-                        .into(),
-                    });
-                }
-                if key == "acknowledgement-timeout-ms" {
-                    let profile = dispatch.active_task_agent_profile()?;
-                    return Ok(DispatcherConfigEntry {
-                        key: key.into(),
-                        value: Some(profile.acknowledgement_timeout_millis.to_string()),
-                        provenance: if profile.acknowledgement_timeout_overridden {
-                            "override"
-                        } else {
-                            "default"
-                        }
-                        .into(),
-                    });
-                }
-                let value = match key {
-                    "herdr-socket" => dispatch
-                        .herdr_socket_path()?
-                        .map(|path| path.to_string_lossy().into_owned()),
-                    _ => dispatch.dispatch_workspace()?.map(|workspace| workspace.id),
-                };
-                Ok(DispatcherConfigEntry {
-                    key: key.into(),
-                    provenance: if value.is_some() {
-                        "override"
-                    } else {
-                        "default"
-                    }
-                    .into(),
-                    value,
-                })
-            })
-            .collect()
-    }
-
-    /// Changes one Dispatcher configuration override using a required explicit value.
-    #[allow(clippy::missing_errors_doc)]
-    pub fn dispatcher_config_set(
-        &self,
-        key: &str,
-        value: &str,
-        project: Option<&str>,
-    ) -> Result<(), RegistrationError> {
-        match key {
-            "project-limit" => {
-                let project = Self::dispatcher_config_project(project)?;
-                let limit = value.parse::<u16>().map_err(|_| {
-                    RegistrationError::new(
-                        "invalid-project-limit",
-                        "project-limit must be an integer from 1 through 1024",
-                    )
-                })?;
-                self.set_project_task_concurrency_limit(project, Some(limit))
-            }
-            "acknowledgement-timeout-ms" => {
-                let timeout = value.parse::<u64>().map_err(|_| {
-                    RegistrationError::new(
-                        "invalid-acknowledgement-timeout",
-                        "acknowledgement-timeout-ms must be a positive integer in range",
-                    )
-                })?;
-                self.configure_task_acknowledgement_timeout(timeout)
-                    .map(|_| ())
-            }
-            "herdr-socket" => self.set_herdr_socket_path(Some(Path::new(value))),
-            "workspace" => self.select_dispatch_workspace(value).map(|_| ()),
-            _ => Err(RegistrationError::new(
-                "unknown-dispatcher-config",
-                "unknown Dispatcher configuration key",
-            )),
-        }
-    }
-
-    /// Explicitly restores the default, or an unconfigured provider key without contacting Herdr.
-    #[allow(clippy::missing_errors_doc)]
-    pub fn dispatcher_config_unset(
-        &self,
-        key: &str,
-        project: Option<&str>,
-    ) -> Result<(), RegistrationError> {
-        match key {
-            "project-limit" => self.set_project_task_concurrency_limit(
-                Self::dispatcher_config_project(project)?,
-                None,
-            ),
-            "acknowledgement-timeout-ms" => self
-                .dispatch()?
-                .configure_task_acknowledgement_timeout(None)
-                .map(|_| ()),
-            "herdr-socket" => self.set_herdr_socket_path(None),
-            "workspace" => {
-                let _guard = self.provider_configuration.lock().map_err(|_| {
-                    RegistrationError::new(
-                        "configuration-lock",
-                        "provider configuration lock is poisoned",
-                    )
-                })?;
-                self.dispatch()?.unset_dispatch_workspace()
-            }
-            _ => Err(RegistrationError::new(
-                "unknown-dispatcher-config",
-                "unknown Dispatcher configuration key",
-            )),
-        }
-    }
-
     fn dispatcher_config_project(project: Option<&str>) -> Result<&str, RegistrationError> {
         project
             .filter(|slug| !slug.trim().is_empty())
@@ -2273,15 +2128,6 @@ impl Application {
                     "project-limit requires explicit --project <slug> scope",
                 )
             })
-    }
-
-    /// Returns the seeded immutable Task Agent Profile.
-    ///
-    /// # Errors
-    ///
-    /// Returns configuration or persistence failures.
-    pub fn task_agent_profile(&self) -> Result<AgentProfile, RegistrationError> {
-        self.dispatch()?.active_task_agent_profile()
     }
 
     /// Explicitly dispatches a Task or interactive Grilling using its immutable profile.
@@ -2294,6 +2140,22 @@ impl Application {
         record_id: u64,
     ) -> Result<(AgentAssignment, bool), RegistrationError> {
         let dispatch = self.dispatch()?;
+        let record = dispatch.show_record(record_id)?;
+        if !matches!(record.record_type, RecordType::Task | RecordType::Grilling) {
+            return Err(RegistrationError::new(
+                "unsupported-record-type",
+                "explicit dispatch supports only Tasks and Grillings",
+            ));
+        }
+        if let Some(assignment) = dispatch
+            .list_agent_assignments(record_id)?
+            .into_iter()
+            .find(|a| a.closed_at_millis.is_none())
+        {
+            return Ok((assignment, true));
+        }
+        let readiness = self.workspace_dispatch_readiness(&record.workspace_id)?;
+        readiness.require_dispatchable()?;
         let (assignment, already_assigned) =
             dispatch.claim_record_agent_assignment(record_id, &next_dispatch_assignment_id())?;
         if already_assigned {
@@ -2308,18 +2170,14 @@ impl Application {
             .map_err(|error| {
                 RegistrationError::new("agent-dispatch-unavailable", format!("{error:?}"))
             })?;
-        let _ = reconcile_agent_assignment(dispatch, adapter.as_ref(), &assignment)?;
+        if workspace_dispatch::provisioning_available(
+            dispatch,
+            self.adapter_factory()?,
+            &assignment,
+        ) {
+            let _ = reconcile_agent_assignment(dispatch, adapter.as_ref(), &assignment)?;
+        }
         Ok((dispatch.agent_assignment(&assignment.id)?, false))
-    }
-
-    /// Creates a new Task Agent Profile revision with the requested acknowledgement timeout.
-    #[allow(clippy::missing_errors_doc)]
-    pub fn configure_task_acknowledgement_timeout(
-        &self,
-        timeout_millis: u64,
-    ) -> Result<AgentProfile, RegistrationError> {
-        self.dispatch()?
-            .configure_task_acknowledgement_timeout(Some(timeout_millis))
     }
 
     /// Acknowledges an Assignment after transport-level capability authentication.
@@ -2672,55 +2530,6 @@ impl Application {
             .replay_record_updates(subscription_id, after)
     }
 
-    /// Verifies a provider workspace before persisting the operator's selection.
-    ///
-    /// # Errors
-    /// Returns a provider, configuration, or workspace safety failure.
-    pub fn select_dispatch_workspace(
-        &self,
-        id: &str,
-    ) -> Result<DispatchWorkspace, RegistrationError> {
-        let _guard = self.provider_configuration.lock().map_err(|_| {
-            RegistrationError::new(
-                "configuration-lock",
-                "provider configuration lock is poisoned",
-            )
-        })?;
-        if id.trim().is_empty() || id != id.trim() {
-            return Err(RegistrationError::new(
-                "invalid-dispatch-workspace",
-                "workspace ID must be nonempty and have no surrounding whitespace",
-            ));
-        }
-        let adapter = self
-            .adapter_factory()?
-            .adapter_for(&self.task_agent_profile()?)
-            .map_err(|_| {
-                RegistrationError::new("workspace-unavailable", "Herdr adapter is unavailable")
-            })?;
-        let workspace = adapter.verify_workspace(id).map_err(|error| {
-            let detail = match error {
-                AgentAdapterError::Endpoint(message)
-                | AgentAdapterError::Transient(message)
-                | AgentAdapterError::NotFound(message)
-                | AgentAdapterError::Conflict(message)
-                | AgentAdapterError::InvalidRequest(message)
-                | AgentAdapterError::Cleanup(message) => safe_adapter_detail(&message),
-            };
-            RegistrationError::new(
-                "workspace-unavailable",
-                format!("could not verify the requested Herdr workspace: {detail}"),
-            )
-        })?;
-        if workspace.id != id {
-            return Err(RegistrationError::new(
-                "workspace-identity-mismatch",
-                "Herdr returned a different workspace identity",
-            ));
-        }
-        self.dispatch()?.select_dispatch_workspace(&workspace)
-    }
-
     /// Sets or clears a registered Project's Task dispatch capacity override.
     ///
     /// # Errors
@@ -2757,7 +2566,8 @@ impl Application {
             .transpose()?;
         Ok(AgentDispatchStatus {
             endpoint_diagnostic: if socket.is_some() {
-                "configured; Herdr adapter will probe on reconciliation".into()
+                "daemon endpoint configured; see Workspace readiness for current availability"
+                    .into()
             } else {
                 "unset".into()
             },
@@ -2812,15 +2622,6 @@ impl Application {
     /// remains visible to the normal reconciliation and recovery path rather than duplicating work.
     fn schedule_agent_dispatch(&self) -> Result<(), RegistrationError> {
         let dispatch = self.dispatch()?;
-        let adapter = self
-            .adapter_factory()?
-            .adapter_for(&self.task_agent_profile()?)
-            .map_err(|_| {
-                RegistrationError::new("dispatch-unavailable", "agent provider is unavailable")
-            })?;
-        if !adapter.dispatch_available(dispatch) {
-            return Ok(());
-        }
         let projects: BTreeSet<_> = dispatch
             .list_records(&RecordListFilter {
                 project_slug: None,
@@ -2840,6 +2641,10 @@ impl Application {
             .map(|record| record.project_slugs[0].clone())
             .collect();
         for project_slug in projects {
+            let owner = dispatch.project(&project_slug)?.workspace_id;
+            if !self.workspace_dispatch_readiness(&owner)?.dispatchable {
+                continue;
+            }
             while let Some(assignment) = dispatch
                 .claim_next_agent_assignment(&project_slug, &next_dispatch_assignment_id())
                 .inspect_err(|error| {

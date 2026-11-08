@@ -88,6 +88,24 @@ impl Fixture {
         ));
         let store = SqliteProjectRepository::open(&path).unwrap();
         support::register_project(&store, "alpha");
+        for kind in [RecordType::Task, RecordType::Grilling] {
+            forge_app::WorkspaceDispatchRepository::select_workspace_profile(
+                &store,
+                "test",
+                kind,
+                Some(1),
+            )
+            .unwrap();
+        }
+        forge_app::WorkspaceDispatchRepository::retain_verified_workspace_binding(
+            &store,
+            "test",
+            Some(&forge_app::DispatchWorkspace {
+                id: "operator".into(),
+            }),
+            0,
+        )
+        .unwrap();
         let task = store
             .open_typed_record(&NewTypedRecord {
                 record_type: RecordType::Task,

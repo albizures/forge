@@ -78,6 +78,23 @@ worktree_requests! {
     worktree_remove => remove(forge_rpc::RemoveManagedWorktreeRequest) -> ();
     worktree_doctor => doctor(forge_rpc::DoctorManagedWorktreesRequest) -> forge_rpc::ListManagedWorktreesResponse;
 }
+macro_rules! dispatch_requests {
+    ($($method:ident($request:ty) -> $response:ty;)+) => {
+        impl RecordClient {
+            $(pub(super) async fn $method(&self, record: $request) -> Result<$response, jsonrpsee::core::client::Error> {
+                forge_rpc::AgentDispatchApiClient::$method(&self.client, SelectedRecordRequest { selection: self.selection.clone(), record }).await
+            })+
+        }
+    }
+}
+dispatch_requests! {
+    profile(forge_rpc::AgentDispatchProfileRequest) -> forge_rpc::AgentDispatchProfileResponse;
+    config_get(forge_rpc::DispatcherConfigGetRequest) -> forge_rpc::DispatcherConfigResponse;
+    config_set(forge_rpc::DispatcherConfigSetRequest) -> forge_rpc::DispatcherConfigResponse;
+    config_unset(forge_rpc::DispatcherConfigUnsetRequest) -> forge_rpc::DispatcherConfigResponse;
+    dispatch_status(forge_rpc::AgentDispatchStatusRequest) -> forge_rpc::AgentDispatchStatusResponse;
+    dispatch_record(forge_rpc::DispatchRecordRequest) -> forge_rpc::DispatchRecordResponse;
+}
 requests! {
     open_initiative(OpenRecordRequest) -> RecordResponse;
     ready(ReadyRecordsRequest) -> ReadyRecordsResponse;

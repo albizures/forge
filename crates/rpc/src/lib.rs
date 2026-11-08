@@ -68,31 +68,34 @@ pub trait AgentDispatchApi {
     #[method(name = "configGet")]
     async fn config_get(
         &self,
-        request: DispatcherConfigGetRequest,
+        request: SelectedRecordRequest<DispatcherConfigGetRequest>,
     ) -> RpcResult<DispatcherConfigResponse>;
     #[method(name = "configSet")]
     async fn config_set(
         &self,
-        request: DispatcherConfigSetRequest,
+        request: SelectedRecordRequest<DispatcherConfigSetRequest>,
     ) -> RpcResult<DispatcherConfigResponse>;
     #[method(name = "configUnset")]
     async fn config_unset(
         &self,
-        request: DispatcherConfigUnsetRequest,
+        request: SelectedRecordRequest<DispatcherConfigUnsetRequest>,
     ) -> RpcResult<DispatcherConfigResponse>;
     #[method(name = "profile")]
-    async fn profile(&self) -> RpcResult<AgentDispatchProfileResponse>;
+    async fn profile(
+        &self,
+        request: SelectedRecordRequest<AgentDispatchProfileRequest>,
+    ) -> RpcResult<AgentDispatchProfileResponse>;
     #[method(name = "status")]
     async fn dispatch_status(
         &self,
-        request: AgentDispatchStatusRequest,
+        request: SelectedRecordRequest<AgentDispatchStatusRequest>,
     ) -> RpcResult<AgentDispatchStatusResponse>;
     #[method(name = "reconcile")]
     async fn reconcile(&self) -> RpcResult<AgentDispatchReconcileResponse>;
     #[method(name = "dispatchRecord")]
     async fn dispatch_record(
         &self,
-        request: DispatchRecordRequest,
+        request: SelectedRecordRequest<DispatchRecordRequest>,
     ) -> RpcResult<DispatchRecordResponse>;
     #[method(name = "assignmentAcknowledge")]
     async fn assignment_acknowledge(
@@ -409,6 +412,7 @@ pub struct DispatcherConfigUnsetRequest {
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DispatcherConfigEntryResponse {
+    pub ownership: String,
     pub key: String,
     pub value: Option<String>,
     pub provenance: String,
@@ -426,6 +430,7 @@ impl From<Vec<forge_app::DispatcherConfigEntry>> for DispatcherConfigResponse {
             entries: entries
                 .into_iter()
                 .map(|entry| DispatcherConfigEntryResponse {
+                    ownership: entry.ownership,
                     key: entry.key,
                     value: entry.value,
                     provenance: entry.provenance,
@@ -454,14 +459,38 @@ impl From<AgentDispatchProjectStatus> for AgentDispatchProjectStatusResponse {
     }
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DispatchBlockerResponse {
+    pub code: String,
+    pub message: String,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AgentDispatchStatusResponse {
+    pub workspace_id: String,
+    pub configured: bool,
+    pub dispatchable: bool,
+    pub blockers: Vec<DispatchBlockerResponse>,
     pub herdr_socket_path: Option<String>,
     pub endpoint_diagnostic: String,
     pub project: Option<AgentDispatchProjectStatusResponse>,
 }
-impl From<AgentDispatchStatus> for AgentDispatchStatusResponse {
-    fn from(value: AgentDispatchStatus) -> Self {
+impl From<(AgentDispatchStatus, forge_app::WorkspaceDispatchReadiness)>
+    for AgentDispatchStatusResponse
+{
+    fn from(
+        (value, readiness): (AgentDispatchStatus, forge_app::WorkspaceDispatchReadiness),
+    ) -> Self {
         Self {
+            workspace_id: readiness.configuration.workspace_id,
+            configured: readiness.configured,
+            dispatchable: readiness.dispatchable,
+            blockers: readiness
+                .blockers
+                .into_iter()
+                .map(|b| DispatchBlockerResponse {
+                    code: b.code,
+                    message: b.message,
+                })
+                .collect(),
             herdr_socket_path: value
                 .herdr_socket_path
                 .map(|path| path.to_string_lossy().into_owned()),
@@ -469,6 +498,10 @@ impl From<AgentDispatchStatus> for AgentDispatchStatusResponse {
             project: value.project.map(Into::into),
         }
     }
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AgentDispatchProfileRequest {
+    pub kind: String,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AgentDispatchProfileResponse {

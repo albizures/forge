@@ -12,11 +12,13 @@ Automatically replacing an uncertain agent risks concurrent work in the same wor
 
 ## Decision
 
-The operator selects an existing Herdr workspace with `forge dispatcher config set workspace <workspace-id>`. Forge verifies and persists its identity, uses it as a shared UI container, and never deletes it. Dispatch is blocked if no workspace is selected or the retained workspace cannot be verified. Each assignment receives a dedicated Forge-managed tab and its initial pane; a Task agent works in its Task's Managed Worktree, not the shared workspace root.
+The operator selects an existing Herdr workspace with `forge dispatcher config set workspace <herdr-workspace-id>` in a selected Forge Workspace. Each Forge Workspace binds one exclusive provider identity and independently selects Task and Grilling profile revisions. The Herdr socket remains daemon-wide. Forge verifies and persists the exact identity, uses it as a shared UI container for that Forge Workspace, and never creates, adopts by label, replaces or deletes it. Dispatch requires both valid selections and a binding and is blocked if the provider is unavailable or the retained identity cannot be verified. Each assignment receives a dedicated Forge-managed tab and its initial pane; a Task agent works in its Task's Managed Worktree, not the shared workspace root.
 
 Forge reconciles using durable resource identities and authoritative evidence, not labels. Potentially live agents and uncertain resources reserve dispatch capacity, including when associated with a previously closed assignment. Forge does not replace an agent until it can establish the required safety facts. When it cannot establish process exit, it remains blocked and surfaces operator investigation rather than treating absence of a heartbeat or provider resource as proof.
 
 Assignment-session heartbeats provide positive liveness evidence, not proof of exit or prompt readiness. Forge waits for established readiness before sending the initial prompt. An uncertain prompt outcome requires explicit, durably recorded operator resolution before another attempt.
+
+Binding changes/removal are rejected while the owning Forge Workspace has live Assignments or retained resources, including closed uncertain attempts. Socket changes apply that guard daemon-wide and invalidate every Workspace's provider verification. Existing Assignments retain their original profile revisions and provider identities; new selections cannot redirect recovery or cleanup.
 
 Forge preserves Managed Worktrees and assignment history during recovery. A confirmed lost agent results in a Dispatch Hold and explicit operator resume before a replacement attempt.
 

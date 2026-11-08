@@ -105,11 +105,14 @@ Hooks execute shell commands in newly created Managed Worktrees. A failed hook r
 ```sh
 forge dispatcher config get
 forge dispatcher config set herdr-socket /absolute/path/to/herdr.sock
-forge dispatcher config set workspace existing-workspace-id
+forge dispatcher config set task-profile 1
+forge dispatcher config set grilling-profile 1
+forge dispatcher config set workspace existing-herdr-workspace-id
 forge dispatcher config get workspace
 forge dispatcher config unset workspace
 forge dispatcher config unset herdr-socket
 forge dispatcher profile
+forge dispatcher profile --kind grilling
 forge dispatcher config set acknowledgement-timeout-ms 300000
 forge dispatcher config unset acknowledgement-timeout-ms
 forge dispatcher config set project-limit 2 --project alpha
@@ -120,7 +123,11 @@ forge dispatcher reconcile --json
 forge dispatcher dispatch 47 --json
 ```
 
-`config set workspace` verifies the explicitly named existing Herdr Workspace. `herdr-socket` is Herdr's absolute Unix socket path, not the Forge RPC endpoint. Reads show effective values and default/override provenance; `config unset` explicitly removes an override. Socket/Workspace changes are rejected while unresolved Assignments or retained resources depend on them; investigate with `status` and `assignment-info` before safe recovery. `project-limit` requires explicit `--project` scope for reads, sets, and unsets; unset restores capacity 1. Aggregate `config get --project <slug>` includes that Project's capacity alongside global values. Timeout set/unset creates an immutable Task Agent Profile revision for future Assignments only; existing Assignments retain their bound profiles. Unset restores 300000 ms.
+Select the Forge Workspace by `--workspace <id>`, qualified Project reference or canonical cwd, with no saved default. `task-profile` and `grilling-profile` independently select existing supported revision numbers; both are required for dispatch. `config set workspace` verifies the exact existing Herdr identity and rejects a binding already owned by another Forge Workspace. Forge never creates, adopts by label, replaces or deletes the Herdr container. `herdr-socket` is the daemon-wide absolute Unix socket, not the Forge RPC endpoint. Reads show effective values, ownership and default/override provenance without contacting Herdr. `profile --kind task|grilling` inspects the Workspace-selected revision.
+
+`config unset` explicitly removes a selection/override. Binding changes are guarded by that Workspace's live Assignments and retained resources, including closed uncertain attempts; socket changes apply that guard daemon-wide and invalidate every Workspace's provider verification. Repeat `config set workspace <bound-id>` for fresh verification at the new endpoint. `status` distinguishes configured completeness from current dispatchability and reports profile, binding, availability and identity blockers. Registration, planning and local inspection remain usable while dispatch is blocked. Investigate with `assignment-info` before safe recovery.
+
+`project-limit` requires explicit `--project` scope for reads, sets and unsets; unset restores capacity 1. Aggregate configuration includes scoped capacity alongside Workspace selections and daemon socket. Timeout set/unset clones the selected Task profile into a new immutable revision selected only by this Workspace; existing Assignments retain their original revision and provider identity. Unset restores 300000 ms.
 
 Reconciliation can provision agents and worktrees; it is not a read-only health check. Automatic dispatch selects oldest-ready eligible Open Tasks within Project capacity, never Grillings. `dispatcher dispatch <record-id>` attempts the requested Task with its Managed Worktree, or an eligible single-Project Grilling interactively without one; other Record Types are unsupported. Readiness, capacity, Dispatch Holds, and recovery blockers still apply. Repeated/concurrent dispatch returns the existing open Assignment (`already_assigned: true`) without another launch or reservation. A closed Assignment with unresolved resources blocks replacement; follow the recovery runbook rather than dispatching around a hold.
 

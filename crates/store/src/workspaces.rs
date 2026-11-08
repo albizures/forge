@@ -235,6 +235,16 @@ impl WorkspaceRepository for SqliteProjectRepository {
                 ));
             }
         }
+        let configured: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM workspace_dispatch_configuration WHERE workspace_id = ?1 AND (task_profile_revision IS NOT NULL OR grilling_profile_revision IS NOT NULL OR herdr_workspace_id IS NOT NULL))",
+            [id], |row| row.get(0),
+        ).map_err(storage_error)?;
+        if configured {
+            return Err(RegistrationError::new(
+                "workspace-not-empty",
+                "Workspace retains dispatch configuration; unset its profile selections and Herdr binding before removal",
+            ));
+        }
         transaction
             .execute("DELETE FROM workspaces WHERE id = ?1", [id])
             .map_err(storage_error)?;

@@ -44,7 +44,7 @@ impl AgentDispatchAdapter for InteractiveProvider {
             Some(Path::new("/tmp/herdr.sock"))
         );
         assert_eq!(
-            store.dispatch_workspace().unwrap().unwrap().id,
+            context.dispatch_workspace.as_ref().unwrap().id,
             "operator-workspace"
         );
         store
@@ -126,6 +126,7 @@ fn dispatch_fixture() -> (std::path::PathBuf, SqliteProjectRepository, Vec<Strin
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::too_many_lines)]
 async fn configuration_dispatch_and_recovery_round_trip_without_duplicate_launches() {
     let (db, store, ids) = dispatch_fixture();
     let launches = Arc::new(AtomicUsize::new(0));
@@ -154,6 +155,8 @@ async fn configuration_dispatch_and_recovery_round_trip_without_duplicate_launch
     for args in [
         vec!["config", "set", "herdr-socket", "/tmp/herdr.sock"],
         vec!["config", "set", "workspace", "operator-workspace"],
+        vec!["config", "set", "task-profile", "1"],
+        vec!["config", "set", "grilling-profile", "1"],
         vec!["config", "set", "project-limit", "2", "--project", "alpha"],
     ] {
         let output = operator(&args);
@@ -165,7 +168,15 @@ async fn configuration_dispatch_and_recovery_round_trip_without_duplicate_launch
     }
     let run = |id: &str, json: bool| {
         let mut command = Command::new(env!("CARGO_BIN_EXE_forge"));
-        command.args(["dispatcher", "dispatch", id, "--server-url", &url]);
+        command.args([
+            "dispatcher",
+            "dispatch",
+            id,
+            "--server-url",
+            &url,
+            "--workspace",
+            "test",
+        ]);
         if json {
             command.arg("--json");
         }

@@ -115,8 +115,12 @@ async fn grouped_provider_configuration_round_trips_through_cli_and_daemon() {
         );
         serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
     };
+    json(&["set", "task-profile", "1"]);
+    json(&["set", "grilling-profile", "1"]);
+    json(&["set", "workspace", "existing"]);
     verify_capacity(&json);
     verify_timeout_revisions(&store, &json);
+    json(&["unset", "workspace"]);
     let defaults = verify_default_provenance(&db, &run, &json);
     verify_provider_configuration(&store, &run, &json, &defaults);
     server.abort();
@@ -128,14 +132,14 @@ fn verify_capacity(json: &impl Fn(&[&str]) -> serde_json::Value) {
     let capacity = json(&["get", "project-limit", "--project", "alpha"]);
     assert_eq!(
         capacity["entries"][0],
-        serde_json::json!({"key":"project-limit", "value":"1", "provenance":"default"})
+        serde_json::json!({"key":"project-limit", "value":"1", "provenance":"default", "ownership":"project:alpha"})
     );
     let capacity = json(&["set", "project-limit", "3", "--project", "alpha"]);
     assert_eq!(capacity["entries"][0]["value"], "3");
     assert_eq!(capacity["entries"][0]["provenance"], "override");
     let aggregate = json(&["get", "--project", "alpha"]);
-    assert_eq!(aggregate["entries"].as_array().unwrap().len(), 4);
-    assert_eq!(aggregate["entries"][3], capacity["entries"][0]);
+    assert_eq!(aggregate["entries"].as_array().unwrap().len(), 6);
+    assert_eq!(aggregate["entries"][5], capacity["entries"][0]);
     json(&["unset", "project-limit", "--project", "alpha"]);
     let capacity = json(&["get", "project-limit", "--project", "alpha"]);
     assert_eq!(capacity["entries"][0]["value"], "1");
@@ -231,9 +235,11 @@ fn verify_default_provenance(
     assert_eq!(
         defaults,
         serde_json::json!({"entries":[
-            {"key":"herdr-socket", "value":null, "provenance":"default"},
-            {"key":"workspace", "value":null, "provenance":"default"},
-            {"key":"acknowledgement-timeout-ms", "value":"300000", "provenance":"default"}
+            {"key":"herdr-socket", "value":null, "provenance":"default", "ownership":"daemon"},
+            {"key":"workspace", "value":null, "provenance":"default", "ownership":"workspace:test"},
+            {"key":"task-profile", "value":"3", "provenance":"override", "ownership":"workspace:test"},
+            {"key":"grilling-profile", "value":"1", "provenance":"override", "ownership":"workspace:test"},
+            {"key":"acknowledgement-timeout-ms", "value":"300000", "provenance":"default", "ownership":"selected-task-profile-revision"}
         ]})
     );
     // An explicit value equal to the default is still an override, durably.
@@ -258,7 +264,7 @@ fn verify_default_provenance(
             .unwrap()
             .acknowledgement_timeout_overridden
     );
-    defaults
+    json(&["get"])
 }
 
 fn verify_provider_configuration(
@@ -321,7 +327,7 @@ fn verify_provider_configuration(
     assert!(human.status.success());
     assert_eq!(
         String::from_utf8(human.stdout).unwrap(),
-        "workspace\texisting\toverride\n"
+        "workspace\texisting\toverride\tworkspace:test\n"
     );
     json(&["unset", "workspace"]);
     json(&["unset", "herdr-socket"]);

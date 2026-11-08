@@ -72,6 +72,7 @@ fn application(database: &Path) -> Application {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn same_local_slugs_do_not_share_dispatch_capacity_and_consumption_survives_reopen() {
     let fixture = Fixture::new();
     let one = fixture.path().join("one");
@@ -82,6 +83,26 @@ fn same_local_slugs_do_not_share_dispatch_capacity_and_consumption_survives_reop
     let store = SqliteProjectRepository::open(&database).unwrap();
     store.create_workspace("one", "One", &one).unwrap();
     store.create_workspace("two", "Two", &two).unwrap();
+    for workspace in ["one", "two"] {
+        for kind in [RecordType::Task, RecordType::Grilling] {
+            forge_app::WorkspaceDispatchRepository::select_workspace_profile(
+                &store,
+                workspace,
+                kind,
+                Some(1),
+            )
+            .unwrap();
+        }
+        forge_app::WorkspaceDispatchRepository::retain_verified_workspace_binding(
+            &store,
+            workspace,
+            Some(&forge_app::DispatchWorkspace {
+                id: format!("provider-{workspace}"),
+            }),
+            0,
+        )
+        .unwrap();
+    }
     let app = application(&database);
     app.register_workspace_project("one", &one, "api").unwrap();
     app.register_workspace_project("two", &two, "api").unwrap();

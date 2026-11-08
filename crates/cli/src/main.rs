@@ -271,14 +271,14 @@ enum AssignmentCommand {
 }
 #[derive(Debug, Subcommand)]
 enum AgentDispatchCommand {
-    /// Inspect or explicitly change daemon-owned Dispatcher configuration.
+    /// Inspect/change Workspace dispatch selections, daemon socket and scoped Project capacity.
     Config {
         #[command(subcommand)]
         command: DispatcherConfigCommand,
     },
-    /// Inspect the active immutable Task Agent Profile (read-only).
-    Profile(AgentDispatchRequestArgs),
-    /// Inspect persisted Dispatcher state.
+    /// Inspect the Workspace-selected immutable Task or Grilling profile (read-only).
+    Profile(AgentDispatchProfileArgs),
+    /// Inspect configured completeness and probe current provider dispatchability.
     Status(AgentDispatchStatusArgs),
     /// Reconcile Assignments and provision eligible Tasks; not a read-only check.
     Reconcile(AgentDispatchRequestArgs),
@@ -298,7 +298,7 @@ enum AgentDispatchCommand {
 }
 #[derive(Args, Debug)]
 struct DispatcherConfigReadArgs {
-    /// Configuration key. Omit to inspect global values (plus capacity with --project).
+    /// Configuration key. Omit to inspect Workspace selections, daemon socket and scoped capacity.
     key: Option<String>,
     #[arg(long)]
     project: Option<String>,
@@ -318,7 +318,7 @@ enum DispatcherConfigCommand {
 }
 #[derive(Args, Debug)]
 struct DispatcherConfigSetArgs {
-    /// herdr-socket, workspace, project-limit, or acknowledgement-timeout-ms.
+    /// herdr-socket (daemon), workspace/task-profile/grilling-profile (Workspace), project-limit, or acknowledgement-timeout-ms (profile revision).
     key: String,
     /// Required configuration value.
     value: String,
@@ -331,7 +331,7 @@ struct DispatcherConfigSetArgs {
 }
 #[derive(Args, Debug)]
 struct DispatcherConfigUnsetArgs {
-    /// herdr-socket, workspace, project-limit, or acknowledgement-timeout-ms.
+    /// herdr-socket, workspace, task-profile, grilling-profile, project-limit, or acknowledgement-timeout-ms.
     key: String,
     #[arg(long)]
     project: Option<String>,
@@ -344,6 +344,16 @@ struct DispatcherConfigUnsetArgs {
 struct AgentDispatchStatusArgs {
     #[arg(long)]
     project: Option<String>,
+    #[arg(long, value_name = "URL")]
+    server_url: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Args, Debug)]
+struct AgentDispatchProfileArgs {
+    /// Workspace-selected immutable profile to inspect.
+    #[arg(long, default_value = "task", value_parser = ["task", "grilling"])]
+    kind: String,
     #[arg(long, value_name = "URL")]
     server_url: Option<String>,
     #[arg(long)]
@@ -701,7 +711,7 @@ async fn run(cli: Cli) -> i32 {
         },
         Command::Project { command } => project(command, cli.workspace).await,
         Command::Worktree { command } => worktree(command, cli.workspace).await,
-        Command::Dispatcher { command } => agent_dispatch(command).await,
+        Command::Dispatcher { command } => agent_dispatch(command, cli.workspace).await,
         Command::Assignment { command } => assignment(command).await,
     }
 }
@@ -928,7 +938,7 @@ async fn assignment(command: AssignmentCommand) -> i32 {
     }
 }
 
-async fn agent_dispatch(command: AgentDispatchCommand) -> i32 {
+async fn agent_dispatch(command: AgentDispatchCommand, workspace: Option<String>) -> i32 {
     let (result, json) = match command {
         AgentDispatchCommand::AssignmentInfo(args) => {
             // Keep typed diagnostics separate from generic dispatch response rendering.
@@ -952,16 +962,21 @@ async fn agent_dispatch(command: AgentDispatchCommand) -> i32 {
                 }
             };
         }
-        AgentDispatchCommand::Config { command } => return dispatcher_config(command).await,
+        AgentDispatchCommand::Config { command } => {
+            return dispatcher_config(command, workspace).await;
+        }
         AgentDispatchCommand::Profile(args) => (
-            request_agent_dispatch_profile(&resolve_endpoint(args.server_url.as_deref()).await)
-                .await
-                .map(|value| serde_json::to_value(value).unwrap()),
+            request_agent_dispatch_profile(
+                selected_record_endpoint(args.server_url.as_deref(), workspace.as_deref()).await,
+                args.kind,
+            )
+            .await
+            .map(|value| serde_json::to_value(value).unwrap()),
             args.json,
         ),
         AgentDispatchCommand::Status(args) => (
             request_agent_dispatch_status(
-                &resolve_endpoint(args.server_url.as_deref()).await,
+                selected_record_endpoint(args.server_url.as_deref(), workspace.as_deref()).await,
                 args.project,
             )
             .await
@@ -976,7 +991,7 @@ async fn agent_dispatch(command: AgentDispatchCommand) -> i32 {
         ),
         AgentDispatchCommand::Dispatch(args) => (
             request_dispatch_record(
-                &resolve_endpoint(args.server_url.as_deref()).await,
+                selected_record_endpoint(args.server_url.as_deref(), workspace.as_deref()).await,
                 args.record_id,
             )
             .await
@@ -1022,11 +1037,11 @@ async fn agent_dispatch(command: AgentDispatchCommand) -> i32 {
     }
 }
 
-async fn dispatcher_config(command: DispatcherConfigCommand) -> i32 {
+async fn dispatcher_config(command: DispatcherConfigCommand, workspace: Option<String>) -> i32 {
     let (result, json) = match command {
         DispatcherConfigCommand::Get(args) => (
             forge_cli::request_dispatcher_config_get(
-                &resolve_endpoint(args.server_url.as_deref()).await,
+                selected_record_endpoint(args.server_url.as_deref(), workspace.as_deref()).await,
                 args.key,
                 args.project,
             )
@@ -1035,7 +1050,7 @@ async fn dispatcher_config(command: DispatcherConfigCommand) -> i32 {
         ),
         DispatcherConfigCommand::Set(args) => (
             forge_cli::request_dispatcher_config_set(
-                &resolve_endpoint(args.server_url.as_deref()).await,
+                selected_record_endpoint(args.server_url.as_deref(), workspace.as_deref()).await,
                 args.key,
                 args.value,
                 args.project,
@@ -1045,7 +1060,7 @@ async fn dispatcher_config(command: DispatcherConfigCommand) -> i32 {
         ),
         DispatcherConfigCommand::Unset(args) => (
             forge_cli::request_dispatcher_config_unset(
-                &resolve_endpoint(args.server_url.as_deref()).await,
+                selected_record_endpoint(args.server_url.as_deref(), workspace.as_deref()).await,
                 args.key,
                 args.project,
             )
@@ -1063,10 +1078,11 @@ async fn dispatcher_config(command: DispatcherConfigCommand) -> i32 {
                 }
                 for entry in config.entries {
                     println!(
-                        "{}\t{}\t{}",
+                        "{}\t{}\t{}\t{}",
                         entry.key,
                         entry.value.as_deref().unwrap_or("unset"),
-                        entry.provenance
+                        entry.provenance,
+                        entry.ownership
                     );
                 }
             }

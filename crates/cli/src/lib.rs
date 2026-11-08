@@ -214,11 +214,11 @@ pub async fn request_register_project_selected(
 /// # Errors
 /// Returns endpoint, key validation, or daemon failures.
 pub async fn request_dispatcher_config_get(
-    url: &str,
+    endpoint: impl Into<RecordEndpoint>,
     key: Option<String>,
     project: Option<String>,
 ) -> Result<forge_rpc::DispatcherConfigResponse, String> {
-    client(url)?
+    record_client(endpoint)?
         .config_get(forge_rpc::DispatcherConfigGetRequest { key, project })
         .await
         .map_err(|error| format!("could not read Dispatcher configuration: {error}"))
@@ -229,12 +229,12 @@ pub async fn request_dispatcher_config_get(
 /// # Errors
 /// Returns endpoint, validation, provider verification, or resource-safety failures.
 pub async fn request_dispatcher_config_set(
-    url: &str,
+    endpoint: impl Into<RecordEndpoint>,
     key: String,
     value: String,
     project: Option<String>,
 ) -> Result<forge_rpc::DispatcherConfigResponse, String> {
-    client(url)?
+    record_client(endpoint)?
         .config_set(forge_rpc::DispatcherConfigSetRequest {
             key,
             value,
@@ -249,39 +249,43 @@ pub async fn request_dispatcher_config_set(
 /// # Errors
 /// Returns endpoint, validation, or resource-safety failures.
 pub async fn request_dispatcher_config_unset(
-    url: &str,
+    endpoint: impl Into<RecordEndpoint>,
     key: String,
     project: Option<String>,
 ) -> Result<forge_rpc::DispatcherConfigResponse, String> {
-    client(url)?
+    record_client(endpoint)?
         .config_unset(forge_rpc::DispatcherConfigUnsetRequest { key, project })
         .await
         .map_err(|error| format!("could not unset Dispatcher configuration: {error}"))
 }
 
-/// Requests the seeded Agent Dispatch Profile.
+/// Requests the Workspace-selected immutable Task or Grilling profile.
 ///
 /// # Errors
 ///
 /// Returns endpoint or daemon failures.
 pub async fn request_agent_dispatch_profile(
-    url: &str,
+    endpoint: impl Into<RecordEndpoint>,
+    kind: String,
 ) -> Result<AgentDispatchProfileResponse, String> {
-    client(url)?.profile().await.map_err(|error| {
-        format!("could not inspect Agent Dispatch profile through Forge daemon: {error}")
-    })
+    record_client(endpoint)?
+        .profile(forge_rpc::AgentDispatchProfileRequest { kind })
+        .await
+        .map_err(|error| {
+            format!("could not inspect Agent Dispatch profile through Forge daemon: {error}")
+        })
 }
 
-/// Requests stable dispatch diagnostics.
+/// Requests Workspace configuration completeness and live provider diagnostics.
 ///
 /// # Errors
 ///
 /// Returns endpoint or daemon failures.
 pub async fn request_agent_dispatch_status(
-    url: &str,
+    endpoint: impl Into<RecordEndpoint>,
     project_slug: Option<String>,
 ) -> Result<AgentDispatchStatusResponse, String> {
-    client(url)?
+    record_client(endpoint)?
         .dispatch_status(AgentDispatchStatusRequest { project_slug })
         .await
         .map_err(|error| {
@@ -307,10 +311,10 @@ pub async fn request_agent_dispatch_reconcile(
 /// # Errors
 /// Returns endpoint, eligibility, or daemon provisioning failures.
 pub async fn request_dispatch_record(
-    url: &str,
+    endpoint: impl Into<RecordEndpoint>,
     record_id: u64,
 ) -> Result<DispatchRecordResponse, String> {
-    client(url)?
+    record_client(endpoint)?
         .dispatch_record(DispatchRecordRequest { record_id })
         .await
         .map_err(|error| format!("could not dispatch Record through Forge daemon: {error}"))
@@ -490,9 +494,18 @@ pub fn render_agent_dispatch_status(status: &AgentDispatchStatusResponse) -> Str
                 .map_or("default".into(), |limit| format!("configured: {limit}"))
         )
     });
+    let blockers = status
+        .blockers
+        .iter()
+        .fold(String::new(), |mut text, blocker| {
+            use std::fmt::Write;
+            write!(text, "\n- {}: {}", blocker.code, blocker.message)
+                .expect("writing a String cannot fail");
+            text
+        });
     format!(
-        "Herdr socket: {endpoint}\nEndpoint: {}{capacity}",
-        status.endpoint_diagnostic
+        "Workspace: {}\nConfigured: {}\nDispatchable now: {}\nHerdr socket (daemon): {endpoint}\nEndpoint: {}{capacity}{blockers}",
+        status.workspace_id, status.configured, status.dispatchable, status.endpoint_diagnostic
     )
 }
 
