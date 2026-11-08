@@ -1,8 +1,9 @@
+mod support;
 use forge_app::{
     AgentAdapterError, AgentDispatchAdapter, AgentDispatchAdapterFactory, AgentDispatchContext,
     AgentDispatchRepository, AgentObservation, AgentProfile, Application, NewAgentAssignment,
-    NewAgentAssignmentResource, NewTypedRecord, Project, ProjectRepository, RecordRepository,
-    RecordStatus, RecordType, RegistrationError, RepositoryInspector,
+    NewAgentAssignmentResource, NewTypedRecord, Project, RecordRepository, RecordStatus,
+    RecordType, RegistrationError, RepositoryInspector,
 };
 use forge_rpc::{AgentDispatchApiServer, RecordIdRequest, RetireAgentAssignmentRequest};
 use forge_server::Daemon;
@@ -86,13 +87,7 @@ impl Fixture {
                 .as_nanos()
         ));
         let store = SqliteProjectRepository::open(&path).unwrap();
-        store
-            .register(&Project {
-                slug: "alpha".into(),
-                registered_folder: "/repos/alpha".into(),
-                origin_url: "https://example.test/alpha.git".into(),
-            })
-            .unwrap();
+        support::register_project(&store, "alpha");
         let task = store
             .open_typed_record(&NewTypedRecord {
                 record_type: RecordType::Task,

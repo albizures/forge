@@ -1,3 +1,6 @@
+mod project_selection;
+mod workspaces;
+
 use clap::{Args, Parser, Subcommand};
 use forge_cli::{
     render_agent_dispatch_status, render_human_status, render_json_status, render_managed_worktree,
@@ -10,10 +13,10 @@ use forge_cli::{
     request_managed_worktree_info, request_managed_worktree_list, request_managed_worktree_recover,
     request_managed_worktree_remove, request_open_grilling_under_wayfinder, request_open_record,
     request_open_spec, request_open_task, request_open_task_under_spec,
-    request_open_task_under_wayfinder, request_open_wayfinder, request_project_here,
-    request_project_setup_hook, request_record_comments, request_record_updates,
-    request_register_project, request_relate_record, request_reopen_dispatch_task,
-    request_resume_dispatch_task, request_retire_agent_assignment, request_show_record,
+    request_open_task_under_wayfinder, request_open_wayfinder, request_project_setup_hook,
+    request_record_comments, request_record_updates, request_register_project_selected,
+    request_relate_record, request_reopen_dispatch_task, request_resume_dispatch_task,
+    request_retire_agent_assignment, request_select_project, request_show_record,
     request_start_assignment_task, request_start_record, request_status, request_unrelate_record,
     request_worktree_root, resolve_endpoint as resolve_managed_endpoint,
 };
@@ -22,11 +25,16 @@ use std::io::Read;
 #[derive(Debug, Parser)]
 #[command(name = "forge", about = "Client for the Forge daemon")]
 struct Cli {
+    /// Explicit Forge Workspace ID; overrides cwd inference. No saved default.
+    #[arg(long, global = true)]
+    workspace: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Manage Forge filesystem Workspace registrations and selection.
+    Workspace(workspaces::WorkspaceArgs),
     /// Print the daemon's shared application status.
     Status {
         #[arg(long, value_name = "URL")]
@@ -43,6 +51,10 @@ enum Command {
     Here {
         #[arg(long, value_name = "URL")]
         server_url: Option<String>,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        json: bool,
     },
     /// Manage generic Records.
     Record {
@@ -638,8 +650,18 @@ async fn main() {
     if print_build_info_if_requested() {
         return;
     }
-    let cli = Cli::parse_from(normalize_comment_delete(std::env::args()));
-    let exit_code = match cli.command {
+    let mut cli = Cli::parse_from(normalize_comment_delete(std::env::args()));
+    if let Err(error) = project_selection::qualify(&mut cli.command, cli.workspace.as_deref()).await
+    {
+        eprintln!("forge: {error}");
+        std::process::exit(1);
+    }
+    std::process::exit(run(cli).await);
+}
+
+async fn run(cli: Cli) -> i32 {
+    match cli.command {
+        Command::Workspace(args) => workspaces::run(args, cli.workspace).await,
         Command::Status { server_url, json } => status(server_url.as_deref(), json).await,
         Command::Add {
             command:
@@ -648,8 +670,12 @@ async fn main() {
                     slug,
                     server_url,
                 },
-        } => add_project(&folder, &slug, server_url.as_deref()).await,
-        Command::Here { server_url } => here(server_url.as_deref()).await,
+        } => add_project(&folder, &slug, server_url.as_deref(), cli.workspace).await,
+        Command::Here {
+            server_url,
+            project,
+            json,
+        } => here(server_url.as_deref(), cli.workspace, project, json).await,
         Command::Record { command } => match command {
             RecordCommand::Open(args) => open_record(args).await,
             RecordCommand::Show(args) => record_result(
@@ -731,8 +757,7 @@ async fn main() {
         Command::Worktree { command } => worktree(command).await,
         Command::Dispatcher { command } => agent_dispatch(command).await,
         Command::Assignment { command } => assignment(command).await,
-    };
-    std::process::exit(exit_code);
+    }
 }
 async fn config(command: ConfigCommand) -> i32 {
     let (key, root, set, url, json) = match command {
@@ -1197,7 +1222,12 @@ async fn status(flag: Option<&str>, json: bool) -> i32 {
         }
     }
 }
-async fn here(flag: Option<&str>) -> i32 {
+async fn here(
+    flag: Option<&str>,
+    workspace: Option<String>,
+    project: Option<String>,
+    json: bool,
+) -> i32 {
     let folder = match std::env::current_dir() {
         Ok(folder) => folder,
         Err(error) => {
@@ -1205,9 +1235,23 @@ async fn here(flag: Option<&str>) -> i32 {
             return 1;
         }
     };
-    match request_project_here(&resolve_endpoint(flag).await, &folder.to_string_lossy()).await {
+    match request_select_project(
+        &resolve_endpoint(flag).await,
+        &folder.to_string_lossy(),
+        workspace,
+        project,
+    )
+    .await
+    {
         Ok(project) => {
-            println!("{}", render_project_here(&project));
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&project).expect("Project is serializable")
+                );
+            } else {
+                println!("{}", render_project_here(&project));
+            }
             0
         }
         Err(error) => {
@@ -1216,8 +1260,27 @@ async fn here(flag: Option<&str>) -> i32 {
         }
     }
 }
-async fn add_project(folder: &str, slug: &str, flag: Option<&str>) -> i32 {
-    match request_register_project(&resolve_endpoint(flag).await, folder, slug).await {
+async fn add_project(
+    folder: &str,
+    slug: &str,
+    flag: Option<&str>,
+    workspace: Option<String>,
+) -> i32 {
+    let folder = match std::env::current_dir() {
+        Ok(cwd) => cwd.join(folder),
+        Err(error) => {
+            eprintln!("forge: {error}");
+            return 1;
+        }
+    };
+    match request_register_project_selected(
+        &resolve_endpoint(flag).await,
+        &folder.to_string_lossy(),
+        slug,
+        workspace,
+    )
+    .await
+    {
         Ok(project) => {
             println!("{}", render_project_registered(&project));
             0

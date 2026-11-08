@@ -6,11 +6,11 @@
 
 ## Context
 
-A Task agent must work in a Task-specific checkout without competing with a human in a Project Registered Folder. Dispatch and provider calls may crash, time out, or return uncertain results. Recreating a checkout or adopting a similarly named provider resource after such a failure can lose evidence, exceed capacity, or direct an agent at the wrong work.
+A Task agent must work in a Task-specific checkout without competing with a human in a Project root. Dispatch and provider calls may crash, time out, or return uncertain results. Recreating a checkout or adopting a similarly named provider resource after such a failure can lose evidence, exceed capacity, or direct an agent at the wrong work.
 
 ## Decision
 
-Forge autonomously selects the oldest dependency-ready Open Task scoped to one Project while that Project has capacity. It atomically creates a durable Provisioning Assignment before any checkout or provider side effect; that assignment is the sole capacity holder. The Base Commit is captured from the Project Registered Folder HEAD when the Task opens. The Dispatcher derives `feat/forge-<task-id>` and prepares the claimed Managed Worktree from that immutable commit.
+Forge autonomously selects the oldest dependency-ready Open Task scoped to one Project while that Project has capacity. It atomically creates a durable Provisioning Assignment before any checkout or provider side effect; that assignment is the sole capacity holder. The Base Commit is captured from the Project root HEAD when the Task opens. The Dispatcher derives `feat/forge-<task-id>` and prepares the claimed Managed Worktree from that immutable commit.
 
 Forge persists Assignment, Worktree Claim, Base Commit, Dispatch Hold, shared Dispatch Workspace, and every provider resource identity. Herdr is an adapter behind a provider-neutral port: Forge creates one retained neutral-root Dispatch Workspace, gives each Assignment a dedicated tab and pane whose cwd is the Task Managed Worktree, and uses the Assignment ID as provider identity. Recovery accepts only the complete persisted resource tuple; labels and names are hints, never adoption authority. Provider events wake reconciliation but do not mutate assignment state or establish Task completion.
 
@@ -18,7 +18,7 @@ On a branch collision, unavailable base, failed setup hook, invalid or missing c
 
 ## Consequences
 
-- Task agents never receive a Registered Folder cwd.
+- Task agents never receive a Project root cwd.
 - Restart and reconciliation recover Forge-owned work without duplicate provisioning or resource adoption.
 - Operators investigate retained Git/provider evidence using dispatch, worktree, resume, reopen, and assignment-retirement commands rather than relying on automatic destructive repair.
 - Existing SQLite stores migrate the new durable lifecycle facts automatically; legacy resources are not adopted.

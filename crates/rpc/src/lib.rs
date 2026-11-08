@@ -1,5 +1,8 @@
 //! Shared JSON-RPC wire contract ownership boundary.
 
+mod workspaces;
+pub use workspaces::*;
+
 use forge_app::{
     AgentDispatchProjectStatus, AgentDispatchReconcileResult, AgentDispatchStatus, AgentProfile,
     ApplicationStatus, ManagedWorktreeInfo, Project, Record, RecordComment, RecordRelationshipKind,
@@ -757,23 +760,31 @@ pub struct ListManagedWorktreesResponse {
 pub struct RegisterProjectRequest {
     pub folder: String,
     pub slug: String,
+    pub workspace: Option<String>,
+    pub cwd: String,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RegisterProjectResponse {
+    pub reference: String,
+    pub workspace_id: String,
     pub slug: String,
-    pub registered_folder: String,
+    pub project_root: String,
     pub origin_url: String,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProjectHereRequest {
     pub folder: String,
+    pub workspace: Option<String>,
+    pub project: Option<String>,
 }
 pub type ProjectHereResponse = RegisterProjectResponse;
 impl From<Project> for RegisterProjectResponse {
     fn from(project: Project) -> Self {
         Self {
+            reference: project.reference,
+            workspace_id: project.workspace_id,
             slug: project.slug,
-            registered_folder: project.registered_folder.to_string_lossy().into_owned(),
+            project_root: project.project_root.to_string_lossy().into_owned(),
             origin_url: project.origin_url,
         }
     }

@@ -7,13 +7,22 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+mod workspaces;
+pub use workspaces::{Workspace, WorkspaceRepository};
+mod projects;
+pub use projects::{ProjectReference, canonical_project_root};
+
 /// A Project registered with Forge.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Project {
-    /// Immutable human-referenceable identity.
+    /// Immutable persistence identity, carried by scope, configuration and Assignments.
+    pub reference: String,
+    /// Immutable owning Workspace.
+    pub workspace_id: String,
+    /// Immutable human-referenceable slug, unique within the owning Workspace.
     pub slug: String,
-    /// Canonical path of the Repository's main Worktree.
-    pub registered_folder: PathBuf,
+    /// Canonical Project root: the Repository's main checkout.
+    pub project_root: PathBuf,
     /// URL configured for the Repository's `origin` remote.
     pub origin_url: String,
 }
@@ -261,15 +270,25 @@ pub trait RepositoryInspector: Send + Sync {
 /// Persistence boundary owned by the application.
 #[allow(clippy::missing_errors_doc)]
 pub trait ProjectRepository: Send + Sync {
-    /// Returns the Project registered under `slug`.
-    fn project(&self, slug: &str) -> Result<Project, RegistrationError>;
+    /// Returns a Project by its immutable persistence reference, not its local slug.
+    fn project(&self, reference: &str) -> Result<Project, RegistrationError>;
+    /// Resolves an operator-facing Workspace-local slug to the immutable persistence identity.
+    /// # Errors
+    /// Returns missing Project or storage failures.
+    fn project_in_workspace(
+        &self,
+        workspace: &str,
+        slug: &str,
+    ) -> Result<Project, RegistrationError> {
+        self.project(&ProjectReference::new(workspace, slug)?.qualified())
+    }
     /// Stores `project`, or returns the matching existing Project idempotently.
     ///
     /// # Errors
     ///
     /// Returns a user-facing validation or storage failure.
     fn register(&self, project: &Project) -> Result<Project, RegistrationError>;
-    /// Finds the Project whose Registered Folder contains `folder`.
+    /// Finds the Project whose deepest Project root contains `folder`.
     ///
     /// # Errors
     ///
@@ -809,7 +828,7 @@ pub enum AgentObservation {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentDispatchContext {
     pub assignment: AgentAssignment,
-    pub registered_project_folder: PathBuf,
+    pub project_root: PathBuf,
     /// The prepared active Managed Worktree in which this Task's Pi process runs.
     pub agent_workspace: Option<PathBuf>,
     pub dispatch_workspace: Option<DispatchWorkspace>,
@@ -1202,7 +1221,7 @@ fn agent_dispatch_context(
     });
     Ok(AgentDispatchContext {
         assignment: assignment.clone(),
-        registered_project_folder: project.registered_folder,
+        project_root: project.project_root,
         agent_workspace,
         dispatch_workspace: repository.dispatch_workspace()?,
         bootstrap_prompt: None,
@@ -1831,6 +1850,7 @@ fn authorize_assignment_operation<R: AgentDispatchRepository + ?Sized>(
 
 /// The application boundary for operations shared by all transports.
 pub struct Application {
+    workspaces: Option<Box<dyn WorkspaceRepository>>,
     records: Box<dyn RecordRepository>,
     managed_worktrees: Option<Box<dyn ManagedWorktreeRepository>>,
     worktree_adapter: Option<Box<dyn ManagedWorktreeAdapter>>,
@@ -1893,6 +1913,7 @@ impl Application {
     ) -> Self {
         Self {
             records,
+            workspaces: None,
             managed_worktrees: None,
             worktree_adapter: None,
             dispatch: None,
@@ -1912,6 +1933,7 @@ impl Application {
     ) -> Self {
         Self {
             records,
+            workspaces: None,
             managed_worktrees: Some(managed_worktrees),
             worktree_adapter: Some(worktree_adapter),
             dispatch: None,
@@ -1931,6 +1953,7 @@ impl Application {
     ) -> Self {
         Self {
             records,
+            workspaces: None,
             managed_worktrees: None,
             worktree_adapter: None,
             dispatch: Some(dispatch),
@@ -1952,6 +1975,7 @@ impl Application {
     ) -> Self {
         Self {
             records,
+            workspaces: None,
             managed_worktrees: Some(managed_worktrees),
             worktree_adapter: Some(worktree_adapter),
             dispatch: Some(dispatch),
@@ -2828,7 +2852,7 @@ impl Application {
             Ok(project) => project,
             Err(error) => return self.retain_worktree_preparation_failure(&claim, error),
         };
-        if let Err(error) = adapter.create(&project.registered_folder, &claim.path, branch, base) {
+        if let Err(error) = adapter.create(&project.project_root, &claim.path, branch, base) {
             return self.retain_worktree_preparation_failure(&claim, error);
         }
         let hook = match managed.project_setup_hook(&claim.project_slug) {
@@ -2914,7 +2938,7 @@ impl Application {
             )
         })?;
         let project = managed.project(&record.project_slugs[0])?;
-        let path = managed_worktree_path(&root, &project.slug, record_id);
+        let path = managed_worktree_path(&root, &project.reference, record_id);
         let base = managed.task_base_commit(record_id)?.ok_or_else(|| {
             RegistrationError::new(
                 "task-base-commit-unavailable",
@@ -2922,7 +2946,7 @@ impl Application {
             )
         })?;
         self.worktree_adapter()?.validate_recovery(
-            &project.registered_folder,
+            &project.project_root,
             &path,
             &format!("feat/forge-{record_id}"),
             &base,
@@ -3054,7 +3078,7 @@ impl Application {
         self.managed_worktrees()?.delete_worktree_claim(record_id)
     }
 
-    /// Registers an eligible Git main Worktree as a Project.
+    /// Registers an eligible Git main checkout using a qualified `<workspace>/<slug>` reference.
     ///
     /// # Errors
     ///
@@ -3062,17 +3086,10 @@ impl Application {
     pub fn register_project(
         &self,
         folder: &Path,
-        slug: &str,
+        reference: &str,
     ) -> Result<Project, RegistrationError> {
-        if slug.is_empty() {
-            return Err(RegistrationError::new(
-                "invalid-slug",
-                "project slug must not be empty",
-            ));
-        }
-        let mut project = self.inspector.inspect(folder)?;
-        slug.clone_into(&mut project.slug);
-        self.records.register(&project)
+        let reference = ProjectReference::parse(reference)?;
+        self.register_workspace_project(&reference.workspace_id, folder, &reference.slug)
     }
 
     /// Finds the Project containing the supplied current folder.
@@ -3419,9 +3436,7 @@ impl Application {
         match project_slugs {
             [project_slug] => {
                 let project = self.records.project(project_slug)?;
-                self.inspector
-                    .head_commit(&project.registered_folder)
-                    .map(Some)
+                self.inspector.head_commit(&project.project_root).map(Some)
             }
             _ => Ok(None),
         }
@@ -3547,8 +3562,10 @@ mod tests {
     impl ProjectRepository for Repository {
         fn project(&self, slug: &str) -> Result<Project, RegistrationError> {
             Ok(Project {
+                reference: slug.into(),
+                workspace_id: "test".into(),
                 slug: slug.into(),
-                registered_folder: PathBuf::from("/test-project"),
+                project_root: PathBuf::from("/test-project"),
                 origin_url: "test".into(),
             })
         }

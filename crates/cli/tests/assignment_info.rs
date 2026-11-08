@@ -1,15 +1,12 @@
+mod support;
 use forge_app::{
     AgentAdapterError, AgentDispatchAdapter, AgentDispatchAdapterFactory, AgentDispatchRepository,
     AgentProfile, Application, NewAgentAssignment, NewAgentAssignmentResource, NewTypedRecord,
-    Project, ProjectRepository, RecordRepository, RecordType, RegistrationError,
-    RepositoryInspector,
+    Project, RecordRepository, RecordType, RegistrationError, RepositoryInspector,
 };
 use forge_server::{Daemon, router};
 use forge_store::SqliteProjectRepository;
-use std::{
-    path::{Path, PathBuf},
-    process::Command,
-};
+use std::{path::Path, process::Command};
 
 struct NoProvider;
 impl AgentDispatchAdapterFactory for NoProvider {
@@ -32,13 +29,7 @@ impl RepositoryInspector for NoInspector {
 
 fn inspection_application() -> Application {
     let store = SqliteProjectRepository::in_memory().unwrap();
-    store
-        .register(&Project {
-            slug: "alpha".into(),
-            registered_folder: PathBuf::from("/repos/alpha"),
-            origin_url: "https://example.test/alpha.git".into(),
-        })
-        .unwrap();
+    support::register_project(&store, "alpha");
     let task = store
         .open_typed_record(&NewTypedRecord {
             record_type: RecordType::Task,

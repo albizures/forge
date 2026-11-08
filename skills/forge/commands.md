@@ -6,11 +6,31 @@ Read [SKILL.md](SKILL.md) first for CLI selection, scope, and role boundaries. I
 
 ```sh
 forge status --server-url http://127.0.0.1:45004/rpc --json
-forge add project /repos/alpha alpha
+forge workspace add personal --root /repos
+forge add project /repos/alpha alpha --workspace personal
 forge here
+forge here --workspace personal --project alpha --json
+forge here --project personal/alpha --json
 ```
 
-Registration accepts a Git main Worktree and immutable Slug. The Repository needs an `origin` remote; independent clones are distinct Repositories. Select the correct daemon before registering. `here` recognizes the Project containing the current folder, including its other Worktrees.
+Registration accepts a Git main checkout as its canonical Project root, within a selected Forge Workspace. The Repository needs an `origin` remote; independent clones are distinct Repositories. Project roots may equal their Workspace root or nest inside other Project roots; duplicate canonical roots, linked Worktrees and the reserved Workspace-relative `.forge/worktrees` subtree are rejected. Project slugs are immutable and unique within their Workspace.
+
+Project selectors use `--workspace personal --project alpha` or the qualified `--project personal/alpha`. Explicit selection wins over cwd; contradictory selectors fail. Otherwise `here` selects the deepest containing Project root. Outside registered Workspaces, supply a Workspace or qualified Project selector; there is no saved default. Examples using short Project slugs below assume cwd is within the intended Workspace (or add `--workspace`). Project output exposes `reference`, `workspace_id`, local `slug`, and `project_root`; persist the returned `reference` in scope/configuration requests. See [Project registration and selection](../../docs/projects.md).
+
+## Forge Workspace registrations
+
+```sh
+forge workspace add personal --root /repos --name 'Personal projects'
+forge workspace list --json
+forge workspace show --workspace personal --json
+forge workspace here
+forge workspace rename personal 'My projects'
+forge workspace remove personal
+```
+
+A Forge Workspace owns a fixed canonical filesystem root; it is distinct from a Herdr terminal container. IDs and roots are immutable, display names are editable, and equal or overlapping roots (including symlink aliases) are rejected. `show` and `here` prefer `--workspace`, otherwise infer from canonical cwd; outside all registered roots, supply an explicit selector. There is no saved default. Listing and registration work without selection. Removal requires an empty registration and leaves files and provider containers untouched.
+
+Project registration, selection and Project-owned configuration use Workspace ownership. Record-wide Workspace confinement, the fixed Workspace-rooted Managed Worktree layout, and Workspace-owned dispatch configuration are separate follow-on slices; registration alone does not establish those contracts.
 
 ## Open work
 

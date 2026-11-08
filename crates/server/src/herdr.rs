@@ -939,17 +939,11 @@ mod tests {
     #[test]
     fn provisioning_refuses_to_launch_without_a_bootstrap() {
         use forge_app::{
-            AgentDispatchRepository, NewAgentAssignment, NewTypedRecord, Project,
-            ProjectRepository, RecordRepository, RecordType,
+            AgentDispatchRepository, NewAgentAssignment, NewTypedRecord, RecordRepository,
+            RecordType,
         };
         let store = forge_store::SqliteProjectRepository::in_memory().unwrap();
-        store
-            .register(&Project {
-                slug: "alpha".into(),
-                registered_folder: "/project".into(),
-                origin_url: "https://example.test/repo".into(),
-            })
-            .unwrap();
+        crate::test_projects::register(&store, "alpha", None);
         let task = store
             .open_typed_record(&NewTypedRecord {
                 record_type: RecordType::Task,
@@ -969,7 +963,7 @@ mod tests {
             .unwrap();
         let context = forge_app::AgentDispatchContext {
             assignment,
-            registered_project_folder: "/project".into(),
+            project_root: "/project".into(),
             agent_workspace: None,
             dispatch_workspace: None,
             rendered_initial_prompt: "full instructions".into(),
@@ -1048,19 +1042,12 @@ mod tests {
     fn provisioning_launch_contract(record_type: forge_app::RecordType) {
         use forge_app::{
             AgentDispatchContext, AgentDispatchRepository, AssignmentCapabilityDelivery,
-            DispatchWorkspace, NewAgentAssignment, NewTypedRecord, Project, ProjectRepository,
-            RecordRepository,
+            DispatchWorkspace, NewAgentAssignment, NewTypedRecord, RecordRepository,
         };
         use std::os::unix::net::UnixListener;
         let interactive = record_type == forge_app::RecordType::Grilling;
         let repository = forge_store::SqliteProjectRepository::in_memory().unwrap();
-        repository
-            .register(&Project {
-                slug: "project".into(),
-                registered_folder: "/project".into(),
-                origin_url: "https://example.test/project".into(),
-            })
-            .unwrap();
+        crate::test_projects::register(&repository, "project", None);
         let task = repository
             .open_typed_record(&NewTypedRecord {
                 record_type,
@@ -1085,7 +1072,7 @@ mod tests {
             .unwrap();
         let context = AgentDispatchContext {
             assignment: assignment.clone(),
-            registered_project_folder: "/project".into(),
+            project_root: "/project".into(),
             agent_workspace: (!interactive).then(|| "/worktree".into()),
             dispatch_workspace: Some(DispatchWorkspace {
                 id: "workspace".into(),
@@ -1514,19 +1501,12 @@ mod tests {
 
         use forge_app::{
             AgentDispatchContext, AgentDispatchRepository, NewAgentAssignment,
-            NewAgentAssignmentResource, NewTypedRecord, Project, ProjectRepository,
-            RecordRepository, RecordType,
+            NewAgentAssignmentResource, NewTypedRecord, RecordRepository, RecordType,
         };
         use forge_store::SqliteProjectRepository;
 
         let repository = SqliteProjectRepository::in_memory().unwrap();
-        repository
-            .register(&Project {
-                slug: "project".into(),
-                registered_folder: "/project".into(),
-                origin_url: "https://example.test/project.git".into(),
-            })
-            .unwrap();
+        crate::test_projects::register(&repository, "project", None);
         let record = repository
             .open_typed_record(&NewTypedRecord {
                 record_type: RecordType::Task,
@@ -1564,7 +1544,7 @@ mod tests {
             .unwrap();
         let context = AgentDispatchContext {
             assignment: assignment.clone(),
-            registered_project_folder: "/project".into(),
+            project_root: "/project".into(),
             agent_workspace: Some("/worktree".into()),
             rendered_initial_prompt: String::new(),
             bootstrap_prompt: None,

@@ -1,8 +1,9 @@
+mod support;
 use forge_app::{
     AgentAdapterError, AgentDispatchAdapter, AgentDispatchAdapterFactory, AgentDispatchContext,
     AgentDispatchRepository, AgentObservation, AgentProfile, Application, DispatchWorkspace,
-    NewAgentAssignmentResource, NewTypedRecord, Project, ProjectRepository, RecordRepository,
-    RecordType, RegistrationError, RepositoryInspector,
+    NewAgentAssignmentResource, NewTypedRecord, Project, RecordRepository, RecordType,
+    RegistrationError, RepositoryInspector,
 };
 use forge_server::{Daemon, router};
 use forge_store::SqliteProjectRepository;
@@ -104,13 +105,7 @@ fn dispatch_fixture() -> (std::path::PathBuf, SqliteProjectRepository, Vec<Strin
             .as_nanos()
     ));
     let store = SqliteProjectRepository::open(&db).unwrap();
-    store
-        .register(&Project {
-            slug: "alpha".into(),
-            registered_folder: "/repos/alpha".into(),
-            origin_url: "https://example.test/alpha".into(),
-        })
-        .unwrap();
+    support::register_project(&store, "alpha");
     let mut ids = Vec::new();
     for kind in [RecordType::Grilling, RecordType::Spec] {
         ids.push(
@@ -139,7 +134,8 @@ async fn configuration_dispatch_and_recovery_round_trip_without_duplicate_launch
         Box::new(SqliteProjectRepository::open(&db).unwrap()),
         Box::new(InteractiveProvider(launches.clone())),
         Box::new(NoInspector),
-    );
+    )
+    .with_workspace_repository(Box::new(SqliteProjectRepository::open(&db).unwrap()));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/rpc", listener.local_addr().unwrap());
     let server = tokio::spawn(async move {
@@ -151,7 +147,7 @@ async fn configuration_dispatch_and_recovery_round_trip_without_duplicate_launch
         Command::new(env!("CARGO_BIN_EXE_forge"))
             .arg("dispatcher")
             .args(args)
-            .args(["--server-url", &url, "--json"])
+            .args(["--server-url", &url, "--json", "--workspace", "test"])
             .output()
             .unwrap()
     };

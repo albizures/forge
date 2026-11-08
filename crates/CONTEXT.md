@@ -60,8 +60,12 @@ _Avoid_: daemon API, server protocol
 One launch of a Managed Daemon, identified by a Forgeup-generated random instance ID that the daemon reports for ownership verification.
 _Avoid_: revision, daemon version
 
+**Forge Workspace**:
+A Forge-owned boundary with a fixed filesystem root that groups Projects and Records and owns their dispatch profile selections and Herdr Workspace binding.
+_Avoid_: Managed Worktree, Herdr Workspace, task workspace
+
 **Project**:
-A Forge-owned unit that is bound to exactly one Repository, has one Registered Folder that is a main Worktree, and to which Specs will belong. A Project is referenced by its immutable Slug.
+A Forge-owned unit belonging to exactly one Forge Workspace, bound to one Repository through its Project Root, and to which Specs belong. Its immutable Slug is unique within that Forge Workspace.
 _Avoid_: repo
 
 **Repository**:
@@ -69,8 +73,8 @@ A local Git repository identified by its checkout, not by its remote address. In
 _Avoid_: project, remote repository
 
 **Worktree**:
-A checked-out folder of a Repository. Only a main Worktree may be registered as a Project; a Repository's other Worktrees are workspaces of that Project rather than separate Projects.
-_Avoid_: project folder
+A checked-out folder of a Repository. Only its main checkout may be a Project Root; linked Worktrees are not separate Projects.
+_Avoid_: Forge Workspace, Project
 
 **Managed Worktree**:
 A Worktree created and durably tracked by the Dispatcher for an eligible Task under its Project. Forge does not automatically remove it while its Task has an open Agent Assignment or after the Task is Done.
@@ -85,7 +89,7 @@ The deterministic Forge-owned Git branch for a Task’s Managed Worktree, named 
 _Avoid_: feature branch, worktree branch
 
 **Base Commit**:
-The immutable commit recorded for a Task from its Project Registered Folder's `HEAD` when the Task opens; its Task Branch is created from it.
+The immutable commit recorded for a Task from its Project Root's `HEAD` when the Task opens; its Task Branch is created from it.
 _Avoid_: dispatch base, checkout evidence
 
 **Worktree Root**:
@@ -104,16 +108,16 @@ _Avoid_: pause, suspension
 Forge's local, offline evaluation of whether a Managed Worktree can be ordinarily removed and the facts supporting that result.
 _Avoid_: cleanup check, removal status
 
-**Registered Folder**:
-The main Worktree folder associated with a Project during registration. Registered Folders cannot be equal to, ancestors of, or descendants of another Project's Registered Folder.
-_Avoid_: project folder
+**Project Root**:
+The main repository checkout folder registered for a Project within its Forge Workspace. Project Roots may nest or equal the Forge Workspace root, but cannot duplicate another Project Root or lie in the reserved Managed Worktree subtree.
+_Avoid_: Registered Folder, task checkout
 
 **Remote URL**:
 A Git remote endpoint configured for a local Repository. Registration requires a remote named `origin` and records its URL.
 _Avoid_: repository identity
 
 **Slug**:
-An immutable, human-referenceable identifier for a Project. No two Projects share a Slug.
+An immutable, human-referenceable identifier for a Project, unique within its Forge Workspace. Outside a selected Forge Workspace, a Project reference identifies both its Forge Workspace and Slug.
 _Avoid_: project name
 
 **Record**:

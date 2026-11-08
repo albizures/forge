@@ -4,6 +4,9 @@
 //! exposes an unauthenticated service, so use that only on a trusted private network.
 
 mod herdr;
+#[cfg(test)]
+mod test_projects;
+mod workspaces;
 
 use std::{
     collections::HashMap,
@@ -482,8 +485,10 @@ impl RepositoryInspector for GitInspector {
             )
         })?;
         Ok(Project {
+            reference: String::new(),
+            workspace_id: String::new(),
             slug: String::new(),
-            registered_folder: root,
+            project_root: root,
             origin_url,
         })
     }
@@ -492,7 +497,7 @@ impl RepositoryInspector for GitInspector {
         git(folder, &["rev-parse", "HEAD"]).map_err(|()| {
             RegistrationError::new(
                 "base-commit-unavailable",
-                "could not resolve Project Registered Folder HEAD",
+                "could not resolve Project root HEAD",
             )
         })
     }
@@ -941,6 +946,8 @@ fn application_from_config(config: &DaemonConfig) -> Result<Application, String>
         SqliteProjectRepository::open(&config.store_path).map_err(|error| error.message)?;
     let managed_worktrees =
         SqliteProjectRepository::open(&config.store_path).map_err(|error| error.message)?;
+    let workspaces =
+        SqliteProjectRepository::open(&config.store_path).map_err(|error| error.message)?;
     Ok(Application::with_managed_worktrees_and_agent_dispatch(
         Box::new(records),
         Box::new(managed_worktrees),
@@ -952,7 +959,8 @@ fn application_from_config(config: &DaemonConfig) -> Result<Application, String>
             capability_secret_root,
         }),
         Box::new(GitInspector),
-    ))
+    )
+    .with_workspace_repository(Box::new(workspaces)))
 }
 
 #[async_trait]
@@ -1669,15 +1677,36 @@ impl ProjectApiServer for Daemon {
         &self,
         request: RegisterProjectRequest,
     ) -> RpcResult<RegisterProjectResponse> {
+        if !Path::new(&request.folder).is_absolute() || !Path::new(&request.cwd).is_absolute() {
+            return Err(rpc_error(RegistrationError::new(
+                "invalid-project-root",
+                "Project root and client cwd must be absolute paths",
+            )));
+        }
         self.application
-            .register_project(Path::new(&request.folder), &request.slug)
+            .register_selected_project(
+                request.workspace.as_deref(),
+                Path::new(&request.folder),
+                &request.slug,
+                Path::new(&request.cwd),
+            )
             .map(Into::into)
             .map_err(rpc_error)
     }
 
     async fn here(&self, request: ProjectHereRequest) -> RpcResult<ProjectHereResponse> {
+        if !Path::new(&request.folder).is_absolute() {
+            return Err(rpc_error(RegistrationError::new(
+                "invalid-folder",
+                "client cwd must be an absolute path",
+            )));
+        }
         self.application
-            .project_here(Path::new(&request.folder))
+            .select_project(
+                request.workspace.as_deref(),
+                request.project.as_deref(),
+                Path::new(&request.folder),
+            )
             .map(Into::into)
             .map_err(rpc_error)
     }
@@ -1956,6 +1985,9 @@ pub fn router(daemon: Daemon) -> Router {
     let status_daemon = daemon.clone();
     let subscription_daemon = daemon.clone();
     let mut methods = SystemApiServer::into_rpc(daemon.clone());
+    methods
+        .merge(forge_rpc::WorkspaceApiServer::into_rpc(daemon.clone()))
+        .expect("Workspace RPC methods are unique");
     methods
         .merge(ProjectApiServer::into_rpc(daemon.clone()))
         .expect("RPC method names must not overlap");
@@ -2403,10 +2435,10 @@ mod tests {
     };
     use forge_app::{
         AgentDispatchRepository, Application, NewAgentAssignment, NewRecordUpdateSubscription,
-        NewTypedRecord, Project, ProjectRepository, RecordRelationshipKind, RecordRepository,
-        RecordStatus, RecordType, RecordUpdate, RecordUpdateEnvelope, RecordUpdateId,
-        RecordUpdateKind, RecordUpdateSubscriptionId, RecordUpdateSubscriptionRepository,
-        RegistrationError, RepositoryInspector,
+        NewTypedRecord, Project, RecordRelationshipKind, RecordRepository, RecordStatus,
+        RecordType, RecordUpdate, RecordUpdateEnvelope, RecordUpdateId, RecordUpdateKind,
+        RecordUpdateSubscriptionId, RecordUpdateSubscriptionRepository, RegistrationError,
+        RepositoryInspector,
     };
     use forge_rpc::{
         AgentDispatchApiServer, AgentSubscriptionApiServer, CreateAgentSubscriptionRequest,
@@ -2470,8 +2502,10 @@ mod tests {
     impl RepositoryInspector for TestInspector {
         fn inspect(&self, folder: &Path) -> Result<Project, RegistrationError> {
             Ok(Project {
+                reference: String::new(),
+                workspace_id: String::new(),
                 slug: String::new(),
-                registered_folder: PathBuf::from(folder),
+                project_root: PathBuf::from(folder),
                 origin_url: "https://example.test/origin.git".into(),
             })
         }
@@ -2558,13 +2592,7 @@ mod tests {
         let base = super::git(&repo, &["rev-parse", "HEAD"]).unwrap();
         let database = root.join("store.sqlite");
         let store = SqliteProjectRepository::open(&database).unwrap();
-        store
-            .register(&Project {
-                slug: "alpha".into(),
-                registered_folder: repo.clone(),
-                origin_url: "https://example.test/alpha".into(),
-            })
-            .unwrap();
+        super::test_projects::register(&store, "alpha", Some(&repo));
         store
             .set_worktree_root(Some(&root.join("worktrees")))
             .unwrap();
@@ -2777,13 +2805,7 @@ mod tests {
         let database = root.join("forge.sqlite3");
         let socket = root.join("herdr.sock");
         let store = SqliteProjectRepository::open(&database).unwrap();
-        store
-            .register(&Project {
-                slug: "alpha".into(),
-                registered_folder: "/repos/alpha".into(),
-                origin_url: "https://example.test/alpha.git".into(),
-            })
-            .unwrap();
+        super::test_projects::register(&store, "alpha", None);
         let task = store
             .open_typed_record(&NewTypedRecord {
                 record_type: RecordType::Task,
@@ -2922,10 +2944,27 @@ mod tests {
     }
 
     fn test_application() -> Application {
+        let db = std::env::temp_dir().join(format!(
+            "forge-server-rpc-{}-{}.sqlite",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let workspace = SqliteProjectRepository::open(&db).unwrap();
+        forge_app::WorkspaceRepository::create_workspace(
+            &workspace,
+            "test",
+            "Test",
+            Path::new("/"),
+        )
+        .unwrap();
         Application::new(
-            Box::new(SqliteProjectRepository::in_memory().unwrap()),
+            Box::new(SqliteProjectRepository::open(&db).unwrap()),
             Box::new(TestInspector),
         )
+        .with_workspace_repository(Box::new(workspace))
     }
 
     struct SubscriptionTestDaemon {
@@ -2957,13 +2996,7 @@ mod tests {
                 .as_nanos()
         ));
         let store = SqliteProjectRepository::open(&database_path).unwrap();
-        store
-            .register(&Project {
-                slug: "alpha".into(),
-                registered_folder: PathBuf::from("/repos/alpha"),
-                origin_url: "https://example.test/alpha.git".into(),
-            })
-            .unwrap();
+        super::test_projects::register(&store, "alpha", None);
         let owner = store
             .open_typed_record(&NewTypedRecord {
                 record_type: RecordType::Task,
@@ -3795,13 +3828,7 @@ mod tests {
         ));
         let store = SqliteProjectRepository::open(&database_path).unwrap();
         for slug in ["alpha", "beta", "gamma"] {
-            store
-                .register(&Project {
-                    slug: slug.into(),
-                    registered_folder: PathBuf::from(format!("/repos/{slug}")),
-                    origin_url: format!("https://example.test/{slug}.git"),
-                })
-                .unwrap();
+            super::test_projects::register(&store, slug, None);
         }
         let task = |body: &str, project_slug: &str| NewTypedRecord {
             record_type: RecordType::Task,
@@ -4202,14 +4229,18 @@ mod tests {
             .register(RegisterProjectRequest {
                 folder: folder.clone(),
                 slug: "server-test-project".into(),
+                workspace: Some("test".into()),
+                cwd: folder.clone(),
             })
             .await
             .unwrap();
         assert_eq!(project.slug, "server-test-project");
-        assert_eq!(project.registered_folder, folder);
+        assert_eq!(project.project_root, folder);
         let here = client
             .here(ProjectHereRequest {
                 folder: format!("{folder}/crates"),
+                workspace: None,
+                project: None,
             })
             .await
             .unwrap();
@@ -4219,7 +4250,7 @@ mod tests {
             .open(OpenRecordRequest {
                 body: "A daemon-backed Record".into(),
                 project_scope: ProjectScopeRequest {
-                    project_slugs: vec!["server-test-project".into()],
+                    project_slugs: vec![project.reference.clone()],
                 },
                 generated_by_ids: vec![],
             })
@@ -4227,7 +4258,10 @@ mod tests {
             .unwrap();
         assert_eq!(record.id, 1);
         assert_eq!(record.status, "open");
-        assert_eq!(record.project_scope.project_slugs, ["server-test-project"]);
+        assert_eq!(
+            record.project_scope.project_slugs,
+            std::slice::from_ref(&project.reference)
+        );
         let updates = client
             .updates(RecordIdRequest { id: record.id })
             .await
@@ -4237,7 +4271,7 @@ mod tests {
         assert_eq!(
             client
                 .list(ListRecordsRequest {
-                    project_slug: Some("server-test-project".into()),
+                    project_slug: Some(project.reference.clone()),
                     status: Some("open".into()),
                     record_type: None,
                     task_kind: None,
@@ -4250,7 +4284,7 @@ mod tests {
         let spec = client
             .open_spec(OpenSpecRequest {
                 body: "A daemon-backed Spec".into(),
-                project_slug: "server-test-project".into(),
+                project_slug: project.reference.clone(),
                 generated_by_ids: vec![],
             })
             .await
@@ -4285,7 +4319,7 @@ mod tests {
             .open_wayfinder(OpenWayfinderRequest {
                 body: "A daemon-backed Wayfinder".into(),
                 project_scope: ProjectScopeRequest {
-                    project_slugs: vec!["server-test-project".into()],
+                    project_slugs: vec![project.reference.clone()],
                 },
                 generated_by_ids: vec![],
             })
@@ -4318,7 +4352,7 @@ mod tests {
         assert_eq!(grilling.relationships[0].parent_id, wayfinder.id);
         let wayfinders = client
             .list(ListRecordsRequest {
-                project_slug: Some("server-test-project".into()),
+                project_slug: Some(project.reference.clone()),
                 status: None,
                 record_type: Some("wayfinder".into()),
                 task_kind: None,

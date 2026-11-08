@@ -1,8 +1,8 @@
+mod support;
 use forge_app::{
     AgentAdapterError, AgentDispatchAdapter, AgentDispatchAdapterFactory, AgentDispatchContext,
     AgentDispatchRepository, AgentObservation, AgentProfile, Application, DispatchWorkspace,
-    NewTypedRecord, Project, ProjectRepository, RecordRepository, RecordType, RegistrationError,
-    RepositoryInspector,
+    NewTypedRecord, Project, RecordRepository, RecordType, RegistrationError, RepositoryInspector,
 };
 use forge_server::{Daemon, router};
 use forge_store::SqliteProjectRepository;
@@ -74,19 +74,14 @@ async fn grouped_provider_configuration_round_trips_through_cli_and_daemon() {
             .as_nanos()
     ));
     let store = SqliteProjectRepository::open(&db).unwrap();
-    store
-        .register(&Project {
-            slug: "alpha".into(),
-            registered_folder: "/repos/alpha".into(),
-            origin_url: "https://example.com/alpha".into(),
-        })
-        .unwrap();
+    support::register_project(&store, "alpha");
     let app = Application::with_agent_dispatch(
-        Box::new(SqliteProjectRepository::in_memory().unwrap()),
+        Box::new(SqliteProjectRepository::open(&db).unwrap()),
         Box::new(SqliteProjectRepository::open(&db).unwrap()),
         Box::new(WorkspaceProvider),
         Box::new(NoInspector),
-    );
+    )
+    .with_workspace_repository(Box::new(SqliteProjectRepository::open(&db).unwrap()));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/rpc", listener.local_addr().unwrap());
     let server = tokio::spawn(async move {
@@ -96,10 +91,12 @@ async fn grouped_provider_configuration_round_trips_through_cli_and_daemon() {
     });
     let run = |args: &[&str], json: bool| {
         let mut command = Command::new(env!("CARGO_BIN_EXE_forge"));
-        command
-            .args(["dispatcher", "config"])
-            .args(args)
-            .args(["--server-url", &url]);
+        command.args(["dispatcher", "config"]).args(args).args([
+            "--server-url",
+            &url,
+            "--workspace",
+            "test",
+        ]);
         // Explicit daemon endpoint must win over the environment. Workspace identity must
         // come from the argument, never the environment used by the removed command.
         command.env("FORGE_SERVER_URL", "http://127.0.0.1:1/rpc");

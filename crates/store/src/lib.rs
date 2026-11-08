@@ -20,6 +20,8 @@ use forge_app::{
 };
 use rusqlite::{Connection, ErrorCode, OptionalExtension, params};
 
+mod workspaces;
+
 /// SQLite-backed Project and Record storage.
 pub struct SqliteProjectRepository {
     connection: Mutex<Connection>,
@@ -46,13 +48,17 @@ impl SqliteProjectRepository {
 
     #[allow(clippy::too_many_lines)]
     fn from_connection(connection: Connection) -> Result<Self, RegistrationError> {
+        // projects.slug is the immutable persistence reference used by the existing
+        // foreign keys; workspace_id/local_slug is the operator-facing routing identity.
         connection
             .execute_batch(
                 "PRAGMA foreign_keys = ON;
             CREATE TABLE IF NOT EXISTS projects (
                 slug TEXT PRIMARY KEY NOT NULL,
                 registered_folder TEXT UNIQUE NOT NULL,
-                origin_url TEXT NOT NULL
+                origin_url TEXT NOT NULL,
+                workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT,
+                local_slug TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS records (
                 id INTEGER PRIMARY KEY NOT NULL,
@@ -220,6 +226,7 @@ impl SqliteProjectRepository {
         migrate_assignment_authorization_audit_schema(&connection)?;
         migrate_managed_worktree_schema(&connection)?;
         seed_agent_profiles(&connection)?;
+        workspaces::initialize(&connection)?;
         Ok(Self {
             connection: Mutex::new(connection),
         })
@@ -227,20 +234,22 @@ impl SqliteProjectRepository {
 }
 
 impl ProjectRepository for SqliteProjectRepository {
-    fn project(&self, slug: &str) -> Result<Project, RegistrationError> {
+    fn project(&self, reference: &str) -> Result<Project, RegistrationError> {
         let connection = self
             .connection
             .lock()
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
         connection
             .query_row(
-                "SELECT slug, registered_folder, origin_url FROM projects WHERE slug = ?1",
-                [slug],
+                "SELECT slug, registered_folder, origin_url, workspace_id, local_slug FROM projects WHERE slug = ?1",
+                [reference],
                 |row| {
                     Ok(Project {
-                        slug: row.get(0)?,
-                        registered_folder: PathBuf::from(row.get::<_, String>(1)?),
+                        reference: row.get(0)?,
+                        project_root: PathBuf::from(row.get::<_, String>(1)?),
                         origin_url: row.get(2)?,
+                        workspace_id: row.get(3)?,
+                        slug: row.get(4)?,
                     })
                 },
             )
@@ -252,32 +261,65 @@ impl ProjectRepository for SqliteProjectRepository {
             })
     }
 
+    fn project_in_workspace(
+        &self,
+        workspace: &str,
+        slug: &str,
+    ) -> Result<Project, RegistrationError> {
+        let reference: Option<String> = {
+            let connection = self.connection.lock().map_err(|_| {
+                RegistrationError::new("storage", "Project storage lock is poisoned")
+            })?;
+            connection
+                .query_row(
+                    "SELECT slug FROM projects WHERE workspace_id = ?1 AND local_slug = ?2",
+                    params![workspace, slug],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(storage_error)?
+        };
+        self.project(&reference.ok_or_else(|| {
+            RegistrationError::new(
+                "project-not-found",
+                "Project does not exist in the selected Workspace",
+            )
+        })?)
+    }
+
     fn register(&self, project: &Project) -> Result<Project, RegistrationError> {
-        let folder = project.registered_folder.to_string_lossy();
-        let connection = self
+        let folder = project.project_root.to_string_lossy();
+        let mut connection = self
             .connection
             .lock()
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
-        let folders = connection
-            .prepare("SELECT registered_folder FROM projects")
-            .map_err(storage_error)?
-            .query_map([], |row| row.get::<_, String>(0))
-            .map_err(storage_error)?
-            .collect::<Result<Vec<_>, _>>()
+        let connection = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(storage_error)?;
-        if folders
-            .iter()
-            .any(|existing| folders_overlap(Path::new(existing), &project.registered_folder))
-            && !folders.iter().any(|existing| existing == &folder)
-        {
+        let identity = forge_app::ProjectReference::new(&project.workspace_id, &project.slug)?;
+        if project.reference.contains('/') {
+            if forge_app::ProjectReference::parse(&project.reference)? != identity {
+                return Err(RegistrationError::new(
+                    "invalid-project-reference",
+                    "qualified Project identity must match its Workspace and local slug",
+                ));
+            }
+        } else {
+            // Persistence identities may be opaque, but are also used as path
+            // components by existing Worktree consumers. Keep those components safe.
+            forge_app::ProjectReference::new(&project.workspace_id, &project.reference)?;
+        }
+        let workspace = workspaces::get(&connection, &project.workspace_id)?;
+        let canonical = forge_app::canonical_project_root(&workspace, &project.project_root)?;
+        if canonical != project.project_root {
             return Err(RegistrationError::new(
-                "folder-overlap",
-                format!("Registered Folder `{folder}` overlaps an existing Project folder"),
+                "invalid-project-root",
+                "persisted Project roots must be canonical",
             ));
         }
-        match connection.execute(
-            "INSERT INTO projects (slug, registered_folder, origin_url) VALUES (?1, ?2, ?3)",
-            params![project.slug, folder, project.origin_url],
+        let result = match connection.execute(
+            "INSERT INTO projects (slug, registered_folder, origin_url, workspace_id, local_slug) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![project.reference, folder, project.origin_url, project.workspace_id, project.slug],
         ) {
             Ok(_) => Ok(project.clone()),
             Err(error)
@@ -286,10 +328,10 @@ impl ProjectRepository for SqliteProjectRepository {
                     Some(ErrorCode::ConstraintViolation)
                 ) =>
             {
-                let existing = connection.query_row("SELECT slug, registered_folder, origin_url FROM projects WHERE slug = ?1 OR registered_folder = ?2", params![project.slug, folder], |row| Ok(Project { slug: row.get(0)?, registered_folder: std::path::PathBuf::from(row.get::<_, String>(1)?), origin_url: row.get(2)? })).map_err(storage_error)?;
+                let existing = connection.query_row("SELECT slug, registered_folder, origin_url, workspace_id, local_slug FROM projects WHERE slug = ?1 OR registered_folder = ?2 OR (workspace_id = ?3 AND local_slug = ?4)", params![project.reference, folder, project.workspace_id, project.slug], |row| Ok(Project { reference: row.get(0)?, project_root: PathBuf::from(row.get::<_, String>(1)?), origin_url: row.get(2)?, workspace_id: row.get(3)?, slug: row.get(4)? })).map_err(storage_error)?;
                 if existing == *project {
                     Ok(existing)
-                } else if existing.slug == project.slug {
+                } else if existing.reference == project.reference || (existing.workspace_id == project.workspace_id && existing.slug == project.slug) {
                     Err(RegistrationError::new(
                         "slug-conflict",
                         format!(
@@ -301,14 +343,18 @@ impl ProjectRepository for SqliteProjectRepository {
                     Err(RegistrationError::new(
                         "folder-conflict",
                         format!(
-                            "Registered Folder `{folder}` is already registered as `{}`",
-                            existing.slug
+                            "Project root `{folder}` is already registered as `{}`",
+                            existing.reference
                         ),
                     ))
                 }
             }
             Err(error) => Err(storage_error(error)),
+        };
+        if result.is_ok() {
+            connection.commit().map_err(storage_error)?;
         }
+        result
     }
 
     fn find_containing(&self, folder: &Path) -> Result<Project, RegistrationError> {
@@ -317,13 +363,15 @@ impl ProjectRepository for SqliteProjectRepository {
             .lock()
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
         let projects = connection
-            .prepare("SELECT slug, registered_folder, origin_url FROM projects")
+            .prepare("SELECT slug, registered_folder, origin_url, workspace_id, local_slug FROM projects")
             .map_err(storage_error)?
             .query_map([], |row| {
                 Ok(Project {
-                    slug: row.get(0)?,
-                    registered_folder: std::path::PathBuf::from(row.get::<_, String>(1)?),
+                    reference: row.get(0)?,
+                    project_root: PathBuf::from(row.get::<_, String>(1)?),
                     origin_url: row.get(2)?,
+                    workspace_id: row.get(3)?,
+                    slug: row.get(4)?,
                 })
             })
             .map_err(storage_error)?
@@ -331,7 +379,8 @@ impl ProjectRepository for SqliteProjectRepository {
             .map_err(storage_error)?;
         projects
             .into_iter()
-            .find(|project| folder.starts_with(&project.registered_folder))
+            .filter(|project| folder.starts_with(&project.project_root))
+            .max_by_key(|project| project.project_root.components().count())
             .ok_or_else(|| {
                 RegistrationError::new(
                     "project-not-found",
@@ -3838,9 +3887,6 @@ fn migrate_record_status_schema(connection: &Connection) -> Result<(), Registrat
     Ok(())
 }
 
-fn folders_overlap(left: &Path, right: &Path) -> bool {
-    left.starts_with(right) || right.starts_with(left)
-}
 #[allow(clippy::needless_pass_by_value)]
 fn storage_error(error: rusqlite::Error) -> RegistrationError {
     RegistrationError::new("storage", format!("could not persist Forge data: {error}"))
@@ -3848,7 +3894,26 @@ fn storage_error(error: rusqlite::Error) -> RegistrationError {
 
 #[cfg(test)]
 mod tests {
-    use super::SqliteProjectRepository;
+    use super::SqliteProjectRepository as Repository;
+    use forge_app::{RegistrationError, WorkspaceRepository};
+
+    // Fixture factories return the real repository; every test Project has an
+    // explicit owner. Short persistence identities keep unrelated record tests readable.
+    struct SqliteProjectRepository;
+    impl SqliteProjectRepository {
+        fn in_memory() -> Result<Repository, RegistrationError> {
+            Self::seed(Repository::in_memory()?)
+        }
+        fn open(path: &std::path::Path) -> Result<Repository, RegistrationError> {
+            Self::seed(Repository::open(path)?)
+        }
+        fn seed(repository: Repository) -> Result<Repository, RegistrationError> {
+            if repository.workspace("test").is_err() {
+                repository.create_workspace("test", "Test", std::path::Path::new("/"))?;
+            }
+            Ok(repository)
+        }
+    }
     use forge_app::{
         AgentDispatchRepository, AssignmentAuthorizationOperation, ManagedWorktreeRepository,
         NewAgentAssignment, NewAgentAssignmentResource, NewRecord, NewRecordUpdateSubscription,
@@ -3863,9 +3928,15 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
     fn project(slug: &str, folder: &str) -> Project {
+        let root = std::env::temp_dir()
+            .join(format!("forge-store-projects-{}", std::process::id()))
+            .join(folder.trim_start_matches('/'));
+        std::fs::create_dir_all(&root).unwrap();
         Project {
+            reference: slug.into(),
+            workspace_id: "test".into(),
             slug: slug.into(),
-            registered_folder: PathBuf::from(folder),
+            project_root: root.canonicalize().unwrap(),
             origin_url: "https://example.test/repo.git".into(),
         }
     }
@@ -4206,17 +4277,14 @@ mod tests {
     }
 
     #[test]
-    fn finds_a_project_from_its_registered_folder_or_descendant() {
+    fn finds_a_project_from_its_project_root_or_descendant() {
         let store = SqliteProjectRepository::in_memory().unwrap();
         let alpha = project("alpha", "/repos/alpha");
         store.register(&alpha).unwrap();
-        assert_eq!(
-            store.find_containing(Path::new("/repos/alpha")).unwrap(),
-            alpha
-        );
+        assert_eq!(store.find_containing(&alpha.project_root).unwrap(), alpha);
         assert_eq!(
             store
-                .find_containing(Path::new("/repos/alpha/src/module"))
+                .find_containing(&alpha.project_root.join("src/module"))
                 .unwrap()
                 .slug,
             "alpha"
@@ -4249,13 +4317,8 @@ mod tests {
                 .code,
             "folder-conflict"
         );
-        assert_eq!(
-            store
-                .register(&project("nested", "/repos/alpha/tools"))
-                .unwrap_err()
-                .code,
-            "folder-overlap"
-        );
+        let nested = project("nested", "/repos/alpha/tools");
+        assert_eq!(store.register(&nested).unwrap(), nested);
     }
     #[test]
     fn lists_records_by_scope_membership_status_and_descending_id() {
@@ -4699,7 +4762,7 @@ mod tests {
         );
     }
 
-    fn opens_scoped_grillings(store: &SqliteProjectRepository) -> (Record, Record) {
+    fn opens_scoped_grillings(store: &Repository) -> (Record, Record) {
         store.register(&project("alpha", "/repos/alpha")).unwrap();
         store.register(&project("beta", "/repos/beta")).unwrap();
         store.register(&project("gamma", "/repos/gamma")).unwrap();
@@ -4774,7 +4837,9 @@ mod tests {
         ));
         let connection = rusqlite::Connection::open(&path).unwrap();
         connection.execute_batch("PRAGMA foreign_keys = ON;
-            CREATE TABLE projects (slug TEXT PRIMARY KEY NOT NULL, registered_folder TEXT UNIQUE NOT NULL, origin_url TEXT NOT NULL);
+            CREATE TABLE workspaces (id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, root TEXT UNIQUE NOT NULL);
+            INSERT INTO workspaces VALUES ('test', 'Test', '/');
+            CREATE TABLE projects (slug TEXT PRIMARY KEY NOT NULL, registered_folder TEXT UNIQUE NOT NULL, origin_url TEXT NOT NULL, workspace_id TEXT NOT NULL REFERENCES workspaces(id), local_slug TEXT NOT NULL);
             CREATE TABLE records (
                 id INTEGER PRIMARY KEY NOT NULL,
                 record_type TEXT NOT NULL CHECK (record_type IN ('generic', 'spec', 'task')),
@@ -4788,7 +4853,7 @@ mod tests {
                 parent_id INTEGER REFERENCES records(id), child_id INTEGER REFERENCES records(id) UNIQUE,
                 kind TEXT NOT NULL CHECK (kind IN ('parent-child', 'depends-on', 'generated-by')), PRIMARY KEY (from_id, to_id, kind)
             );
-            INSERT INTO projects VALUES ('alpha', '/repos/alpha', 'https://example.test/repo.git');
+            INSERT INTO projects VALUES ('alpha', '/repos/alpha', 'https://example.test/repo.git', 'test', 'alpha');
             INSERT INTO records VALUES (1, 'generic', 'generic', 'open', NULL);
             INSERT INTO records VALUES (2, 'spec', 'spec', 'open', NULL);
             INSERT INTO records VALUES (3, 'task', 'task', 'done', 'complete');
@@ -4849,13 +4914,15 @@ mod tests {
         ));
         let connection = rusqlite::Connection::open(&path).unwrap();
         connection.execute_batch("PRAGMA foreign_keys = ON;
-            CREATE TABLE projects (slug TEXT PRIMARY KEY NOT NULL, registered_folder TEXT UNIQUE NOT NULL, origin_url TEXT NOT NULL);
+            CREATE TABLE workspaces (id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, root TEXT UNIQUE NOT NULL);
+            INSERT INTO workspaces VALUES ('test', 'Test', '/');
+            CREATE TABLE projects (slug TEXT PRIMARY KEY NOT NULL, registered_folder TEXT UNIQUE NOT NULL, origin_url TEXT NOT NULL, workspace_id TEXT NOT NULL REFERENCES workspaces(id), local_slug TEXT NOT NULL);
             CREATE TABLE records (id INTEGER PRIMARY KEY NOT NULL, body TEXT NOT NULL, status TEXT NOT NULL CHECK (status IN ('open', 'in_progress', 'done')), completion_resolution TEXT);
             CREATE TABLE record_projects (record_id INTEGER NOT NULL REFERENCES records(id), project_slug TEXT NOT NULL REFERENCES projects(slug), PRIMARY KEY (record_id, project_slug));
             CREATE TABLE record_relationships (parent_id INTEGER NOT NULL REFERENCES records(id), child_id INTEGER NOT NULL REFERENCES records(id) UNIQUE, kind TEXT NOT NULL CHECK (kind IN ('parent-child')), PRIMARY KEY (parent_id, child_id));
             CREATE TABLE record_updates (id INTEGER PRIMARY KEY NOT NULL, record_id INTEGER NOT NULL REFERENCES records(id), created_at_millis INTEGER NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('created', 'body-edited', 'status-transition', 'relationship-added', 'relationship-removed')), from_status TEXT, to_status TEXT, related_record_id INTEGER REFERENCES records(id), comment_id INTEGER);
             CREATE TABLE record_comments (id INTEGER PRIMARY KEY NOT NULL, record_id INTEGER NOT NULL REFERENCES records(id), created_at_millis INTEGER NOT NULL, author TEXT, body TEXT NOT NULL);
-            INSERT INTO projects VALUES ('alpha', '/repos/alpha', 'https://example.test/repo.git');
+            INSERT INTO projects VALUES ('alpha', '/repos/alpha', 'https://example.test/repo.git', 'test', 'alpha');
             INSERT INTO records VALUES (6, 'parent', 'open', NULL);
             INSERT INTO records VALUES (7, 'legacy', 'done', 'complete');
             INSERT INTO record_projects VALUES (6, 'alpha');
@@ -5339,7 +5406,7 @@ mod tests {
         );
     }
 
-    fn asserts_dispatch_workspace_persists(store: &SqliteProjectRepository) {
+    fn asserts_dispatch_workspace_persists(store: &Repository) {
         let workspace = forge_app::DispatchWorkspace {
             id: "shared-workspace".into(),
         };
@@ -5360,7 +5427,7 @@ mod tests {
         );
     }
 
-    fn asserts_project_configuration_persists(store: &SqliteProjectRepository) {
+    fn asserts_project_configuration_persists(store: &Repository) {
         assert_eq!(
             store
                 .effective_project_task_concurrency_limit("alpha")

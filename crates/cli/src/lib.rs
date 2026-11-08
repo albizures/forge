@@ -181,10 +181,27 @@ pub async fn request_register_project(
     folder: &str,
     slug: &str,
 ) -> Result<RegisterProjectResponse, String> {
+    request_register_project_selected(url, folder, slug, None).await
+}
+
+/// Registers with explicit Workspace routing; cwd is always supplied by the client.
+/// # Errors
+/// Returns missing cwd, conflicting selectors or daemon validation failures.
+pub async fn request_register_project_selected(
+    url: &str,
+    folder: &str,
+    slug: &str,
+    workspace: Option<String>,
+) -> Result<RegisterProjectResponse, String> {
     client(url)?
         .register(RegisterProjectRequest {
             folder: folder.into(),
             slug: slug.into(),
+            workspace,
+            cwd: std::env::current_dir()
+                .map_err(|error| error.to_string())?
+                .to_string_lossy()
+                .into_owned(),
         })
         .await
         .map_err(|error| format!("could not register Project through Forge daemon: {error}"))
@@ -480,7 +497,7 @@ pub fn render_agent_dispatch_status(status: &AgentDispatchStatusResponse) -> Str
 pub fn render_project_registered(project: &RegisterProjectResponse) -> String {
     format!(
         "Registered Project `{}` at `{}`. Run `forge here` to confirm it.",
-        project.slug, project.registered_folder
+        project.reference, project.project_root
     )
 }
 /// Requests the Project containing `folder` through the daemon.
@@ -489,9 +506,23 @@ pub fn render_project_registered(project: &RegisterProjectResponse) -> String {
 ///
 /// Returns an endpoint or daemon error.
 pub async fn request_project_here(url: &str, folder: &str) -> Result<ProjectHereResponse, String> {
+    request_select_project(url, folder, None, None).await
+}
+
+/// Resolves explicit selectors or the deepest containing Project root.
+/// # Errors
+/// Returns endpoint, selection or daemon failures.
+pub async fn request_select_project(
+    url: &str,
+    folder: &str,
+    workspace: Option<String>,
+    project: Option<String>,
+) -> Result<ProjectHereResponse, String> {
     client(url)?
         .here(ProjectHereRequest {
             folder: folder.into(),
+            workspace,
+            project,
         })
         .await
         .map_err(|error| format!("could not find Project through Forge daemon: {error}"))
@@ -656,7 +687,7 @@ pub fn render_managed_worktrees(worktrees: &ListManagedWorktreesResponse) -> Str
 pub fn render_project_here(project: &ProjectHereResponse) -> String {
     format!(
         "Project `{}` is registered at `{}` (origin: `{}`).",
-        project.slug, project.registered_folder, project.origin_url
+        project.reference, project.project_root, project.origin_url
     )
 }
 /// Opens a generic Record through the daemon.
@@ -1104,8 +1135,10 @@ mod tests {
     impl RepositoryInspector for TestInspector {
         fn inspect(&self, folder: &Path) -> Result<Project, RegistrationError> {
             Ok(Project {
+                reference: String::new(),
+                workspace_id: String::new(),
                 slug: String::new(),
-                registered_folder: PathBuf::from(folder),
+                project_root: PathBuf::from(folder),
                 origin_url: "https://example.test/origin.git".into(),
             })
         }
@@ -1116,10 +1149,27 @@ mod tests {
     }
 
     fn test_application() -> Application {
+        let db = std::env::temp_dir().join(format!(
+            "forge-cli-rpc-{}-{}.sqlite",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let workspace = SqliteProjectRepository::open(&db).unwrap();
+        forge_app::WorkspaceRepository::create_workspace(
+            &workspace,
+            "test",
+            "Test",
+            Path::new("/"),
+        )
+        .unwrap();
         Application::new(
-            Box::new(SqliteProjectRepository::in_memory().unwrap()),
+            Box::new(SqliteProjectRepository::open(&db).unwrap()),
             Box::new(TestInspector),
         )
+        .with_workspace_repository(Box::new(workspace))
     }
     #[test]
     fn endpoint_configuration_prioritizes_flag_then_environment_then_default() {
@@ -1245,19 +1295,19 @@ mod tests {
             .unwrap()
             .to_string_lossy()
             .into_owned();
-        request_register_project(&url, &folder, "cli-test-project")
+        request_register_project(&url, &folder, "test/cli-test-project")
             .await
             .unwrap();
 
-        let spec = request_open_spec(&url, "Spec body", "cli-test-project".into(), vec![])
+        let spec = request_open_spec(&url, "Spec body", "test/cli-test-project".into(), vec![])
             .await
             .unwrap();
         assert_eq!(spec.record_type, "spec");
-        assert_eq!(spec.project_scope.project_slugs, ["cli-test-project"]);
+        assert_eq!(spec.project_scope.project_slugs, ["test/cli-test-project"]);
         let wayfinder = request_open_wayfinder(
             &url,
             "Wayfinder body",
-            vec!["cli-test-project".into()],
+            vec!["test/cli-test-project".into()],
             vec![],
         )
         .await
