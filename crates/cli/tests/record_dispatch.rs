@@ -55,7 +55,17 @@ impl AgentDispatchAdapter for InteractiveProvider {
             })
             .unwrap();
         assert_eq!(context.assignment.profile.record_type, RecordType::Grilling);
-        assert!(context.agent_workspace.is_none());
+        assert_eq!(context.agent_workspace.as_deref(), Some(Path::new("/")));
+        assert!(
+            context
+                .rendered_initial_prompt
+                .contains("Applicable Project scope paths:")
+        );
+        assert!(
+            context
+                .rendered_initial_prompt
+                .contains(context.project_root.to_str().unwrap())
+        );
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }

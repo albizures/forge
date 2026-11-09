@@ -2046,10 +2046,13 @@ impl AgentDispatchRepository for SqliteProjectRepository {
         if let Some(assignment) = existing {
             return Ok((assignment, true));
         }
-        if record.status != RecordStatus::Open || record.project_slugs.len() != 1 {
+        if record.status != RecordStatus::Open
+            || record.project_slugs.is_empty()
+            || (record.record_type == RecordType::Task && record.project_slugs.len() != 1)
+        {
             return Err(RegistrationError::new(
                 "record-not-ready",
-                "dispatch requires an Open Record scoped to exactly one Project",
+                "dispatch requires an Open Record with Project scope; Tasks require exactly one Project",
             ));
         }
         let held: bool = transaction
@@ -2080,13 +2083,15 @@ impl AgentDispatchRepository for SqliteProjectRepository {
             ));
         }
         let project_slug = &record.project_slugs[0];
-        let limit = effective_limit(&transaction, project_slug)?;
-        let used: i64 = transaction.query_row("SELECT COUNT(*) FROM agent_assignments a WHERE a.project_slug = ?1 AND (a.closed_at_millis IS NULL OR EXISTS (SELECT 1 FROM agent_assignment_resources r WHERE r.assignment_id = a.id AND r.retired_at_millis IS NULL))", [project_slug], |row| row.get(0)).map_err(storage_error)?;
-        if used >= i64::from(limit) {
-            return Err(RegistrationError::new(
-                "project-capacity",
-                "Project dispatch capacity is reserved; inspect open Assignments and recovery blockers",
-            ));
+        for scoped_project in &record.project_slugs {
+            let limit = effective_limit(&transaction, scoped_project)?;
+            let used: i64 = transaction.query_row("SELECT COUNT(*) FROM agent_assignments a JOIN record_projects p ON p.record_id = a.record_id WHERE p.project_slug = ?1 AND (a.closed_at_millis IS NULL OR EXISTS (SELECT 1 FROM agent_assignment_resources r WHERE r.assignment_id = a.id AND r.retired_at_millis IS NULL))", [scoped_project], |row| row.get(0)).map_err(storage_error)?;
+            if used >= i64::from(limit) {
+                return Err(RegistrationError::new(
+                    "project-capacity",
+                    "Project dispatch capacity is reserved; inspect open Assignments and recovery blockers",
+                ));
+            }
         }
         let revision =
             workspace_dispatch::selected_revision(&transaction, record_id, record.record_type)?;
@@ -2263,7 +2268,7 @@ impl AgentDispatchRepository for SqliteProjectRepository {
             .map_err(storage_error)?;
         let result = (|| {
             let limit = effective_limit(&connection, project_slug)?;
-            let used: u16 = connection.query_row("SELECT COUNT(*) FROM agent_assignments a WHERE a.project_slug = ?1 AND (a.closed_at_millis IS NULL OR EXISTS (SELECT 1 FROM agent_assignment_resources r WHERE r.assignment_id = a.id AND r.retired_at_millis IS NULL))", [project_slug], |row| row.get::<_, i64>(0)).map_err(storage_error)?.cast_unsigned().try_into().expect("assignment count fits u16");
+            let used: u16 = connection.query_row("SELECT COUNT(*) FROM agent_assignments a JOIN record_projects p ON p.record_id = a.record_id WHERE p.project_slug = ?1 AND (a.closed_at_millis IS NULL OR EXISTS (SELECT 1 FROM agent_assignment_resources r WHERE r.assignment_id = a.id AND r.retired_at_millis IS NULL))", [project_slug], |row| row.get::<_, i64>(0)).map_err(storage_error)?.cast_unsigned().try_into().expect("assignment count fits u16");
             if used >= limit {
                 return Ok(None);
             }
@@ -2654,13 +2659,18 @@ impl AgentDispatchRepository for SqliteProjectRepository {
     }
 
     fn agent_workspace(&self, record_id: u64) -> Result<Option<PathBuf>, RegistrationError> {
+        self.record_workspace(record_id)?;
         let connection = self
             .connection
             .lock()
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
         connection
             .query_row(
-                "SELECT path FROM worktree_claims WHERE record_id = ?1 AND state = 'active'",
+                "SELECT w.root FROM records r JOIN workspaces w ON w.id = r.workspace_id
+                 WHERE r.id = ?1 AND r.record_type = 'grilling'
+                 UNION ALL
+                 SELECT c.path FROM worktree_claims c JOIN records r ON r.id = c.record_id
+                 WHERE c.record_id = ?1 AND c.state = 'active' AND r.record_type = 'task'",
                 [record_id.cast_signed()],
                 |row| row.get::<_, String>(0),
             )
@@ -6219,14 +6229,6 @@ mod tests {
                 .unwrap_err()
                 .code,
             "unsupported-record-type"
-        );
-        let multi = open(RecordType::Grilling, vec!["alpha", "beta"]);
-        assert_eq!(
-            store
-                .claim_record_agent_assignment(multi.id, "multi")
-                .unwrap_err()
-                .code,
-            "record-not-ready"
         );
         let prerequisite = open(RecordType::Task, vec!["alpha"]);
         let task = open(RecordType::Task, vec!["alpha"]);

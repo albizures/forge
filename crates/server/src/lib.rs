@@ -860,10 +860,11 @@ impl CapabilityDeliveryAdapter {
                     secret
                 },
             );
-            let workspace = context
-                .agent_workspace
-                .as_deref()
-                .unwrap_or_else(|| self.inner.default_agent_workspace());
+            let workspace = context.agent_workspace.as_deref().ok_or_else(|| {
+                forge_app::AgentAdapterError::InvalidRequest(
+                    "Task capability delivery requires its active Managed Worktree".into(),
+                )
+            })?;
             write_assignment_capability_secret(&secret_file, workspace, &secret).map_err(
                 |error| {
                     forge_app::AgentAdapterError::Endpoint(format!(
@@ -3055,7 +3056,17 @@ mod tests {
                 .rendered_initial_prompt
                 .contains("Managed Worktree")
         );
-        assert!(contexts[1].agent_workspace.is_none());
+        assert_eq!(contexts[1].agent_workspace.as_ref(), Some(&root));
+        assert!(
+            contexts[1]
+                .rendered_initial_prompt
+                .contains(root.join("repo").to_str().unwrap())
+        );
+        assert!(
+            !contexts[1]
+                .rendered_initial_prompt
+                .contains("assigned Managed Worktree")
+        );
         assert_eq!(
             store.show_record(records[1].id).unwrap().status,
             RecordStatus::Open

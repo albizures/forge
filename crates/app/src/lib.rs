@@ -1268,15 +1268,34 @@ fn agent_dispatch_context(
     repository: &dyn AgentDispatchRepository,
     assignment: &AgentAssignment,
 ) -> Result<AgentDispatchContext, RegistrationError> {
+    use std::fmt::Write;
     let project = repository.project(&assignment.project_slug)?;
     let record = repository.show_record(assignment.record_id)?;
     let agent_workspace = repository.agent_workspace(assignment.record_id)?;
-    let worktree_instruction = agent_workspace.as_ref().map_or_else(String::new, |path| {
-        format!(
-            "\n\nYour assigned Managed Worktree is {}. Perform Task work only in this worktree.",
-            path.display()
-        )
-    });
+    let execution_instruction = if record.record_type == RecordType::Grilling {
+        let mut instruction = agent_workspace.as_ref().map_or_else(String::new, |path| {
+            format!("\n\nYour Forge Workspace root is {}.", path.display())
+        });
+        instruction.push_str("\nApplicable Project scope paths:");
+        for reference in &record.project_slugs {
+            let scoped_project = repository.project(reference)?;
+            write!(
+                instruction,
+                "\n- {}: {}",
+                reference,
+                scoped_project.project_root.display()
+            )
+            .expect("writing to a String cannot fail");
+        }
+        instruction
+    } else {
+        agent_workspace.as_ref().map_or_else(String::new, |path| {
+            format!(
+                "\n\nYour assigned Managed Worktree is {}. Perform Task work only in this worktree.",
+                path.display()
+            )
+        })
+    };
     Ok(AgentDispatchContext {
         assignment: assignment.clone(),
         project_root: project.project_root,
@@ -1285,7 +1304,7 @@ fn agent_dispatch_context(
         bootstrap_prompt: None,
         rendered_initial_prompt: format!(
             "{}\n\n{}{}",
-            assignment.profile.prompt_template, record.body, worktree_instruction
+            assignment.profile.prompt_template, record.body, execution_instruction
         ),
         capability_delivery: None,
         resources: repository.list_agent_assignment_resources(&assignment.id)?,
@@ -1563,7 +1582,7 @@ pub trait AgentDispatchRepository: RecordRepository + WorkspaceDispatchRepositor
         &self,
         assignment_id: &str,
     ) -> Result<Vec<AgentAssignmentResource>, RegistrationError>;
-    /// Returns the prepared active Managed Worktree used as the Agent's process cwd.
+    /// Returns the Task's active Managed Worktree or the Grilling's owning Workspace root.
     fn agent_workspace(&self, record_id: u64) -> Result<Option<PathBuf>, RegistrationError>;
     /// Returns the immutable provider container bound when this attempt was created.
     fn assignment_dispatch_workspace(

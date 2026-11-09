@@ -21,6 +21,7 @@ struct ProviderState {
     mismatch: bool,
     gets: usize,
     lose_on_get: Option<usize>,
+    agents: std::collections::BTreeMap<String, Value>,
 }
 struct Provider {
     path: PathBuf,
@@ -68,13 +69,37 @@ impl Provider {
                                 if state.missing {
                                     json!({"absent":true})
                                 } else {
-                                    json!({"workspace":{"workspace_id": if state.mismatch { json!("wrong-identity") } else { request["params"]["workspace_id"].clone() }}})
+                                    json!({"workspace":{"workspace_id": if state.mismatch { json!("wrong-identity") } else { request["params"]["workspace_id"].clone() }, "cwd":"/unrelated/focused-pane", "cwd_policy":"home"}})
                                 }
                             }
                             "tab.create" => {
                                 json!({"tab":{"tab_id":"tab"},"root_pane":{"pane_id":"pane"}})
                             }
-                            "agent.start" => json!({"type":"agent_started"}),
+                            "agent.start" => {
+                                let name = request["params"]["name"].as_str().unwrap().to_owned();
+                                let workspace = state
+                                    .calls
+                                    .iter()
+                                    .rev()
+                                    .find(|call| call["method"] == "tab.create")
+                                    .unwrap()["params"]["workspace_id"]
+                                    .clone();
+                                state.agents.insert(
+                                    name.clone(),
+                                    json!({
+                                        "name":name, "workspace_id":workspace,
+                                        "tab_id":"tab", "pane_id":"pane", "agent_status":"working"
+                                    }),
+                                );
+                                json!({"type":"agent_started"})
+                            }
+                            "agent.get" => {
+                                let agent = state
+                                    .agents
+                                    .get(request["params"]["target"].as_str().unwrap())
+                                    .unwrap();
+                                json!({"type":"agent_info", "agent":agent})
+                            }
                             method => panic!("unexpected provider operation {method}"),
                         };
                         if result["absent"] == true {
@@ -491,6 +516,20 @@ fn production_grilling_launch_uses_its_selected_revision_and_retained_container(
         .unwrap();
     assert_eq!(tab["params"]["workspace_id"], "herdr-two");
     assert_eq!(
+        tab["params"]["cwd"],
+        fixture.root.join("two").to_str().unwrap()
+    );
+    let launch = calls
+        .calls
+        .iter()
+        .find(|call| call["method"] == "agent.start")
+        .unwrap();
+    assert!(
+        launch
+            .to_string()
+            .contains(fixture.root.join("two").to_str().unwrap())
+    );
+    assert_eq!(
         calls
             .calls
             .iter()
@@ -516,4 +555,209 @@ fn production_grilling_launch_uses_its_selected_revision_and_retained_container(
     app.workspace_dispatch_config_unset("one", "workspace", None)
         .unwrap();
     assert!(app.dispatch_record(record.id).unwrap().1);
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn workspace_launch_context_and_recovery_stay_with_the_original_owner_after_restart() {
+    let fixture = Fixture::new();
+    let provider = Provider::new(fixture.root.join("herdr.sock"));
+    let app = fixture.app();
+    for workspace in ["one", "two"] {
+        fixture.configure(&app, &provider, workspace);
+    }
+    let nested = fixture.root.join("two/nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    let store = fixture.store();
+    store
+        .register(&forge_app::Project {
+            reference: "two/web".into(),
+            workspace_id: "two".into(),
+            slug: "web".into(),
+            project_root: nested.clone(),
+            origin_url: "https://example.test/web.git".into(),
+        })
+        .unwrap();
+    for reference in ["one/api", "two/api", "two/web"] {
+        store
+            .set_project_task_concurrency_limit(reference, Some(1))
+            .unwrap();
+    }
+    let one = fixture.grilling("one");
+    let two = store
+        .open_typed_record(&NewTypedRecord {
+            record_type: RecordType::Grilling,
+            task_kind: None,
+            body: "multi-project decision".into(),
+            project_slugs: vec!["two/api".into(), "two/web".into()],
+            generated_by_ids: vec![],
+        })
+        .unwrap();
+    let first = app.dispatch_record(one.id).unwrap().0;
+    let web = store
+        .open_typed_record(&NewTypedRecord {
+            record_type: RecordType::Grilling,
+            task_kind: None,
+            body: "web decision".into(),
+            project_slugs: vec!["two/web".into()],
+            generated_by_ids: vec![],
+        })
+        .unwrap();
+    let occupied = store
+        .claim_record_agent_assignment(web.id, "web-occupied")
+        .unwrap()
+        .0;
+    assert_eq!(
+        app.dispatch_record(two.id).unwrap_err().code,
+        "project-capacity"
+    );
+    assert!(store.list_agent_assignments(two.id).unwrap().is_empty());
+    assert_eq!(
+        provider
+            .state
+            .lock()
+            .unwrap()
+            .calls
+            .iter()
+            .filter(|call| call["method"] == "agent.start")
+            .count(),
+        1
+    );
+    store
+        .close_agent_assignment(
+            &occupied.id,
+            forge_app::AgentAssignmentClosureReason::Retired,
+        )
+        .unwrap();
+    let second = app.dispatch_record(two.id).unwrap().0;
+    {
+        let state = provider.state.lock().unwrap();
+        let tabs: Vec<_> = state
+            .calls
+            .iter()
+            .filter(|call| call["method"] == "tab.create")
+            .collect();
+        assert_eq!(tabs.len(), 2);
+        for (tab, workspace) in tabs.iter().zip(["one", "two"]) {
+            assert_eq!(
+                tab["params"]["cwd"],
+                fixture.root.join(workspace).to_str().unwrap()
+            );
+            assert_eq!(tab["params"]["workspace_id"], format!("herdr-{workspace}"));
+            assert_eq!(tab["params"]["focus"], false);
+        }
+        let launch = state
+            .calls
+            .iter()
+            .filter(|call| call["method"] == "agent.start")
+            .nth(1)
+            .unwrap();
+        let prompt = launch["params"]["args"][2].as_str().unwrap();
+        assert!(prompt.contains(&format!("two/api: {}", fixture.root.join("two").display())));
+        assert!(prompt.contains(&format!("two/web: {}", nested.display())));
+        assert!(!prompt.contains(fixture.root.join("one").to_str().unwrap()));
+    }
+    assert!(
+        store
+            .in_record_workspace("one")
+            .unwrap()
+            .agent_workspace(two.id)
+            .is_err()
+    );
+    let retained = store.list_agent_assignment_resources(&second.id).unwrap();
+    assert_eq!(
+        app.dispatch_record(web.id).unwrap_err().code,
+        "project-capacity"
+    );
+    assert_eq!(store.list_agent_assignments(web.id).unwrap().len(), 1);
+    drop(app);
+    let restarted = fixture.app();
+    restarted
+        .reconcile_agent_dispatch("restart", 1_000)
+        .unwrap();
+    for (original, workspace) in [(&first, "one"), (&second, "two")] {
+        let recovered = store.agent_assignment(&original.id).unwrap();
+        assert_eq!(recovered.profile, original.profile);
+        assert_eq!(recovered.project_slug, original.project_slug);
+        assert_eq!(recovered.state, forge_app::AgentAssignmentState::Working);
+        assert_eq!(
+            store
+                .assignment_dispatch_workspace(&original.id)
+                .unwrap()
+                .unwrap()
+                .id,
+            format!("herdr-{workspace}")
+        );
+        assert!(store.remove_workspace(workspace).is_err());
+    }
+    assert_eq!(
+        store.list_agent_assignment_resources(&second.id).unwrap(),
+        retained
+    );
+    provider.state.lock().unwrap().missing = true;
+    restarted
+        .reconcile_agent_dispatch("provider-outage", 2_000)
+        .unwrap();
+    for original in [&first, &second] {
+        let after_outage = store.agent_assignment(&original.id).unwrap();
+        assert!(after_outage.closed_at_millis.is_none());
+        assert_eq!(after_outage.profile, original.profile);
+    }
+    assert_eq!(
+        store.list_agent_assignment_resources(&second.id).unwrap(),
+        retained
+    );
+    provider.state.lock().unwrap().missing = false;
+    store
+        .close_agent_assignment(&second.id, forge_app::AgentAssignmentClosureReason::Retired)
+        .unwrap();
+    assert_eq!(
+        restarted.dispatch_record(web.id).unwrap_err().code,
+        "project-capacity"
+    );
+    assert!(store.remove_workspace("two").is_err());
+    let task = store
+        .open_typed_record(&NewTypedRecord {
+            record_type: RecordType::Task,
+            task_kind: None,
+            body: "web implementation".into(),
+            project_slugs: vec!["two/web".into()],
+            generated_by_ids: vec![],
+        })
+        .unwrap();
+    assert!(
+        store
+            .claim_next_agent_assignment("two/web", "blocked-scheduler")
+            .unwrap()
+            .is_none()
+    );
+    assert!(store.list_agent_assignments(task.id).unwrap().is_empty());
+    let state = provider.state.lock().unwrap();
+    assert_eq!(
+        state
+            .calls
+            .iter()
+            .filter(|call| call["method"] == "agent.start")
+            .count(),
+        2
+    );
+    assert_eq!(
+        state
+            .calls
+            .iter()
+            .filter(|call| call["method"] == "agent.get")
+            .count(),
+        2
+    );
+    assert!(state.calls.iter().all(|call| matches!(
+        call["method"].as_str(),
+        Some(
+            "ping"
+                | "session.snapshot"
+                | "workspace.get"
+                | "tab.create"
+                | "agent.start"
+                | "agent.get"
+        )
+    )));
 }

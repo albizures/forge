@@ -72,6 +72,7 @@ impl Drop for Fixture {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn claims_require_complete_verified_configuration_and_bind_selected_revision_and_identity() {
     let fixture = Fixture::new();
     let store = fixture.open();
@@ -126,6 +127,20 @@ fn claims_require_complete_verified_configuration_and_bind_selected_revision_and
         store.agent_assignment(&claimed.id).unwrap().profile,
         revised
     );
+    assert!(
+        store
+            .schedule_agent_assignment_retry(
+                &claimed.id,
+                forge_app::AgentAssignmentState::Provisioning,
+                2_000,
+                1,
+            )
+            .unwrap()
+    );
+    assert_eq!(
+        store.agent_assignment(&claimed.id).unwrap().profile,
+        revised
+    );
     store
         .close_agent_assignment(&claimed.id, AgentAssignmentClosureReason::Retired)
         .unwrap();
@@ -147,6 +162,27 @@ fn claims_require_complete_verified_configuration_and_bind_selected_revision_and
             .unwrap()
             .id,
         "exact"
+    );
+    assert_eq!(
+        reopened.agent_assignment(&claimed.id).unwrap().profile,
+        revised
+    );
+    assert_eq!(
+        reopened.agent_assignment(&claimed.id).unwrap().retry_count,
+        1
+    );
+    let (future, _) = reopened
+        .claim_record_agent_assignment(old.record_id, "future")
+        .unwrap();
+    assert_eq!(future.profile.revision, 1);
+    assert_ne!(future.profile, claimed.profile);
+    assert_eq!(
+        reopened
+            .assignment_dispatch_workspace(&future.id)
+            .unwrap()
+            .unwrap()
+            .id,
+        "future-container"
     );
     assert_eq!(
         reopened.agent_assignment(&claimed.id).unwrap().profile,

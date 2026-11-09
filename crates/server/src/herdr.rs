@@ -2,7 +2,7 @@
 
 use std::{
     io::{BufRead, BufReader, Write},
-    path::{Path, PathBuf},
+    path::PathBuf,
     time::Duration,
 };
 
@@ -82,32 +82,13 @@ impl HerdrAdapterFactory {
         .ok_or_else(|| {
             AgentAdapterError::Endpoint("Herdr Unix socket endpoint is not configured".into())
         })?;
-        let store_root = self
-            .configuration_store
-            .as_deref()
-            .and_then(Path::parent)
-            .unwrap_or_else(|| Path::new("."));
-        let data_root = if store_root.is_absolute() {
-            store_root.to_owned()
-        } else {
-            std::env::current_dir()
-                .map_err(|_| {
-                    AgentAdapterError::Endpoint("could not resolve Forge data root".into())
-                })?
-                .join(store_root)
-        };
-        Ok(HerdrAdapter {
-            socket_path,
-            dispatch_root: data_root.join("herdr-dispatch-workspace"),
-        })
+        Ok(HerdrAdapter { socket_path })
     }
 }
 
 /// A synchronous, one-request-per-connection Herdr protocol-22 client.
 pub struct HerdrAdapter {
     socket_path: PathBuf,
-    /// Neutral Forge-owned data root, never a Project or Task workspace.
-    dispatch_root: PathBuf,
 }
 
 /// Runs the long-lived event side of Herdr observation. Events only enqueue a wake; the
@@ -285,10 +266,6 @@ fn event_is_owned_status_change(event: &Value, panes: &[String]) -> bool {
 }
 
 impl HerdrAdapter {
-    pub(crate) fn default_agent_workspace(&self) -> &Path {
-        &self.dispatch_root
-    }
-
     #[allow(clippy::needless_pass_by_value)] // Required by the non-Unix fallback's ownership shape.
     fn request(&self, method: &str, params: Value) -> Result<Value, AgentAdapterError> {
         #[cfg(unix)]
@@ -661,7 +638,14 @@ fn provisioning_prompt(context: &AgentDispatchContext) -> Result<&str, AgentAdap
             }
             Ok(bootstrap)
         }
-        forge_app::RecordType::Grilling => Ok(context.rendered_initial_prompt.as_str()),
+        forge_app::RecordType::Grilling => {
+            if context.agent_workspace.is_none() {
+                return Err(AgentAdapterError::InvalidRequest(
+                    "Grilling provisioning requires its Forge Workspace root".into(),
+                ));
+            }
+            Ok(context.rendered_initial_prompt.as_str())
+        }
         _ => Err(AgentAdapterError::InvalidRequest(
             "explicit dispatch supports only Tasks and Grillings".into(),
         )),
@@ -690,10 +674,9 @@ impl HerdrAdapter {
                 "provisioning was already attempted; investigate retained resources before recovery".into(),
             ));
         }
-        let agent_workspace = context
-            .agent_workspace
-            .as_deref()
-            .unwrap_or(&self.dispatch_root);
+        let agent_workspace = context.agent_workspace.as_deref().ok_or_else(|| {
+            AgentAdapterError::InvalidRequest("explicit Agent Workspace is required".into())
+        })?;
         let (tab, root) = if let Some(id) = Self::active(&context.resources, "tab") {
             (id.to_owned(), None)
         } else {
@@ -977,7 +960,6 @@ mod tests {
         };
         let adapter = super::HerdrAdapter {
             socket_path: "/nonexistent-herdr-socket".into(),
-            dispatch_root: "/tmp".into(),
         };
         assert!(matches!(
             adapter.provision(&context, &store),
@@ -1025,7 +1007,6 @@ mod tests {
         });
         let adapter = super::HerdrAdapter {
             socket_path: path.clone(),
-            dispatch_root: std::env::temp_dir().join("forge-dispatch-workspace"),
         };
         adapter.probe().unwrap();
         server.join().unwrap();
@@ -1077,7 +1058,14 @@ mod tests {
         let context = AgentDispatchContext {
             assignment: assignment.clone(),
             project_root: "/project".into(),
-            agent_workspace: (!interactive).then(|| "/worktree".into()),
+            agent_workspace: Some(
+                if interactive {
+                    "/workspace"
+                } else {
+                    "/worktree"
+                }
+                .into(),
+            ),
             dispatch_workspace: Some(DispatchWorkspace {
                 id: "workspace".into(),
             }),
@@ -1103,7 +1091,6 @@ mod tests {
         let server = launch_contract_server(listener, interactive, model);
         let adapter = super::HerdrAdapter {
             socket_path: path.clone(),
-            dispatch_root: "/neutral".into(),
         };
         adapter.provision(&context, &repository).unwrap();
         assert!(
@@ -1113,13 +1100,16 @@ mod tests {
                 .is_some()
         );
         server.join().unwrap();
-        if !interactive {
-            let mut missing_worktree = context.clone();
-            missing_worktree.agent_workspace = None;
-            assert!(
-                matches!(adapter.provision(&missing_worktree, &repository), Err(forge_app::AgentAdapterError::InvalidRequest(message)) if message.contains("Managed Worktree"))
-            );
-        }
+        let mut missing_workspace = context.clone();
+        missing_workspace.agent_workspace = None;
+        let expected = if interactive {
+            "Forge Workspace root"
+        } else {
+            "Managed Worktree"
+        };
+        assert!(
+            matches!(adapter.provision(&missing_workspace, &repository), Err(forge_app::AgentAdapterError::InvalidRequest(message)) if message.contains(expected))
+        );
         std::fs::remove_file(path).unwrap();
     }
 
@@ -1141,7 +1131,7 @@ mod tests {
                 ),
                 (
                     "workspace.get",
-                    serde_json::json!({"workspace":{"workspace_id":"workspace"}}),
+                    serde_json::json!({"workspace":{"workspace_id":"workspace", "cwd":"/unrelated/provider-default", "cwd_policy": if interactive { "focused-pane" } else { "home" }}}),
                 ),
                 (
                     "tab.create",
@@ -1159,7 +1149,11 @@ mod tests {
                 if method == "tab.create" {
                     assert_eq!(
                         request["params"]["cwd"],
-                        if interactive { "/neutral" } else { "/worktree" }
+                        if interactive {
+                            "/workspace"
+                        } else {
+                            "/worktree"
+                        }
                     );
                     if interactive {
                         assert!(request["params"].get("env").is_none());
@@ -1250,7 +1244,6 @@ mod tests {
         });
         let adapter = super::HerdrAdapter {
             socket_path: path.clone(),
-            dispatch_root: "/unused".into(),
         };
         let result = adapter.agent_observation("forge-dispatch-a", ("workspace", "tab", "pane"));
         server.join().unwrap();
@@ -1459,7 +1452,6 @@ mod tests {
         });
         let adapter = super::HerdrAdapter {
             socket_path: path.clone(),
-            dispatch_root: std::env::temp_dir().join("forge-dispatch-workspace"),
         };
         assert_eq!(
             adapter
@@ -1697,7 +1689,6 @@ mod tests {
         });
         let adapter = super::HerdrAdapter {
             socket_path: path.clone(),
-            dispatch_root: std::env::temp_dir().join("forge-dispatch-workspace"),
         };
         let result = adapter.retire(&context, &repository);
         assert_eq!(result.is_ok(), outcome == "absent", "{outcome}: {result:?}");
@@ -1760,7 +1751,6 @@ mod tests {
         });
         let adapter = super::HerdrAdapter {
             socket_path: path.clone(),
-            dispatch_root: "/unused".into(),
         };
         assert_eq!(
             adapter.verify_workspace("requested").unwrap(),
@@ -1779,7 +1769,6 @@ mod tests {
         let repository = forge_store::SqliteProjectRepository::in_memory().unwrap();
         let adapter = super::HerdrAdapter {
             socket_path: std::env::temp_dir().join("forge-nonexistent-herdr.sock"),
-            dispatch_root: std::env::temp_dir().join("forge-unused-dispatch-root"),
         };
         assert!(matches!(
             adapter.dispatch_workspace(&repository),

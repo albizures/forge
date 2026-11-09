@@ -205,7 +205,7 @@ A versioned Forge-owned configuration for a Record Type that specifies how Forge
 _Avoid_: agent configuration, record profile
 
 **Agent Workspace**:
-The filesystem folder in which an Agent works for an Agent Assignment. A Task Agent Assignment requires and uses its bound Task’s active Managed Worktree.
+The filesystem folder in which an Agent works for an Agent Assignment. Task Assignments use their bound Managed Worktree; Grilling Assignments use their Forge Workspace root.
 _Avoid_: agent project, agent checkout
 
 **Forge Dispatch Workspace**:

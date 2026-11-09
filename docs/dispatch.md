@@ -62,8 +62,12 @@ can provision work, so use status rather than reconcile for read-only diagnostic
 Forge retains the exact provider identity in each Assignment. It never creates,
 adopts by label, replaces or deletes a Herdr Workspace. A missing or unverifiable
 identity blocks dispatch. Forge creates an unfocused dedicated tab and uses its
-initial pane per Assignment; Task tabs run in their Managed Worktree, never the
-Project root. Other Herdr tabs remain operator-owned. See [the workspace ownership decision](../crates/docs/adr/0008-operator-selected-dispatch-workspaces.md).
+initial pane per Assignment. Forge explicitly supplies cwd: Task tabs run in their
+bound Managed Worktree, never the Project root; Grilling tabs run at the owning
+Forge Workspace root, with applicable Project references and canonical paths in
+their initial instructions. Neither launch inherits Herdr's cwd policy or the
+focused pane's directory, nor requires a matching Herdr filesystem root. Other
+Herdr tabs and global cwd configuration remain operator-owned and unchanged. See [the workspace ownership decision](../crates/docs/adr/0008-operator-selected-dispatch-workspaces.md).
 
 ## Capacity and selection
 
@@ -107,7 +111,10 @@ waiting. It still checks readiness, single-Project eligibility, dependencies,
 Project capacity, Dispatch Holds, assignment uniqueness, and retained-resource
 safety. Tasks use their Managed Worktrees; Grillings launch interactively without
 a Managed Worktree or Task bootstrap and are never scheduled automatically.
-Specs, Wayfinders, and generic Records are unsupported.
+Grillings may span multiple Projects within their Workspace; each scoped Project
+must have capacity, and the Assignment reserves capacity in each, including while
+a closed Assignment retains resources. Projectless Records remain planning-only
+and are not dispatchable. Specs, Wayfinders, and generic Records are unsupported.
 
 Repeated or concurrent requests return the existing open Assignment, reporting
 `already assigned` (JSON: `already_assigned: true`) without another Agent launch
