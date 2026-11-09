@@ -4,7 +4,7 @@ Forge manages project work from planning through agent execution. A local daemon
 keeps Projects, Specs, Tasks, managed Git worktrees, and agent assignments in
 SQLite; the `forge` CLI operates on that shared state.
 
-- **Plan work:** register Git repositories as Projects, then create Specs and Tasks.
+- **Plan work:** register a Forge Workspace and its Git Projects, then create Specs and Tasks.
 - **Isolate implementation:** give Tasks their own managed worktrees and branches.
 - **Dispatch agents:** run Pi through Herdr with durable assignments and explicit
   recovery controls.
@@ -32,11 +32,13 @@ managed daemon is running; you do not need to start a separate server.
 
 ## Example workflow
 
-A Project registers a local Git repository's **main worktree**. It must have an
-`origin` remote. Replace `/repos/alpha` with your repository's absolute path:
+A Forge Workspace owns a fixed canonical root containing its Projects. A Project
+registers a Git repository's **main checkout**, with an `origin` remote and an
+initial commit. Replace `/repos` and `/repos/alpha` with existing absolute paths:
 
 ```sh
-forge add project /repos/alpha alpha
+forge workspace add personal --root /repos
+forge add project /repos/alpha alpha --workspace personal
 cd /repos/alpha
 forge here
 forge spec open --body 'Deliver the migration' --project alpha
@@ -85,7 +87,9 @@ npx skills add mattpocock/skills --skill grill-me writing-for-agents improve-cod
 
 | Guide | Contents |
 | --- | --- |
-| [Records](docs/records.md) | Projects, scope, lifecycle, hierarchy, and provenance |
+| [Workspaces](docs/workspaces.md) | Registration, selection, filesystem boundaries, and configuration ownership |
+| [Projects](docs/projects.md) | Workspace-local identities, nested main checkouts, and canonical roots |
+| [Records](docs/records.md) | Scope, lifecycle, hierarchy, and provenance |
 | [Managed worktrees](docs/worktrees.md) | Manual checkout creation, safety checks, and repair |
 | [Dispatcher](docs/dispatch.md) | Configuration, explicit Record dispatch, launch, and ownership boundaries |
 | [Assignment recovery](docs/assignment-recovery.md) | Investigation, retirement, unknown resources, and holds |
@@ -100,6 +104,9 @@ default. Its operator RPC surface can mutate state; keep access restricted to
 trusted clients. A non-loopback bind is suitable only for an explicitly trusted
 private network, not public exposure. Assignment capabilities restrict agent
 operations but do not authenticate operator clients.
+
+Workspace selection is routing, not authentication or OS/process isolation.
+Forge and Herdr Workspaces are distinct; no Herdr plugin or upstream change is required.
 
 Authentication, TLS termination, browser mutations, CSRF handling, and CORS access
 are not provided by this foundation.

@@ -47,4 +47,4 @@ The CLI resolves Project selectors before sending a mutation. `project.here` als
 
 Project responses expose `reference` (the immutable identity to carry into scope and configuration requests), `workspace_id`, local `slug`, `project_root`, and `origin_url`. A local slug alone is not a daemon-wide identity. Separate Projects with the same local slug retain independent setup hooks, concurrency limits and consumed dispatch capacity across daemon/store reopen.
 
-This Project slice does not yet establish record-wide Workspace relationship confinement, the fixed Workspace-rooted Managed Worktree layout, or Workspace-owned provider/profile configuration. Those belong to their dedicated Spec 599 Tasks.
+See [Workspaces](workspaces.md) for the full ownership contract, [Records](records.md) for relationship confinement, [Managed Worktrees](worktrees.md) for the fixed Workspace-rooted layout, and [dispatch operations](dispatch.md) for Workspace-owned provider/profile configuration.

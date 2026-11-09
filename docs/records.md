@@ -107,8 +107,10 @@ Record listing. Every result remains in the selected Workspace.
 
 This is workflow readiness, not provider dispatchability. Registration, records,
 planning and inspection work without dispatch profiles or a provider binding.
-Dispatch configuration/readiness and Workspace-rooted worktree layout are separate
-implementation slices; readiness does not promise an Agent can be provisioned.
+[Dispatch readiness](dispatch.md#configure-dispatch) additionally requires both
+profiles, a verified provider binding and present availability; workflow readiness
+does not promise an Agent can be provisioned. See [Workspaces](workspaces.md) for
+the ownership contract and [Managed Worktrees](worktrees.md) for checkout placement.
 
 ## RPC and persistence
 

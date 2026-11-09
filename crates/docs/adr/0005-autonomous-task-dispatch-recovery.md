@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-10-25
 - **Decision scope:** Dispatcher lifecycle, Git worktree safety, and Herdr provider ownership
+- **Partially superseded by:** [ADR-008](0008-operator-selected-dispatch-workspaces.md) for provider-container ownership and conservative replacement. The Forge-created neutral-root container described below is historical, not current setup guidance; see [Workspaces](../../../docs/workspaces.md).
 
 ## Context
 

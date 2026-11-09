@@ -6,9 +6,10 @@ configuration and launch behavior, see [dispatch operations](dispatch.md).
 
 ## Trust and upgrade boundary
 
-Back up the Forge database using the normal upgrade policy before opening it
-with the new binaries; existing databases migrate automatically. Preserve
-Assignment, resource, audit and worktree evidence. Do not edit SQLite, adopt
+Back up the Forge database before opening it with new binaries. Owned development
+schemas can evolve, but pre-Workspace unowned data requires a new store; legacy
+import or implicit adoption is unsupported. Preserve Assignment, resource, audit
+and worktree evidence. Do not edit SQLite, adopt
 lookalike provider resources, delete worktree claims or launch a replacement to
 bypass a recovery blocker.
 
@@ -20,6 +21,17 @@ prompts, capability values and secret-file paths; treat provider identities and
 operational evidence as sensitive nonetheless.
 
 ## Investigate before changing state
+
+Select the owning Forge Workspace with `--workspace <id>` or canonical client cwd;
+outside registered roots, supply an explicit selector. Bare Record/Assignment IDs
+do not select a Workspace. Use qualified Project references (`personal/api`) or a
+local slug within the selected owner. Selection is routing, not authentication.
+Existing attempts retain their original Workspace, profile revision and provider
+resource identities across restart; changing current selections never redirects
+cleanup. Binding changes are guarded by the owning Workspace's live Assignments
+and retained resources; socket changes apply that guard daemon-wide. After a safe
+socket change, every Workspace needs fresh binding verification before dispatch.
+See [Workspace ownership](workspaces.md).
 
 ```sh
 forge dispatcher assignment-info <assignment-id>
@@ -54,7 +66,7 @@ Retirement installs a Dispatch Hold and durable cleanup evidence, closes/revokes
 the Assignment and removes its subscriptions **before** provider cleanup. It
 checks retained ownership identities before destructive requests and verifies
 agent/tab/pane absence afterward. It retains Git/worktree evidence and does not
-delete the shared operator-selected workspace. Revocation cannot undo external
+delete the operator-selected Herdr Workspace or the Forge Workspace root. Revocation cannot undo external
 actions or prove that an external child process is dead.
 
 If cleanup fails, identities mismatch, resources survive, or the provider is

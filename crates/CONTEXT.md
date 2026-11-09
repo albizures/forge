@@ -78,7 +78,7 @@ _Avoid_: Forge Workspace, Project
 
 **Managed Worktree**:
 A Worktree created and durably tracked by Forge for an eligible Task under its Project, within that Project's Forge Workspace. It is retained while the Task has an open Agent Assignment and is not automatically removed when the Task is Done.
-_Avoid_: task checkout, Forge workspace
+_Avoid_: task checkout, Forge Workspace
 
 **Worktree Claim**:
 Forge's exclusive durable association of one eligible Record with one Managed Worktree. The claim prevents a second Managed Worktree for that Record.
@@ -206,11 +206,11 @@ _Avoid_: agent configuration, record profile
 
 **Agent Workspace**:
 The filesystem folder in which an Agent works for an Agent Assignment. Task Assignments use their bound Managed Worktree; Grilling Assignments use their Forge Workspace root.
-_Avoid_: agent project, agent checkout
+_Avoid_: Herdr Workspace, agent project
 
 **Forge Dispatch Workspace**:
 An existing operator-selected Herdr Workspace bound exclusively to one Forge Workspace within a daemon/store. It contains dedicated Agent Assignment tabs but is neither a Forge-owned filesystem root nor a container Forge owns or deletes.
-_Avoid_: Project workspace, task workspace
+_Avoid_: Forge Workspace, Project workspace, task workspace
 
 **Assignment Recovery Blocker**:
 A durable condition that reserves Project dispatch capacity while an Agent Assignment's potentially live Agent or uncertain resources cannot be reconciled safely. It can exist for a closed Assignment.

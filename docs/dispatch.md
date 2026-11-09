@@ -13,17 +13,19 @@ Herdr container identity. Select the Forge Workspace with `--workspace <id>` or
 canonical cwd containment; there is no saved default. Qualified `--project
 <workspace>/<slug>` also routes configuration/status; conflicting selectors fail.
 Outside a registered root, supply an explicit selector. Configure an absolute socket path
-then select the profiles and provider identity. Managed Worktrees use the fixed
+then select the profiles and provider identity. The setup below assumes a Forge
+Workspace named `personal` is already registered (see [local planning setup](workspaces.md#start-with-local-planning)).
+Replace the socket path and Herdr ID with inspected existing values. Managed Worktrees use the fixed
 `<forge-workspace-root>/.forge/worktrees/<project-slug>/<record-id>` layout:
 
 ```sh
-forge dispatcher config set herdr-socket /absolute/path/to/herdr.sock
-forge dispatcher config set task-profile 1
-forge dispatcher config set grilling-profile 1
-forge dispatcher config set workspace your-herdr-workspace-id
-forge dispatcher config get
-forge dispatcher status --json
-forge dispatcher reconcile
+forge dispatcher config set herdr-socket /absolute/path/to/herdr.sock --workspace personal
+forge dispatcher config set task-profile 1 --workspace personal
+forge dispatcher config set grilling-profile 1 --workspace personal
+forge dispatcher config set workspace your-herdr-workspace-id --workspace personal
+forge dispatcher config get --workspace personal
+forge dispatcher status --workspace personal --json
+forge dispatcher reconcile --workspace personal
 ```
 
 `herdr-socket` is the **daemon-to-Herdr Unix socket**, not the CLI-to-Forge
@@ -67,9 +69,14 @@ bound Managed Worktree, never the Project root; Grilling tabs run at the owning
 Forge Workspace root, with applicable Project references and canonical paths in
 their initial instructions. Neither launch inherits Herdr's cwd policy or the
 focused pane's directory, nor requires a matching Herdr filesystem root. Other
-Herdr tabs and global cwd configuration remain operator-owned and unchanged. See [the workspace ownership decision](../crates/docs/adr/0008-operator-selected-dispatch-workspaces.md).
+Herdr tabs and global cwd configuration remain operator-owned and unchanged.
+No Herdr plugin or upstream change is required. See [the workspace ownership decision](../crates/docs/adr/0008-operator-selected-dispatch-workspaces.md).
 
 ## Capacity and selection
+
+The remaining examples assume cwd is inside the intended Forge Workspace; add
+`--workspace <id>` outside it, or use a qualified Project reference where accepted.
+Workspace routing is not authentication or OS/process isolation.
 
 Forge selects the oldest dependency-ready, single-Project Open Task when Project
 capacity is available. It atomically creates a Provisioning Assignment to reserve
@@ -203,8 +210,9 @@ unavailable bases, invalid checkouts, and provider/workspace failures retain
 diagnostics for investigation. Repeated definite provisioning failures can create
 a hold; uncertain launches require the more conservative recovery runbook.
 
-Back up existing databases before upgrades; durable dispatch facts migrate
-automatically. Forge does not adopt legacy workspace/worktree state. Automated Git
+Back up existing evidence before upgrades. Owned development schemas can evolve;
+pre-Workspace unowned data requires a new store, not legacy import or implicit
+adoption. Forge does not adopt legacy workspace/worktree state. Automated Git
 cleanup/repair, unknown-resource adoption/replacement, general cancellation beyond
 retirement, and automatic shared-workspace conflict resolution are not provided.
 Integration and release decisions remain explicit workflow actions.

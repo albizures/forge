@@ -23,7 +23,11 @@ use forge_cli::{
 use std::io::Read;
 
 #[derive(Debug, Parser)]
-#[command(name = "forge", about = "Client for the Forge daemon")]
+#[command(
+    name = "forge",
+    about = "Client for the Forge daemon",
+    after_long_help = "Workspace selection is routing, not authentication or OS isolation. Use --workspace or canonical client cwd; there is no saved default. Qualified Project references use <workspace>/<slug>; conflicting explicit selectors fail. No Herdr plugin or upstream change is required."
+)]
 struct Cli {
     /// Explicit Forge Workspace ID; overrides cwd inference. No saved default.
     #[arg(long, global = true)]
@@ -42,12 +46,12 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Register a Git main worktree as a Project through the daemon.
+    /// Register a main Git checkout within its Workspace (origin remote required).
     Add {
         #[command(subcommand)]
         command: AddCommand,
     },
-    /// Confirm the Project containing the current folder.
+    /// Select an explicit Project, otherwise the deepest containing Project root.
     Here {
         #[arg(long, value_name = "URL")]
         server_url: Option<String>,
@@ -99,7 +103,10 @@ enum Command {
         #[command(subcommand)]
         command: WorktreeCommand,
     },
-    /// Configure and inspect daemon-owned Agent Dispatch.
+    /// Configure Workspace dispatch selections and inspect daemon-owned Agent Dispatch.
+    #[command(
+        after_long_help = "Dispatch requires both Task and Grilling profile selections and an exclusive existing Herdr binding. Status distinguishes configured completeness from current dispatchability. Task cwd is its bound Managed Worktree; Grilling cwd is its Forge Workspace root. Binding changes are guarded by live Assignments and retained resources in that Workspace; socket changes apply the guard daemon-wide and invalidate every Workspace's provider verification. Profile changes affect future Assignments only. Planning remains available without dispatch configuration."
+    )]
     Dispatcher {
         #[command(subcommand)]
         command: AgentDispatchCommand,
@@ -1901,6 +1908,94 @@ mod tests {
                 "missing skill example for {}",
                 command.get_name()
             );
+        }
+    }
+
+    #[test]
+    fn operator_guide_commands_parse_without_execution() {
+        let documents = [
+            ("README.md", include_str!("../../../README.md")),
+            ("workspaces.md", include_str!("../../../docs/workspaces.md")),
+            ("projects.md", include_str!("../../../docs/projects.md")),
+            ("records.md", include_str!("../../../docs/records.md")),
+            ("worktrees.md", include_str!("../../../docs/worktrees.md")),
+            ("dispatch.md", include_str!("../../../docs/dispatch.md")),
+            (
+                "assignment-recovery.md",
+                include_str!("../../../docs/assignment-recovery.md"),
+            ),
+        ];
+        for (name, document) in documents {
+            let mut in_shell = false;
+            let mut continued = String::new();
+            let mut count = 0;
+            for (index, line) in document.lines().enumerate() {
+                let line = line.trim();
+                if line == "```sh" {
+                    in_shell = true;
+                } else if line == "```" {
+                    assert!(continued.is_empty(), "{name}: unfinished command");
+                    in_shell = false;
+                } else if in_shell && (line.starts_with("forge ") || !continued.is_empty()) {
+                    if let Some(prefix) = line.strip_suffix('\\') {
+                        continued.push_str(prefix);
+                        continued.push(' ');
+                        continue;
+                    }
+                    continued.push_str(line);
+                    let args: Vec<String> = shlex::split(&continued)
+                        .expect("valid shell quoting")
+                        .into_iter()
+                        .map(|arg| match arg.as_str() {
+                            "<spec-id>" | "<task-id>" | "<record-id>" => "42".into(),
+                            _ => arg,
+                        })
+                        .collect();
+                    Cli::try_parse_from(&args)
+                        .unwrap_or_else(|error| panic!("{name}:{}: {error}", index + 1));
+                    continued.clear();
+                    count += 1;
+                }
+            }
+            assert!(
+                !in_shell && count > 0,
+                "{name}: missing/unfinished examples"
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_contract_is_visible_in_generated_help() {
+        use clap::CommandFactory;
+        let mut command = Cli::command();
+        let help = command.render_long_help().to_string();
+        for required in [
+            "no saved default",
+            "not authentication",
+            "<workspace>/<slug>",
+        ] {
+            assert!(help.contains(required), "missing {required}: {help}");
+        }
+        let help = command
+            .find_subcommand_mut("workspace")
+            .unwrap()
+            .render_long_help()
+            .to_string();
+        for required in ["canonical", "overlapping", "immutable", "never deletes"] {
+            assert!(help.contains(required), "missing {required}: {help}");
+        }
+        let help = command
+            .find_subcommand_mut("dispatcher")
+            .unwrap()
+            .render_long_help()
+            .to_string();
+        for required in [
+            "both Task and Grilling",
+            "Grilling cwd",
+            "retained resources",
+            "invalidate",
+        ] {
+            assert!(help.contains(required), "missing {required}: {help}");
         }
     }
 

@@ -1,5 +1,11 @@
 # Herdr V1 adapter socket contract
 
+> Historical research: the Forge-created neutral-root provider container below
+> was superseded by [operator-selected ownership](../../crates/docs/adr/0008-operator-selected-dispatch-workspaces.md).
+> Current [Workspace setup](../workspaces.md) binds an existing Herdr identity per
+> Forge Workspace and supplies explicit cwd for both Task and Grilling launches.
+> Do not use this research sequence as an executable setup guide.
+
 **Question:** What exact provider-neutral contract and Herdr Socket API sequence should Forge use for a V1 Task assignment?
 
 **Decision:** implement one `HerdrAdapter` behind Forge's provider-neutral dispatch port. Forge creates and durably retains one reusable **Forge Dispatch Workspace** at a neutral root under Forge user data. It provisions one dedicated **tab** and **pane** per Assignment in that workspace; the tab cwd is the Assignment's prepared Task Managed Worktree, so Pi starts there. Every external call is made by the Forge daemon, not by the CLI.

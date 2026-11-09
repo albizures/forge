@@ -6,6 +6,9 @@ use forge_rpc::{
 use jsonrpsee::http_client::HttpClientBuilder;
 
 #[derive(Debug, Args)]
+#[command(
+    after_long_help = "A Forge Workspace has a fixed canonical filesystem root, distinct from a Herdr terminal container. Equal or overlapping roots (including symlink aliases) are rejected. IDs and roots are immutable; names are editable. Projects must be main Git checkouts at or below the root, outside .forge/worktrees. Removal requires no Projects, Records, Assignments, retained resources or dispatch configuration; it never deletes files or Herdr containers. Root relocation and Project reparenting are unavailable."
+)]
 pub struct WorkspaceArgs {
     #[command(subcommand)]
     command: WorkspaceCommand,
