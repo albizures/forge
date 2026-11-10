@@ -173,28 +173,12 @@ Forge’s scheduling and dispatch application service that automatically selects
 _Avoid_: agent dispatcher, Herdr dispatcher
 
 **Assignment Capability**:
-An opaque, revocable credential Forge issues for one open Agent Assignment. It authorizes that Assignment's bounded reads, subscriptions and own-Record actions through the Forge daemon; it does not protect against a hostile process running as the same OS user.
+An opaque, revocable credential Forge issues for one open Agent Assignment. It authorizes that Assignment's bounded reads and own-Record actions through the Forge daemon; it does not protect against a hostile process running as the same OS user.
 _Avoid_: agent token, agent credential
 
 **Assignment Capability Delivery**:
 The session-scoped endpoint, Assignment Identifier, and owner-only secret-file path through which Forge makes an Assignment Capability available to its bound Agent. The capability secret itself is not placed in the Agent's prompt or environment.
 _Avoid_: capability injection, agent token environment
-
-**Record Update Subscription**:
-A durable, leased request owned and authorized by one Agent Assignment to be notified when matching Record Updates are written for explicitly named Records. It survives a transient delivery-connection loss but is removed when its lease expires or its owning Agent Assignment is retired.
-_Avoid_: event subscription, agent session subscription
-
-**Subscription Delivery**:
-The connection-scoped transport of a Record Update Subscription's notifications. V1 uses server-sent events behind a transport adapter so a future transport may replace it without changing subscription semantics. Notifications use a compact Record Update envelope and are at-least-once; subscribers reconcile from Forge's authoritative reads.
-_Avoid_: subscription, event stream
-
-**Subscription Cursor**:
-The global Record Update Identifier a subscriber supplies to resume a Record Update Subscription. Forge replays matching later updates before live delivery; an invalid or unavailable cursor requires the subscriber to reconcile.
-_Avoid_: offset, checkpoint
-
-**Subscription Lease**:
-The renewable time-bounded validity of a Record Update Subscription. Opening Subscription Delivery validates but does not renew the lease.
-_Avoid_: heartbeat, connection timeout
 
 **Assignment Context**:
 The bounded Forge information an Agent Assignment may read, combining its bound execution identity with live assigned-Record, Forge Workspace and Project Scope information and directly related Records. Related visibility includes one-hop parent/child, prerequisite/dependent and generated-by relationships in either direction, but neither transitive traversal nor shared-membership access.

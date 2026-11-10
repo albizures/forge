@@ -290,11 +290,6 @@ enum AssignmentCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Manage authenticated Record update subscriptions.
-    Subscription {
-        #[command(subcommand)]
-        command: AssignmentSubscriptionCommand,
-    },
     /// Complete the assigned Record; Grilling requires conversational confirmation.
     Done(AssignmentDoneArgs),
     /// Comment on the Record bound to this Assignment.
@@ -308,39 +303,6 @@ enum AssignmentCommand {
     Comments(AssignmentPageArgs),
     /// Read a bounded page of history on an authorized Record.
     History(AssignmentPageArgs),
-}
-#[derive(Debug, Subcommand)]
-enum AssignmentSubscriptionCommand {
-    /// Stream notifications as hints; reread authoritative state after events.
-    Events {
-        id: u64,
-        #[arg(long)]
-        after: Option<u64>,
-        /// Emit one versioned JSON object per event.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Renew an existing subscription lease.
-    Renew {
-        id: u64,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Delete an existing subscription.
-    Delete {
-        id: u64,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Subscribe to authorized Record IDs.
-    Create {
-        #[arg(required = true)]
-        ids: Vec<u64>,
-        #[arg(long = "kind")]
-        kinds: Vec<String>,
-        #[arg(long)]
-        json: bool,
-    },
 }
 #[derive(Debug, Args)]
 struct AssignmentDoneArgs {
@@ -1034,36 +996,9 @@ fn render_assignment_result(result: Result<serde_json::Value, String>, json: boo
     }
 }
 
-async fn assignment_subscription(command: AssignmentSubscriptionCommand) -> i32 {
-    match command {
-        AssignmentSubscriptionCommand::Events { id, after, json } => {
-            match forge_cli::assignment_subscription_events(id, after, json).await {
-                Ok(()) => 0,
-                Err(error) => {
-                    eprintln!("forge assignment subscription events: {error}");
-                    1
-                }
-            }
-        }
-        AssignmentSubscriptionCommand::Renew { id, json } => render_assignment_result(
-            forge_cli::assignment_subscription_manage(id, false).await,
-            json,
-        ),
-        AssignmentSubscriptionCommand::Delete { id, json } => render_assignment_result(
-            forge_cli::assignment_subscription_manage(id, true).await,
-            json,
-        ),
-        AssignmentSubscriptionCommand::Create { ids, kinds, json } => render_assignment_result(
-            forge_cli::assignment_subscription_create(ids, kinds).await,
-            json,
-        ),
-    }
-}
-
 async fn assignment(command: AssignmentCommand) -> i32 {
     let history = matches!(&command, AssignmentCommand::History(_));
     match command {
-        AssignmentCommand::Subscription { command } => assignment_subscription(command).await,
         AssignmentCommand::Done(args) => {
             let human = args.confirmation.zip(args.agreed_outcome);
             render_assignment_result(

@@ -13,7 +13,7 @@ async fn assignment_rpc(
 
 #[tokio::test]
 async fn production_assignment_routes_authenticate_and_reject_spoofed_fields() {
-    let (fixture, assignment, _, _, neighbor) = subscription_test_daemon();
+    let (fixture, assignment, neighbor) = assignment_test_daemon();
     let root = fixture.database_path.with_extension("rpc-secrets");
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(root.join(&assignment), "actual-secret\n").unwrap();
@@ -90,7 +90,7 @@ fn verify_assignment_graph(
 #[test]
 fn assignment_read_graph_is_one_hop_for_tasks_and_grillings() {
     for kind in [RecordType::Task, RecordType::Grilling] {
-        let (fixture, _, _, _, _) = subscription_test_daemon();
+        let (fixture, _, _) = assignment_test_daemon();
         let store = SqliteProjectRepository::open(&fixture.database_path).unwrap();
         let open = |kind, body: &str| {
             store
@@ -191,7 +191,7 @@ fn assignment_read_graph_is_one_hop_for_tasks_and_grillings() {
 
 #[test]
 fn assignment_application_authenticates_real_secret_and_rechecks_graph() {
-    let (fixture, assignment, _, _, neighbor) = subscription_test_daemon();
+    let (fixture, assignment, neighbor) = assignment_test_daemon();
     let root = fixture.database_path.with_extension("actions-secrets");
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(root.join(&assignment), "actual-secret\n").unwrap();
@@ -257,7 +257,7 @@ fn assignment_application_authenticates_real_secret_and_rechecks_graph() {
 
 #[test]
 fn authenticated_grilling_bootstrap_separates_bound_identity_and_live_context() {
-    let (fixture, _, _, _, _) = subscription_test_daemon();
+    let (fixture, _, _) = assignment_test_daemon();
     let store = SqliteProjectRepository::open(&fixture.database_path).unwrap();
     let grilling = store
         .open_typed_record(&NewTypedRecord {
@@ -339,7 +339,7 @@ fn authenticated_grilling_bootstrap_separates_bound_identity_and_live_context() 
 
 #[test]
 fn authenticated_pages_are_complete_bounded_and_cursor_bound() {
-    let (fixture, assignment, _, _, neighbor) = subscription_test_daemon();
+    let (fixture, assignment, neighbor) = assignment_test_daemon();
     let root = fixture.database_path.with_extension("page-secrets");
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(root.join(&assignment), "actual-secret\n").unwrap();
@@ -409,7 +409,7 @@ fn authenticated_pages_are_complete_bounded_and_cursor_bound() {
 
 #[test]
 fn authenticated_actions_require_acknowledgement_and_normal_lifecycle_validation() {
-    let (fixture, assignment, _, _, prerequisite) = subscription_test_daemon();
+    let (fixture, assignment, prerequisite) = assignment_test_daemon();
     let root = fixture.database_path.with_extension("lifecycle-secrets");
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(root.join(&assignment), "actual-secret\n").unwrap();

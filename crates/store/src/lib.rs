@@ -11,12 +11,10 @@ use forge_app::{
     AgentDispatchRepository, AgentProfile, AssignmentAuthorizationAudit,
     AssignmentAuthorizationOperation, AssignmentAuthorizationOutcome, DispatchWorkspace,
     ManagedWorktreeRepository, NewAgentAssignment, NewAgentAssignmentResource, NewRecord,
-    NewRecordUpdateSubscription, NewTypedRecord, Project, ProjectRepository, Record, RecordComment,
-    RecordCommentId, RecordListFilter, RecordRelationship, RecordRelationshipKind,
-    RecordRepository, RecordStatus, RecordType, RecordUpdate, RecordUpdateEnvelope, RecordUpdateId,
-    RecordUpdateKind, RecordUpdateKindFilter, RecordUpdateSubscription, RecordUpdateSubscriptionId,
-    RecordUpdateSubscriptionRepository, RegistrationError, TaskKind, WorktreeClaim,
-    WorktreeClaimState, is_worktree_eligible, managed_worktree_path,
+    NewTypedRecord, Project, ProjectRepository, Record, RecordComment, RecordCommentId,
+    RecordListFilter, RecordRelationship, RecordRelationshipKind, RecordRepository, RecordStatus,
+    RecordType, RecordUpdate, RecordUpdateId, RecordUpdateKind, RegistrationError, TaskKind,
+    WorktreeClaim, WorktreeClaimState, is_worktree_eligible, managed_worktree_path,
 };
 use rusqlite::{Connection, ErrorCode, OptionalExtension, params};
 
@@ -103,29 +101,10 @@ impl SqliteProjectRepository {
                 author TEXT,
                 body TEXT NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS record_update_subscriptions (
-                id INTEGER PRIMARY KEY NOT NULL,
-                assignment_id TEXT NOT NULL REFERENCES agent_assignments(id),
-                target_key TEXT NOT NULL,
-                filter_key TEXT NOT NULL,
-                start_cursor INTEGER NOT NULL,
-                lease_expires_at_millis INTEGER NOT NULL,
-                UNIQUE (assignment_id, target_key, filter_key)
-            );
-            CREATE TABLE IF NOT EXISTS record_update_subscription_targets (
-                subscription_id INTEGER NOT NULL REFERENCES record_update_subscriptions(id) ON DELETE CASCADE,
-                record_id INTEGER NOT NULL REFERENCES records(id),
-                PRIMARY KEY (subscription_id, record_id)
-            );
-            CREATE TABLE IF NOT EXISTS record_update_subscription_filters (
-                subscription_id INTEGER NOT NULL REFERENCES record_update_subscriptions(id) ON DELETE CASCADE,
-                kind TEXT NOT NULL,
-                PRIMARY KEY (subscription_id, kind)
-            );
-            CREATE INDEX IF NOT EXISTS record_updates_global_replay
-                ON record_updates(id);
-            CREATE INDEX IF NOT EXISTS record_update_subscriptions_expiry
-                ON record_update_subscriptions(lease_expires_at_millis);
+            DROP TABLE IF EXISTS record_update_subscription_targets;
+            DROP TABLE IF EXISTS record_update_subscription_filters;
+            DROP TABLE IF EXISTS record_update_subscriptions;
+            DROP INDEX IF EXISTS record_updates_global_replay;
             CREATE TABLE IF NOT EXISTS agent_profiles (
                 record_type TEXT NOT NULL CHECK (record_type IN ('spec', 'task', 'grilling')),
                 revision INTEGER NOT NULL CHECK (revision > 0),
@@ -183,7 +162,7 @@ impl SqliteProjectRepository {
                 assignment_id TEXT NOT NULL REFERENCES agent_assignments(id),
                 capability_id TEXT NOT NULL,
                 created_at_millis INTEGER NOT NULL,
-                operation TEXT NOT NULL CHECK (operation IN ('read-context', 'add-comment', 'complete-task', 'start-task', 'create-subscription', 'renew-subscription', 'delete-subscription')),
+                operation TEXT NOT NULL CHECK (operation IN ('read-context', 'add-comment', 'complete-task', 'start-task', 'acknowledge')),
                 target_record_id INTEGER NOT NULL REFERENCES records(id),
                 outcome TEXT NOT NULL CHECK (outcome IN ('allowed', 'denied')),
                 reason TEXT NOT NULL,
@@ -1655,25 +1634,28 @@ fn migrate_assignment_authorization_audit_schema(
             |row| row.get(0),
         )
         .map_err(storage_error)?;
-    if schema.contains("acknowledge") {
+    if schema.contains("acknowledge") && !schema.contains("subscription") {
         return Ok(());
     }
-    connection.execute_batch(
+    let transaction = connection.unchecked_transaction().map_err(storage_error)?;
+    transaction.execute_batch(
         "ALTER TABLE assignment_authorization_audits RENAME TO assignment_authorization_audits_old;
         CREATE TABLE assignment_authorization_audits (
             id INTEGER PRIMARY KEY NOT NULL,
             assignment_id TEXT NOT NULL REFERENCES agent_assignments(id),
             capability_id TEXT NOT NULL,
             created_at_millis INTEGER NOT NULL,
-            operation TEXT NOT NULL CHECK (operation IN ('read-context', 'add-comment', 'complete-task', 'start-task', 'acknowledge', 'create-subscription', 'renew-subscription', 'delete-subscription')),
+            operation TEXT NOT NULL CHECK (operation IN ('read-context', 'add-comment', 'complete-task', 'start-task', 'acknowledge')),
             target_record_id INTEGER NOT NULL REFERENCES records(id),
             outcome TEXT NOT NULL CHECK (outcome IN ('allowed', 'denied')),
             reason TEXT NOT NULL,
             correlation_id TEXT NOT NULL
         );
-        INSERT INTO assignment_authorization_audits SELECT * FROM assignment_authorization_audits_old;
+        INSERT INTO assignment_authorization_audits SELECT * FROM assignment_authorization_audits_old
+            WHERE operation NOT IN ('create-subscription', 'renew-subscription', 'delete-subscription');
         DROP TABLE assignment_authorization_audits_old;",
-    ).map_err(storage_error)
+    ).map_err(storage_error)?;
+    transaction.commit().map_err(storage_error)
 }
 
 fn migrate_agent_profile_schema(connection: &Connection) -> Result<(), RegistrationError> {
@@ -1888,6 +1870,21 @@ fn effective_limit(connection: &Connection, project_slug: &str) -> Result<u16, R
 }
 
 impl AgentDispatchRepository for SqliteProjectRepository {
+    fn record_update_head(&self) -> Result<RecordUpdateId, RegistrationError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        connection
+            .query_row(
+                "SELECT COALESCE(MAX(id), 0) FROM record_updates",
+                [],
+                |row| row.get::<_, i64>(0).map(i64::cast_unsigned),
+            )
+            .map(RecordUpdateId)
+            .map_err(storage_error)
+    }
+
     fn dispatch_hold(
         &self,
         record_id: u64,
@@ -2440,12 +2437,6 @@ impl AgentDispatchRepository for SqliteProjectRepository {
         if transaction.execute("UPDATE agent_assignments SET closed_at_millis = ?1, closure_reason = ?2 WHERE id = ?3 AND closed_at_millis IS NULL", params![closed_at_millis, reason_name, assignment_id]).map_err(storage_error)? != 1 {
             return Err(RegistrationError::new("assignment-not-open", "Agent Assignment is absent or already closed"));
         }
-        transaction
-            .execute(
-                "DELETE FROM record_update_subscriptions WHERE assignment_id = ?1",
-                [assignment_id],
-            )
-            .map_err(storage_error)?;
         let assignment = transaction.query_row("SELECT id, record_id, project_slug, profile_record_type, profile_revision, attempt_number, claimed_at_millis, state, closed_at_millis, closure_reason, state_changed_at_millis, next_retry_at_millis, retry_count FROM agent_assignments WHERE id = ?1", [assignment_id], |row| agent_assignment_from_row(row, &transaction)).map_err(storage_error)?;
         transaction.commit().map_err(storage_error)?;
         Ok(assignment)
@@ -2466,14 +2457,6 @@ impl AgentDispatchRepository for SqliteProjectRepository {
             "UPDATE agent_assignments SET closed_at_millis = ?1, closure_reason = ?2 WHERE id = ?3 AND state = ?4 AND closed_at_millis IS NULL",
             params![now_millis()?, closure_reason_name(reason), assignment_id, assignment_state_name(expected)],
         ).map_err(storage_error)?;
-        if changed == 1 {
-            transaction
-                .execute(
-                    "DELETE FROM record_update_subscriptions WHERE assignment_id = ?1",
-                    [assignment_id],
-                )
-                .map_err(storage_error)?;
-        }
         let assignment = if changed == 1 {
             Some(transaction.query_row("SELECT id, record_id, project_slug, profile_record_type, profile_revision, attempt_number, claimed_at_millis, state, closed_at_millis, closure_reason, state_changed_at_millis, next_retry_at_millis, retry_count FROM agent_assignments WHERE id = ?1", [assignment_id], |row| agent_assignment_from_row(row, &transaction)).map_err(storage_error)?)
         } else {
@@ -2699,9 +2682,6 @@ impl AgentDispatchRepository for SqliteProjectRepository {
             AssignmentAuthorizationOperation::CompleteTask => "complete-task",
             AssignmentAuthorizationOperation::StartTask => "start-task",
             AssignmentAuthorizationOperation::Acknowledge => "acknowledge",
-            AssignmentAuthorizationOperation::CreateSubscription => "create-subscription",
-            AssignmentAuthorizationOperation::RenewSubscription => "renew-subscription",
-            AssignmentAuthorizationOperation::DeleteSubscription => "delete-subscription",
         };
         let outcome = match audit.outcome {
             AssignmentAuthorizationOutcome::Allowed => "allowed",
@@ -2721,7 +2701,7 @@ impl AgentDispatchRepository for SqliteProjectRepository {
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
         connection.prepare("SELECT assignment_id, capability_id, created_at_millis, operation, target_record_id, outcome, reason, correlation_id FROM assignment_authorization_audits WHERE assignment_id = ?1 ORDER BY id").map_err(storage_error)?
             .query_map([assignment_id], |row| {
-                let operation = match row.get::<_, String>(3)?.as_str() { "read-context" => AssignmentAuthorizationOperation::ReadContext, "add-comment" => AssignmentAuthorizationOperation::AddComment, "complete-task" => AssignmentAuthorizationOperation::CompleteTask, "start-task" => AssignmentAuthorizationOperation::StartTask, "acknowledge" => AssignmentAuthorizationOperation::Acknowledge, "create-subscription" => AssignmentAuthorizationOperation::CreateSubscription, "renew-subscription" => AssignmentAuthorizationOperation::RenewSubscription, "delete-subscription" => AssignmentAuthorizationOperation::DeleteSubscription, _ => return Err(rusqlite::Error::InvalidQuery) };
+                let operation = match row.get::<_, String>(3)?.as_str() { "read-context" => AssignmentAuthorizationOperation::ReadContext, "add-comment" => AssignmentAuthorizationOperation::AddComment, "complete-task" => AssignmentAuthorizationOperation::CompleteTask, "start-task" => AssignmentAuthorizationOperation::StartTask, "acknowledge" => AssignmentAuthorizationOperation::Acknowledge, _ => return Err(rusqlite::Error::InvalidQuery) };
                 let outcome = match row.get::<_, String>(5)?.as_str() { "allowed" => AssignmentAuthorizationOutcome::Allowed, "denied" => AssignmentAuthorizationOutcome::Denied, _ => return Err(rusqlite::Error::InvalidQuery) };
                 Ok(AssignmentAuthorizationAudit { assignment_id: row.get(0)?, capability_id: row.get(1)?, created_at_millis: row.get::<_, i64>(2)?.cast_unsigned(), operation, target_record_id: row.get::<_, i64>(4)?.cast_unsigned(), outcome, reason: row.get(6)?, correlation_id: row.get(7)? })
             }).map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)
@@ -3086,278 +3066,6 @@ impl AgentDispatchRepository for SqliteProjectRepository {
     }
 }
 
-impl RecordUpdateSubscriptionRepository for SqliteProjectRepository {
-    fn create_record_update_subscription(
-        &self,
-        subscription: &NewRecordUpdateSubscription,
-    ) -> Result<RecordUpdateSubscription, RegistrationError> {
-        let targets = normalized_targets(&subscription.target_record_ids)?;
-        let filters = normalized_filters(&subscription.kind_filters);
-        let target_key = targets
-            .iter()
-            .map(u64::to_string)
-            .collect::<Vec<_>>()
-            .join(",");
-        let filter_key = filters
-            .iter()
-            .map(|filter| filter_name(*filter))
-            .collect::<Vec<_>>()
-            .join(",");
-        let now = now_millis()?;
-        let expires = now.checked_add(SUBSCRIPTION_LEASE_MILLIS).ok_or_else(|| {
-            RegistrationError::new("storage", "subscription lease is out of range")
-        })?;
-        let mut connection = self
-            .connection
-            .lock()
-            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
-        let transaction = connection.transaction().map_err(storage_error)?;
-        transaction
-            .execute(
-                "DELETE FROM record_update_subscriptions WHERE lease_expires_at_millis <= ?1",
-                [now],
-            )
-            .map_err(storage_error)?;
-        let assignment_exists: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM agent_assignments WHERE id = ?1 AND closed_at_millis IS NULL)", [&subscription.assignment_id], |row| row.get(0)).map_err(storage_error)?;
-        if !assignment_exists {
-            return Err(RegistrationError::new(
-                "assignment-not-found",
-                "Assignment does not exist or is closed",
-            ));
-        }
-        if let Some(existing) = transaction.query_row(
-            "SELECT id, start_cursor, lease_expires_at_millis FROM record_update_subscriptions WHERE assignment_id = ?1 AND target_key = ?2 AND filter_key = ?3",
-            params![subscription.assignment_id, target_key, filter_key],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
-        ).optional().map_err(storage_error)? {
-            let result = subscription_from_parts(existing.0.cast_unsigned(), subscription.assignment_id.clone(), targets, filters, existing.1.cast_unsigned(), existing.2.cast_unsigned());
-            transaction.commit().map_err(storage_error)?;
-            return Ok(result);
-        }
-        let cursor: i64 = transaction
-            .query_row(
-                "SELECT COALESCE(MAX(id), 0) FROM record_updates",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(storage_error)?;
-        transaction.execute("INSERT INTO record_update_subscriptions (assignment_id, target_key, filter_key, start_cursor, lease_expires_at_millis) VALUES (?1, ?2, ?3, ?4, ?5)", params![subscription.assignment_id, target_key, filter_key, cursor, expires]).map_err(storage_error)?;
-        let id = transaction.last_insert_rowid().cast_unsigned();
-        for target in &targets {
-            transaction.execute("INSERT INTO record_update_subscription_targets (subscription_id, record_id) VALUES (?1, ?2)", params![id.cast_signed(), target.cast_signed()]).map_err(storage_error)?;
-        }
-        for filter in &filters {
-            transaction.execute("INSERT INTO record_update_subscription_filters (subscription_id, kind) VALUES (?1, ?2)", params![id.cast_signed(), filter_name(*filter)]).map_err(storage_error)?;
-        }
-        transaction.commit().map_err(storage_error)?;
-        Ok(subscription_from_parts(
-            id,
-            subscription.assignment_id.clone(),
-            targets,
-            filters,
-            cursor.cast_unsigned(),
-            expires.cast_unsigned(),
-        ))
-    }
-
-    fn record_update_subscription(
-        &self,
-        id: RecordUpdateSubscriptionId,
-    ) -> Result<RecordUpdateSubscription, RegistrationError> {
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
-        let now = now_millis()?;
-        match load_subscription(&connection, id, now) {
-            Ok(subscription) => Ok(subscription),
-            Err(error) if error.code == "subscription-not-found" => {
-                let expired: bool = connection
-                    .query_row(
-                        "SELECT EXISTS(SELECT 1 FROM record_update_subscriptions WHERE id = ?1 AND lease_expires_at_millis <= ?2)",
-                        params![id.0.cast_signed(), now],
-                        |row| row.get(0),
-                    )
-                    .map_err(storage_error)?;
-                if expired {
-                    Err(RegistrationError::new(
-                        "subscription-expired",
-                        "Subscription lease has expired",
-                    ))
-                } else {
-                    Err(error)
-                }
-            }
-            Err(error) => Err(error),
-        }
-    }
-
-    fn renew_record_update_subscription(
-        &self,
-        id: RecordUpdateSubscriptionId,
-    ) -> Result<RecordUpdateSubscription, RegistrationError> {
-        let now = now_millis()?;
-        let expires = now.checked_add(SUBSCRIPTION_LEASE_MILLIS).ok_or_else(|| {
-            RegistrationError::new("storage", "subscription lease is out of range")
-        })?;
-        let mut connection = self
-            .connection
-            .lock()
-            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
-        let transaction = connection.transaction().map_err(storage_error)?;
-        let changed = transaction.execute("UPDATE record_update_subscriptions SET lease_expires_at_millis = ?1 WHERE id = ?2 AND lease_expires_at_millis > ?3", params![expires, id.0.cast_signed(), now]).map_err(storage_error)?;
-        if changed == 0 {
-            return Err(RegistrationError::new(
-                "subscription-not-found",
-                "Subscription does not exist or has expired",
-            ));
-        }
-        let subscription = load_subscription(&transaction, id, now)?;
-        transaction.commit().map_err(storage_error)?;
-        Ok(subscription)
-    }
-
-    fn delete_record_update_subscription(
-        &self,
-        id: RecordUpdateSubscriptionId,
-    ) -> Result<(), RegistrationError> {
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
-        let deleted = connection
-            .execute(
-                "DELETE FROM record_update_subscriptions WHERE id = ?1",
-                [id.0.cast_signed()],
-            )
-            .map_err(storage_error)?;
-        if deleted == 0 {
-            return Err(RegistrationError::new(
-                "subscription-not-found",
-                "Subscription does not exist",
-            ));
-        }
-        Ok(())
-    }
-
-    fn record_update_head(&self) -> Result<RecordUpdateId, RegistrationError> {
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
-        connection
-            .query_row(
-                "SELECT COALESCE(MAX(id), 0) FROM record_updates",
-                [],
-                |row| row.get::<_, i64>(0).map(i64::cast_unsigned),
-            )
-            .map(RecordUpdateId)
-            .map_err(storage_error)
-    }
-
-    fn replay_record_updates(
-        &self,
-        id: RecordUpdateSubscriptionId,
-        after: RecordUpdateId,
-    ) -> Result<Vec<RecordUpdateEnvelope>, RegistrationError> {
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
-        let subscription = load_subscription(&connection, id, now_millis()?)?;
-        let head = connection
-            .query_row(
-                "SELECT COALESCE(MAX(id), 0) FROM record_updates",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .map_err(storage_error)?;
-        if after < subscription.start_cursor || after.0 > head.cast_unsigned() {
-            return Err(RegistrationError::new(
-                "invalid-cursor",
-                "cursor lies outside the Subscription replay interval",
-            ));
-        }
-        // Filter and bound in SQL: unrelated global traffic must not cause an
-        // unbounded allocation or force reconciliation for a quiet subscription.
-        let updates = connection.prepare("SELECT id, record_id, created_at_millis, kind, from_status, to_status, related_record_id, comment_id, relationship_kind FROM record_updates u WHERE id > ?1 AND EXISTS (SELECT 1 FROM record_update_subscription_targets t WHERE t.subscription_id = ?2 AND t.record_id = u.record_id) AND (NOT EXISTS (SELECT 1 FROM record_update_subscription_filters f WHERE f.subscription_id = ?2) OR EXISTS (SELECT 1 FROM record_update_subscription_filters f WHERE f.subscription_id = ?2 AND f.kind = u.kind)) ORDER BY id ASC LIMIT 257").map_err(storage_error)?.query_map(params![after.0.cast_signed(), id.0.cast_signed()], update_envelope_from_row).map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)?;
-        if updates.len() > 256 {
-            return Err(RegistrationError::new(
-                "invalid-cursor",
-                "replay exceeds 256 notifications; authoritative reconciliation required",
-            ));
-        }
-        Ok(updates)
-    }
-}
-
-const SUBSCRIPTION_LEASE_MILLIS: i64 = 30 * 60 * 1000;
-
-fn normalized_targets(targets: &[u64]) -> Result<Vec<u64>, RegistrationError> {
-    let mut normalized = targets.to_vec();
-    normalized.sort_unstable();
-    normalized.dedup();
-    if normalized.is_empty() {
-        return Err(RegistrationError::new(
-            "invalid-subscription-targets",
-            "Subscription must select at least one Record",
-        ));
-    }
-    Ok(normalized)
-}
-fn normalized_filters(filters: &[RecordUpdateKindFilter]) -> Vec<RecordUpdateKindFilter> {
-    let mut normalized = filters.to_vec();
-    normalized.sort_unstable();
-    normalized.dedup();
-    normalized
-}
-fn filter_name(filter: RecordUpdateKindFilter) -> &'static str {
-    match filter {
-        RecordUpdateKindFilter::Created => "created",
-        RecordUpdateKindFilter::BodyEdited => "body-edited",
-        RecordUpdateKindFilter::StatusTransition => "status-transition",
-        RecordUpdateKindFilter::RelationshipAdded => "relationship-added",
-        RecordUpdateKindFilter::RelationshipRemoved => "relationship-removed",
-        RecordUpdateKindFilter::CommentAdded => "comment-added",
-        RecordUpdateKindFilter::CommentDeleted => "comment-deleted",
-    }
-}
-fn subscription_from_parts(
-    id: u64,
-    assignment_id: String,
-    target_record_ids: Vec<u64>,
-    kind_filters: Vec<RecordUpdateKindFilter>,
-    start_cursor: u64,
-    lease_expires_at_millis: u64,
-) -> RecordUpdateSubscription {
-    RecordUpdateSubscription {
-        id: RecordUpdateSubscriptionId(id),
-        assignment_id,
-        target_record_ids,
-        kind_filters,
-        start_cursor: RecordUpdateId(start_cursor),
-        lease_expires_at_millis,
-    }
-}
-
-fn load_subscription(
-    connection: &Connection,
-    id: RecordUpdateSubscriptionId,
-    now: i64,
-) -> Result<RecordUpdateSubscription, RegistrationError> {
-    let (assignment_id, start_cursor, expires): (String, i64, i64) = connection.query_row("SELECT subscription.assignment_id, subscription.start_cursor, subscription.lease_expires_at_millis FROM record_update_subscriptions subscription JOIN agent_assignments assignment ON assignment.id = subscription.assignment_id WHERE subscription.id = ?1 AND subscription.lease_expires_at_millis > ?2 AND assignment.closed_at_millis IS NULL", params![id.0.cast_signed(), now], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).optional().map_err(storage_error)?.ok_or_else(|| RegistrationError::new("subscription-not-found", "Subscription does not exist or has expired"))?;
-    let targets = connection.prepare("SELECT record_id FROM record_update_subscription_targets WHERE subscription_id = ?1 ORDER BY record_id").map_err(storage_error)?.query_map([id.0.cast_signed()], |row| row.get::<_, i64>(0)).map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)?.into_iter().map(i64::cast_unsigned).collect();
-    let filters = connection.prepare("SELECT kind FROM record_update_subscription_filters WHERE subscription_id = ?1 ORDER BY kind").map_err(storage_error)?.query_map([id.0.cast_signed()], |row| row.get::<_, String>(0)).map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)?.into_iter().map(|kind| match kind.as_str() { "created" => Ok(RecordUpdateKindFilter::Created), "body-edited" => Ok(RecordUpdateKindFilter::BodyEdited), "status-transition" => Ok(RecordUpdateKindFilter::StatusTransition), "relationship-added" => Ok(RecordUpdateKindFilter::RelationshipAdded), "relationship-removed" => Ok(RecordUpdateKindFilter::RelationshipRemoved), "comment-added" => Ok(RecordUpdateKindFilter::CommentAdded), "comment-deleted" => Ok(RecordUpdateKindFilter::CommentDeleted), _ => Err(RegistrationError::new("storage", "Subscription has an invalid update filter")) }).collect::<Result<Vec<_>, _>>()?;
-    Ok(subscription_from_parts(
-        id.0,
-        assignment_id,
-        targets,
-        filters,
-        start_cursor.cast_unsigned(),
-        expires.cast_unsigned(),
-    ))
-}
-
 fn relationship_kind_name(kind: RecordRelationshipKind) -> &'static str {
     match kind {
         RecordRelationshipKind::ParentChild => "parent-child",
@@ -3552,13 +3260,6 @@ fn insert_update(
         )
         .map_err(storage_error)?;
     Ok(())
-}
-
-fn update_envelope_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RecordUpdateEnvelope> {
-    Ok(RecordUpdateEnvelope {
-        record_id: row.get::<_, i64>(1)?.cast_unsigned(),
-        update: update_from_row_at(row, 0, 2)?,
-    })
 }
 
 fn update_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RecordUpdate> {
@@ -4085,6 +3786,7 @@ fn storage_error(error: rusqlite::Error) -> RegistrationError {
 
 #[cfg(test)]
 mod tests {
+    include!("subscription_removal_tests.rs");
     use super::SqliteProjectRepository as Repository;
     use forge_app::{RegistrationError, WorkspaceRepository};
 
@@ -4123,13 +3825,11 @@ mod tests {
     }
     use forge_app::{
         AgentDispatchRepository, AssignmentAuthorizationOperation, ManagedWorktreeRepository,
-        NewAgentAssignment, NewAgentAssignmentResource, NewRecord, NewRecordUpdateSubscription,
-        NewTypedRecord, Project, ProjectRepository, Record, RecordListFilter,
-        RecordRelationshipKind, RecordRepository, RecordStatus, RecordType, RecordUpdateKind,
-        RecordUpdateKindFilter, RecordUpdateSubscriptionRepository, TaskKind,
-        WorkspaceDispatchRepository, assignment_acknowledge, assignment_add_comment,
-        assignment_complete_task, assignment_context, assignment_create_record_update_subscription,
-        assignment_start_task,
+        NewAgentAssignment, NewAgentAssignmentResource, NewRecord, NewTypedRecord, Project,
+        ProjectRepository, Record, RecordListFilter, RecordRelationshipKind, RecordRepository,
+        RecordStatus, RecordType, RecordUpdateKind, TaskKind, WorkspaceDispatchRepository,
+        assignment_acknowledge, assignment_add_comment, assignment_complete_task,
+        assignment_context, assignment_start_task,
     };
     use std::{
         path::{Path, PathBuf},
@@ -5111,101 +4811,8 @@ mod tests {
     }
 
     #[test]
-    fn durable_subscriptions_are_idempotent_and_replay_selected_updates_in_global_order() {
-        let store = SqliteProjectRepository::in_memory().unwrap();
-        store.register(&project("alpha", "/repos/alpha")).unwrap();
-        let task = store
-            .open_typed_record(&NewTypedRecord {
-                record_type: RecordType::Task,
-                task_kind: None,
-                body: "task".into(),
-                project_slugs: vec!["alpha".into()],
-                generated_by_ids: vec![],
-            })
-            .unwrap();
-        let target = store
-            .open_record(&NewRecord {
-                body: "target".into(),
-                project_slugs: vec![],
-                generated_by_ids: vec![],
-            })
-            .unwrap();
-        let other = store
-            .open_record(&NewRecord {
-                body: "other".into(),
-                project_slugs: vec![],
-                generated_by_ids: vec![],
-            })
-            .unwrap();
-        store
-            .create_agent_assignment(&NewAgentAssignment {
-                id: "attempt-1".into(),
-                record_id: task.id,
-                project_slug: "alpha".into(),
-                profile_revision: 1,
-            })
-            .unwrap();
-
-        let request = NewRecordUpdateSubscription {
-            assignment_id: "attempt-1".into(),
-            target_record_ids: vec![target.id, target.id],
-            kind_filters: vec![
-                RecordUpdateKindFilter::BodyEdited,
-                RecordUpdateKindFilter::BodyEdited,
-            ],
-        };
-        let subscription = store.create_record_update_subscription(&request).unwrap();
-        assert_eq!(subscription.target_record_ids, vec![target.id]);
-        assert_eq!(
-            subscription.kind_filters,
-            vec![RecordUpdateKindFilter::BodyEdited]
-        );
-        assert_eq!(
-            store.create_record_update_subscription(&request).unwrap(),
-            subscription
-        );
-
-        store.edit_record(other.id, "unselected").unwrap();
-        store.start_record(target.id).unwrap();
-        store.edit_record(target.id, "selected").unwrap();
-        assert!(store.record_update_head().unwrap() > subscription.start_cursor);
-        let replay = store
-            .replay_record_updates(subscription.id, subscription.start_cursor)
-            .unwrap();
-        assert_eq!(replay.len(), 1);
-        assert_eq!(replay[0].record_id, target.id);
-        assert!(matches!(
-            replay[0].update.kind,
-            RecordUpdateKind::BodyEdited
-        ));
-        assert!(
-            replay
-                .windows(2)
-                .all(|pair| pair[0].update.id < pair[1].update.id)
-        );
-        assert_eq!(
-            store
-                .replay_record_updates(subscription.id, forge_app::RecordUpdateId(0))
-                .unwrap_err()
-                .code,
-            "invalid-cursor"
-        );
-        store
-            .delete_record_update_subscription(subscription.id)
-            .unwrap();
-        assert_eq!(
-            store
-                .record_update_subscription(subscription.id)
-                .unwrap_err()
-                .code,
-            "subscription-not-found"
-        );
-    }
-
-    #[test]
     #[allow(clippy::too_many_lines)]
-    fn assignment_context_includes_direct_provenance_and_authorizes_only_direct_subscription_targets()
-     {
+    fn assignment_context_includes_only_direct_provenance() {
         let store = SqliteProjectRepository::in_memory().unwrap();
         for (slug, folder) in [
             ("alpha", "/repos/alpha"),
@@ -5221,56 +4828,6 @@ mod tests {
             project_slugs: vec![project_slug.into()],
             generated_by_ids: vec![],
         };
-        let spec = store
-            .open_typed_record(&NewTypedRecord {
-                record_type: RecordType::Spec,
-                task_kind: None,
-                body: "spec".into(),
-                project_slugs: vec!["alpha".into()],
-                generated_by_ids: vec![],
-            })
-            .unwrap();
-        let direct_child = store
-            .open_task_under_spec("direct child", spec.id, None, vec![])
-            .unwrap();
-        let unrelated = store
-            .open_typed_record(&task("unrelated", "alpha"))
-            .unwrap();
-        store
-            .create_agent_assignment(&NewAgentAssignment {
-                id: "spec-owner".into(),
-                record_id: spec.id,
-                project_slug: "alpha".into(),
-                profile_revision: 1,
-            })
-            .unwrap();
-        assert_eq!(
-            assignment_create_record_update_subscription(
-                &store,
-                "spec-owner",
-                "cap-spec-owner",
-                "create-child",
-                vec![direct_child.id],
-                vec![],
-            )
-            .unwrap()
-            .target_record_ids,
-            vec![direct_child.id]
-        );
-        assert_eq!(
-            assignment_create_record_update_subscription(
-                &store,
-                "spec-owner",
-                "cap-spec-owner",
-                "deny-unrelated",
-                vec![unrelated.id],
-                vec![],
-            )
-            .unwrap_err()
-            .code,
-            "assignment-capability-denied"
-        );
-
         let assigned = store.open_typed_record(&task("assigned", "alpha")).unwrap();
         let prerequisite = store
             .open_typed_record(&task("prerequisite", "beta"))
@@ -5353,69 +4910,6 @@ mod tests {
                 .directly_related_records
                 .iter()
                 .any(|record| record.id == transitive_generator.id)
-        );
-
-        let subscription = assignment_create_record_update_subscription(
-            &store,
-            "owner",
-            "cap-owner",
-            "create",
-            vec![prerequisite.id],
-            vec![],
-        )
-        .unwrap();
-        assert_eq!(subscription.target_record_ids, vec![prerequisite.id]);
-        for target in [
-            dependent.id,
-            transitive.id,
-            generator.id,
-            transitive_generator.id,
-        ] {
-            assert_eq!(
-                assignment_create_record_update_subscription(
-                    &store,
-                    "owner",
-                    "cap-owner",
-                    "denied",
-                    vec![target],
-                    vec![]
-                )
-                .unwrap_err()
-                .code,
-                "assignment-capability-denied"
-            );
-        }
-
-        store
-            .unrelate_records(
-                assigned.id,
-                prerequisite.id,
-                RecordRelationshipKind::DependsOn,
-            )
-            .unwrap();
-        assert!(
-            store
-                .replay_record_updates(subscription.id, subscription.start_cursor)
-                .unwrap()
-                .iter()
-                .any(|update| {
-                    update.record_id == prerequisite.id
-                        && matches!(
-                            update.update.kind,
-                            RecordUpdateKind::RelationshipRemoved { related_record_id, .. }
-                                if related_record_id == assigned.id
-                        )
-                })
-        );
-        store
-            .close_agent_assignment("owner", forge_app::AgentAssignmentClosureReason::Retired)
-            .unwrap();
-        assert_eq!(
-            store
-                .record_update_subscription(subscription.id)
-                .unwrap_err()
-                .code,
-            "subscription-not-found"
         );
     }
 

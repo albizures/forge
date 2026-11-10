@@ -45,7 +45,6 @@ impl AssignmentApiServer for Daemon {
         let result = self
             .assignment_session(&request.assignment_id, &request.secret)?
             .bootstrap();
-        self.delivery.publish(&self.application);
         result
             .map(|value| AssignmentBootstrapResponse {
                 schema_version: 1,
@@ -107,7 +106,6 @@ impl AssignmentApiServer for Daemon {
         let result = self
             .assignment_session(&request.assignment_id, &request.secret)?
             .comment(&request.body);
-        self.delivery.publish(&self.application);
         result
             .map(|comment| AssignmentCommentResponse {
                 schema_version: 1,
@@ -119,14 +117,12 @@ impl AssignmentApiServer for Daemon {
         let result = self
             .assignment_session(&request.assignment_id, &request.secret)?
             .start();
-        self.delivery.publish(&self.application);
         self.assignment_record_response(result.map_err(rpc_error)?)
     }
     async fn done(&self, request: AssignmentDoneRequest) -> RpcResult<AssignmentRecordResponse> {
         let result = self
             .assignment_session(&request.assignment_id, &request.secret)?
             .done(request.resolution.as_deref(), request.human.as_ref());
-        self.delivery.publish(&self.application);
         self.assignment_record_response(result.map_err(rpc_error)?)
     }
 }

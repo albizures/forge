@@ -54,7 +54,7 @@ forge assignment bootstrap
 
 Bootstrap reads `FORGE_ASSIGNMENT_ID`, `FORGE_ASSIGNMENT_DAEMON_URL`, and the owner-only file named by `FORGE_ASSIGNMENT_CAPABILITY_SECRET_FILE`. It authenticates, acknowledges, starts the bound Task or Grilling and fetches context before returning separately labelled behavior. If any step fails or is uncertain, stop and report the diagnostic. Keep the capability secret out of prompts, comments, shell arguments, and logs.
 
-Work in the bound execution directory and follow the returned trusted constraints and behavior. Use `forge assignment` for bounded reads, own-Record actions and subscriptions; read [Assignment context](../../docs/assignment-context.md) for commands, scope and Grilling confirmation. Bootstrap's assignment endpoint is separate from ordinary CLI endpoint selection. Do not bypass assignment ownership with a manual `record start` or replace an agent merely because it has not acknowledged.
+Work in the bound execution directory and follow the returned trusted constraints and behavior. Use `forge assignment` for bounded reads and own-Record actions; read [Assignment context](../../docs/assignment-context.md) for commands, scope and Grilling confirmation. Bootstrap's assignment endpoint is separate from ordinary CLI endpoint selection. Do not bypass assignment ownership with a manual `record start` or replace an agent merely because it has not acknowledged.
 
 ## Operators
 

@@ -67,7 +67,7 @@ forge dispatcher assignment-info <assignment-id> --json
 ```
 
 Retirement installs a Dispatch Hold and durable cleanup evidence, closes/revokes
-the Assignment and removes its subscriptions **before** provider cleanup. It
+the Assignment **before** provider cleanup. It
 checks retained ownership identities before destructive requests and verifies
 agent/tab/pane absence afterward. It retains Git/worktree evidence and does not
 delete the operator-selected Herdr Workspace or the Forge Workspace root. Revocation cannot undo external

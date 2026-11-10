@@ -180,40 +180,6 @@ async fn verify_context_route_authentication(daemon: &Daemon, own_id: u64) {
     }
 }
 
-async fn verify_source_independent_subscription_delivery(daemon: &Daemon, own_id: u64) {
-    let created = assignment_rpc(
-        daemon.clone(),
-        "agentSubscription.create",
-        serde_json::json!({"assignment_id":"context-owner", "capability_id":"actual-secret", "correlation_id":"not-authority", "target_record_ids":[own_id], "kind_filters":[]}),
-    ).await;
-    let id = created["result"]["id"].as_u64().unwrap_or_else(|| panic!("{created}"));
-    let manage = serde_json::json!({"assignment_id":"context-owner", "capability_id":"actual-secret", "correlation_id":"not-authority", "subscription_id":id});
-    let renewed = assignment_rpc(daemon.clone(), "agentSubscription.renew", manage.clone()).await;
-    assert!(renewed.get("result").is_some(), "{renewed}");
-    let endpoint = format!("/v1/agent-assignments/context-owner/record-update-subscriptions/{id}/events");
-    let request = axum::http::Request::builder()
-        .uri(endpoint)
-        .header("authorization", "Bearer actual-secret")
-        .extension(axum::extract::ConnectInfo("127.0.0.1:40000".parse::<std::net::SocketAddr>().unwrap()))
-        .body(axum::body::Body::empty()).unwrap();
-    let response = router(daemon.clone()).oneshot(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let mut stream = response.into_body().into_data_stream();
-    stream.next().await.unwrap().unwrap(); // connection control frame
-    let comment = assignment_rpc(daemon.clone(), "assignment.comment", serde_json::json!({"assignmentId":"context-owner", "secret":"actual-secret", "body":"Notification after source deletion"})).await;
-    assert!(comment.get("result").is_some(), "{comment}");
-    let notification = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
-        .await.unwrap().unwrap().unwrap();
-    let text = String::from_utf8(notification.to_vec()).unwrap();
-    assert!(text.contains("record-update"), "{text}");
-    assert_context_redacted(&text, false);
-    let context = assignment_rpc(daemon.clone(), "assignment.context", context_credentials()).await;
-    assert_eq!(context["result"]["record"]["id"], own_id);
-    let deleted = assignment_rpc(daemon.clone(), "agentSubscription.delete", manage).await;
-    assert!(deleted.get("result").is_some(), "{deleted}");
-    assert!(tokio::time::timeout(std::time::Duration::from_secs(1), stream.next()).await.unwrap().is_none());
-}
-
 async fn verify_context_completion(daemon: &Daemon, kind: RecordType) {
     let mut done = context_credentials();
     done["resolution"] = "implemented".into();
@@ -244,7 +210,7 @@ async fn verify_context_completion(daemon: &Daemon, kind: RecordType) {
 async fn persisted_task_and_multi_project_grilling_context_survives_source_deletion_and_restart() {
     use forge_app::{ManagedWorktreeRepository, WorkspaceDispatchRepository};
     for kind in [RecordType::Task, RecordType::Grilling] {
-        let (fixture, _, _, _, _) = subscription_test_daemon();
+        let (fixture, _, _) = assignment_test_daemon();
         let root = fixture.database_path.with_extension("context-secrets");
         let catalog = root.join("PRIVATE-DELIVERY-CATALOG");
         let policy = context_policy_fixture(&catalog);
@@ -297,7 +263,6 @@ async fn persisted_task_and_multi_project_grilling_context_survives_source_delet
         daemon.capability_secret_root = Some(root.clone());
         verify_source_independent_context_routes(&daemon, own.id, &bound).await;
         verify_context_route_authentication(&daemon, own.id).await;
-        verify_source_independent_subscription_delivery(&daemon, own.id).await;
         verify_context_completion(&daemon, kind).await;
         assert!(
             store.dispatch_hold(own.id).unwrap().is_some(),

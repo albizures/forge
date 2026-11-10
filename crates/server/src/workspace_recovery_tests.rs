@@ -122,10 +122,6 @@ fn verify_source_independent_retirement(kind: RecordType) {
     session
         .comment("Post-restart source-independent action")
         .unwrap();
-    let subscription = session
-        .create_subscription(vec![record.id], vec![])
-        .unwrap();
-    session.renew_subscription(subscription.id).unwrap();
     assert_eq!(session.context().unwrap().bound, first.context.bound);
     app.reconcile_agent_dispatch("recovery", 40_000).unwrap();
     assert_eq!(
@@ -140,7 +136,6 @@ fn verify_source_independent_retirement(kind: RecordType) {
 
     app.retire_agent_assignment(&original.id).unwrap();
     assert!(session.context().is_err());
-    assert!(session.subscription(subscription.id).is_err());
     let info = app.agent_assignment_info(&original.id).unwrap();
     assert!(info.assignment.closed_at_millis.is_some());
     assert_eq!(info.assignment.profile, original.profile);

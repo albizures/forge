@@ -2,7 +2,14 @@
 
 - **Status:** Accepted
 - **Date:** 2026-10-25
-- **Decision scope:** Forge dispatch and Pi subscription extension integration
+- **Decision scope:** Forge dispatch and Assignment Capability Delivery
+
+## Current scope
+
+The subscription extension and its tools have been removed. References to that
+consumer below are historical; protected Assignment Capability Delivery remains
+accepted and is used by `forge assignment` for authenticated reads and actions.
+See [Assignment context](../../../docs/assignment-context.md).
 
 ## Context
 

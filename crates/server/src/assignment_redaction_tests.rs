@@ -13,7 +13,7 @@ impl std::io::Write for AssignmentLogWriter {
 #[tokio::test]
 async fn legacy_authenticated_routes_and_normal_logs_do_not_retain_caller_secrets() {
     use tracing::instrument::WithSubscriber;
-    let (fixture, assignment, _, _, target) = subscription_test_daemon();
+    let (fixture, assignment, target) = assignment_test_daemon();
     let root = fixture
         .database_path
         .with_extension("PRIVATE-DELIVERY-PATH");
@@ -46,21 +46,6 @@ async fn legacy_authenticated_routes_and_normal_logs_do_not_retain_caller_secret
         failure["message"] = "BEHAVIOR-SENTINEL actual-secret PRIVATE-DELIVERY-PATH".into();
         let reported = assignment_rpc(daemon.clone(), "agentDispatch.assignmentBootstrapFailure", failure).await;
         assert!(reported.get("result").is_some(), "{reported}");
-        let subscription_request = |secret: &str| serde_json::json!({"assignment_id": assignment, "capability_id":secret, "correlation_id":"actual-secret PRIVATE-DELIVERY-PATH MCP-CREDENTIAL-SENTINEL BEHAVIOR-SENTINEL", "target_record_ids":[target], "kind_filters":[]});
-        let created = assignment_rpc(daemon.clone(), "agentSubscription.create", subscription_request("actual-secret")).await;
-        let id = created["result"]["id"].as_u64().unwrap_or_else(|| panic!("{created}"));
-        let mut responses = vec![created.to_string()];
-        responses.push(assignment_rpc(daemon.clone(), "agentSubscription.create", subscription_request("PRIVATE-DELIVERY-PATH MCP-CREDENTIAL-SENTINEL BEHAVIOR-SENTINEL")).await.to_string());
-        for method in ["agentSubscription.renew", "agentSubscription.delete"] {
-            let mut params = subscription_request("actual-secret");
-            params.as_object_mut().unwrap().remove("target_record_ids");
-            params.as_object_mut().unwrap().remove("kind_filters");
-            params["subscription_id"] = id.into();
-            responses.push(assignment_rpc(daemon.clone(), method, params).await.to_string());
-        }
-        for response in responses {
-            for sentinel in ["actual-secret", "PRIVATE-DELIVERY-PATH", "MCP-CREDENTIAL-SENTINEL", "BEHAVIOR-SENTINEL"] { assert!(!response.contains(sentinel)); }
-        }
         let store = SqliteProjectRepository::open(&fixture.database_path).unwrap();
         let owner = store.agent_assignment(&assignment).unwrap().record_id;
         let evidence = format!("{:?} {:?}", store.list_assignment_authorization_audits(&assignment).unwrap(), store.list_record_comments(owner).unwrap());

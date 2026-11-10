@@ -1,8 +1,15 @@
 # ADR-006: Record-update SSE delivery is in-process for V1
 
-- **Status:** Accepted
+- **Status:** Partially superseded — subscription delivery removed; single-daemon store ownership retained
 - **Date:** 2026-10-25
 - **Decision scope:** Daemon ownership and record-update subscription delivery
+
+## Current scope
+
+Record Update Subscriptions and SSE delivery have been removed, with no replacement
+transport. The delivery rationale and replacement conditions below are historical.
+The exclusive per-store daemon ownership lock remains in force. See
+[Assignment context](../../../docs/assignment-context.md#subscription-removal).
 
 ## Context
 
@@ -44,5 +51,5 @@ revocation semantics, and define failure recovery across daemon processes.
 
 ## References
 
-- [Record Update Subscriptions](../record-update-subscriptions.md)
+- [Subscription removal](../../../docs/assignment-context.md#subscription-removal)
 - Spec #510, “Make record-update SSE delivery lifecycle-safe”

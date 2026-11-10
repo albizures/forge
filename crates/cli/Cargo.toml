@@ -13,8 +13,6 @@ forge-rpc = { path = "../rpc" }
 clap = { version = "4.5.53", features = ["derive", "env"] }
 jsonrpsee = { version = "0.26.0", features = ["http-client"] }
 hyper = { version = "1", features = ["client", "http1"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
-http-body-util = "0.1"
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["fs", "process"] }
 

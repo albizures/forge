@@ -35,104 +35,6 @@ async fn run_cli(
     .unwrap()
 }
 
-async fn verify_events(root: &str, secret: &Path, assignment: &str, subscription: &str) {
-    use std::io::{BufRead, BufReader};
-    use std::process::Stdio;
-    let mut child = Command::new(env!("CARGO_BIN_EXE_forge"))
-        .args(["assignment", "subscription", "events", subscription])
-        .env("FORGE_ASSIGNMENT_ID", assignment)
-        .env("FORGE_ASSIGNMENT_DAEMON_URL", root)
-        .env("FORGE_ASSIGNMENT_CAPABILITY_SECRET_FILE", secret)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let stdout = child.stdout.take().unwrap();
-    let (sender, receiver) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines() {
-            if sender.send(line.unwrap()).is_err() {
-                break;
-            }
-        }
-    });
-    let (ready_sender, ready_receiver) = std::sync::mpsc::channel();
-    let (event_sender, event_receiver) = std::sync::mpsc::channel();
-    let reader = std::thread::spawn(move || {
-        let mut ready = false;
-        for line in receiver {
-            if line.starts_with("retry:") && !ready {
-                ready_sender.send(()).unwrap();
-                ready = true;
-            }
-            if line == "event: record-update" {
-                let _ = event_sender.send(());
-                return true;
-            }
-        }
-        false
-    });
-    tokio::task::spawn_blocking(move || {
-        ready_receiver.recv_timeout(std::time::Duration::from_secs(3))
-    })
-    .await
-    .unwrap()
-    .expect("event stream did not connect");
-    let changed = run_cli(
-        root,
-        secret,
-        assignment,
-        &["assignment", "comment", "--message", "Notify", "--json"],
-    )
-    .await;
-    assert!(
-        changed.status.success(),
-        "{}",
-        String::from_utf8_lossy(&changed.stderr)
-    );
-    tokio::task::spawn_blocking(move || {
-        event_receiver.recv_timeout(std::time::Duration::from_secs(3))
-    })
-    .await
-    .unwrap()
-    .expect("event not delivered");
-    let deleted = run_cli(
-        root,
-        secret,
-        assignment,
-        &[
-            "assignment",
-            "subscription",
-            "delete",
-            subscription,
-            "--json",
-        ],
-    )
-    .await;
-    assert!(
-        deleted.status.success(),
-        "{}",
-        String::from_utf8_lossy(&deleted.stderr)
-    );
-    let mut exited = false;
-    for _ in 0..100 {
-        if child.try_wait().unwrap().is_some() {
-            exited = true;
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-    if !exited {
-        child.kill().unwrap();
-    }
-    let _ = child.wait();
-    assert!(
-        exited,
-        "subscription deletion must terminate the event stream"
-    );
-    assert!(reader.join().unwrap(), "expected a Record update event");
-}
-
 #[tokio::test]
 #[allow(clippy::too_many_lines)] // One daemon lifecycle exercises both Assignment types.
 async fn production_daemon_bootstraps_grilling_through_delivered_cli() {
@@ -418,31 +320,6 @@ async fn production_daemon_bootstraps_grilling_through_delivered_cli() {
         String::from_utf8_lossy(&task_page.stderr)
     );
     assert!(String::from_utf8_lossy(&task_page.stdout).contains("Task progress"));
-    let task_subscription = run_cli(
-        &endpoint,
-        &task_secret,
-        "production-task",
-        &["assignment", "subscription", "create", &task_id, "--json"],
-    )
-    .await;
-    assert!(
-        task_subscription.status.success(),
-        "{}",
-        String::from_utf8_lossy(&task_subscription.stderr)
-    );
-    let task_subscription: serde_json::Value =
-        serde_json::from_slice(&task_subscription.stdout).unwrap();
-    let task_subscription_id = task_subscription["subscription"]["id"]
-        .as_u64()
-        .unwrap()
-        .to_string();
-    verify_events(
-        &endpoint,
-        &task_secret,
-        "production-task",
-        &task_subscription_id,
-    )
-    .await;
     let id = record.id.to_string();
     for args in [
         vec!["assignment", "context", "--json"],
@@ -462,47 +339,6 @@ async fn production_daemon_bootstraps_grilling_through_delivered_cli() {
         assert_eq!(result["schemaVersion"], 1);
         assert!(!result.to_string().contains("production-secret"));
     }
-    let created = run_cli(
-        &endpoint,
-        &secret,
-        "production-assignment",
-        &["assignment", "subscription", "create", &id, "--json"],
-    )
-    .await;
-    assert!(
-        created.status.success(),
-        "{}",
-        String::from_utf8_lossy(&created.stderr)
-    );
-    let created: serde_json::Value = serde_json::from_slice(&created.stdout).unwrap();
-    let subscription_id = created["subscription"]["id"].as_u64().unwrap().to_string();
-    for verb in ["renew"] {
-        let result = run_cli(
-            &endpoint,
-            &secret,
-            "production-assignment",
-            &[
-                "assignment",
-                "subscription",
-                verb,
-                &subscription_id,
-                "--json",
-            ],
-        )
-        .await;
-        assert!(
-            result.status.success(),
-            "{verb}: {}",
-            String::from_utf8_lossy(&result.stderr)
-        );
-    }
-    verify_events(
-        &endpoint,
-        &secret,
-        "production-assignment",
-        &subscription_id,
-    )
-    .await;
     let result = run_cli(
         &endpoint,
         &secret,

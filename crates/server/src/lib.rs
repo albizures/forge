@@ -12,19 +12,14 @@ mod workspace_dispatch_tests;
 mod workspaces;
 
 use std::{
-    collections::HashMap,
-    convert::Infallible,
     env, fs, io,
     io::Write,
     net::SocketAddr,
     path::{Path, PathBuf},
     process::Command,
     str::FromStr,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
-    },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    sync::Arc,
+    time::Duration,
 };
 
 use tokio::{
@@ -32,44 +27,40 @@ use tokio::{
     sync::{mpsc, watch},
     time::{self, MissedTickBehavior},
 };
-use tokio_stream::wrappers::ReceiverStream;
 
 use askama::Template;
 use axum::{
     Router,
     body::Body,
-    extract::{ConnectInfo, Path as AxumPath, Request, State},
+    extract::Request,
     http::{StatusCode, header},
-    response::{Html, IntoResponse, Response, Sse, sse::Event},
+    response::Html,
     routing::{get, post},
 };
 use forge_app::{
     AgentDispatchAdapter, AgentDispatchAdapterFactory, AgentDispatchContext, AgentProfile,
     Application, ApplicationStatus, AssignmentCapabilityDelivery, ManagedWorktreeAdapter, Project,
-    RecordStatus, RecordType, RecordUpdateEnvelope, RecordUpdateId, RecordUpdateKind,
-    RecordUpdateKindFilter, RecordUpdateSubscriptionId, RegistrationError, RepositoryInspector,
-    TaskKind, WorktreeSafetyAssessment,
+    RecordStatus, RecordType, RegistrationError, RepositoryInspector, TaskKind,
+    WorktreeSafetyAssessment,
 };
 use forge_rpc::{
     AddRecordCommentRequest, AgentAssignmentResponse, AgentDispatchApiServer,
     AgentDispatchProfileResponse, AgentDispatchReconcileResponse, AgentDispatchStatusRequest,
-    AgentDispatchStatusResponse, AgentSubscriptionApiServer, CreateAgentSubscriptionRequest,
-    CreateManagedWorktreeRequest, DeleteRecordCommentRequest, DispatchRecordRequest,
-    DispatchRecordResponse, DoctorManagedWorktreesRequest, DoneRecordRequest, EditRecordRequest,
-    ListManagedWorktreesRequest, ListManagedWorktreesResponse, ListRecordCommentsResponse,
-    ListRecordUpdatesResponse, ListRecordsRequest, ListRecordsResponse,
-    ManageAgentSubscriptionRequest, ManagedWorktreeResponse, ManagementStatus,
+    AgentDispatchStatusResponse, CreateManagedWorktreeRequest, DeleteRecordCommentRequest,
+    DispatchRecordRequest, DispatchRecordResponse, DoctorManagedWorktreesRequest,
+    DoneRecordRequest, EditRecordRequest, ListManagedWorktreesRequest,
+    ListManagedWorktreesResponse, ListRecordCommentsResponse, ListRecordUpdatesResponse,
+    ListRecordsRequest, ListRecordsResponse, ManagedWorktreeResponse, ManagementStatus,
     OpenGrillingUnderWayfinderRequest, OpenRecordRequest, OpenSpecRequest, OpenTaskRequest,
     OpenTaskUnderSpecRequest, OpenTaskUnderWayfinderRequest, OpenWayfinderRequest,
     ProjectApiServer, ProjectHereRequest, ProjectHereResponse, RecordApiServer, RecordIdRequest,
-    RecordResponse, RecordUpdateSubscriptionResponse, RegisterProjectRequest,
-    RegisterProjectResponse, RelateRecordRequest, RemoveManagedWorktreeRequest,
-    RetireAgentAssignmentRequest, RevisionIdentity, SetProjectSetupHookRequest,
-    StartAssignmentTaskRequest, SystemApiServer, SystemStatusResponse, WorktreeApiServer,
+    RecordResponse, RegisterProjectRequest, RegisterProjectResponse, RelateRecordRequest,
+    RemoveManagedWorktreeRequest, RetireAgentAssignmentRequest, RevisionIdentity,
+    SetProjectSetupHookRequest, StartAssignmentTaskRequest, SystemApiServer, SystemStatusResponse,
+    WorktreeApiServer,
 };
 use forge_store::SqliteProjectRepository;
 use fs2::FileExt;
-use futures_util::StreamExt as FuturesStreamExt;
 use herdr::{HerdrAdapterFactory, observe_status_changes};
 use jsonrpsee::{
     core::{RpcResult, async_trait},
@@ -220,156 +211,8 @@ mod assignment;
 pub struct Daemon {
     application: Arc<Application>,
     management: ManagementStatus,
-    delivery: Arc<SubscriptionDelivery>,
     capability_secret_root: Option<PathBuf>,
     profile_operator_root: Option<PathBuf>,
-}
-
-#[derive(Default)]
-struct SubscriptionDelivery {
-    connections: Mutex<HashMap<RecordUpdateSubscriptionId, DeliveryConnection>>,
-    next_connection_id: AtomicU64,
-}
-
-struct DeliveryConnection {
-    connection_id: u64,
-    assignment_id: String,
-    sender: mpsc::Sender<RecordUpdateEnvelope>,
-    cancelled: watch::Sender<bool>,
-    lease_expires_at_millis: watch::Sender<u64>,
-    cursor: RecordUpdateId,
-}
-
-type DeliveryConnectionStart = (
-    u64,
-    mpsc::Receiver<RecordUpdateEnvelope>,
-    watch::Receiver<bool>,
-    watch::Receiver<u64>,
-    Vec<RecordUpdateEnvelope>,
-);
-
-impl SubscriptionDelivery {
-    /// Claims the active connection slot before replaying under the publication lock.
-    /// A committed update is therefore either in `replay` or waits to be queued live.
-    fn connect_and_replay(
-        &self,
-        application: &Application,
-        subscription: &forge_app::RecordUpdateSubscription,
-        cursor: RecordUpdateId,
-    ) -> Result<DeliveryConnectionStart, RegistrationError> {
-        let (sender, receiver) = mpsc::channel(256);
-        let (cancelled, cancellation) = watch::channel(false);
-        let (lease_expires_at_millis, lease) = watch::channel(subscription.lease_expires_at_millis);
-        let id = subscription.id;
-        let connection_id = self.next_connection_id.fetch_add(1, Ordering::Relaxed);
-        let mut connections = self
-            .connections
-            .lock()
-            .expect("delivery lock is not poisoned");
-        if let Some(previous) = connections.insert(
-            id,
-            DeliveryConnection {
-                connection_id,
-                assignment_id: subscription.assignment_id.clone(),
-                sender,
-                cancelled,
-                lease_expires_at_millis,
-                cursor,
-            },
-        ) {
-            let _ = previous.cancelled.send(true);
-        }
-        let replay = match application.replay_assignment_subscription_updates(id, cursor) {
-            Ok(replay) => replay,
-            Err(error) => {
-                connections.remove(&id);
-                return Err(error);
-            }
-        };
-        if let Some(last) = replay.last() {
-            connections
-                .get_mut(&id)
-                .expect("new delivery connection is retained")
-                .cursor = last.update.id;
-        }
-        Ok((connection_id, receiver, cancellation, lease, replay))
-    }
-
-    fn cancel_current_connection(&self, id: RecordUpdateSubscriptionId, connection_id: u64) {
-        let mut connections = self
-            .connections
-            .lock()
-            .expect("delivery lock is not poisoned");
-        if connections
-            .get(&id)
-            .is_some_and(|connection| connection.connection_id == connection_id)
-            && let Some(connection) = connections.remove(&id)
-        {
-            let _ = connection.cancelled.send(true);
-        }
-    }
-
-    fn cancel_subscription(&self, id: RecordUpdateSubscriptionId) {
-        if let Some(connection) = self
-            .connections
-            .lock()
-            .expect("delivery lock is not poisoned")
-            .remove(&id)
-        {
-            let _ = connection.cancelled.send(true);
-        }
-    }
-
-    fn cancel_assignment(&self, assignment_id: &str) {
-        let mut connections = self
-            .connections
-            .lock()
-            .expect("delivery lock is not poisoned");
-        connections.retain(|_, connection| {
-            if connection.assignment_id == assignment_id {
-                let _ = connection.cancelled.send(true);
-                false
-            } else {
-                true
-            }
-        });
-    }
-
-    fn renew_subscription(&self, id: RecordUpdateSubscriptionId, lease_expires_at_millis: u64) {
-        if let Some(connection) = self
-            .connections
-            .lock()
-            .expect("delivery lock is not poisoned")
-            .get(&id)
-        {
-            let _ = connection
-                .lease_expires_at_millis
-                .send(lease_expires_at_millis);
-        }
-    }
-
-    fn publish(&self, application: &Application) {
-        let mut connections = self
-            .connections
-            .lock()
-            .expect("delivery lock is not poisoned");
-        connections.retain(|id, connection| {
-            let Ok(updates) =
-                application.replay_assignment_subscription_updates(*id, connection.cursor)
-            else {
-                let _ = connection.cancelled.send(true);
-                return false;
-            };
-            for update in updates {
-                connection.cursor = update.update.id;
-                if connection.sender.try_send(update).is_err() {
-                    let _ = connection.cancelled.send(true);
-                    return false;
-                }
-            }
-            true
-        });
-    }
 }
 
 impl Daemon {
@@ -387,7 +230,6 @@ impl Daemon {
     ) -> Self {
         Self {
             application: Arc::new(application),
-            delivery: Arc::new(SubscriptionDelivery::default()),
             capability_secret_root: None,
             profile_operator_root: std::env::var_os("HOME").map(PathBuf::from),
             management: ManagementStatus::new(
@@ -1140,8 +982,6 @@ impl AgentDispatchApiServer for Daemon {
         let result = self
             .application
             .reconcile_agent_dispatch(daemon_id, now_millis);
-        // Reconciliation can commit a dispatch failure Comment before returning an error.
-        self.delivery.publish(&self.application);
         result.map(Into::into).map_err(rpc_error)
     }
 
@@ -1166,7 +1006,6 @@ impl AgentDispatchApiServer for Daemon {
                         "dispatch worker failed",
                     ))
                 })?;
-        self.delivery.publish(&self.application);
         result
             .map(|(assignment, already_assigned)| DispatchRecordResponse {
                 message: if already_assigned {
@@ -1211,7 +1050,7 @@ impl AgentDispatchApiServer for Daemon {
     ) -> RpcResult<()> {
         self.assignment_session(&request.assignment_id, &request.secret)?
             .comment("Assignment bootstrap failed; stop work and request operator review.")
-            .map(|_| self.delivery.publish(&self.application))
+            .map(|_| ())
             .map_err(rpc_error)
     }
 
@@ -1226,10 +1065,7 @@ impl AgentDispatchApiServer for Daemon {
                 &request.correlation_id,
                 request.task_id,
             )
-            .map(|record| {
-                self.delivery.publish(&self.application);
-                record.into()
-            })
+            .map(Into::into)
             .map_err(rpc_error)
     }
 
@@ -1243,10 +1079,7 @@ impl AgentDispatchApiServer for Daemon {
     async fn task_reopen(&self, request: RecordIdRequest) -> RpcResult<RecordResponse> {
         self.application
             .reopen_task(request.id)
-            .map(|record| {
-                self.delivery.publish(&self.application);
-                record.into()
-            })
+            .map(Into::into)
             .map_err(rpc_error)
     }
 
@@ -1284,14 +1117,6 @@ impl AgentDispatchApiServer for Daemon {
         let result = self
             .application
             .retire_agent_assignment(&request.assignment_id);
-        // Cleanup errors do not undo revocation. End already-open delivery connections too.
-        if self
-            .application
-            .agent_assignment_info(&request.assignment_id)
-            .is_ok_and(|info| info.assignment.closed_at_millis.is_some())
-        {
-            self.delivery.cancel_assignment(&request.assignment_id);
-        }
         result.map(|_| ()).map_err(rpc_error)
     }
 }
@@ -1327,7 +1152,6 @@ impl WorktreeApiServer for Daemon {
             .create_managed_worktree(request.record_id, &request.branch, &request.base)
             .and_then(|_| self.application.managed_worktree_info(request.record_id));
         // Preparation failure can commit a durable Task Comment while returning its error.
-        self.delivery.publish(&self.application);
         result.map(Into::into).map_err(rpc_error)
     }
     async fn recover(
@@ -1425,48 +1249,6 @@ impl WorktreeApiServer for Daemon {
 }
 
 #[async_trait]
-impl AgentSubscriptionApiServer for Daemon {
-    async fn create(
-        &self,
-        request: CreateAgentSubscriptionRequest,
-    ) -> RpcResult<RecordUpdateSubscriptionResponse> {
-        let session = self.assignment_session(&request.assignment_id, &request.capability_id)?;
-        let filters = request
-            .kind_filters
-            .iter()
-            .map(|filter| record_update_kind_filter(filter))
-            .collect::<Result<Vec<_>, _>>()?;
-        session
-            .create_subscription(request.target_record_ids, filters)
-            .map(Into::into)
-            .map_err(rpc_error)
-    }
-
-    async fn renew(
-        &self,
-        request: ManageAgentSubscriptionRequest,
-    ) -> RpcResult<RecordUpdateSubscriptionResponse> {
-        let id = RecordUpdateSubscriptionId(request.subscription_id);
-        self.assignment_session(&request.assignment_id, &request.capability_id)?
-            .renew_subscription(id)
-            .map(|subscription| {
-                self.delivery
-                    .renew_subscription(id, subscription.lease_expires_at_millis);
-                subscription.into()
-            })
-            .map_err(rpc_error)
-    }
-
-    async fn delete(&self, request: ManageAgentSubscriptionRequest) -> RpcResult<()> {
-        let id = RecordUpdateSubscriptionId(request.subscription_id);
-        self.assignment_session(&request.assignment_id, &request.capability_id)?
-            .delete_subscription(id)
-            .inspect(|()| self.delivery.cancel_subscription(id))
-            .map_err(rpc_error)
-    }
-}
-
-#[async_trait]
 impl RecordApiServer for Daemon {
     async fn open_initiative(
         &self,
@@ -1486,10 +1268,7 @@ impl RecordApiServer for Daemon {
                 None,
                 request.generated_by_ids,
             )
-            .map(|record| {
-                self.delivery.publish(&self.application);
-                record.into()
-            })
+            .map(Into::into)
             .map_err(rpc_error)
     }
 
@@ -1531,10 +1310,7 @@ impl RecordApiServer for Daemon {
                 request.project_scope.project_slugs,
                 request.generated_by_ids,
             )
-            .map(|record| {
-                self.delivery.publish(&self.application);
-                record.into()
-            })
+            .map(Into::into)
             .map_err(rpc_error)
     }
 
@@ -1556,10 +1332,7 @@ impl RecordApiServer for Daemon {
                 None,
                 request.generated_by_ids,
             )
-            .map(|record| {
-                self.delivery.publish(&self.application);
-                record.into()
-            })
+            .map(Into::into)
             .map_err(rpc_error)
     }
 
@@ -1581,10 +1354,7 @@ impl RecordApiServer for Daemon {
                 request.task_kind.as_deref().map(task_kind).transpose()?,
                 request.generated_by_ids,
             )
-            .map(|record| {
-                self.delivery.publish(&self.application);
-                record.into()
-            })
+            .map(Into::into)
             .map_err(rpc_error)
     }
 
@@ -1606,10 +1376,7 @@ impl RecordApiServer for Daemon {
                 None,
                 request.generated_by_ids,
             )
-            .map(|record| {
-                self.delivery.publish(&self.application);
-                record.into()
-            })
+            .map(Into::into)
             .map_err(rpc_error)
     }
 
@@ -1629,10 +1396,7 @@ impl RecordApiServer for Daemon {
                 request.task_kind.as_deref().map(task_kind).transpose()?,
                 request.generated_by_ids,
             )
-            .map(|record| {
-                self.delivery.publish(&self.application);
-                record.into()
-            })
+            .map(Into::into)
             .map_err(rpc_error)
     }
 
@@ -1654,10 +1418,7 @@ impl RecordApiServer for Daemon {
                 request.task_kind.as_deref().map(task_kind).transpose()?,
                 request.generated_by_ids,
             )
-            .map(|record| {
-                self.delivery.publish(&self.application);
-                record.into()
-            })
+            .map(Into::into)
             .map_err(rpc_error)
     }
 
@@ -1681,10 +1442,7 @@ impl RecordApiServer for Daemon {
                 request.project_scope.map(|scope| scope.project_slugs),
                 request.generated_by_ids,
             )
-            .map(|record| {
-                self.delivery.publish(&self.application);
-                record.into()
-            })
+            .map(Into::into)
             .map_err(rpc_error)
     }
 
@@ -1737,10 +1495,7 @@ impl RecordApiServer for Daemon {
         } = request;
         self.record_application(&selection, &mut [])?
             .edit_record(request.id, &request.body)
-            .map(|record| {
-                self.delivery.publish(&self.application);
-                record.into()
-            })
+            .map(Into::into)
             .map_err(rpc_error)
     }
 
@@ -1754,10 +1509,7 @@ impl RecordApiServer for Daemon {
         } = request;
         self.record_application(&selection, &mut [])?
             .start_record(request.id)
-            .map(|record| {
-                self.delivery.publish(&self.application);
-                record.into()
-            })
+            .map(Into::into)
             .map_err(rpc_error)
     }
 
@@ -1771,10 +1523,7 @@ impl RecordApiServer for Daemon {
         } = request;
         self.record_application(&selection, &mut [])?
             .done_record(request.id, request.completion_resolution.as_deref())
-            .map(|record| {
-                self.delivery.publish(&self.application);
-                record.into()
-            })
+            .map(Into::into)
             .map_err(rpc_error)
     }
 
@@ -1789,10 +1538,7 @@ impl RecordApiServer for Daemon {
         let kind = relationship_kind(&request.kind)?;
         self.record_application(&selection, &mut [])?
             .relate_records(request.from_id, request.to_id, kind)
-            .map(|record| {
-                self.delivery.publish(&self.application);
-                record.into()
-            })
+            .map(Into::into)
             .map_err(rpc_error)
     }
 
@@ -1807,10 +1553,7 @@ impl RecordApiServer for Daemon {
         let kind = relationship_kind(&request.kind)?;
         self.record_application(&selection, &mut [])?
             .unrelate_records(request.from_id, request.to_id, kind)
-            .map(|record| {
-                self.delivery.publish(&self.application);
-                record.into()
-            })
+            .map(Into::into)
             .map_err(rpc_error)
     }
 
@@ -1840,10 +1583,7 @@ impl RecordApiServer for Daemon {
         } = request;
         self.record_application(&selection, &mut [])?
             .add_record_comment(request.record_id, &request.body, request.author.as_deref())
-            .map(|comment| {
-                self.delivery.publish(&self.application);
-                comment.into()
-            })
+            .map(Into::into)
             .map_err(rpc_error)
     }
 
@@ -1873,7 +1613,6 @@ impl RecordApiServer for Daemon {
         } = request;
         self.record_application(&selection, &mut [])?
             .delete_record_comment(request.record_id, request.comment_id)
-            .inspect(|()| self.delivery.publish(&self.application))
             .map_err(rpc_error)
     }
 }
@@ -1939,22 +1678,6 @@ impl Daemon {
                 .reference;
         }
         Ok(workspace.id)
-    }
-}
-
-fn record_update_kind_filter(filter: &str) -> RpcResult<RecordUpdateKindFilter> {
-    match filter {
-        "created" => Ok(RecordUpdateKindFilter::Created),
-        "body-edited" => Ok(RecordUpdateKindFilter::BodyEdited),
-        "status-transition" => Ok(RecordUpdateKindFilter::StatusTransition),
-        "relationship-added" => Ok(RecordUpdateKindFilter::RelationshipAdded),
-        "relationship-removed" => Ok(RecordUpdateKindFilter::RelationshipRemoved),
-        "comment-added" => Ok(RecordUpdateKindFilter::CommentAdded),
-        "comment-deleted" => Ok(RecordUpdateKindFilter::CommentDeleted),
-        _ => Err(rpc_error(RegistrationError::new(
-            "invalid-subscription-filter",
-            "unknown Record Update filter",
-        ))),
     }
 }
 
@@ -2051,308 +1774,6 @@ impl ProjectApiServer for Daemon {
     }
 }
 
-async fn subscription_events(
-    State(daemon): State<Daemon>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    AxumPath((assignment_id, subscription_id)): AxumPath<(String, u64)>,
-    request: Request,
-) -> Response {
-    if !peer.ip().is_loopback() {
-        return StatusCode::FORBIDDEN.into_response();
-    }
-    // Credentials are accepted only in the Authorization header, never a URL.
-    if request
-        .uri()
-        .query()
-        .is_some_and(|query| query.split('&').any(|part| !part.starts_with("after=")))
-    {
-        return StatusCode::BAD_REQUEST.into_response();
-    }
-    let Some(secret) = request
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .filter(|value| !value.is_empty())
-    else {
-        return StatusCode::UNAUTHORIZED.into_response();
-    };
-    let id = RecordUpdateSubscriptionId(subscription_id);
-    let Ok(session) = daemon.assignment_session(&assignment_id, secret) else {
-        return StatusCode::UNAUTHORIZED.into_response();
-    };
-    let subscription = match session.subscription(id) {
-        Ok(subscription) => subscription,
-        Err(error) if error.code == "subscription-not-found" => {
-            return StatusCode::NOT_FOUND.into_response();
-        }
-        Err(error) if error.code == "subscription-expired" => {
-            return StatusCode::GONE.into_response();
-        }
-        Err(error) if error.code == "assignment-subscription-mismatch" => {
-            return StatusCode::FORBIDDEN.into_response();
-        }
-        Err(_) => return StatusCode::UNAUTHORIZED.into_response(),
-    };
-    let Ok(cursor) = subscription_cursor(&request, subscription.start_cursor) else {
-        return (StatusCode::BAD_REQUEST, "invalid-cursor").into_response();
-    };
-    subscription_event_stream(&daemon, id, &subscription, cursor, secret.to_owned())
-}
-
-fn subscription_cursor(
-    request: &Request,
-    start_cursor: RecordUpdateId,
-) -> Result<RecordUpdateId, ()> {
-    let header_cursor = request
-        .headers()
-        .get("last-event-id")
-        .and_then(|value| value.to_str().ok());
-    let query_cursor = request.uri().query().and_then(|query| {
-        query
-            .split('&')
-            .find_map(|part| part.strip_prefix("after="))
-    });
-    let parse_cursor = |value: &str| value.parse::<u64>().ok().map(RecordUpdateId);
-    let header_cursor = header_cursor.map(parse_cursor);
-    let query_cursor = query_cursor.map(parse_cursor);
-    if header_cursor.is_some_and(|cursor| cursor.is_none())
-        || query_cursor.is_some_and(|cursor| cursor.is_none())
-        || matches!((header_cursor.flatten(), query_cursor.flatten()), (Some(left), Some(right)) if left != right)
-    {
-        return Err(());
-    }
-    Ok(header_cursor
-        .flatten()
-        .or(query_cursor.flatten())
-        .unwrap_or(start_cursor))
-}
-
-fn subscription_event_stream(
-    daemon: &Daemon,
-    id: RecordUpdateSubscriptionId,
-    subscription: &forge_app::RecordUpdateSubscription,
-    cursor: RecordUpdateId,
-    secret: String,
-) -> Response {
-    if cursor < subscription.start_cursor {
-        return match daemon.application.record_update_head() {
-            Ok(head) => resync_required(id, subscription.start_cursor, head),
-            Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-        };
-    }
-    let (connection_id, receiver, mut cancellation, mut lease_expires_at_millis, replay) =
-        match daemon
-            .delivery
-            .connect_and_replay(&daemon.application, subscription, cursor)
-        {
-            Ok(connection) => connection,
-            Err(error) if error.code == "invalid-cursor" => {
-                return match daemon.application.record_update_head() {
-                    Ok(head) => resync_required(id, subscription.start_cursor, head),
-                    Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-                };
-            }
-            Err(error) if error.code == "subscription-expired" => {
-                return StatusCode::GONE.into_response();
-            }
-            Err(_) => return StatusCode::NOT_FOUND.into_response(),
-        };
-    let initial = std::iter::once(Ok::<Event, Infallible>(
-        Event::default().retry(Duration::from_millis(1_000)),
-    ))
-    .chain(
-        replay
-            .into_iter()
-            .map(move |update| Ok(record_update_event(id, &update))),
-    );
-    let auth_daemon = daemon.clone();
-    let auth_assignment = subscription.assignment_id.clone();
-    let watch_daemon = daemon.clone();
-    let watch_assignment = auth_assignment.clone();
-    let watch_secret = secret.clone();
-    let stream = tokio_stream::iter(initial)
-        .chain(
-            ReceiverStream::new(receiver).map(move |update| Ok(record_update_event(id, &update))),
-        )
-        // Recheck before each replayed or queued notification, including after backpressure.
-        .take_while(move |_| {
-            let allowed = auth_daemon
-                .assignment_session(&auth_assignment, &secret)
-                .is_ok_and(|session| session.subscription(id).is_ok());
-            if !allowed {
-                auth_daemon
-                    .delivery
-                    .cancel_current_connection(id, connection_id);
-            }
-            std::future::ready(allowed)
-        })
-        .take_until({
-            let delivery = daemon.delivery.clone();
-            async move {
-                loop {
-                    let deadline = Duration::from_millis(
-                        lease_expires_at_millis
-                            .borrow()
-                            .saturating_sub(now_millis()),
-                    );
-                    tokio::select! {
-                        () = time::sleep(deadline) => {
-                            delivery.cancel_current_connection(id, connection_id);
-                            return;
-                        }
-                        () = time::sleep(Duration::from_millis(100)) => {
-                            if !watch_daemon.assignment_session(&watch_assignment, &watch_secret)
-                                .is_ok_and(|session| session.subscription(id).is_ok()) {
-                                delivery.cancel_current_connection(id, connection_id);
-                                return;
-                            }
-                        }
-                        changed = cancellation.changed() => {
-                            let _ = changed;
-                            return;
-                        }
-                        changed = lease_expires_at_millis.changed() => {
-                            if changed.is_err() {
-                                return;
-                            }
-                        }
-                    }
-                }
-            }
-        });
-    let mut response = Sse::new(stream)
-        .keep_alive(
-            axum::response::sse::KeepAlive::new()
-                .interval(Duration::from_secs(15))
-                .text("keepalive"),
-        )
-        .into_response();
-    response.headers_mut().insert(
-        header::CACHE_CONTROL,
-        header::HeaderValue::from_static("no-cache, no-transform"),
-    );
-    response
-        .headers_mut()
-        .insert("x-accel-buffering", header::HeaderValue::from_static("no"));
-    response
-}
-
-fn now_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .try_into()
-        .unwrap_or(u64::MAX)
-}
-
-fn resync_required(
-    id: RecordUpdateSubscriptionId,
-    start: RecordUpdateId,
-    head: RecordUpdateId,
-) -> Response {
-    (
-        StatusCode::CONFLICT,
-        [(header::CONTENT_TYPE, "application/json")],
-        format!("{{\"code\":\"resync-required\",\"subscription_id\":{},\"retention_floor\":0,\"start_after_update_id\":{},\"head\":{}}}", id.0, start.0, head.0),
-    ).into_response()
-}
-
-fn record_update_event(
-    subscription_id: RecordUpdateSubscriptionId,
-    envelope: &RecordUpdateEnvelope,
-) -> Event {
-    let (kind, extra) = match envelope.update.kind {
-        RecordUpdateKind::Created => ("created", String::new()),
-        RecordUpdateKind::BodyEdited => ("body-edited", String::new()),
-        RecordUpdateKind::StatusTransition { from, to } => (
-            "status-transition",
-            format!(",\"from_status\":\"{from:?}\",\"to_status\":\"{to:?}\""),
-        ),
-        RecordUpdateKind::RelationshipAdded {
-            related_record_id,
-            relationship_kind,
-        } => (
-            "relationship-added",
-            format!(
-                ",\"related_record_id\":{related_record_id}{}",
-                relationship_kind.map_or(String::new(), |kind| format!(
-                    ",\"relationship_kind\":\"{}\"",
-                    relationship_kind_name(kind)
-                ))
-            ),
-        ),
-        RecordUpdateKind::RelationshipRemoved {
-            related_record_id,
-            relationship_kind,
-        } => (
-            "relationship-removed",
-            format!(
-                ",\"related_record_id\":{related_record_id}{}",
-                relationship_kind.map_or(String::new(), |kind| format!(
-                    ",\"relationship_kind\":\"{}\"",
-                    relationship_kind_name(kind)
-                ))
-            ),
-        ),
-        RecordUpdateKind::CommentAdded { comment_id } => {
-            ("comment-added", format!(",\"comment_id\":{}", comment_id.0))
-        }
-        RecordUpdateKind::CommentDeleted { comment_id } => (
-            "comment-deleted",
-            format!(",\"comment_id\":{}", comment_id.0),
-        ),
-    };
-    Event::default()
-        .id(envelope.update.id.0.to_string())
-        .event("record-update")
-        .data(format!("{{\"subscription_id\":{},\"record_id\":{},\"record_update_id\":{},\"kind\":\"{kind}\",\"timestamp\":\"{}\"{} }}", subscription_id.0, envelope.record_id, envelope.update.id.0, rfc3339_utc_timestamp(envelope.update.created_at_millis), extra))
-}
-
-fn relationship_kind_name(kind: forge_app::RecordRelationshipKind) -> &'static str {
-    match kind {
-        forge_app::RecordRelationshipKind::ParentChild => "parent-child",
-        forge_app::RecordRelationshipKind::DependsOn => "depends-on",
-        forge_app::RecordRelationshipKind::GeneratedBy => "generated-by",
-        forge_app::RecordRelationshipKind::Initiative => "initiative",
-    }
-}
-
-fn rfc3339_utc_timestamp(millis: u64) -> String {
-    let seconds = millis / 1_000;
-    let milliseconds = millis % 1_000;
-    let days = seconds / 86_400;
-    let seconds_of_day = seconds % 86_400;
-    let (year, month, day) = civil_date_from_days_since_unix_epoch(days);
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{milliseconds:03}Z",
-        seconds_of_day / 3_600,
-        (seconds_of_day % 3_600) / 60,
-        seconds_of_day % 60,
-    )
-}
-
-fn civil_date_from_days_since_unix_epoch(days: u64) -> (u64, u64, u64) {
-    // Civil-date conversion from Howard Hinnant's public-domain algorithm.
-    let days = days + 719_468;
-    let era = days / 146_097;
-    let day_of_era = days % 146_097;
-    let year_of_era =
-        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let mut year = year_of_era + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_prime = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
-    let month = if month_prime < 10 {
-        month_prime + 3
-    } else {
-        month_prime - 9
-    };
-    year += u64::from(month <= 2);
-    (year, month, day)
-}
-
 fn rpc_error(error: RegistrationError) -> jsonrpsee::types::ErrorObjectOwned {
     jsonrpsee::types::ErrorObjectOwned::owned(-32001, error.message, Some(error.code))
 }
@@ -2365,7 +1786,6 @@ fn rpc_error(error: RegistrationError) -> jsonrpsee::types::ErrorObjectOwned {
 pub fn router(daemon: Daemon) -> Router {
     let page_daemon = daemon.clone();
     let status_daemon = daemon.clone();
-    let subscription_daemon = daemon.clone();
     let mut methods = SystemApiServer::into_rpc(daemon.clone());
     methods
         .merge(forge_rpc::AgentProfileApiServer::into_rpc(daemon.clone()))
@@ -2383,9 +1803,6 @@ pub fn router(daemon: Daemon) -> Router {
         .merge(AgentDispatchApiServer::into_rpc(daemon.clone()))
         .expect("RPC method names must not overlap");
     methods
-        .merge(AgentSubscriptionApiServer::into_rpc(daemon.clone()))
-        .expect("RPC method names must not overlap");
-    methods
         .merge(WorktreeApiServer::into_rpc(daemon.clone()))
         .expect("RPC method names must not overlap");
     methods
@@ -2396,10 +1813,6 @@ pub fn router(daemon: Daemon) -> Router {
     let server_handle = Arc::new(server_handle);
 
     Router::new()
-        .route(
-            "/v1/agent-assignments/{assignment_id}/record-update-subscriptions/{subscription_id}/events",
-            get(subscription_events).with_state(subscription_daemon),
-        )
         .route(
             "/",
             get(move || {
@@ -2631,11 +2044,9 @@ async fn reconcile_daemon(daemon: &Daemon) {
             .as_millis()
             .try_into()
             .unwrap_or(u64::MAX);
-        let result = daemon
+        daemon
             .application
-            .reconcile_agent_dispatch("herdr-observer", now_millis);
-        daemon.delivery.publish(&daemon.application);
-        result
+            .reconcile_agent_dispatch("herdr-observer", now_millis)
     })
     .await;
     match result {
@@ -2809,7 +2220,6 @@ mod tests {
     include!("assignment_actions_tests.rs");
     include!("assignment_context_tests.rs");
     include!("assignment_redaction_tests.rs");
-    include!("assignment_subscription_tests.rs");
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
         path::{Path, PathBuf},
@@ -2821,27 +2231,21 @@ mod tests {
 
     use axum::{
         body::{Body, to_bytes},
-        extract::ConnectInfo,
         http::{Request, StatusCode, header},
-        response::{IntoResponse, Sse},
     };
     use forge_app::{
-        AgentDispatchRepository, Application, NewAgentAssignment, NewRecordUpdateSubscription,
-        NewTypedRecord, Project, RecordRelationshipKind, RecordRepository, RecordStatus,
-        RecordType, RecordUpdate, RecordUpdateEnvelope, RecordUpdateId, RecordUpdateKind,
-        RecordUpdateSubscriptionId, RecordUpdateSubscriptionRepository, RegistrationError,
+        AgentDispatchRepository, Application, NewAgentAssignment, NewTypedRecord, Project,
+        RecordRelationshipKind, RecordRepository, RecordStatus, RecordType, RegistrationError,
         RepositoryInspector,
     };
     use forge_rpc::{
-        AgentDispatchApiServer, AgentSubscriptionApiServer, CreateAgentSubscriptionRequest,
-        DoneRecordRequest, EditRecordRequest, ListRecordsRequest,
+        AgentDispatchApiServer, DoneRecordRequest, EditRecordRequest, ListRecordsRequest,
         OpenGrillingUnderWayfinderRequest, OpenRecordRequest, OpenSpecRequest, OpenTaskRequest,
         OpenTaskUnderSpecRequest, OpenTaskUnderWayfinderRequest, OpenWayfinderRequest,
         ProjectApiClient, ProjectHereRequest, ProjectScopeRequest, RecordApiClient,
         RecordIdRequest, RegisterProjectRequest, SystemApiClient, SystemApiServer,
     };
     use forge_store::SqliteProjectRepository;
-    use futures_util::StreamExt;
     use jsonrpsee::http_client::HttpClientBuilder;
     use tower::ServiceExt;
 
@@ -3433,30 +2837,30 @@ mod tests {
         .with_workspace_repository(Box::new(workspace))
     }
 
-    struct SubscriptionTestDaemon {
+    struct AssignmentTestDaemon {
         daemon: Daemon,
         database_path: PathBuf,
     }
 
-    impl SubscriptionTestDaemon {
+    impl AssignmentTestDaemon {
         fn daemon(&self) -> Daemon {
             self.daemon.clone()
         }
     }
 
-    impl Drop for SubscriptionTestDaemon {
+    impl Drop for AssignmentTestDaemon {
         fn drop(&mut self) {
             let daemon = std::mem::replace(&mut self.daemon, Daemon::new(test_application()));
             drop(daemon);
             let _ =
-                std::fs::remove_dir_all(self.database_path.with_extension("subscription-secrets"));
+                std::fs::remove_dir_all(self.database_path.with_extension("assignment-secrets"));
             let _ = std::fs::remove_file(&self.database_path);
         }
     }
 
-    fn subscription_test_daemon() -> (SubscriptionTestDaemon, String, u64, u64, u64) {
+    fn assignment_test_daemon() -> (AssignmentTestDaemon, String, u64) {
         let database_path = std::env::temp_dir().join(format!(
-            "forge-subscription-endpoint-{}-{}.sqlite3",
+            "forge-assignment-endpoint-{}-{}.sqlite3",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -3502,22 +2906,15 @@ mod tests {
                 profile_revision: 1,
             })
             .unwrap();
-        let subscription = store
-            .create_record_update_subscription(&NewRecordUpdateSubscription {
-                assignment_id: "owner-assignment".into(),
-                target_record_ids: vec![target.id],
-                kind_filters: vec![],
-            })
-            .unwrap();
-        store.edit_record(target.id, "delivered update").unwrap();
+        store.edit_record(target.id, "updated target").unwrap();
         drop(store);
         let records = SqliteProjectRepository::open(&database_path).unwrap();
         let dispatch = SqliteProjectRepository::open(&database_path).unwrap();
-        let root = database_path.with_extension("subscription-secrets");
+        let root = database_path.with_extension("assignment-secrets");
         std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("owner-assignment"), "subscription-test-secret").unwrap();
+        std::fs::write(root.join("owner-assignment"), "assignment-test-secret").unwrap();
         (
-            SubscriptionTestDaemon {
+            AssignmentTestDaemon {
                 daemon: {
                     let mut daemon = Daemon::new(Application::with_agent_dispatch(
                         Box::new(records),
@@ -3539,21 +2936,13 @@ mod tests {
                 database_path,
             },
             "owner-assignment".into(),
-            subscription.id.0,
-            subscription.start_cursor.0,
             target.id,
         )
     }
 
     #[tokio::test]
     async fn retirement_failure_revokes_access_and_retains_capacity_across_restart() {
-        let (fixture, assignment, subscription, _, _) = subscription_test_daemon();
-        let response = router(fixture.daemon()).oneshot(loopback_request(format!(
-            "/v1/agent-assignments/{assignment}/record-update-subscriptions/{subscription}/events"
-        ))).await.unwrap();
-        let mut stream = response.into_body().into_data_stream();
-        let _ = stream.next().await.unwrap().unwrap();
-        let _ = stream.next().await.unwrap().unwrap();
+        let (fixture, assignment, _) = assignment_test_daemon();
         let request = || forge_rpc::RetireAgentAssignmentRequest {
             assignment_id: assignment.clone(),
         };
@@ -3562,12 +2951,6 @@ mod tests {
             AgentDispatchApiServer::assignment_retire(&fixture.daemon(), request())
                 .await
                 .is_err()
-        );
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(200), stream.next())
-                .await
-                .expect("revoked delivery must end even when cleanup fails")
-                .is_none()
         );
         let store = SqliteProjectRepository::open(&fixture.database_path).unwrap();
         let info = store.agent_assignment_info(&assignment).unwrap();
@@ -3590,8 +2973,9 @@ mod tests {
         .unwrap_err();
         assert!(denied.to_string().contains("assignment-route-removed"));
         assert!(
-            store
-                .record_update_subscription(forge_app::RecordUpdateSubscriptionId(subscription))
+            fixture
+                .daemon()
+                .assignment_session(&assignment, "assignment-test-secret")
                 .is_err()
         );
         drop(store);
@@ -3613,7 +2997,7 @@ mod tests {
     #[tokio::test]
     async fn unknown_resolution_requires_confirmation_and_revocation_and_preserves_other_blockers()
     {
-        let (fixture, assignment, _, _, _) = subscription_test_daemon();
+        let (fixture, assignment, _) = assignment_test_daemon();
         let store = SqliteProjectRepository::open(&fixture.database_path).unwrap();
         for (kind, id) in [
             ("provision-intent", "once"),
@@ -3633,7 +3017,7 @@ mod tests {
     }
 
     async fn verify_unknown_resolution_request_validation(
-        fixture: &SubscriptionTestDaemon,
+        fixture: &AssignmentTestDaemon,
         assignment: &str,
     ) {
         for field in ["secret", "capability_id", "capability", "correlation_id"] {
@@ -3674,7 +3058,7 @@ mod tests {
     }
 
     async fn verify_unknown_resolution_confirmation_and_persistence(
-        fixture: &SubscriptionTestDaemon,
+        fixture: &AssignmentTestDaemon,
         assignment: &str,
         store: SqliteProjectRepository,
     ) {
@@ -3825,7 +3209,7 @@ mod tests {
 
     #[tokio::test]
     async fn assignment_info_does_not_invent_missing_evidence() {
-        let (fixture, assignment, _, _, _) = subscription_test_daemon();
+        let (fixture, assignment, _) = assignment_test_daemon();
         let initial = AgentDispatchApiServer::assignment_info(
             &fixture.daemon(),
             forge_rpc::AssignmentInfoRequest {
@@ -3844,7 +3228,7 @@ mod tests {
 
     #[tokio::test]
     async fn assignment_info_reports_persisted_evidence_without_prompts_or_secrets() {
-        let (fixture, assignment, _, _, _) = subscription_test_daemon();
+        let (fixture, assignment, _) = assignment_test_daemon();
         let store = SqliteProjectRepository::open(&fixture.database_path).unwrap();
         let task_id = store.agent_assignment(&assignment).unwrap().record_id;
         store.edit_record(task_id, "PRIVATE TASK PROMPT").unwrap();
@@ -3944,7 +3328,7 @@ mod tests {
 
     #[tokio::test]
     async fn assignment_info_retains_closed_recovery_evidence_across_reopen() {
-        let (fixture, assignment, _, _, _) = subscription_test_daemon();
+        let (fixture, assignment, _) = assignment_test_daemon();
         {
             let store = SqliteProjectRepository::open(&fixture.database_path).unwrap();
             store.begin_agent_provision(&assignment).unwrap();
@@ -3998,7 +3382,7 @@ mod tests {
 
     #[tokio::test]
     async fn assignment_info_uses_the_operator_contract_not_assignment_credentials() {
-        let (fixture, assignment, _, _, _) = subscription_test_daemon();
+        let (fixture, assignment, _) = assignment_test_daemon();
         // Like resume and retirement, this read is on the existing trusted operator RPC
         // surface. It does not authenticate operators or accept agent credentials.
         let module = AgentDispatchApiServer::into_rpc(fixture.daemon());
@@ -4029,7 +3413,7 @@ mod tests {
 
     #[tokio::test]
     async fn acknowledgement_requires_the_assignment_secret() {
-        let (fixture, assignment, _, _, _) = subscription_test_daemon();
+        let (fixture, assignment, _) = assignment_test_daemon();
         let root = fixture.database_path.with_extension("secrets");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join(&assignment), "correct-secret\n").unwrap();
@@ -4089,7 +3473,7 @@ mod tests {
 
     #[tokio::test]
     async fn authenticated_assignment_start_checks_secret_binding_and_retries() {
-        let (fixture, assignment, _, _, other_task) = subscription_test_daemon();
+        let (fixture, assignment, other_task) = assignment_test_daemon();
         let root = fixture.database_path.with_extension("start-secrets");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join(&assignment), "correct-secret\n").unwrap();
@@ -4284,141 +3668,6 @@ mod tests {
             .await
             .is_err()
         );
-    }
-
-    fn loopback_request(uri: String) -> Request<Body> {
-        let mut request = Request::builder()
-            .uri(uri)
-            .header(header::AUTHORIZATION, "Bearer subscription-test-secret")
-            .body(Body::empty())
-            .unwrap();
-        request.extensions_mut().insert(ConnectInfo(SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::LOCALHOST),
-            45678,
-        )));
-        request
-    }
-
-    fn subscription_authorization_fixture() -> (PathBuf, u64, u64, u64) {
-        let database_path = std::env::temp_dir().join(format!(
-            "forge-provenance-subscription-{}-{}.sqlite3",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let store = SqliteProjectRepository::open(&database_path).unwrap();
-        for slug in ["alpha", "beta", "gamma"] {
-            super::test_projects::register(&store, slug, None);
-        }
-        let task = |body: &str, project_slug: &str| NewTypedRecord {
-            record_type: RecordType::Task,
-            task_kind: None,
-            body: body.into(),
-            project_slugs: vec![project_slug.into()],
-            generated_by_ids: vec![],
-        };
-        let owner = store.open_typed_record(&task("owner", "alpha")).unwrap();
-        let prerequisite = store
-            .open_typed_record(&task("prerequisite", "beta"))
-            .unwrap();
-        let generated = store
-            .open_typed_record(&task("generated", "gamma"))
-            .unwrap();
-        store
-            .relate_records(owner.id, prerequisite.id, RecordRelationshipKind::DependsOn)
-            .unwrap();
-        store
-            .relate_records(owner.id, generated.id, RecordRelationshipKind::GeneratedBy)
-            .unwrap();
-        store
-            .create_agent_assignment(&NewAgentAssignment {
-                id: "owner-assignment".into(),
-                record_id: owner.id,
-                project_slug: "alpha".into(),
-                profile_revision: 1,
-            })
-            .unwrap();
-        let spec = store
-            .open_typed_record(&NewTypedRecord {
-                record_type: RecordType::Spec,
-                task_kind: None,
-                body: "spec".into(),
-                project_slugs: vec!["alpha".into()],
-                generated_by_ids: vec![],
-            })
-            .unwrap();
-        let child = store
-            .open_task_under_spec("child", spec.id, None, vec![])
-            .unwrap();
-        store
-            .create_agent_assignment(&NewAgentAssignment {
-                id: "spec-assignment".into(),
-                record_id: spec.id,
-                project_slug: "alpha".into(),
-                profile_revision: 1,
-            })
-            .unwrap();
-        drop(store);
-        (database_path, prerequisite.id, generated.id, child.id)
-    }
-
-    #[tokio::test]
-    async fn subscription_rpc_authorizes_neighbors_but_not_spec_assignments() {
-        let (database_path, prerequisite, generated, child) = subscription_authorization_fixture();
-        let root = database_path.with_extension("subscription-secrets");
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("owner-assignment"), "cap-owner").unwrap();
-        let daemon = Daemon::new(Application::with_agent_dispatch(
-            Box::new(SqliteProjectRepository::open(&database_path).unwrap()),
-            Box::new(SqliteProjectRepository::open(&database_path).unwrap()),
-            Box::new(super::ServerAgentDispatchAdapterFactory {
-                herdr: super::HerdrAdapterFactory::from_configuration_store(database_path.clone()),
-                daemon_url: "http://127.0.0.1:45003".into(),
-                capability_secret_root: std::env::temp_dir().join("forge-test-capabilities"),
-                cli_override: None,
-            }),
-            Box::new(TestInspector),
-        ));
-        let mut daemon = daemon;
-        daemon.capability_secret_root = Some(root.clone());
-        let request = |assignment_id: &str, target_record_id| CreateAgentSubscriptionRequest {
-            assignment_id: assignment_id.into(),
-            capability_id: "cap-owner".into(),
-            correlation_id: "subscription".into(),
-            target_record_ids: vec![target_record_id],
-            kind_filters: vec![],
-        };
-        assert_eq!(
-            AgentSubscriptionApiServer::create(&daemon, request("owner-assignment", prerequisite))
-                .await
-                .unwrap()
-                .target_record_ids,
-            vec![prerequisite]
-        );
-        assert_eq!(
-            AgentSubscriptionApiServer::create(&daemon, request("owner-assignment", generated))
-                .await
-                .unwrap()
-                .target_record_ids,
-            vec![generated]
-        );
-        assert!(
-            AgentSubscriptionApiServer::create(&daemon, request("spec-assignment", child))
-                .await
-                .is_err()
-        );
-        assert!(
-            AgentSubscriptionApiServer::create(&daemon, request("spec-assignment", prerequisite))
-                .await
-                .unwrap_err()
-                .to_string()
-                .contains("assignment-capability-denied")
-        );
-        drop(daemon);
-        std::fs::remove_dir_all(root).unwrap();
-        std::fs::remove_file(database_path).unwrap();
     }
 
     #[test]
@@ -4933,260 +4182,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn subscription_endpoint_replays_framed_updates_and_enforces_cursor_guards() {
-        let (fixture, assignment_id, subscription_id, start_cursor, _) = subscription_test_daemon();
-        let daemon = fixture.daemon();
-        let endpoint = format!(
-            "/v1/agent-assignments/{assignment_id}/record-update-subscriptions/{subscription_id}/events"
-        );
+    async fn subscription_interfaces_are_removed() {
+        let daemon = Daemon::new(test_application());
         let response = router(daemon.clone())
-            .oneshot(loopback_request(endpoint.clone()))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response.headers()[header::CONTENT_TYPE],
-            "text/event-stream"
-        );
-        assert_eq!(
-            response.headers()[header::CACHE_CONTROL],
-            "no-cache, no-transform"
-        );
-        assert_eq!(response.headers()["x-accel-buffering"], "no");
-        let mut stream = response.into_body().into_data_stream();
-        let retry = String::from_utf8(stream.next().await.unwrap().unwrap().to_vec()).unwrap();
-        let update = String::from_utf8(stream.next().await.unwrap().unwrap().to_vec()).unwrap();
-        assert_eq!(retry, "retry: 1000\n\n");
-        assert!(update.starts_with("id: "));
-        assert!(update.contains("event: record-update\n"));
-        assert!(update.contains(&format!("\"subscription_id\":{subscription_id}")));
-        assert!(update.contains("\"kind\":\"body-edited\""));
-        assert!(update.ends_with("\n\n"));
-
-        let response = router(daemon.clone())
-            .oneshot(loopback_request(format!(
-                "{endpoint}?after={}",
-                start_cursor + 1
-            )))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let mut conflict = loopback_request(format!("{endpoint}?after={}", start_cursor + 1));
-        conflict
-            .headers_mut()
-            .insert("last-event-id", start_cursor.to_string().parse().unwrap());
-        assert_eq!(
-            router(daemon.clone())
-                .oneshot(conflict)
-                .await
-                .unwrap()
-                .status(),
-            StatusCode::BAD_REQUEST
-        );
-
-        let response = router(daemon)
-            .oneshot(loopback_request(format!("{endpoint}?after=0")))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::CONFLICT);
-        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
-    }
-
-    #[tokio::test]
-    async fn active_delivery_publishes_assignment_task_start_and_reopen_updates() {
-        let (fixture, assignment_id, subscription_id, _, target_id) = subscription_test_daemon();
-        let root = fixture
-            .database_path
-            .with_extension("delivery-start-secrets");
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("target-assignment"), "target-secret\n").unwrap();
-        std::fs::write(root.join(&assignment_id), "subscription-test-secret").unwrap();
-        let mut daemon = fixture.daemon();
-        daemon.capability_secret_root = Some(root.clone());
-        AgentDispatchApiServer::assignment_acknowledge(
-            &daemon,
-            forge_rpc::AcknowledgeAssignmentRequest {
-                assignment_id: "target-assignment".into(),
-                secret: "target-secret".into(),
-                correlation_id: "start-target".into(),
-            },
-        )
-        .await
-        .unwrap();
-        let endpoint = format!(
-            "/v1/agent-assignments/{assignment_id}/record-update-subscriptions/{subscription_id}/events"
-        );
-        let response = router(daemon.clone())
-            .oneshot(loopback_request(endpoint))
-            .await
-            .unwrap();
-        let mut stream = response.into_body().into_data_stream();
-        let _ = stream.next().await.unwrap().unwrap();
-        let _ = stream.next().await.unwrap().unwrap();
-
-        AgentDispatchApiServer::assignment_task_start(
-            &daemon,
-            forge_rpc::AuthenticatedAssignmentTaskStartRequest {
-                assignment_id: "target-assignment".into(),
-                secret: "target-secret".into(),
-                correlation_id: "start-target".into(),
-                task_id: target_id,
-            },
-        )
-        .await
-        .unwrap();
-        let started = String::from_utf8(stream.next().await.unwrap().unwrap().to_vec()).unwrap();
-        assert!(started.contains("\"kind\":\"status-transition\""));
-
-        let store = SqliteProjectRepository::open(&fixture.database_path).unwrap();
-        store
-            .close_agent_assignment(
-                "target-assignment",
-                forge_app::AgentAssignmentClosureReason::Retired,
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/agent-assignments/removed/record-update-subscriptions/1/events")
+                    .body(Body::empty())
+                    .unwrap(),
             )
-            .unwrap();
-        drop(store);
-        AgentDispatchApiServer::task_reopen(&daemon, RecordIdRequest { id: target_id })
             .await
             .unwrap();
-        let reopened = String::from_utf8(stream.next().await.unwrap().unwrap().to_vec()).unwrap();
-        assert!(reopened.contains("\"kind\":\"status-transition\""));
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[tokio::test]
-    async fn active_subscription_delivery_ends_at_its_renewed_lease_deadline() {
-        let (fixture, assignment_id, subscription_id, _, _) = subscription_test_daemon();
-        let daemon = fixture.daemon();
-        let endpoint = format!(
-            "/v1/agent-assignments/{assignment_id}/record-update-subscriptions/{subscription_id}/events"
-        );
-        let response = router(daemon.clone())
-            .oneshot(loopback_request(endpoint))
-            .await
-            .unwrap();
-        let mut stream = response.into_body().into_data_stream();
-        let _ = stream.next().await.unwrap().unwrap();
-        let _ = stream.next().await.unwrap().unwrap();
-
-        daemon.delivery.renew_subscription(
-            RecordUpdateSubscriptionId(subscription_id),
-            super::now_millis() + 20,
-        );
-        assert!(
-            tokio::time::timeout(Duration::from_secs(1), stream.next())
-                .await
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            daemon
-                .delivery
-                .connections
-                .lock()
-                .unwrap()
-                .get(&RecordUpdateSubscriptionId(subscription_id))
-                .is_none()
-        );
-    }
-
-    #[tokio::test]
-    async fn subscription_endpoint_rejects_non_loopback_peers_before_delivery() {
-        let (fixture, assignment_id, subscription_id, _, _) = subscription_test_daemon();
-        let daemon = fixture.daemon();
-        let mut request = Request::builder()
-            .uri(format!(
-                "/v1/agent-assignments/{assignment_id}/record-update-subscriptions/{subscription_id}/events"
-            ))
-            .body(Body::empty())
-            .unwrap();
-        request.extensions_mut().insert(ConnectInfo(SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1)),
-            45678,
-        )));
-        assert_eq!(
-            router(daemon).oneshot(request).await.unwrap().status(),
-            StatusCode::FORBIDDEN
-        );
-    }
-
-    #[tokio::test]
-    async fn resync_required_reports_current_head_after_subscription_creation() {
-        let response = super::resync_required(
-            RecordUpdateSubscriptionId(9),
-            RecordUpdateId(12),
-            RecordUpdateId(18),
-        );
-        assert_eq!(response.status(), StatusCode::CONFLICT);
-        let body = String::from_utf8(
-            to_bytes(response.into_body(), usize::MAX)
-                .await
-                .unwrap()
-                .to_vec(),
-        )
-        .unwrap();
-        assert_eq!(
-            body,
-            "{\"code\":\"resync-required\",\"subscription_id\":9,\"retention_floor\":0,\"start_after_update_id\":12,\"head\":18}"
-        );
-    }
-
-    #[tokio::test]
-    async fn record_update_events_use_complete_named_sse_json_frames() {
-        let kinds = [
-            RecordUpdateKind::Created,
-            RecordUpdateKind::BodyEdited,
-            RecordUpdateKind::StatusTransition {
-                from: RecordStatus::Open,
-                to: RecordStatus::InProgress,
-            },
-            RecordUpdateKind::RelationshipAdded {
-                related_record_id: 4,
-                relationship_kind: None,
-            },
-            RecordUpdateKind::RelationshipRemoved {
-                related_record_id: 4,
-                relationship_kind: None,
-            },
-            RecordUpdateKind::CommentAdded {
-                comment_id: forge_app::RecordCommentId(3),
-            },
-            RecordUpdateKind::CommentDeleted {
-                comment_id: forge_app::RecordCommentId(3),
-            },
-        ];
-
-        for kind in kinds {
-            let event = super::record_update_event(
-                RecordUpdateSubscriptionId(9),
-                &RecordUpdateEnvelope {
-                    record_id: 47,
-                    update: RecordUpdate {
-                        id: RecordUpdateId(12),
-                        created_at_millis: 123,
-                        kind,
-                    },
-                },
-            );
-            let response = Sse::new(tokio_stream::iter([Ok::<_, std::convert::Infallible>(
-                event,
-            )]))
-            .into_response();
-            assert_eq!(
-                response.headers()[header::CONTENT_TYPE],
-                "text/event-stream"
-            );
-            let frame = String::from_utf8(
-                to_bytes(response.into_body(), usize::MAX)
-                    .await
-                    .unwrap()
-                    .to_vec(),
-            )
-            .unwrap();
-            assert!(frame.starts_with("id: 12\nevent: record-update\ndata: {"));
-            assert!(frame.contains("\"timestamp\":\"1970-01-01T00:00:00.123Z\""));
-            assert!(frame.ends_with(" }\n\n"));
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        for method in [
+            "agentSubscription_create",
+            "agentSubscription_renew",
+            "agentSubscription_delete",
+        ] {
+            let response = router(daemon.clone()).oneshot(Request::builder()
+                .method("POST").uri("/rpc").header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::json!({"jsonrpc":"2.0", "id":1, "method":method, "params":[{}]}).to_string())).unwrap()).await.unwrap();
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(result["error"]["code"], -32601, "{method}");
         }
     }
 }

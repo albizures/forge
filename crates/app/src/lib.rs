@@ -155,52 +155,6 @@ pub struct RecordUpdate {
     pub kind: RecordUpdateKind,
 }
 
-/// A Record Update in Forge's global cursor order.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RecordUpdateEnvelope {
-    pub record_id: u64,
-    pub update: RecordUpdate,
-}
-
-/// Opaque stable identity assigned to a durable Record Update Subscription.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct RecordUpdateSubscriptionId(pub u64);
-
-/// The update categories a subscription may select.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub enum RecordUpdateKindFilter {
-    Created,
-    BodyEdited,
-    StatusTransition,
-    RelationshipAdded,
-    RelationshipRemoved,
-    CommentAdded,
-    CommentDeleted,
-}
-
-/// A durable, leased request for updates to explicit Records.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RecordUpdateSubscription {
-    pub id: RecordUpdateSubscriptionId,
-    pub assignment_id: String,
-    /// Sorted, duplicate-free explicit Record IDs.
-    pub target_record_ids: Vec<u64>,
-    /// Sorted, duplicate-free categories; empty selects every category.
-    pub kind_filters: Vec<RecordUpdateKindFilter>,
-    /// The greatest committed global update cursor at creation.
-    pub start_cursor: RecordUpdateId,
-    /// Unix milliseconds at which the lease becomes invalid.
-    pub lease_expires_at_millis: u64,
-}
-
-/// Persistence input for a durable Record Update Subscription.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct NewRecordUpdateSubscription {
-    pub assignment_id: String,
-    pub target_record_ids: Vec<u64>,
-    pub kind_filters: Vec<RecordUpdateKindFilter>,
-}
-
 /// Opaque stable identity assigned to a Record Comment.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct RecordCommentId(pub u64);
@@ -1417,9 +1371,6 @@ pub enum AssignmentAuthorizationOperation {
     CompleteTask,
     StartTask,
     Acknowledge,
-    CreateSubscription,
-    RenewSubscription,
-    DeleteSubscription,
 }
 
 /// The recorded decision; neither capability material nor Comment content is retained.
@@ -1435,39 +1386,6 @@ pub struct AssignmentContext {
     pub assignment_id: String,
     pub task: Record,
     pub directly_related_records: Vec<Record>,
-}
-
-/// Persistence boundary for durable Record Update Subscription state and replay.
-#[allow(clippy::missing_errors_doc)]
-pub trait RecordUpdateSubscriptionRepository: AgentDispatchRepository {
-    /// Creates an idempotent 30-minute leased Subscription and captures its start cursor.
-    fn create_record_update_subscription(
-        &self,
-        subscription: &NewRecordUpdateSubscription,
-    ) -> Result<RecordUpdateSubscription, RegistrationError>;
-    /// Returns a Subscription while its lease remains valid.
-    fn record_update_subscription(
-        &self,
-        id: RecordUpdateSubscriptionId,
-    ) -> Result<RecordUpdateSubscription, RegistrationError>;
-    /// Renews a Subscription's 30-minute lease.
-    fn renew_record_update_subscription(
-        &self,
-        id: RecordUpdateSubscriptionId,
-    ) -> Result<RecordUpdateSubscription, RegistrationError>;
-    /// Deletes a Subscription and all of its selections.
-    fn delete_record_update_subscription(
-        &self,
-        id: RecordUpdateSubscriptionId,
-    ) -> Result<(), RegistrationError>;
-    /// Returns the greatest committed global Record Update cursor, or zero before any updates.
-    fn record_update_head(&self) -> Result<RecordUpdateId, RegistrationError>;
-    /// Replays selected global updates strictly after `after`, ascending by cursor.
-    fn replay_record_updates(
-        &self,
-        id: RecordUpdateSubscriptionId,
-        after: RecordUpdateId,
-    ) -> Result<Vec<RecordUpdateEnvelope>, RegistrationError>;
 }
 
 /// The operator-selected provider workspace shared by dispatched Agents.
@@ -1495,6 +1413,8 @@ pub struct DispatchPreflightSelection {
 /// Durable persistence boundary for provider-neutral dispatch foundations.
 #[allow(clippy::missing_errors_doc)]
 pub trait AgentDispatchRepository: RecordRepository + WorkspaceDispatchRepository {
+    /// Returns the greatest committed global Record Update identifier for read freshness.
+    fn record_update_head(&self) -> Result<RecordUpdateId, RegistrationError>;
     /// Returns the operator-cleared automatic-dispatch block, if any.
     fn dispatch_hold(&self, record_id: u64) -> Result<Option<DispatchHold>, RegistrationError>;
     /// Creates or replaces the durable block on automatic dispatch.
@@ -1897,112 +1817,6 @@ pub fn assignment_complete_task<R: AgentDispatchRepository + ?Sized>(
     repository.done_record(task_id, resolution)
 }
 
-/// Authorizes creation for a Task's direct prerequisites or a Spec's direct children.
-#[allow(clippy::missing_errors_doc)]
-pub fn assignment_create_record_update_subscription<
-    R: RecordUpdateSubscriptionRepository + ?Sized,
->(
-    repository: &R,
-    assignment_id: &str,
-    capability_id: &str,
-    correlation_id: &str,
-    target_record_ids: Vec<u64>,
-    kind_filters: Vec<RecordUpdateKindFilter>,
-) -> Result<RecordUpdateSubscription, RegistrationError> {
-    let assignment = repository.agent_assignment(assignment_id)?;
-    let assigned_record = repository.show_record(assignment.record_id)?;
-    let allowed = assignment.closed_at_millis.is_none()
-        && !target_record_ids.is_empty()
-        && target_record_ids.iter().all(|target_id| {
-            repository.show_record(*target_id).is_ok_and(|target| {
-                target
-                    .relationships
-                    .iter()
-                    .any(|relationship| match assigned_record.record_type {
-                        RecordType::Spec => {
-                            relationship.kind == RecordRelationshipKind::ParentChild
-                                && relationship.parent_id == assignment.record_id
-                                && relationship.child_id == *target_id
-                        }
-                        RecordType::Task => {
-                            relationship.kind == RecordRelationshipKind::DependsOn
-                                && relationship.from_id == assignment.record_id
-                                && relationship.to_id == *target_id
-                        }
-                        _ => false,
-                    })
-            })
-        });
-    authorize_assignment_operation(
-        repository,
-        &assignment,
-        capability_id,
-        correlation_id,
-        AssignmentAuthorizationOperation::CreateSubscription,
-        assignment.record_id,
-        allowed,
-    )?;
-    repository.create_record_update_subscription(&NewRecordUpdateSubscription {
-        assignment_id: assignment.id,
-        target_record_ids,
-        kind_filters,
-    })
-}
-
-/// Authorizes renewal only for the named open Assignment's Subscription.
-#[allow(clippy::missing_errors_doc)]
-pub fn assignment_renew_record_update_subscription<
-    R: RecordUpdateSubscriptionRepository + ?Sized,
->(
-    repository: &R,
-    assignment_id: &str,
-    capability_id: &str,
-    correlation_id: &str,
-    subscription_id: RecordUpdateSubscriptionId,
-) -> Result<RecordUpdateSubscription, RegistrationError> {
-    let assignment = repository.agent_assignment(assignment_id)?;
-    let subscription = repository.record_update_subscription(subscription_id)?;
-    let allowed =
-        assignment.closed_at_millis.is_none() && subscription.assignment_id == assignment.id;
-    authorize_assignment_operation(
-        repository,
-        &assignment,
-        capability_id,
-        correlation_id,
-        AssignmentAuthorizationOperation::RenewSubscription,
-        assignment.record_id,
-        allowed,
-    )?;
-    repository.renew_record_update_subscription(subscription_id)
-}
-
-/// Authorizes deletion only for the named open Assignment's Subscription.
-#[allow(clippy::missing_errors_doc)]
-pub fn assignment_delete_record_update_subscription<
-    R: RecordUpdateSubscriptionRepository + ?Sized,
->(
-    repository: &R,
-    assignment_id: &str,
-    capability_id: &str,
-    correlation_id: &str,
-    subscription_id: RecordUpdateSubscriptionId,
-) -> Result<(), RegistrationError> {
-    let assignment = repository.agent_assignment(assignment_id)?;
-    let subscription = repository.record_update_subscription(subscription_id)?;
-    let allowed =
-        assignment.closed_at_millis.is_none() && subscription.assignment_id == assignment.id;
-    authorize_assignment_operation(
-        repository,
-        &assignment,
-        capability_id,
-        correlation_id,
-        AssignmentAuthorizationOperation::DeleteSubscription,
-        assignment.record_id,
-        allowed,
-    )?;
-    repository.delete_record_update_subscription(subscription_id)
-}
-
 fn authorize_assignment_operation<R: AgentDispatchRepository + ?Sized>(
     repository: &R,
     assignment: &AgentAssignment,
@@ -2052,7 +1866,7 @@ pub struct Application {
     records: Box<dyn RecordRepository>,
     managed_worktrees: Option<Box<dyn ManagedWorktreeRepository>>,
     worktree_adapter: Option<Box<dyn ManagedWorktreeAdapter>>,
-    dispatch: Option<Box<dyn RecordUpdateSubscriptionRepository>>,
+    dispatch: Option<Box<dyn AgentDispatchRepository>>,
     adapter_factory: Option<Box<dyn AgentDispatchAdapterFactory>>,
     inspector: std::sync::Arc<dyn RepositoryInspector>,
     // Serialize provider verification with configuration writes. Atomic repository guards
@@ -2146,7 +1960,7 @@ impl Application {
     #[must_use]
     pub fn with_agent_dispatch(
         records: Box<dyn RecordRepository>,
-        dispatch: Box<dyn RecordUpdateSubscriptionRepository>,
+        dispatch: Box<dyn AgentDispatchRepository>,
         adapter_factory: Box<dyn AgentDispatchAdapterFactory>,
         inspector: Box<dyn RepositoryInspector>,
     ) -> Self {
@@ -2168,7 +1982,7 @@ impl Application {
         records: Box<dyn RecordRepository>,
         managed_worktrees: Box<dyn ManagedWorktreeRepository>,
         worktree_adapter: Box<dyn ManagedWorktreeAdapter>,
-        dispatch: Box<dyn RecordUpdateSubscriptionRepository>,
+        dispatch: Box<dyn AgentDispatchRepository>,
         adapter_factory: Box<dyn AgentDispatchAdapterFactory>,
         inspector: Box<dyn RepositoryInspector>,
     ) -> Self {
@@ -2221,7 +2035,7 @@ impl Application {
         })
     }
 
-    fn dispatch(&self) -> Result<&dyn RecordUpdateSubscriptionRepository, RegistrationError> {
+    fn dispatch(&self) -> Result<&dyn AgentDispatchRepository, RegistrationError> {
         self.dispatch.as_deref().ok_or_else(|| {
             RegistrationError::new(
                 "agent-dispatch-unavailable",
@@ -2506,7 +2320,7 @@ impl Application {
             "Assignment retirement requested; resume dispatch explicitly after recovery review.",
         )?;
         // Persist the blocker before revocation: failure or a crash at any later step must
-        // not free capacity. Closure revokes capability access and subscriptions atomically.
+        // not free capacity. Closure revokes capability access atomically.
         dispatch.add_agent_assignment_resource(&NewAgentAssignmentResource {
             assignment_id: assignment_id.into(),
             resource_kind: "retirement-pending".into(),
@@ -2557,94 +2371,6 @@ impl Application {
         self.agent_assignment_info(assignment_id)
     }
 
-    /// Creates an Assignment-authorized durable Record Update Subscription.
-    ///
-    /// # Errors
-    ///
-    /// Returns authorization, validation, or persistence failures.
-    pub fn create_assignment_subscription(
-        &self,
-        assignment_id: &str,
-        capability_id: &str,
-        correlation_id: &str,
-        target_record_ids: Vec<u64>,
-        kind_filters: Vec<RecordUpdateKindFilter>,
-    ) -> Result<RecordUpdateSubscription, RegistrationError> {
-        assignment_create_record_update_subscription(
-            self.dispatch()?,
-            assignment_id,
-            capability_id,
-            correlation_id,
-            target_record_ids,
-            kind_filters,
-        )
-    }
-
-    /// Renews an Assignment-owned durable Record Update Subscription.
-    ///
-    /// # Errors
-    ///
-    /// Returns authorization, expiry, or persistence failures.
-    pub fn renew_assignment_subscription(
-        &self,
-        assignment_id: &str,
-        capability_id: &str,
-        correlation_id: &str,
-        subscription_id: RecordUpdateSubscriptionId,
-    ) -> Result<RecordUpdateSubscription, RegistrationError> {
-        assignment_renew_record_update_subscription(
-            self.dispatch()?,
-            assignment_id,
-            capability_id,
-            correlation_id,
-            subscription_id,
-        )
-    }
-
-    /// Deletes an Assignment-owned durable Record Update Subscription.
-    ///
-    /// # Errors
-    ///
-    /// Returns authorization or persistence failures.
-    pub fn delete_assignment_subscription(
-        &self,
-        assignment_id: &str,
-        capability_id: &str,
-        correlation_id: &str,
-        subscription_id: RecordUpdateSubscriptionId,
-    ) -> Result<(), RegistrationError> {
-        assignment_delete_record_update_subscription(
-            self.dispatch()?,
-            assignment_id,
-            capability_id,
-            correlation_id,
-            subscription_id,
-        )
-    }
-
-    /// Validates delivery ownership without renewing the Subscription lease.
-    ///
-    /// # Errors
-    ///
-    /// Returns authorization, ownership, or lease failures.
-    pub fn assignment_subscription_delivery(
-        &self,
-        assignment_id: &str,
-        subscription_id: RecordUpdateSubscriptionId,
-    ) -> Result<RecordUpdateSubscription, RegistrationError> {
-        let dispatch = self.dispatch()?;
-        let assignment = dispatch.agent_assignment(assignment_id)?;
-        let subscription = dispatch.record_update_subscription(subscription_id)?;
-        if assignment.closed_at_millis.is_none() && subscription.assignment_id == assignment.id {
-            Ok(subscription)
-        } else {
-            Err(RegistrationError::new(
-                "assignment-subscription-mismatch",
-                "Subscription is not owned by the named open Assignment",
-            ))
-        }
-    }
-
     /// Returns the greatest committed global Record Update cursor.
     ///
     /// # Errors
@@ -2652,20 +2378,6 @@ impl Application {
     /// Returns a dispatch storage error.
     pub fn record_update_head(&self) -> Result<RecordUpdateId, RegistrationError> {
         self.dispatch()?.record_update_head()
-    }
-
-    /// Replays selected committed updates after a durable global cursor.
-    ///
-    /// # Errors
-    ///
-    /// Returns storage, lease, or cursor failures.
-    pub fn replay_assignment_subscription_updates(
-        &self,
-        subscription_id: RecordUpdateSubscriptionId,
-        after: RecordUpdateId,
-    ) -> Result<Vec<RecordUpdateEnvelope>, RegistrationError> {
-        self.dispatch()?
-            .replay_record_updates(subscription_id, after)
     }
 
     /// Sets or clears a registered Project's Task dispatch capacity override.

@@ -12,8 +12,7 @@ pub use record_selection::*;
 use forge_app::{
     AgentDispatchProjectStatus, AgentDispatchReconcileResult, AgentDispatchStatus, AgentProfile,
     ApplicationStatus, ManagedWorktreeInfo, Project, Record, RecordComment, RecordRelationshipKind,
-    RecordStatus, RecordUpdate, RecordUpdateKind, RecordUpdateKindFilter, RecordUpdateSubscription,
-    RegistrationError, TaskKind, WorktreeClaimState,
+    RecordStatus, RecordUpdate, RecordUpdateKind, RegistrationError, TaskKind, WorktreeClaimState,
 };
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
 use serde::{Deserialize, Serialize};
@@ -44,9 +43,6 @@ pub const AGENT_DISPATCH_TASK_REOPEN_METHOD: &str = "agentDispatch.taskReopen";
 pub const AGENT_DISPATCH_RESUME_METHOD: &str = "agentDispatch.resume";
 pub const AGENT_DISPATCH_ASSIGNMENT_RETIRE_METHOD: &str = "agentDispatch.assignmentRetire";
 pub const AGENT_DISPATCH_ASSIGNMENT_INFO_METHOD: &str = "agentDispatch_assignmentInfo";
-pub const AGENT_SUBSCRIPTION_CREATE_METHOD: &str = "agentSubscription.create";
-pub const AGENT_SUBSCRIPTION_RENEW_METHOD: &str = "agentSubscription.renew";
-pub const AGENT_SUBSCRIPTION_DELETE_METHOD: &str = "agentSubscription.delete";
 pub const WORKTREE_SETUP_HOOK_SET_METHOD: &str = "worktree.setupHookSet";
 pub const WORKTREE_CREATE_METHOD: &str = "worktree.create";
 pub const WORKTREE_INFO_METHOD: &str = "worktree.info";
@@ -140,22 +136,6 @@ pub trait AgentDispatchApi {
         &self,
         request: ResolveUnknownAgentResourcesRequest,
     ) -> RpcResult<AgentAssignmentInfoResponse>;
-}
-
-#[rpc(client, server, namespace = "agentSubscription")]
-pub trait AgentSubscriptionApi {
-    #[method(name = "create")]
-    async fn create(
-        &self,
-        request: CreateAgentSubscriptionRequest,
-    ) -> RpcResult<RecordUpdateSubscriptionResponse>;
-    #[method(name = "renew")]
-    async fn renew(
-        &self,
-        request: ManageAgentSubscriptionRequest,
-    ) -> RpcResult<RecordUpdateSubscriptionResponse>;
-    #[method(name = "delete")]
-    async fn delete(&self, request: ManageAgentSubscriptionRequest) -> RpcResult<()>;
 }
 
 #[rpc(client, server, namespace = "worktree")]
@@ -728,62 +708,6 @@ impl From<AgentDispatchReconcileResult> for AgentDispatchReconcileResponse {
             reconciled_assignments: value.reconciled_assignments,
         }
     }
-}
-
-// Legacy field name capability_id carries the actual secret, never an audit identity.
-#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct CreateAgentSubscriptionRequest {
-    pub assignment_id: String,
-    pub capability_id: String,
-    pub correlation_id: String,
-    pub target_record_ids: Vec<u64>,
-    pub kind_filters: Vec<String>,
-}
-#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ManageAgentSubscriptionRequest {
-    pub assignment_id: String,
-    pub capability_id: String,
-    pub correlation_id: String,
-    pub subscription_id: u64,
-}
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct RecordUpdateSubscriptionResponse {
-    pub id: u64,
-    pub assignment_id: String,
-    pub target_record_ids: Vec<u64>,
-    pub kind_filters: Vec<String>,
-    pub start_cursor: u64,
-    pub lease_expires_at_millis: u64,
-}
-impl From<RecordUpdateSubscription> for RecordUpdateSubscriptionResponse {
-    fn from(value: RecordUpdateSubscription) -> Self {
-        Self {
-            id: value.id.0,
-            assignment_id: value.assignment_id,
-            target_record_ids: value.target_record_ids,
-            kind_filters: value
-                .kind_filters
-                .into_iter()
-                .map(record_update_kind_filter_name)
-                .collect(),
-            start_cursor: value.start_cursor.0,
-            lease_expires_at_millis: value.lease_expires_at_millis,
-        }
-    }
-}
-fn record_update_kind_filter_name(filter: RecordUpdateKindFilter) -> String {
-    match filter {
-        RecordUpdateKindFilter::Created => "created",
-        RecordUpdateKindFilter::BodyEdited => "body-edited",
-        RecordUpdateKindFilter::StatusTransition => "status-transition",
-        RecordUpdateKindFilter::RelationshipAdded => "relationship-added",
-        RecordUpdateKindFilter::RelationshipRemoved => "relationship-removed",
-        RecordUpdateKindFilter::CommentAdded => "comment-added",
-        RecordUpdateKindFilter::CommentDeleted => "comment-deleted",
-    }
-    .into()
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

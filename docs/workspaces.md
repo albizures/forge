@@ -139,4 +139,4 @@ new store is not a way to reconcile an uncertain old agent.
 
 Author and register immutable profile revisions using [Agent Profile policy](agent-profile-policy.md);
 registration never changes a Workspace selection. For the delivered agent's
-bounded bootstrap, actions and subscriptions, see [Assignment context](assignment-context.md).
+bounded bootstrap, reads and actions, see [Assignment context](assignment-context.md).
