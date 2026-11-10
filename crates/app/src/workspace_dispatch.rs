@@ -144,6 +144,57 @@ pub(crate) fn provisioning_available<F: AgentDispatchAdapterFactory + ?Sized>(
 }
 
 impl Application {
+    /// Resolve authoring input and the same-type lifecycle defaults without side effects.
+    /// Paths are rooted in the selected Workspace, never the execution/client cwd.
+    /// # Errors
+    /// Rejects invalid Workspace, Record Type, catalog or document inputs.
+    pub fn preview_agent_profile(
+        &self,
+        workspace: &str,
+        operator_root: &std::path::Path,
+        document: &std::path::Path,
+        kind: RecordType,
+    ) -> Result<(crate::agent_profiles::ResolvedLaunchPolicy, AgentProfile), RegistrationError>
+    {
+        let configuration = self
+            .dispatch()?
+            .workspace_dispatch_configuration(workspace)?;
+        let selected = match kind {
+            RecordType::Task => configuration.task_profile,
+            RecordType::Grilling => configuration.grilling_profile,
+            _ => {
+                return Err(RegistrationError::new(
+                    "invalid-profile-kind",
+                    "select task or grilling",
+                ));
+            }
+        };
+        let lifecycle = match selected {
+            Some(profile) => profile,
+            None => self.dispatch()?.agent_profile(kind, 1)?,
+        };
+        let root = self.workspace(workspace)?.root;
+        let policy = crate::agent_profiles::ResourceCatalog::discover(operator_root, &root)
+            .and_then(|catalog| catalog.resolve(&root, document))
+            .map_err(|reason| RegistrationError::new("invalid-agent-profile", reason))?;
+        Ok((policy, lifecycle))
+    }
+
+    /// Explicitly register an immutable revision; never changes Workspace selection.
+    /// # Errors
+    /// Rejects invalid authoring inputs or failed persistence.
+    pub fn register_agent_profile(
+        &self,
+        workspace: &str,
+        operator_root: &std::path::Path,
+        document: &std::path::Path,
+        kind: RecordType,
+    ) -> Result<AgentProfile, RegistrationError> {
+        let (policy, _) = self.preview_agent_profile(workspace, operator_root, document, kind)?;
+        self.dispatch()?
+            .register_agent_profile(workspace, kind, &policy)
+    }
+
     /// Returns the effective selected immutable profile, without contacting the provider.
     #[allow(clippy::missing_errors_doc)]
     pub fn selected_agent_profile(
@@ -318,14 +369,19 @@ impl Application {
                     RecordType::Grilling
                 };
                 let profile = self.dispatch()?.agent_profile(kind, revision)?;
-                self.adapter_factory()?
-                    .validate_profile(&profile)
-                    .map_err(|_| {
-                        RegistrationError::new(
-                            "invalid-profile-selection",
-                            "selected profile is unsupported by this provider",
-                        )
-                    })?;
+                // Selecting a registered immutable policy is not a runtime compatibility
+                // attestation. Dispatch readiness/launch still require adapter enforcement.
+                // Preserve the existing provider check for legacy, unregistered profiles.
+                if profile.launch_policy.is_none() {
+                    self.adapter_factory()?
+                        .validate_profile(&profile)
+                        .map_err(|_| {
+                            RegistrationError::new(
+                                "invalid-profile-selection",
+                                "selected profile is unsupported by this provider",
+                            )
+                        })?;
+                }
                 self.dispatch()?
                     .select_workspace_profile(workspace, kind, Some(revision))
             }

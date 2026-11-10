@@ -1,3 +1,4 @@
+mod agent_profiles;
 mod project_selection;
 mod workspaces;
 
@@ -39,6 +40,8 @@ struct Cli {
 enum Command {
     /// Manage Forge filesystem Workspace registrations and selection.
     Workspace(workspaces::WorkspaceArgs),
+    /// Preview or explicitly register an immutable Agent Profile document.
+    AgentProfile(agent_profiles::AgentProfileArgs),
     /// Print the daemon's shared application status.
     Status {
         #[arg(long, value_name = "URL")]
@@ -681,6 +684,7 @@ async fn main() {
 async fn run(cli: Cli) -> i32 {
     match cli.command {
         Command::Workspace(args) => workspaces::run(args, cli.workspace).await,
+        Command::AgentProfile(args) => agent_profiles::run(args, cli.workspace).await,
         Command::Status { server_url, json } => status(server_url.as_deref(), json).await,
         Command::Add {
             command:
@@ -1920,6 +1924,10 @@ mod tests {
             ("records.md", include_str!("../../../docs/records.md")),
             ("worktrees.md", include_str!("../../../docs/worktrees.md")),
             ("dispatch.md", include_str!("../../../docs/dispatch.md")),
+            (
+                "agent-profile-policy.md",
+                include_str!("../../../docs/agent-profile-policy.md"),
+            ),
             (
                 "assignment-recovery.md",
                 include_str!("../../../docs/assignment-recovery.md"),

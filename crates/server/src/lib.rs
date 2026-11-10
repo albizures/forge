@@ -3,6 +3,7 @@
 //! The daemon listens on loopback by default. Binding it to a remote address
 //! exposes an unauthenticated service, so use that only on a trusted private network.
 
+mod agent_profiles;
 mod herdr;
 #[cfg(test)]
 mod test_projects;
@@ -252,6 +253,7 @@ pub struct Daemon {
     management: ManagementStatus,
     delivery: Arc<SubscriptionDelivery>,
     capability_secret_root: Option<PathBuf>,
+    profile_operator_root: Option<PathBuf>,
 }
 
 #[derive(Default)]
@@ -418,6 +420,7 @@ impl Daemon {
             application: Arc::new(application),
             delivery: Arc::new(SubscriptionDelivery::default()),
             capability_secret_root: None,
+            profile_operator_root: std::env::var_os("HOME").map(PathBuf::from),
             management: ManagementStatus::new(
                 RevisionIdentity::from(forge_build_info::current()),
                 daemon_instance_id,
@@ -2330,6 +2333,9 @@ pub fn router(daemon: Daemon) -> Router {
     let status_daemon = daemon.clone();
     let subscription_daemon = daemon.clone();
     let mut methods = SystemApiServer::into_rpc(daemon.clone());
+    methods
+        .merge(forge_rpc::AgentProfileApiServer::into_rpc(daemon.clone()))
+        .expect("Agent Profile RPC methods are unique");
     methods
         .merge(forge_rpc::WorkspaceApiServer::into_rpc(daemon.clone()))
         .expect("Workspace RPC methods are unique");

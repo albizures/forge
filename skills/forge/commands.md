@@ -100,6 +100,26 @@ Select a Forge Workspace with `--workspace` or canonical cwd; worktree IDs, list
 
 Hooks execute shell commands in newly created Managed Worktrees. A failed hook retains evidence and blocks automatic retry. `doctor` diagnoses; `--repair` mutates. `recover --confirm-no-active-agent` is an operator assertion requiring verification that no agent is active. Removal is safety-checked; inspect dirty, missing, invalid, or agent-owned state rather than forcing cleanup. Forge does not automatically remove a Managed Worktree when its Task completes.
 
+## Agent Profile authoring and registration
+
+```sh
+forge agent-profile preview .agents/skills/implementation/forge-agent.md --workspace personal --json
+forge agent-profile preview .agents/skills/implementation/forge-agent.md --workspace personal --record-type grilling
+forge agent-profile register .agents/skills/implementation/forge-agent.md --workspace personal --record-type task --json
+forge agent-profile register .agents/skills/implementation/forge-agent.md --workspace personal --record-type grilling --json
+```
+
+Operator-only: both operations require explicit `--workspace`. Document paths resolve
+from its root; internal resource paths resolve from the companion directory.
+Preview reads catalogs without executing extensions, connecting MCP servers or
+changing registration/selections. Registration persists a new immutable per-type
+revision without selecting it. Inspect the returned revision, then explicitly
+select with `dispatcher config set task-profile|grilling-profile <revision>`.
+Selection is independent of runtime readiness; registered policies currently
+remain launch-blocked pending closed-policy enforcement and trusted bootstrap.
+For schema, catalog membership, redacted output, fingerprint limits and an
+isolated runnable example, read [Agent Profile policy](../../docs/agent-profile-policy.md).
+
 ## Dispatch administration
 
 ```sh
@@ -123,7 +143,7 @@ forge dispatcher reconcile --json
 forge dispatcher dispatch 47 --json
 ```
 
-Select the Forge Workspace by `--workspace <id>`, qualified Project reference or canonical cwd, with no saved default. `task-profile` and `grilling-profile` independently select existing supported revision numbers; both are required for dispatch. `config set workspace` verifies the exact existing Herdr identity and rejects a binding already owned by another Forge Workspace. Forge never creates, adopts by label, replaces or deletes the Herdr container. `herdr-socket` is the daemon-wide absolute Unix socket, not the Forge RPC endpoint. Reads show effective values, ownership and default/override provenance without contacting Herdr. `profile --kind task|grilling` inspects the Workspace-selected revision.
+Select the Forge Workspace by `--workspace <id>`, qualified Project reference or canonical cwd, with no saved default. `task-profile` and `grilling-profile` independently select existing revision numbers; both are required for dispatch. Registered-policy selection stores an explicit choice without attesting runtime compatibility; legacy selections retain provider validation. `config set workspace` verifies the exact existing Herdr identity and rejects a binding already owned by another Forge Workspace. Forge never creates, adopts by label, replaces or deletes the Herdr container. `herdr-socket` is the daemon-wide absolute Unix socket, not the Forge RPC endpoint. Reads show effective values, ownership and default/override provenance without contacting Herdr. `profile --kind task|grilling` inspects the Workspace-selected revision.
 
 `config unset` explicitly removes a selection/override. Binding changes are guarded by that Workspace's live Assignments and retained resources, including closed uncertain attempts; socket changes apply that guard daemon-wide and invalidate every Workspace's provider verification. Repeat `config set workspace <bound-id>` for fresh verification at the new endpoint. `status` distinguishes configured completeness from current dispatchability and reports profile, binding, availability and identity blockers. Registration, planning and local inspection remain usable while dispatch is blocked. Investigate with `assignment-info` before safe recovery.
 

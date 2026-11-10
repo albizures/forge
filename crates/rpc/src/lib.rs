@@ -1,5 +1,7 @@
 //! Shared JSON-RPC wire contract ownership boundary.
 
+mod agent_profiles;
+pub use agent_profiles::*;
 mod workspaces;
 pub use workspaces::*;
 mod record_selection;

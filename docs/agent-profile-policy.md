@@ -1,8 +1,8 @@
 # Agent Profile policy boundary
 
-Implementation contract for Spec #614, Task #615. Operator CLI, authenticated
-Assignment context, preflight ordering and closed runtime loading are subsequent
-Tasks. **Registered policies cannot yet launch through Herdr.** This is not a
+Implementation contract for Spec #614, Tasks #615–616. Operator preview,
+registration and explicit selection are available. Authenticated Assignment
+context, preflight ordering and closed runtime loading are subsequent Tasks. **Registered policies cannot yet launch through Herdr.** This is not a
 claim that outgoing Pi flags enforce the policy.
 
 ## Authoring and resolution
@@ -50,6 +50,94 @@ may select outside-root catalog members, including installed symlink targets,
 but cannot grant membership. Skill paths may identify SKILL.md or its directory.
 MCP paths identify catalog configuration files; a file containing multiple server
 entries is ambiguous and must be selected by unique server name instead.
+
+## Operator preview, registration and selection
+
+```sh
+forge agent-profile preview .agents/skills/implementation/forge-agent.md \
+  --workspace development --record-type task --json
+forge agent-profile register .agents/skills/implementation/forge-agent.md \
+  --workspace development --record-type task --json
+# Use the returned revision explicitly; do not assume a latest/default revision.
+forge dispatcher config set task-profile 2 --workspace development
+forge dispatcher config set grilling-profile 2 --workspace development
+forge dispatcher profile --workspace development
+forge dispatcher profile --kind grilling --workspace development
+```
+
+The Grilling revision must first be independently registered with
+`--record-type grilling`; revision numbers are per Record Type, not interchangeable
+handles. Each Workspace has separate selections. Preview defaults to Task for
+Forge-owned lifecycle policy; registration requires an explicit Record Type.
+Both require explicit `--workspace`, even from inside a Workspace. Relative
+**document arguments are sent unchanged** to the daemon and resolved from that
+Workspace root. The daemon's home directory supplies the operator catalog, not
+the client's home or cwd. Files must be available to the daemon.
+
+Readable and JSON responses report runtime/model/tools, canonical resource
+identities and SHA-256 digests, effective Forge-owned lifecycle policy, exact
+fingerprint coverage and limitations. They omit behavior and MCP configuration
+(including credentials). Preview has a null `revision`; registration returns the
+new revision and leaves all selections unchanged. Invalid documents/catalogs
+fail with redacted reasons; neither operation imports extensions, starts MCP
+commands, provisions worktrees or contacts a runtime provider. JSON uses
+`schema_version: 1`. Operator RPC methods are `agent_profile.preview` and
+`agent_profile.register`, with `workspace`, `document` and `record_type` fields.
+These are trusted operator routes, not Assignment-authenticated agent actions.
+
+Selection stores a registered revision even when the runtime is unavailable or
+not yet compatible. It does **not** certify enforcement or enable unsupported
+launches. Legacy revision selections retain the existing provider validation.
+`forge dispatcher status --workspace development` reports launch readiness
+separately; registered policies currently remain blocked by the Herdr adapter.
+
+### Isolated executable example
+
+Build `forge` and `forge-server` from this checkout. In one POSIX shell (substitute
+an unused port if needed):
+
+```sh
+cargo build -p forge-cli -p forge-server
+FORGE="$PWD/target/debug/forge"
+DAEMON="$PWD/target/debug/forge-server"
+fixture=$(mktemp -d)
+mkdir -p "$fixture/home" "$fixture/workspace/.agents/skills/example"
+printf '%s\n' '---' 'name: example' 'description: Example skill' '---' \
+  'Follow the assigned work.' > "$fixture/workspace/.agents/skills/example/SKILL.md"
+printf '%s\n' '---' 'version: 1' 'runtime: herdr/pi' 'model: openai/gpt-5' \
+  'tools: [read]' 'skills: [{name: example}]' '---' \
+  'Read and follow the example skill before working.' \
+  > "$fixture/workspace/.agents/skills/example/forge-agent.md"
+HOME="$fixture/home" FORGE_STORE_PATH="$fixture/store.sqlite" \
+  "$DAEMON" --bind-addr 127.0.0.1:45014 > "$fixture/daemon.log" 2>&1 &
+daemon_pid=$!
+export FORGE_SERVER_URL=http://127.0.0.1:45014/rpc
+# Wait for readiness, then run from an unrelated cwd.
+for attempt in $(seq 1 100); do
+  "$FORGE" status >/dev/null 2>&1 && break
+  sleep 0.1
+done
+(
+  cd "$fixture"
+  "$FORGE" workspace add demo --root "$fixture/workspace"
+  "$FORGE" agent-profile preview .agents/skills/example/forge-agent.md --workspace demo
+  "$FORGE" agent-profile register .agents/skills/example/forge-agent.md \
+    --workspace demo --record-type task --json
+  # This isolated fresh store returns Task revision 2. Registration did not select it.
+  "$FORGE" dispatcher config set task-profile 2 --workspace demo
+  "$FORGE" dispatcher profile --workspace demo --json
+)
+kill "$daemon_pid"
+wait "$daemon_pid"
+unset FORGE_SERVER_URL
+rm -rf "$fixture"
+```
+
+The example intentionally does not dispatch. No external credentials, Herdr
+resources, MCP servers or extension execution are required. Integration tests
+exercise this command sequence with isolated operator/Workspace catalogs plus
+extension/MCP sentinels, two Workspaces, both Record Types, new revisions and
+companion mutation/deletion.
 
 ## Frozen revision payload
 
