@@ -14,7 +14,9 @@ use std::{
     },
 };
 
+// Independent provider fault switches, not product lifecycle state.
 #[derive(Default)]
+#[allow(clippy::struct_excessive_bools)]
 struct ProviderState {
     calls: Vec<Value>,
     missing: bool,
@@ -22,6 +24,8 @@ struct ProviderState {
     gets: usize,
     lose_on_get: Option<usize>,
     agents: std::collections::BTreeMap<String, Value>,
+    tab_closed: bool,
+    lose_launch_response: bool,
 }
 struct Provider {
     path: PathBuf,
@@ -30,6 +34,7 @@ struct Provider {
     worker: Option<std::thread::JoinHandle<()>>,
 }
 impl Provider {
+    #[allow(clippy::too_many_lines)] // Keep the isolated protocol fixture in one place.
     fn new(path: PathBuf) -> Self {
         let listener = UnixListener::bind(&path).unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -94,11 +99,38 @@ impl Provider {
                                 json!({"type":"agent_started"})
                             }
                             "agent.get" => {
-                                let agent = state
+                                match state
                                     .agents
                                     .get(request["params"]["target"].as_str().unwrap())
-                                    .unwrap();
-                                json!({"type":"agent_info", "agent":agent})
+                                {
+                                    Some(agent) => json!({"type":"agent_info", "agent":agent}),
+                                    None => json!({"absent":true}),
+                                }
+                            }
+                            "agent.list" => {
+                                json!({"type":"agent_list", "agents":state.agents.values().collect::<Vec<_>>()})
+                            }
+                            "tab.get" | "pane.get" => {
+                                if state.tab_closed {
+                                    json!({"absent":true})
+                                } else {
+                                    let workspace = state
+                                        .calls
+                                        .iter()
+                                        .rev()
+                                        .find(|call| call["method"] == "tab.create")
+                                        .unwrap()["params"]["workspace_id"]
+                                        .clone();
+                                    json!({"tab_id":"tab", "pane_id":"pane", "workspace_id":workspace})
+                                }
+                            }
+                            "pane.release_agent" => {
+                                state.agents.clear();
+                                json!({})
+                            }
+                            "tab.close" => {
+                                state.tab_closed = true;
+                                json!({})
                             }
                             method => panic!("unexpected provider operation {method}"),
                         };
@@ -108,6 +140,11 @@ impl Provider {
                             json!({"result":result})
                         }
                     };
+                    if request["method"] == "agent.start"
+                        && state.lock().unwrap().lose_launch_response
+                    {
+                        continue;
+                    }
                     serde_json::to_writer(&mut stream, &response).unwrap();
                     stream.write_all(b"\n").unwrap();
                 }
@@ -133,7 +170,10 @@ impl Provider {
 impl Drop for Provider {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        self.worker.take().unwrap().join().unwrap();
+        let result = self.worker.take().unwrap().join();
+        if !std::thread::panicking() {
+            result.unwrap();
+        }
         let _ = std::fs::remove_file(&self.path);
     }
 }
@@ -225,6 +265,11 @@ impl Drop for Fixture {
         let _ = std::fs::remove_dir_all(&self.root);
     }
 }
+mod recovery {
+    use super::*;
+    include!("workspace_recovery_tests.rs");
+}
+
 fn has(ready: &forge_app::WorkspaceDispatchReadiness, code: &str) -> bool {
     ready.blockers.iter().any(|blocker| blocker.code == code)
 }
