@@ -165,6 +165,13 @@ impl SqliteProjectRepository {
                 retired_at_millis INTEGER,
                 PRIMARY KEY (assignment_id, resource_kind, resource_id)
             );
+            CREATE TABLE IF NOT EXISTS assignment_execution_bindings (
+                assignment_id TEXT PRIMARY KEY NOT NULL REFERENCES agent_assignments(id),
+                directory TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS assignment_context_bootstrap (
+                assignment_id TEXT PRIMARY KEY NOT NULL REFERENCES agent_assignments(id)
+            );
             CREATE TABLE IF NOT EXISTS assignment_unknown_resource_resolutions (
                 assignment_id TEXT PRIMARY KEY NOT NULL REFERENCES agent_assignments(id),
                 confirmed_at_millis INTEGER NOT NULL,
@@ -1406,6 +1413,51 @@ impl RecordRepository for SqliteProjectRepository {
             RecordUpdateKind::CommentDeleted { comment_id },
         )?;
         transaction.commit().map_err(storage_error)
+    }
+
+    fn record_comment_head(&self, id: u64) -> Result<u64, RegistrationError> {
+        self.record_workspace(id)?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "store lock poisoned"))?;
+        connection
+            .query_row(
+                "SELECT COALESCE(MAX(id), 0) FROM record_comments WHERE record_id = ?1",
+                [id.cast_signed()],
+                |row| Ok(row.get::<_, i64>(0)?.cast_unsigned()),
+            )
+            .map_err(storage_error)
+    }
+
+    fn record_comment_page(
+        &self,
+        id: u64,
+        after: u64,
+        through: u64,
+        limit: u32,
+    ) -> Result<Vec<RecordComment>, RegistrationError> {
+        self.record_workspace(id)?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "store lock poisoned"))?;
+        connection.prepare("SELECT id, created_at_millis, author, body FROM record_comments WHERE record_id = ?1 AND id > ?2 AND id <= ?3 ORDER BY id LIMIT ?4").map_err(storage_error)?.query_map(params![id.cast_signed(), after.cast_signed(), through.cast_signed(), limit], |row| Ok(RecordComment { id: RecordCommentId(row.get::<_, i64>(0)?.cast_unsigned()), created_at_millis: row.get::<_, i64>(1)?.cast_unsigned(), author: row.get(2)?, body: row.get(3)? })).map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)
+    }
+
+    fn record_update_page(
+        &self,
+        id: u64,
+        after: u64,
+        through: u64,
+        limit: u32,
+    ) -> Result<Vec<RecordUpdate>, RegistrationError> {
+        self.record_workspace(id)?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "store lock poisoned"))?;
+        connection.prepare("SELECT id, created_at_millis, kind, from_status, to_status, related_record_id, comment_id, relationship_kind FROM record_updates WHERE record_id = ?1 AND id > ?2 AND id <= ?3 ORDER BY id LIMIT ?4").map_err(storage_error)?.query_map(params![id.cast_signed(), after.cast_signed(), through.cast_signed(), limit], update_from_row).map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)
     }
 
     fn list_record_updates(&self, id: u64) -> Result<Vec<RecordUpdate>, RegistrationError> {
@@ -2665,6 +2717,58 @@ impl AgentDispatchRepository for SqliteProjectRepository {
                 let outcome = match row.get::<_, String>(5)?.as_str() { "allowed" => AssignmentAuthorizationOutcome::Allowed, "denied" => AssignmentAuthorizationOutcome::Denied, _ => return Err(rusqlite::Error::InvalidQuery) };
                 Ok(AssignmentAuthorizationAudit { assignment_id: row.get(0)?, capability_id: row.get(1)?, created_at_millis: row.get::<_, i64>(2)?.cast_unsigned(), operation, target_record_id: row.get::<_, i64>(4)?.cast_unsigned(), outcome, reason: row.get(6)?, correlation_id: row.get(7)? })
             }).map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)
+    }
+
+    fn assignment_execution_directory(
+        &self,
+        assignment_id: &str,
+    ) -> Result<Option<PathBuf>, RegistrationError> {
+        let assignment = self.agent_assignment(assignment_id)?;
+        let current = self.agent_workspace(assignment.record_id)?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "store lock poisoned"))?;
+        if let Some(path) = current {
+            let path = path.to_str().ok_or_else(|| {
+                RegistrationError::new(
+                    "assignment-execution-unavailable",
+                    "execution directory cannot be represented",
+                )
+            })?;
+            connection.execute("INSERT OR IGNORE INTO assignment_execution_bindings (assignment_id, directory) VALUES (?1, ?2)", params![assignment_id, path]).map_err(storage_error)?;
+        }
+        connection
+            .query_row(
+                "SELECT directory FROM assignment_execution_bindings WHERE assignment_id = ?1",
+                [assignment_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map(|path| path.map(PathBuf::from))
+            .map_err(storage_error)
+    }
+
+    fn mark_assignment_context_read(&self, assignment_id: &str) -> Result<(), RegistrationError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "store lock poisoned"))?;
+        connection
+            .execute(
+                "INSERT OR IGNORE INTO assignment_context_bootstrap (assignment_id) VALUES (?1)",
+                [assignment_id],
+            )
+            .map_err(storage_error)?;
+        Ok(())
+    }
+
+    fn assignment_context_read(&self, assignment_id: &str) -> Result<bool, RegistrationError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "store lock poisoned"))?;
+        connection.query_row("SELECT EXISTS(SELECT 1 FROM assignment_context_bootstrap WHERE assignment_id = ?1)", [assignment_id], |row| row.get(0)).map_err(storage_error)
     }
 
     fn agent_workspace(&self, record_id: u64) -> Result<Option<PathBuf>, RegistrationError> {
@@ -6932,7 +7036,7 @@ mod tests {
         assert!(
             audit
                 .iter()
-                .all(|entry| entry.capability_id == "cap-1" && !entry.reason.contains("hidden"))
+                .all(|entry| entry.capability_id == "attempt" && !entry.reason.contains("hidden"))
         );
         assert_eq!(
             audit[1].outcome,

@@ -1,9 +1,10 @@
 # Agent Profile policy boundary
 
-Implementation contract for Spec #614, Tasks #615–617. Operator preview,
+Implementation contract for Spec #614, Tasks #615–618. Operator preview,
 registration and explicit selection are available. The Herdr adapter has a
-flags-only Pi argument path; authenticated Assignment bootstrap and dispatch
-preflight integration remain subsequent Tasks. **Registered policies cannot yet
+flags-only Pi argument path. [Authenticated Assignment context/actions](assignment-context.md)
+are implemented at the application/RPC boundary; CLI delivery and dispatch
+preflight/bootstrap integration remain subsequent Tasks. **Registered policies cannot yet
 launch through the configured Herdr adapter.**
 
 During #617 the human explicitly chose “use only flags for now”, superseding the

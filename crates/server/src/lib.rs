@@ -213,38 +213,7 @@ impl DaemonConfig {
     }
 }
 
-fn authenticate_assignment_secret(
-    root: Option<&std::path::Path>,
-    assignment_id: &str,
-    secret: &str,
-) -> RpcResult<()> {
-    let valid_id = !assignment_id.is_empty()
-        && assignment_id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
-    let expected = root
-        .filter(|_| valid_id)
-        .and_then(|root| std::fs::read_to_string(root.join(assignment_id)).ok());
-    let authenticated = expected.as_deref().is_some_and(|s| {
-        let expected = s.trim_end_matches('\n').as_bytes();
-        let supplied = secret.as_bytes();
-        !expected.is_empty()
-            && expected.len() == supplied.len()
-            && expected
-                .iter()
-                .zip(supplied)
-                .fold(0u8, |diff, (a, b)| diff | (a ^ b))
-                == 0
-    });
-    if authenticated {
-        Ok(())
-    } else {
-        Err(rpc_error(RegistrationError::new(
-            "assignment-capability-denied",
-            "invalid Assignment Capability",
-        )))
-    }
-}
+mod assignment;
 
 /// Owns the application and exposes it through the daemon transport adapters.
 #[derive(Clone)]
@@ -1152,13 +1121,8 @@ impl AgentDispatchApiServer for Daemon {
         &self,
         request: forge_rpc::AcknowledgeAssignmentRequest,
     ) -> RpcResult<AgentAssignmentResponse> {
-        authenticate_assignment_secret(
-            self.capability_secret_root.as_deref(),
-            &request.assignment_id,
-            &request.secret,
-        )?;
-        self.application
-            .acknowledge_assignment(&request.assignment_id, &request.correlation_id)
+        self.assignment_session(&request.assignment_id, &request.secret)?
+            .acknowledge()
             .map(Into::into)
             .map_err(rpc_error)
     }
@@ -1167,13 +1131,8 @@ impl AgentDispatchApiServer for Daemon {
         &self,
         request: forge_rpc::AcknowledgeAssignmentRequest,
     ) -> RpcResult<String> {
-        authenticate_assignment_secret(
-            self.capability_secret_root.as_deref(),
-            &request.assignment_id,
-            &request.secret,
-        )?;
-        self.application
-            .assignment_instructions(&request.assignment_id, &request.correlation_id)
+        self.assignment_session(&request.assignment_id, &request.secret)?
+            .behavior()
             .map_err(rpc_error)
     }
 
@@ -1181,18 +1140,9 @@ impl AgentDispatchApiServer for Daemon {
         &self,
         request: forge_rpc::AssignmentBootstrapFailureRequest,
     ) -> RpcResult<()> {
-        authenticate_assignment_secret(
-            self.capability_secret_root.as_deref(),
-            &request.assignment_id,
-            &request.secret,
-        )?;
-        self.application
-            .report_assignment_bootstrap_failure(
-                &request.assignment_id,
-                &request.correlation_id,
-                &request.message,
-            )
-            .map(|()| self.delivery.publish(&self.application))
+        self.assignment_session(&request.assignment_id, &request.secret)?
+            .comment("Assignment bootstrap failed; stop work and request operator review.")
+            .map(|_| self.delivery.publish(&self.application))
             .map_err(rpc_error)
     }
 
@@ -1200,11 +1150,7 @@ impl AgentDispatchApiServer for Daemon {
         &self,
         request: forge_rpc::AuthenticatedAssignmentTaskStartRequest,
     ) -> RpcResult<RecordResponse> {
-        authenticate_assignment_secret(
-            self.capability_secret_root.as_deref(),
-            &request.assignment_id,
-            &request.secret,
-        )?;
+        self.assignment_session(&request.assignment_id, &request.secret)?;
         self.application
             .start_acknowledged_assignment_task(
                 &request.assignment_id,
@@ -1218,19 +1164,11 @@ impl AgentDispatchApiServer for Daemon {
             .map_err(rpc_error)
     }
 
-    async fn task_start(&self, request: StartAssignmentTaskRequest) -> RpcResult<RecordResponse> {
-        self.application
-            .start_assignment_task(
-                &request.assignment_id,
-                &request.capability_id,
-                &request.correlation_id,
-                request.task_id,
-            )
-            .map(|record| {
-                self.delivery.publish(&self.application);
-                record.into()
-            })
-            .map_err(rpc_error)
+    async fn task_start(&self, _request: StartAssignmentTaskRequest) -> RpcResult<RecordResponse> {
+        Err(rpc_error(RegistrationError::new(
+            "assignment-route-removed",
+            "Unauthenticated taskStart is removed; use authenticated Assignment operations",
+        )))
     }
 
     async fn task_reopen(&self, request: RecordIdRequest) -> RpcResult<RecordResponse> {
@@ -2343,6 +2281,9 @@ pub fn router(daemon: Daemon) -> Router {
         .merge(ProjectApiServer::into_rpc(daemon.clone()))
         .expect("RPC method names must not overlap");
     methods
+        .merge(forge_rpc::AssignmentApiServer::into_rpc(daemon.clone()))
+        .expect("Assignment RPC method names are unique");
+    methods
         .merge(AgentDispatchApiServer::into_rpc(daemon.clone()))
         .expect("RPC method names must not overlap");
     methods
@@ -2769,6 +2710,9 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
+    include!("assignment_actions_tests.rs");
+    include!("assignment_context_tests.rs");
+    include!("assignment_redaction_tests.rs");
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
         path::{Path, PathBuf},
@@ -2797,8 +2741,7 @@ mod tests {
         OpenGrillingUnderWayfinderRequest, OpenRecordRequest, OpenSpecRequest, OpenTaskRequest,
         OpenTaskUnderSpecRequest, OpenTaskUnderWayfinderRequest, OpenWayfinderRequest,
         ProjectApiClient, ProjectHereRequest, ProjectScopeRequest, RecordApiClient,
-        RecordIdRequest, RegisterProjectRequest, StartAssignmentTaskRequest, SystemApiClient,
-        SystemApiServer,
+        RecordIdRequest, RegisterProjectRequest, SystemApiClient, SystemApiServer,
     };
     use forge_store::SqliteProjectRepository;
     use futures_util::StreamExt;
@@ -3511,7 +3454,7 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(denied.to_string().contains("assignment-capability-denied"));
+        assert!(denied.to_string().contains("assignment-route-removed"));
         assert!(
             store
                 .record_update_subscription(forge_app::RecordUpdateSubscriptionId(subscription))
@@ -4142,13 +4085,15 @@ mod tests {
             .await
             .is_ok()
         );
-        let instructions = AgentDispatchApiServer::assignment_instructions(
-            &daemon,
-            read_request("correct-secret"),
-        )
-        .await
-        .unwrap();
-        assert!(instructions.contains("owner"));
+        assert!(
+            AgentDispatchApiServer::assignment_instructions(
+                &daemon,
+                read_request("correct-secret"),
+            )
+            .await
+            .is_err(),
+            "acknowledged start without trusted context cannot release behavior"
+        );
         assert!(
             AgentDispatchApiServer::assignment_instructions(&daemon, read_request("wrong"))
                 .await
@@ -4908,7 +4853,23 @@ mod tests {
     #[tokio::test]
     async fn active_delivery_publishes_assignment_task_start_and_reopen_updates() {
         let (fixture, assignment_id, subscription_id, _, target_id) = subscription_test_daemon();
-        let daemon = fixture.daemon();
+        let root = fixture
+            .database_path
+            .with_extension("delivery-start-secrets");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("target-assignment"), "target-secret\n").unwrap();
+        let mut daemon = fixture.daemon();
+        daemon.capability_secret_root = Some(root.clone());
+        AgentDispatchApiServer::assignment_acknowledge(
+            &daemon,
+            forge_rpc::AcknowledgeAssignmentRequest {
+                assignment_id: "target-assignment".into(),
+                secret: "target-secret".into(),
+                correlation_id: "start-target".into(),
+            },
+        )
+        .await
+        .unwrap();
         let endpoint = format!(
             "/v1/agent-assignments/{assignment_id}/record-update-subscriptions/{subscription_id}/events"
         );
@@ -4920,11 +4881,11 @@ mod tests {
         let _ = stream.next().await.unwrap().unwrap();
         let _ = stream.next().await.unwrap().unwrap();
 
-        AgentDispatchApiServer::task_start(
+        AgentDispatchApiServer::assignment_task_start(
             &daemon,
-            StartAssignmentTaskRequest {
+            forge_rpc::AuthenticatedAssignmentTaskStartRequest {
                 assignment_id: "target-assignment".into(),
-                capability_id: "target-capability".into(),
+                secret: "target-secret".into(),
                 correlation_id: "start-target".into(),
                 task_id: target_id,
             },
@@ -4947,6 +4908,7 @@ mod tests {
             .unwrap();
         let reopened = String::from_utf8(stream.next().await.unwrap().unwrap().to_vec()).unwrap();
         assert!(reopened.contains("\"kind\":\"status-transition\""));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

@@ -8,6 +8,7 @@ use std::{
 };
 
 pub mod agent_profiles;
+pub mod assignment;
 mod profile_catalog;
 mod workspaces;
 pub use workspaces::{Workspace, WorkspaceRepository};
@@ -652,6 +653,46 @@ pub trait RecordRepository: ProjectRepository {
     ///
     /// Returns a user-facing error when the Record is absent or storage fails.
     fn list_record_comments(&self, id: u64) -> Result<Vec<RecordComment>, RegistrationError>;
+
+    /// Returns the greatest existing Comment identifier for a stable page traversal.
+    /// # Errors
+    /// Returns an error when bounded collection reads are unavailable.
+    fn record_comment_head(&self, _id: u64) -> Result<u64, RegistrationError> {
+        Err(RegistrationError::new(
+            "assignment-pages-unavailable",
+            "bounded collection reads unavailable",
+        ))
+    }
+    /// Reads at most `limit` Comments with identifiers in `(after, through]`, ascending.
+    /// # Errors
+    /// Returns an error when bounded collection reads are unavailable.
+    fn record_comment_page(
+        &self,
+        _id: u64,
+        _after: u64,
+        _through: u64,
+        _limit: u32,
+    ) -> Result<Vec<RecordComment>, RegistrationError> {
+        Err(RegistrationError::new(
+            "assignment-pages-unavailable",
+            "bounded collection reads unavailable",
+        ))
+    }
+    /// Reads at most `limit` Record Updates in `(after, through]`, ascending.
+    /// # Errors
+    /// Returns an error when bounded collection reads are unavailable.
+    fn record_update_page(
+        &self,
+        _id: u64,
+        _after: u64,
+        _through: u64,
+        _limit: u32,
+    ) -> Result<Vec<RecordUpdate>, RegistrationError> {
+        Err(RegistrationError::new(
+            "assignment-pages-unavailable",
+            "bounded collection reads unavailable",
+        ))
+    }
     /// Deletes a Comment without retaining its content.
     ///
     /// # Errors
@@ -1275,7 +1316,7 @@ fn agent_dispatch_context(
     use std::fmt::Write;
     let project = repository.project(&assignment.project_slug)?;
     let record = repository.show_record(assignment.record_id)?;
-    let agent_workspace = repository.agent_workspace(assignment.record_id)?;
+    let agent_workspace = repository.assignment_execution_directory(&assignment.id)?;
     let execution_instruction = if record.record_type == RecordType::Grilling {
         let mut instruction = agent_workspace.as_ref().map_or_else(String::new, |path| {
             format!("\n\nYour Forge Workspace root is {}.", path.display())
@@ -1478,6 +1519,17 @@ pub trait AgentDispatchRepository: RecordRepository + WorkspaceDispatchRepositor
         record_id: u64,
         assignment_id: &str,
     ) -> Result<(AgentAssignment, bool), RegistrationError>;
+    /// Persists successful trusted-context bootstrap independently of source files.
+    fn mark_assignment_context_read(&self, _assignment_id: &str) -> Result<(), RegistrationError> {
+        Err(RegistrationError::new(
+            "assignment-context-unavailable",
+            "context bootstrap persistence unavailable",
+        ))
+    }
+    /// Returns whether trusted context was fetched after acknowledged start.
+    fn assignment_context_read(&self, _assignment_id: &str) -> Result<bool, RegistrationError> {
+        Ok(false)
+    }
     /// Returns one Assignment by opaque identifier.
     fn agent_assignment(&self, assignment_id: &str) -> Result<AgentAssignment, RegistrationError>;
     /// Returns a consistent snapshot of persisted investigation evidence, including closed attempts.
@@ -1586,6 +1638,13 @@ pub trait AgentDispatchRepository: RecordRepository + WorkspaceDispatchRepositor
         &self,
         assignment_id: &str,
     ) -> Result<Vec<AgentAssignmentResource>, RegistrationError>;
+    /// Retains and returns the Assignment's execution identity once its directory is available.
+    fn assignment_execution_directory(
+        &self,
+        assignment_id: &str,
+    ) -> Result<Option<PathBuf>, RegistrationError> {
+        self.agent_workspace(self.agent_assignment(assignment_id)?.record_id)
+    }
     /// Returns the Task's active Managed Worktree or the Grilling's owning Workspace root.
     fn agent_workspace(&self, record_id: u64) -> Result<Option<PathBuf>, RegistrationError>;
     /// Returns the immutable provider container bound when this attempt was created.
@@ -1769,7 +1828,7 @@ pub fn assignment_start_task<R: AgentDispatchRepository + ?Sized>(
 
 /// Authorizes capability-authenticated completion of its bound Task and records its decision.
 #[allow(clippy::missing_errors_doc)]
-pub fn assignment_complete_task<R: AgentDispatchRepository>(
+pub fn assignment_complete_task<R: AgentDispatchRepository + ?Sized>(
     repository: &R,
     assignment_id: &str,
     capability_id: &str,
@@ -1900,18 +1959,24 @@ pub fn assignment_delete_record_update_subscription<
 fn authorize_assignment_operation<R: AgentDispatchRepository + ?Sized>(
     repository: &R,
     assignment: &AgentAssignment,
-    capability_id: &str,
-    correlation_id: &str,
+    _capability_id: &str,
+    _correlation_id: &str,
     operation: AssignmentAuthorizationOperation,
     target_record_id: u64,
     allowed: bool,
 ) -> Result<(), RegistrationError> {
     repository.add_assignment_authorization_audit(&AssignmentAuthorizationAudit {
         assignment_id: assignment.id.clone(),
-        capability_id: capability_id.into(),
+        capability_id: assignment.id.clone(),
         created_at_millis: 0,
         operation,
-        target_record_id,
+        // Denials are scoped to the owner: foreign/nonexistent IDs must not become
+        // storage-FK errors or a target-existence oracle in the agent interface.
+        target_record_id: if allowed {
+            target_record_id
+        } else {
+            assignment.record_id
+        },
         outcome: if allowed {
             AssignmentAuthorizationOutcome::Allowed
         } else {
@@ -1922,7 +1987,7 @@ fn authorize_assignment_operation<R: AgentDispatchRepository + ?Sized>(
         } else {
             "outside-bound-open-assignment".into()
         },
-        correlation_id: correlation_id.into(),
+        correlation_id: "assignment-operation".into(),
     })?;
     if allowed {
         Ok(())
@@ -2218,7 +2283,7 @@ impl Application {
         )
     }
 
-    /// Reads rendered instructions after transport authentication and a confirmed Task start.
+    /// Reads rendered instructions after authenticated start and persisted trusted context.
     #[allow(clippy::missing_errors_doc)]
     pub fn assignment_instructions(
         &self,
@@ -2242,10 +2307,15 @@ impl Application {
                         | AgentAssignmentState::Idle
                         | AgentAssignmentState::Blocked
                 )
-                && task.record_type == RecordType::Task
-                && task.status == RecordStatus::InProgress,
+                && matches!(task.record_type, RecordType::Task | RecordType::Grilling)
+                && task.status == RecordStatus::InProgress
+                && repository.assignment_context_read(assignment_id)?,
         )?;
-        Ok(agent_dispatch_context(repository, &assignment)?.rendered_initial_prompt)
+        if let Some(policy) = assignment.profile.launch_policy {
+            Ok(policy.behavior)
+        } else {
+            Ok(assignment.profile.prompt_template)
+        }
     }
 
     /// Reports a bootstrap failure after transport authentication.
@@ -2277,13 +2347,8 @@ impl Application {
         correlation_id: &str,
         task_id: u64,
     ) -> Result<Record, RegistrationError> {
-        let assignment = self.dispatch()?.agent_assignment(assignment_id)?;
-        if !matches!(
-            assignment.state,
-            AgentAssignmentState::Working
-                | AgentAssignmentState::Idle
-                | AgentAssignmentState::Blocked
-        ) {
+        let info = self.dispatch()?.agent_assignment_info(assignment_id)?;
+        if info.acknowledged_at_millis.is_none() {
             return Err(RegistrationError::new(
                 "assignment-not-acknowledged",
                 "Assignment has not acknowledged",
