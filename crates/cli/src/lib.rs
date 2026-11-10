@@ -82,89 +82,455 @@ fn managed_error(error: &forgeup::ForgeupError) -> String {
         "could not resolve the active Forge Revision: {error}. Run `forgeup use <selector>` or provide --server-url / FORGE_SERVER_URL"
     )
 }
-/// Performs the Assignment bootstrap using the secret delivered in an owner-only file.
-/// Instructions are returned only after acknowledgement and a confirmed Task start.
+fn read_assignment_secret(file: std::ffi::OsString) -> Result<String, String> {
+    use std::io::Read;
+    let assignment = env::var("FORGE_ASSIGNMENT_ID").map_err(|_| "missing Assignment ID")?;
+    if assignment.is_empty()
+        || !assignment
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err("invalid Assignment ID".into());
+    }
+    let endpoint =
+        env::var("FORGE_ASSIGNMENT_DAEMON_URL").map_err(|_| "missing Assignment daemon URL")?;
+    let uri: hyper::Uri = endpoint
+        .parse()
+        .map_err(|_| "invalid Assignment daemon URL")?;
+    let authority = uri.authority().ok_or("invalid Assignment daemon URL")?;
+    let host = uri
+        .host()
+        .ok_or("invalid Assignment daemon URL")?
+        .trim_matches(['[', ']']);
+    if uri.scheme_str() != Some("http")
+        || uri.path() != "/"
+        || uri.query().is_some()
+        || authority.as_str().contains('@')
+    {
+        return Err("invalid Assignment daemon URL".into());
+    }
+    if host != "localhost"
+        && !host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+    {
+        return Err("Assignment daemon must be loopback".into());
+    }
+    let path = std::path::PathBuf::from(file);
+    if !path.is_absolute() {
+        return Err("Assignment secret file must be protected".into());
+    }
+    #[cfg(unix)]
+    let mut file = std::fs::File::from(
+        rustix::fs::open(
+            &path,
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::CLOEXEC
+                | rustix::fs::OFlags::NONBLOCK,
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(|_| "Assignment secret file must be protected")?,
+    );
+    #[cfg(not(unix))]
+    let mut file = fs::File::open(path).map_err(|_| "could not read Assignment secret file")?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| "could not read Assignment secret file")?;
+    if !metadata.is_file() {
+        return Err("Assignment secret file must be protected".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if metadata.uid() != rustix::process::geteuid().as_raw()
+            || metadata.permissions().mode() & 0o077 != 0
+        {
+            return Err("Assignment secret file must be protected".into());
+        }
+    }
+    let mut secret = String::new();
+    file.read_to_string(&mut secret)
+        .map_err(|_| "could not read Assignment secret file")?;
+    let secret = secret.trim_end_matches('\n').to_owned();
+    if secret.is_empty() {
+        return Err("empty Assignment secret".into());
+    }
+    Ok(secret)
+}
+
+#[derive(Default)]
+struct AssignmentEventDecoder {
+    pending: Vec<u8>,
+    event: String,
+    id: String,
+    data: Vec<String>,
+}
+impl AssignmentEventDecoder {
+    fn push(&mut self, bytes: &[u8]) -> Result<Vec<serde_json::Value>, String> {
+        self.pending.extend_from_slice(bytes);
+        if self.pending.len() > 65_536 {
+            return Err("Assignment event frame too large".into());
+        }
+        let mut values = Vec::new();
+        while let Some(end) = self.pending.iter().position(|byte| *byte == b'\n') {
+            let line: Vec<u8> = self.pending.drain(..=end).collect();
+            let line = std::str::from_utf8(&line[..line.len() - 1])
+                .map_err(|_| "invalid Assignment event")?
+                .trim_end_matches('\r');
+            if line.is_empty() {
+                if !self.data.is_empty() {
+                    let data: serde_json::Value = serde_json::from_str(&self.data.join("\n"))
+                        .map_err(|_| "invalid Assignment event")?;
+                    values.push(serde_json::json!({"schemaVersion":1, "event": self.event, "id": self.id, "data": data}));
+                }
+                self.event.clear();
+                self.id.clear();
+                self.data.clear();
+            } else if let Some(value) = line.strip_prefix("event:") {
+                self.event = value.trim_start().into();
+            } else if let Some(value) = line.strip_prefix("id:") {
+                self.id = value.trim_start().into();
+            } else if let Some(value) = line.strip_prefix("data:") {
+                self.data
+                    .push(value.strip_prefix(' ').unwrap_or(value).into());
+            }
+        }
+        if self.data.iter().map(String::len).sum::<usize>() > 65_536 {
+            return Err("Assignment event frame too large".into());
+        }
+        Ok(values)
+    }
+}
+
+/// Stream authenticated subscription events. Notifications are hints requiring rereads.
 #[allow(clippy::missing_errors_doc)]
-pub async fn assignment_bootstrap() -> Result<String, String> {
+pub async fn assignment_subscription_events(
+    id: u64,
+    after: Option<u64>,
+    json: bool,
+) -> Result<(), String> {
+    use http_body_util::{BodyExt, Empty};
+    use hyper::{Request, Uri, body::Bytes, client::conn::http1};
+    use hyper_util::rt::TokioIo;
+    use std::io::Write;
+    let assignment = env::var("FORGE_ASSIGNMENT_ID").map_err(|_| "missing Assignment ID")?;
+    if assignment.is_empty()
+        || !assignment
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err("invalid Assignment ID".into());
+    }
+    let endpoint =
+        env::var("FORGE_ASSIGNMENT_DAEMON_URL").map_err(|_| "missing Assignment daemon URL")?;
+    let uri: Uri = endpoint
+        .parse()
+        .map_err(|_| "invalid Assignment daemon URL")?;
+    if uri.scheme_str() != Some("http") || uri.path() != "/" || uri.query().is_some() {
+        return Err("invalid Assignment daemon URL".into());
+    }
+    let host = uri
+        .host()
+        .ok_or("invalid Assignment daemon URL")?
+        .trim_matches(['[', ']']);
+    if host != "localhost"
+        && !host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+    {
+        return Err("Assignment daemon must be loopback".into());
+    }
+    let file = env::var_os("FORGE_ASSIGNMENT_CAPABILITY_SECRET_FILE")
+        .ok_or("missing Assignment secret file")?;
+    let secret = read_assignment_secret(file)?;
+    let path = format!(
+        "/v1/agent-assignments/{assignment}/record-update-subscriptions/{id}/events{}",
+        after.map_or_else(String::new, |value| format!("?after={value}"))
+    );
+    let request = Request::get(path)
+        .header(
+            "host",
+            uri.authority()
+                .ok_or("invalid Assignment daemon URL")?
+                .as_str(),
+        )
+        .header("authorization", format!("Bearer {secret}"))
+        .header("accept", "text/event-stream")
+        .body(Empty::<Bytes>::new())
+        .map_err(|_| "invalid Assignment event request")?;
+    let stream = tokio::net::TcpStream::connect((host, uri.port_u16().unwrap_or(80)))
+        .await
+        .map_err(|_| "Assignment event connection failed")?;
+    let (mut sender, connection) = http1::handshake(TokioIo::new(stream))
+        .await
+        .map_err(|_| "Assignment event connection failed")?;
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let response = sender
+        .send_request(request)
+        .await
+        .map_err(|_| "Assignment event connection failed")?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "Assignment event connection rejected (HTTP {})",
+            response.status().as_u16()
+        ));
+    }
+    if !response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("text/event-stream"))
+    {
+        return Err("Assignment event response is not an event stream".into());
+    }
+    let mut body = response.into_body();
+    let mut decoder = AssignmentEventDecoder::default();
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|_| "Assignment event stream failed")?;
+        if let Ok(data) = frame.into_data() {
+            let mut output = std::io::stdout().lock();
+            if json {
+                for value in decoder.push(&data)? {
+                    writeln!(output, "{value}").map_err(|_| "could not write Assignment events")?;
+                }
+                output
+                    .flush()
+                    .map_err(|_| "could not write Assignment events")?;
+            } else {
+                output
+                    .write_all(&data)
+                    .and_then(|()| output.flush())
+                    .map_err(|_| "could not write Assignment events")?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Renew or delete an authenticated Assignment subscription.
+#[allow(clippy::missing_errors_doc)]
+pub async fn assignment_subscription_manage(
+    id: u64,
+    delete: bool,
+) -> Result<serde_json::Value, String> {
+    use forge_rpc::AgentSubscriptionApiClient;
+    let assignment_id = env::var("FORGE_ASSIGNMENT_ID").map_err(|_| "missing Assignment ID")?;
+    let endpoint =
+        env::var("FORGE_ASSIGNMENT_DAEMON_URL").map_err(|_| "missing Assignment daemon URL")?;
+    let file = env::var_os("FORGE_ASSIGNMENT_CAPABILITY_SECRET_FILE")
+        .ok_or("missing Assignment secret file")?;
+    let secret = read_assignment_secret(file)?;
+    let client = client(&format!("{}/rpc", endpoint.trim_end_matches('/')))
+        .map_err(|_| "invalid Assignment daemon URL")?;
+    let request = forge_rpc::ManageAgentSubscriptionRequest {
+        assignment_id,
+        capability_id: secret,
+        correlation_id: "assignment-cli".into(),
+        subscription_id: id,
+    };
+    if delete {
+        client
+            .delete(request)
+            .await
+            .map_err(|_| "Assignment subscription deletion failed")?;
+        Ok(serde_json::json!({"schemaVersion":1, "deleted":true}))
+    } else {
+        let subscription = client
+            .renew(request)
+            .await
+            .map_err(|_| "Assignment subscription renewal failed")?;
+        Ok(serde_json::json!({"schemaVersion":1, "subscription":subscription}))
+    }
+}
+
+/// Create an authenticated subscription to authorized Records.
+#[allow(clippy::missing_errors_doc)]
+pub async fn assignment_subscription_create(
+    targets: Vec<u64>,
+    kinds: Vec<String>,
+) -> Result<serde_json::Value, String> {
+    use forge_rpc::AgentSubscriptionApiClient;
+    let assignment_id = env::var("FORGE_ASSIGNMENT_ID").map_err(|_| "missing Assignment ID")?;
+    let endpoint =
+        env::var("FORGE_ASSIGNMENT_DAEMON_URL").map_err(|_| "missing Assignment daemon URL")?;
+    let file = env::var_os("FORGE_ASSIGNMENT_CAPABILITY_SECRET_FILE")
+        .ok_or("missing Assignment secret file")?;
+    let secret = read_assignment_secret(file)?;
+    let client = client(&format!("{}/rpc", endpoint.trim_end_matches('/')))
+        .map_err(|_| "invalid Assignment daemon URL")?;
+    let result = client
+        .create(forge_rpc::CreateAgentSubscriptionRequest {
+            assignment_id,
+            capability_id: secret,
+            correlation_id: "assignment-cli".into(),
+            target_record_ids: targets,
+            kind_filters: kinds,
+        })
+        .await
+        .map_err(|_| "Assignment subscription creation failed")?;
+    Ok(serde_json::json!({"schemaVersion": 1, "subscription": result}))
+}
+
+/// Complete only the Record bound to the delivered Assignment.
+#[allow(clippy::missing_errors_doc)]
+pub async fn assignment_done(
+    resolution: Option<String>,
+    human: Option<(String, String)>,
+) -> Result<serde_json::Value, String> {
+    use jsonrpsee::{core::client::ClientT, rpc_params};
+    let assignment_id = env::var("FORGE_ASSIGNMENT_ID").map_err(|_| "missing Assignment ID")?;
+    let endpoint =
+        env::var("FORGE_ASSIGNMENT_DAEMON_URL").map_err(|_| "missing Assignment daemon URL")?;
+    let file = env::var_os("FORGE_ASSIGNMENT_CAPABILITY_SECRET_FILE")
+        .ok_or("missing Assignment secret file")?;
+    let secret = read_assignment_secret(file)?;
+    let client = client(&format!("{}/rpc", endpoint.trim_end_matches('/')))
+        .map_err(|_| "invalid Assignment daemon URL")?;
+    let human = human.map(|(confirmation, agreed_outcome)| serde_json::json!({"confirmed": true, "confirmation": confirmation, "agreedOutcome": agreed_outcome}));
+    client.request("assignment_done", rpc_params![serde_json::json!({"assignmentId": assignment_id, "secret": secret, "resolution": resolution, "human": human})]).await.map_err(|_| "Assignment completion failed".into())
+}
+
+/// Add a comment to only the delivered Assignment's Record.
+#[allow(clippy::missing_errors_doc)]
+pub async fn assignment_comment(body: &str) -> Result<serde_json::Value, String> {
+    use jsonrpsee::{core::client::ClientT, rpc_params};
+    if body.trim().is_empty() {
+        return Err("comment must not be blank".into());
+    }
+    let assignment_id = env::var("FORGE_ASSIGNMENT_ID").map_err(|_| "missing Assignment ID")?;
+    let endpoint =
+        env::var("FORGE_ASSIGNMENT_DAEMON_URL").map_err(|_| "missing Assignment daemon URL")?;
+    let file = env::var_os("FORGE_ASSIGNMENT_CAPABILITY_SECRET_FILE")
+        .ok_or("missing Assignment secret file")?;
+    let secret = read_assignment_secret(file)?;
+    let client = client(&format!("{}/rpc", endpoint.trim_end_matches('/')))
+        .map_err(|_| "invalid Assignment daemon URL")?;
+    client
+        .request(
+            "assignment_comment",
+            rpc_params![
+                serde_json::json!({"assignmentId": assignment_id, "secret": secret, "body": body})
+            ],
+        )
+        .await
+        .map_err(|_| "Assignment comment failed".into())
+}
+
+/// Start only the Record bound to the delivered Assignment.
+#[allow(clippy::missing_errors_doc)]
+pub async fn assignment_start() -> Result<serde_json::Value, String> {
+    use jsonrpsee::{core::client::ClientT, rpc_params};
+    let assignment_id = env::var("FORGE_ASSIGNMENT_ID").map_err(|_| "missing Assignment ID")?;
+    let endpoint =
+        env::var("FORGE_ASSIGNMENT_DAEMON_URL").map_err(|_| "missing Assignment daemon URL")?;
+    let file = env::var_os("FORGE_ASSIGNMENT_CAPABILITY_SECRET_FILE")
+        .ok_or("missing Assignment secret file")?;
+    let secret = read_assignment_secret(file)?;
+    let client = client(&format!("{}/rpc", endpoint.trim_end_matches('/')))
+        .map_err(|_| "invalid Assignment daemon URL")?;
+    client
+        .request(
+            "assignment_start",
+            rpc_params![serde_json::json!({"assignmentId": assignment_id, "secret": secret})],
+        )
+        .await
+        .map_err(|_| "Assignment start failed".into())
+}
+
+/// Fetch a bounded Assignment comment or history page.
+#[allow(clippy::missing_errors_doc)]
+pub async fn assignment_page(
+    target: u64,
+    limit: u32,
+    cursor: Option<String>,
+    history: bool,
+) -> Result<serde_json::Value, String> {
+    use jsonrpsee::{core::client::ClientT, rpc_params};
+    if !(1..=100).contains(&limit) {
+        return Err("page limit must be between 1 and 100".into());
+    }
     let assignment_id = env::var("FORGE_ASSIGNMENT_ID").map_err(|_| "missing Assignment ID")?;
     let endpoint =
         env::var("FORGE_ASSIGNMENT_DAEMON_URL").map_err(|_| "missing Assignment daemon URL")?;
     let secret_file = env::var_os("FORGE_ASSIGNMENT_CAPABILITY_SECRET_FILE")
         .ok_or("missing Assignment secret file")?;
-    let secret =
-        fs::read_to_string(secret_file).map_err(|_| "could not read Assignment secret file")?;
-    let secret = secret.trim_end_matches('\n').to_owned();
-    if secret.is_empty() {
-        return Err("empty Assignment secret".into());
-    }
-    assignment_bootstrap_with(&endpoint, assignment_id, secret).await
+    let secret = read_assignment_secret(secret_file)?;
+    let client = client(&format!("{}/rpc", endpoint.trim_end_matches('/')))
+        .map_err(|_| "invalid Assignment daemon URL")?;
+    let method = if history {
+        "assignment_history"
+    } else {
+        "assignment_comments"
+    };
+    client.request(method, rpc_params![serde_json::json!({ "assignmentId": assignment_id, "secret": secret, "target": target, "limit": limit, "cursor": cursor })]).await.map_err(|_| "Assignment page request failed".into())
 }
 
-async fn assignment_bootstrap_with(
-    endpoint: &str,
-    assignment_id: String,
-    secret: String,
-) -> Result<String, String> {
+/// Perform an Assignment read using the protected delivery contract.
+#[allow(clippy::missing_errors_doc)]
+pub async fn assignment_record(target: u64) -> Result<serde_json::Value, String> {
+    use jsonrpsee::{core::client::ClientT, rpc_params};
+    let assignment_id = env::var("FORGE_ASSIGNMENT_ID").map_err(|_| "missing Assignment ID")?;
+    let endpoint =
+        env::var("FORGE_ASSIGNMENT_DAEMON_URL").map_err(|_| "missing Assignment daemon URL")?;
+    let secret_file = env::var_os("FORGE_ASSIGNMENT_CAPABILITY_SECRET_FILE")
+        .ok_or("missing Assignment secret file")?;
+    let secret = read_assignment_secret(secret_file)?;
+    let client = client(&format!("{}/rpc", endpoint.trim_end_matches('/')))
+        .map_err(|_| "invalid Assignment daemon URL")?;
+    client
+        .request(
+            "assignment_record",
+            rpc_params![serde_json::json!({
+                "assignmentId": assignment_id, "secret": secret, "target": target
+            })],
+        )
+        .await
+        .map_err(|_| "Assignment record request failed".into())
+}
+
+/// Read the current Assignment context using protected delivery.
+#[allow(clippy::missing_errors_doc)]
+pub async fn assignment_context() -> Result<forge_rpc::AssignmentContextResponse, String> {
+    use forge_rpc::AssignmentApiClient;
+    let assignment_id = env::var("FORGE_ASSIGNMENT_ID").map_err(|_| "missing Assignment ID")?;
+    let endpoint =
+        env::var("FORGE_ASSIGNMENT_DAEMON_URL").map_err(|_| "missing Assignment daemon URL")?;
+    let secret_file = env::var_os("FORGE_ASSIGNMENT_CAPABILITY_SECRET_FILE")
+        .ok_or("missing Assignment secret file")?;
+    let secret = read_assignment_secret(secret_file)?;
     let url = format!("{}/rpc", endpoint.trim_end_matches('/'));
-    let client = client(&url)?;
-    let auth = || forge_rpc::AcknowledgeAssignmentRequest {
-        assignment_id: assignment_id.clone(),
-        secret: secret.clone(),
-        correlation_id: "bootstrap".into(),
-    };
-    let mut acknowledged = None;
-    for attempt in 0..3 {
-        if let Ok(value) = client.assignment_acknowledge(auth()).await {
-            acknowledged = Some(value);
-            break;
-        }
-        if attempt < 2 {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-    }
-    let Some(assignment) = acknowledged else {
-        return Err("Assignment acknowledgement failed or is uncertain; do not begin work".into());
-    };
-    let mut started = false;
-    for attempt in 0..3 {
-        let result = client
-            .assignment_task_start(forge_rpc::AuthenticatedAssignmentTaskStartRequest {
-                assignment_id: assignment_id.clone(),
-                secret: secret.clone(),
-                correlation_id: "bootstrap".into(),
-                task_id: assignment.record_id,
-            })
-            .await;
-        if result
-            .is_ok_and(|record| record.id == assignment.record_id && record.status == "in_progress")
-        {
-            started = true;
-            break;
-        }
-        if attempt < 2 {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-    }
-    if !started {
-        let _ = client.assignment_bootstrap_failure(forge_rpc::AssignmentBootstrapFailureRequest {
-            assignment_id, secret, correlation_id: "bootstrap".into(),
-            message: "Agent bootstrap could not establish Task start after bounded retries; no implementation should begin. Investigate the Assignment and Task.".into(),
-        }).await;
-        return Err("Task start failed or is uncertain; do not begin work".into());
-    }
-    for attempt in 0..3 {
-        if let Ok(instructions) = client.assignment_instructions(auth()).await {
-            return Ok(instructions);
-        }
-        if attempt < 2 {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-    }
-    let _ = client.assignment_bootstrap_failure(forge_rpc::AssignmentBootstrapFailureRequest {
-        assignment_id, secret, correlation_id: "bootstrap".into(),
-        message: "Agent bootstrap started the Task but could not retrieve instructions after bounded retries; no implementation should begin.".into(),
-    }).await;
-    Err("Could not retrieve Assignment instructions; do not begin work".into())
+    let client = client(&url).map_err(|_| "invalid Assignment daemon URL")?;
+    client
+        .context(forge_rpc::AssignmentCredentials {
+            assignment_id,
+            secret,
+        })
+        .await
+        .map_err(|_| "Assignment context request failed".into())
+}
+
+/// Authenticate and bootstrap the delivered Assignment through the unified server route.
+#[allow(clippy::missing_errors_doc)]
+pub async fn assignment_bootstrap() -> Result<forge_rpc::AssignmentBootstrapResponse, String> {
+    use forge_rpc::AssignmentApiClient;
+    let assignment_id = env::var("FORGE_ASSIGNMENT_ID").map_err(|_| "missing Assignment ID")?;
+    let endpoint =
+        env::var("FORGE_ASSIGNMENT_DAEMON_URL").map_err(|_| "missing Assignment daemon URL")?;
+    let file = env::var_os("FORGE_ASSIGNMENT_CAPABILITY_SECRET_FILE")
+        .ok_or("missing Assignment secret file")?;
+    let secret = read_assignment_secret(file)?;
+    let client = client(&format!("{}/rpc", endpoint.trim_end_matches('/')))
+        .map_err(|_| "invalid Assignment daemon URL")?;
+    client
+        .bootstrap(forge_rpc::AssignmentCredentials {
+            assignment_id,
+            secret,
+        })
+        .await
+        .map_err(|_| "Assignment bootstrap failed or is uncertain; do not begin work".into())
 }
 
 fn client(url: &str) -> Result<jsonrpsee::http_client::HttpClient, String> {
@@ -1231,94 +1597,6 @@ mod tests {
                 .unwrap(),
             "http://manual-daemon/rpc"
         );
-    }
-
-    #[tokio::test]
-    async fn bootstrap_retries_lost_responses_and_never_reads_after_start_failure() {
-        use axum::{Json, Router, extract::State, routing::post};
-        use std::sync::{Arc, Mutex};
-        #[derive(Default)]
-        struct Calls {
-            ack: u32,
-            start: u32,
-            read: u32,
-            report: u32,
-            fail_start: bool,
-        }
-        async fn handler(
-            State(state): State<Arc<Mutex<Calls>>>,
-            Json(request): Json<serde_json::Value>,
-        ) -> Json<serde_json::Value> {
-            let mut calls = state.lock().unwrap();
-            let method = request["method"].as_str().unwrap();
-            let result = if method.ends_with("assignmentAcknowledge") {
-                calls.ack += 1;
-                if calls.ack == 1 {
-                    None
-                } else {
-                    Some(serde_json::json!({"id":"a", "record_id":7, "state":"working"}))
-                }
-            } else if method.ends_with("assignmentTaskStart") {
-                calls.start += 1;
-                if calls.start == 1 || calls.fail_start {
-                    None
-                } else {
-                    Some(
-                        serde_json::json!({"workspace_id":"test","id":7,"record_type":"task","task_kind":null,"body":"task","project_scope":{"project_slugs":[]},"status":"in_progress","completion_resolution":null,"relationships":[]}),
-                    )
-                }
-            } else if method.ends_with("assignmentInstructions") {
-                calls.read += 1;
-                Some(serde_json::json!("instructions"))
-            } else if method.ends_with("assignmentBootstrapFailure") {
-                calls.report += 1;
-                Some(serde_json::Value::Null)
-            } else {
-                panic!("unexpected method {method}")
-            };
-            Json(match result {
-                Some(value) => {
-                    serde_json::json!({"jsonrpc":"2.0","id":request["id"],"result":value})
-                }
-                None => {
-                    serde_json::json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":-32000,"message":"response lost"}})
-                }
-            })
-        }
-        let state = Arc::new(Mutex::new(Calls::default()));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let app = Router::new()
-            .route("/rpc", post(handler))
-            .with_state(state.clone());
-        let server = tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-        let endpoint = format!("http://{address}");
-        assert_eq!(
-            assignment_bootstrap_with(&endpoint, "a".into(), "secret".into())
-                .await
-                .unwrap(),
-            "instructions"
-        );
-        {
-            let mut calls = state.lock().unwrap();
-            assert_eq!((calls.ack, calls.start, calls.read), (2, 2, 1));
-            *calls = Calls {
-                fail_start: true,
-                ..Calls::default()
-            };
-        }
-        assert!(
-            assignment_bootstrap_with(&endpoint, "a".into(), "secret".into())
-                .await
-                .is_err()
-        );
-        {
-            let calls = state.lock().unwrap();
-            assert_eq!((calls.start, calls.read, calls.report), (3, 0, 1));
-        }
-        server.abort();
     }
 
     #[tokio::test]

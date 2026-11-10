@@ -162,7 +162,7 @@ forge dispatcher resume 44 --json
 forge dispatcher task-reopen 44 --json
 ```
 
-Agents use `bootstrap` with their delivered environment, not operator recovery commands. The lower-level `assignment task-start` requires assignment/capability/correlation arguments; use bootstrap rather than manually copying credentials to command arguments.
+Agents use `bootstrap` with their delivered environment, not operator recovery commands. Credentials are read from protected delivery, never copied into command arguments.
 
 Operators: inspect `assignment-info` before recovery; it reads persisted evidence without contacting the provider. Retirement revokes Assignment access and attempts verified provider cleanup. Unresolved resources can continue reserving capacity after retirement, and the Dispatch Hold remains separate. Investigate before retrying or replacing an agent.
 

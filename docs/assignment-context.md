@@ -1,9 +1,8 @@
 # Authenticated Assignment context and actions
 
-Implemented application/RPC boundary for Spec #614, Tasks #618–619. This is **not yet
-an integrated launch feature**: the Assignment CLI is #620 and protected
-Task/Grilling launch integration is #621.
-Registered-policy dispatch remains disabled. The flags-only runtime limitations
+The application/RPC boundary and `forge assignment` CLI implement authenticated
+Assignment operations. Protected Task/Grilling launch integration remains #621;
+registered-policy dispatch remains disabled. The flags-only runtime limitations
 in [Agent Profile policy](agent-profile-policy.md) are unchanged.
 
 ## Authority and delivery
@@ -31,8 +30,8 @@ JSON-RPC method names use the jsonrpsee namespace separator **underscore**:
 | `assignment_done` | optional `resolution`, optional `human` |
 
 Credentials are transport inputs from protected delivery, **not model-facing
-arguments or instructions to paste secrets into tools**. #620 must derive them
-automatically. Requests reject unknown fields, so own mutations have no target
+arguments or instructions to paste secrets into tools**. The CLI derives them
+automatically from protected delivery. Requests reject unknown fields, so own mutations have no target
 selector and cannot be redirected by adding one. Responses carry
 `schemaVersion: 1`; existing nested Record fields retain their established wire
 names. Credential-bearing requests and behavior-bearing responses have no Debug
@@ -127,6 +126,48 @@ This `human` object is agent-reported conversational confirmation, **not
 independently authenticated human proof**. Its affirmative flag, nonblank
 confirmation and nonblank outcome are required and retained atomically in the
 completion resolution. They do not bypass lifecycle validation.
+
+## Agent CLI examples
+
+In a delivered Assignment environment, first run `forge assignment bootstrap`.
+Its response labels trusted `context` separately from `behavior`; stop if it
+fails. Use `--json` for a versioned machine-readable response. Record IDs below
+are examples; use IDs from the authorized context.
+
+```sh
+forge assignment bootstrap --json
+forge assignment context --json
+forge assignment record 42 --json
+forge assignment comments 42 --limit 20 --json
+forge assignment history 42 --limit 20 --json
+forge assignment comment --message 'Progress update' --json
+forge assignment start --json
+forge assignment subscription create 42 --json
+```
+
+Use the returned subscription ID and cursor in separate commands. Events stream
+until the lease ends or the command is stopped; renew or delete separately:
+
+```sh
+forge assignment subscription events 1 --after 0 --json
+forge assignment subscription renew 1 --json
+forge assignment subscription delete 1 --json
+```
+
+To complete a Task, or alternatively a Grilling after the human confirms:
+
+```sh
+forge assignment done --resolution implemented --json
+forge assignment done --resolution agreed --confirmed --confirmation 'Human confirmed in conversation' --agreed-outcome 'Proceed with the agreed approach' --json
+```
+
+The Grilling command records agent-reported conversational confirmation; it is
+not independent human authentication. Never supply `--confirmed` without that
+conversation. Subscription events are hints: reread context or the relevant
+Record to reconcile current state. Event `--json` emits one versioned JSON object
+per notification; without it, the command streams SSE frames. Follow `nextCursor` with `--cursor` for the
+next bounded page. These examples do not create a launch or delivery; #621 owns
+that integration.
 
 ## Authenticated subscriptions and events
 

@@ -136,16 +136,13 @@ launching Pi. Launch arguments contain a short bootstrap and profile model,
 not rendered Task instructions or capability secrets. The capability is delivered
 through an owner-only secret file outside the Agent Workspace.
 
-Task Agents run the generated `forge assignment bootstrap` invocation using
-their delivered environment. The lower-level `forge assignment task-start`
-retains its Assignment Capability contract; operators should use bootstrap
-rather than manually copying credentials.
-
-The bootstrap authenticates its acknowledgement, separately starts the Task with
-bounded retries, and only then retrieves rendered instructions through an
-assignment-scoped authenticated read. Acknowledgement makes the Assignment
-Working; it does not itself start the Task. If start cannot be confirmed, the
-agent must not begin implementation. Failed instruction retrieval also stops
+Agents use `forge assignment bootstrap` with their delivered environment;
+credentials are never supplied as command arguments. The authenticated bootstrap
+route acknowledges and starts the assigned Record, then fetches trusted context
+before returning separately labelled behavior. Grilling launch integration is
+still pending. Acknowledgement makes the Assignment Working; it does not itself
+start the Record. If bootstrap fails or is uncertain, the agent must not begin
+work. Failed instruction retrieval also stops
 bootstrap without permitting implementation.
 
 The acknowledgement timeout defaults to **300000 ms**, separately from startup

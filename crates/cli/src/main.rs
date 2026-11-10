@@ -18,7 +18,7 @@ use forge_cli::{
     request_record_comments, request_record_updates, request_register_project_selected,
     request_relate_record, request_reopen_dispatch_task, request_resume_dispatch_task,
     request_retire_agent_assignment, request_select_project, request_show_record,
-    request_start_assignment_task, request_start_record, request_status, request_unrelate_record,
+    request_start_record, request_status, request_unrelate_record,
     resolve_endpoint as resolve_managed_endpoint,
 };
 use std::io::Read;
@@ -274,10 +274,107 @@ enum TaskCommand {
 }
 #[derive(Debug, Subcommand)]
 enum AssignmentCommand {
-    /// Acknowledge and start the delivered Assignment before printing its instructions.
-    Bootstrap,
-    /// Start the Task bound to an Assignment Capability.
-    TaskStart(AssignmentTaskStartArgs),
+    /// Authenticate, acknowledge, start and fetch context before returning behavior.
+    Bootstrap {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read the authenticated Assignment context.
+    Context {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read an authorized Record.
+    Record {
+        id: u64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Manage authenticated Record update subscriptions.
+    Subscription {
+        #[command(subcommand)]
+        command: AssignmentSubscriptionCommand,
+    },
+    /// Complete the assigned Record; Grilling requires conversational confirmation.
+    Done(AssignmentDoneArgs),
+    /// Comment on the Record bound to this Assignment.
+    Comment(AssignmentCommentArgs),
+    /// Start the Record bound to this Assignment.
+    Start {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read a bounded page of comments on an authorized Record.
+    Comments(AssignmentPageArgs),
+    /// Read a bounded page of history on an authorized Record.
+    History(AssignmentPageArgs),
+}
+#[derive(Debug, Subcommand)]
+enum AssignmentSubscriptionCommand {
+    /// Stream notifications as hints; reread authoritative state after events.
+    Events {
+        id: u64,
+        #[arg(long)]
+        after: Option<u64>,
+        /// Emit one versioned JSON object per event.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Renew an existing subscription lease.
+    Renew {
+        id: u64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Delete an existing subscription.
+    Delete {
+        id: u64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Subscribe to authorized Record IDs.
+    Create {
+        #[arg(required = true)]
+        ids: Vec<u64>,
+        #[arg(long = "kind")]
+        kinds: Vec<String>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+#[derive(Debug, Args)]
+struct AssignmentDoneArgs {
+    #[arg(long)]
+    resolution: Option<String>,
+    /// Confirm a human explicitly agreed in conversation (not independent authentication).
+    #[arg(long, requires_all = ["confirmation", "agreed_outcome"])]
+    confirmed: bool,
+    #[arg(long, requires = "confirmed")]
+    confirmation: Option<String>,
+    #[arg(long, requires = "confirmed")]
+    agreed_outcome: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Debug, Args)]
+#[command(group(clap::ArgGroup::new("message_source").required(true).args(["message", "message_file"])))]
+struct AssignmentCommentArgs {
+    #[arg(long)]
+    message: Option<String>,
+    #[arg(long)]
+    message_file: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Debug, Args)]
+struct AssignmentPageArgs {
+    id: u64,
+    #[arg(long, default_value_t = 50)]
+    limit: u32,
+    #[arg(long)]
+    cursor: Option<String>,
+    #[arg(long)]
+    json: bool,
 }
 #[derive(Debug, Subcommand)]
 enum AgentDispatchCommand {
@@ -387,20 +484,6 @@ struct DispatchRecordArgs {
 #[derive(Args, Debug)]
 struct DispatchTaskArgs {
     task_id: u64,
-    #[arg(long, value_name = "URL")]
-    server_url: Option<String>,
-    #[arg(long)]
-    json: bool,
-}
-#[derive(Args, Debug)]
-struct AssignmentTaskStartArgs {
-    task_id: u64,
-    #[arg(long)]
-    assignment_id: String,
-    #[arg(long)]
-    capability_id: String,
-    #[arg(long)]
-    correlation_id: String,
     #[arg(long, value_name = "URL")]
     server_url: Option<String>,
     #[arg(long)]
@@ -911,41 +994,137 @@ async fn worktree(command: WorktreeCommand, workspace: Option<String>) -> i32 {
     }
 }
 
-async fn assignment(command: AssignmentCommand) -> i32 {
-    let result = match command {
-        AssignmentCommand::Bootstrap => {
-            return match forge_cli::assignment_bootstrap().await {
-                Ok(instructions) => {
-                    println!("{instructions}");
-                    0
-                }
-                Err(error) => {
-                    eprintln!("forge assignment bootstrap: {error}");
-                    1
-                }
-            };
+async fn assignment_comment_command(args: AssignmentCommentArgs) -> i32 {
+    let body = match (args.message, args.message_file) {
+        (Some(message), None) => Ok(message),
+        (None, Some(file)) if file == "-" => {
+            let mut body = String::new();
+            std::io::stdin()
+                .read_to_string(&mut body)
+                .map(|_| body)
+                .map_err(|_| "could not read comment")
         }
-        AssignmentCommand::TaskStart(args) => {
-            request_start_assignment_task(
-                &resolve_endpoint(args.server_url.as_deref()).await,
-                args.assignment_id,
-                args.capability_id,
-                args.correlation_id,
-                args.task_id,
-            )
-            .await
+        (None, Some(file)) => {
+            std::fs::read_to_string(file).map_err(|_| "could not read comment file")
         }
+        _ => Err("exactly one comment source is required"),
     };
+    let result = match body {
+        Ok(body) => forge_cli::assignment_comment(&body).await,
+        Err(error) => Err(error.into()),
+    };
+    render_assignment_result(result, args.json)
+}
+
+fn render_assignment_result(result: Result<serde_json::Value, String>, json: bool) -> i32 {
     match result {
         Ok(value) => {
-            // Task-start retains the same JSON rendering in both output modes.
-            println!("{}", serde_json::to_value(value).unwrap());
+            let rendered = if json {
+                serde_json::to_string(&value)
+            } else {
+                serde_json::to_string_pretty(&value)
+            };
+            println!("{}", rendered.expect("response is serializable"));
             0
         }
         Err(error) => {
-            eprintln!("forge assignment task-start: {error}");
+            eprintln!("forge assignment: {error}");
             1
         }
+    }
+}
+
+async fn assignment_subscription(command: AssignmentSubscriptionCommand) -> i32 {
+    match command {
+        AssignmentSubscriptionCommand::Events { id, after, json } => {
+            match forge_cli::assignment_subscription_events(id, after, json).await {
+                Ok(()) => 0,
+                Err(error) => {
+                    eprintln!("forge assignment subscription events: {error}");
+                    1
+                }
+            }
+        }
+        AssignmentSubscriptionCommand::Renew { id, json } => render_assignment_result(
+            forge_cli::assignment_subscription_manage(id, false).await,
+            json,
+        ),
+        AssignmentSubscriptionCommand::Delete { id, json } => render_assignment_result(
+            forge_cli::assignment_subscription_manage(id, true).await,
+            json,
+        ),
+        AssignmentSubscriptionCommand::Create { ids, kinds, json } => render_assignment_result(
+            forge_cli::assignment_subscription_create(ids, kinds).await,
+            json,
+        ),
+    }
+}
+
+async fn assignment(command: AssignmentCommand) -> i32 {
+    let history = matches!(&command, AssignmentCommand::History(_));
+    match command {
+        AssignmentCommand::Subscription { command } => assignment_subscription(command).await,
+        AssignmentCommand::Done(args) => {
+            let human = args.confirmation.zip(args.agreed_outcome);
+            render_assignment_result(
+                forge_cli::assignment_done(args.resolution, human).await,
+                args.json,
+            )
+        }
+        AssignmentCommand::Comment(args) => assignment_comment_command(args).await,
+        AssignmentCommand::Start { json } => {
+            render_assignment_result(forge_cli::assignment_start().await, json)
+        }
+        AssignmentCommand::Comments(args) | AssignmentCommand::History(args) => {
+            match forge_cli::assignment_page(args.id, args.limit, args.cursor, history).await {
+                Ok(page) => {
+                    let rendered = if args.json {
+                        serde_json::to_string(&page)
+                    } else {
+                        serde_json::to_string_pretty(&page)
+                    };
+                    println!("{}", rendered.expect("page is serializable"));
+                    0
+                }
+                Err(error) => {
+                    eprintln!("forge assignment: {error}");
+                    1
+                }
+            }
+        }
+        AssignmentCommand::Bootstrap { json } => match forge_cli::assignment_bootstrap().await {
+            Ok(response) => {
+                let rendered = if json {
+                    serde_json::to_string(&response)
+                } else {
+                    serde_json::to_string_pretty(&response)
+                };
+                println!("{}", rendered.expect("bootstrap is serializable"));
+                0
+            }
+            Err(error) => {
+                eprintln!("forge assignment bootstrap: {error}");
+                1
+            }
+        },
+        AssignmentCommand::Record { id, json } => {
+            render_assignment_result(forge_cli::assignment_record(id).await, json)
+        }
+        AssignmentCommand::Context { json } => match forge_cli::assignment_context().await {
+            Ok(context) => {
+                let rendered = if json {
+                    serde_json::to_string(&context)
+                } else {
+                    serde_json::to_string_pretty(&context)
+                };
+                println!("{}", rendered.expect("context is serializable"));
+                0
+            }
+            Err(error) => {
+                eprintln!("forge assignment context: {error}");
+                1
+            }
+        },
     }
 }
 
@@ -1793,18 +1972,7 @@ mod tests {
             vec!["forge", "dispatcher", "assignment-retire", "a"],
             vec!["forge", "dispatcher", "assignment-resolve-unknown", "a"],
             vec!["forge", "assignment", "bootstrap"],
-            vec![
-                "forge",
-                "assignment",
-                "task-start",
-                "42",
-                "--assignment-id",
-                "a",
-                "--capability-id",
-                "c",
-                "--correlation-id",
-                "r",
-            ],
+            vec!["forge", "assignment", "start"],
         ] {
             Cli::try_parse_from(&args).unwrap_or_else(|error| panic!("{args:?}: {error}"));
         }
@@ -1924,6 +2092,10 @@ mod tests {
             ("records.md", include_str!("../../../docs/records.md")),
             ("worktrees.md", include_str!("../../../docs/worktrees.md")),
             ("dispatch.md", include_str!("../../../docs/dispatch.md")),
+            (
+                "assignment-context.md",
+                include_str!("../../../docs/assignment-context.md"),
+            ),
             (
                 "agent-profile-policy.md",
                 include_str!("../../../docs/agent-profile-policy.md"),
