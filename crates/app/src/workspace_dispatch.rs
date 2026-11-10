@@ -461,6 +461,15 @@ pub trait WorkspaceDispatchRepository: Send + Sync {
         workspace: &str,
     ) -> Result<WorkspaceDispatchConfiguration, RegistrationError>;
 
+    /// Registers a resolved policy with lifecycle settings copied from the selected
+    /// revision (or seed when unselected). Never changes Workspace selection.
+    fn register_agent_profile(
+        &self,
+        workspace: &str,
+        record_type: RecordType,
+        policy: &crate::agent_profiles::ResolvedLaunchPolicy,
+    ) -> Result<AgentProfile, RegistrationError>;
+
     fn select_workspace_profile(
         &self,
         workspace: &str,

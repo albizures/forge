@@ -9,6 +9,107 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+#[test]
+fn registered_policy_survives_reopen_and_lifecycle_revision_without_selection() {
+    use forge_app::agent_profiles::ResourceCatalog;
+    let fixture = Fixture::new();
+    let workspace = fixture.0.join("one");
+    let skill = workspace.join(".agents/skills/entry");
+    std::fs::create_dir_all(&skill).unwrap();
+    std::fs::create_dir_all(workspace.join(".pi/extensions")).unwrap();
+    std::fs::write(workspace.join(".pi/extensions/entry.ts"), "never execute").unwrap();
+    std::fs::write(
+        workspace.join(".pi/mcp.json"),
+        r#"{"mcpServers":{"local":{"command":"never-connect"}}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: entry\ndescription: entry\n---\nSkill",
+    )
+    .unwrap();
+    std::fs::write(skill.join("forge-agent.md"), "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\ntools: [read]\nskills: [{name: entry}]\nextensions: [{name: entry}]\nmcpServers: [{name: local}]\n---\nUse entry.\n").unwrap();
+    let policy = ResourceCatalog::discover(&fixture.0.join("two"), &workspace)
+        .unwrap()
+        .resolve(&workspace, ".agents/skills/entry/forge-agent.md")
+        .unwrap();
+    let registered = {
+        let store = fixture.open();
+        fixture.register(&store);
+        let mut invalid = policy.clone();
+        invalid.version = 2;
+        assert!(
+            store
+                .register_agent_profile("one", RecordType::Task, &invalid)
+                .is_err()
+        );
+        let registered = store
+            .register_agent_profile("one", RecordType::Task, &policy)
+            .unwrap();
+        assert_eq!(registered.launch_policy.as_ref(), Some(&policy));
+        assert_eq!(
+            store
+                .workspace_dispatch_configuration("one")
+                .unwrap()
+                .task_profile,
+            None
+        );
+        registered
+    };
+    std::fs::remove_file(skill.join("forge-agent.md")).unwrap();
+    let store = fixture.open();
+    assert_eq!(
+        store
+            .agent_profile(RecordType::Task, registered.revision)
+            .unwrap(),
+        registered
+    );
+    store
+        .select_workspace_profile("one", RecordType::Task, Some(registered.revision))
+        .unwrap();
+    let copied = store
+        .configure_workspace_acknowledgement_timeout("one", Some(1234))
+        .unwrap();
+    assert_eq!(copied.launch_policy, registered.launch_policy);
+    assert_eq!(copied.model, registered.model);
+    assert_eq!(copied.acknowledgement_timeout_millis, 1234);
+    let next = store
+        .register_agent_profile("one", RecordType::Task, &policy)
+        .unwrap();
+    assert_eq!(next.acknowledgement_timeout_millis, 1234);
+    assert!(next.acknowledgement_timeout_overridden);
+    assert_eq!(
+        store
+            .workspace_dispatch_configuration("one")
+            .unwrap()
+            .task_profile
+            .unwrap()
+            .revision,
+        copied.revision
+    );
+    let grilling = store
+        .register_agent_profile("one", RecordType::Grilling, &policy)
+        .unwrap();
+    assert_eq!(grilling.launch_policy, Some(policy));
+    assert!(
+        store
+            .workspace_dispatch_configuration("one")
+            .unwrap()
+            .grilling_profile
+            .is_none()
+    );
+    let legacy_copy = store
+        .configure_task_acknowledgement_timeout(Some(4321))
+        .unwrap();
+    assert_eq!(legacy_copy.launch_policy, next.launch_policy);
+    assert_eq!(
+        store
+            .agent_profile(RecordType::Task, registered.revision)
+            .unwrap(),
+        registered
+    );
+}
+
 static NEXT: AtomicU64 = AtomicU64::new(0);
 struct Fixture(PathBuf);
 impl Fixture {

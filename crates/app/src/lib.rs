@@ -7,6 +7,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+pub mod agent_profiles;
+mod profile_catalog;
 mod workspaces;
 pub use workspaces::{Workspace, WorkspaceRepository};
 mod workspace_dispatch;
@@ -678,6 +680,8 @@ pub struct AgentProfile {
     /// Whether this revision has an explicit acknowledgement timeout override.
     pub acknowledgement_timeout_overridden: bool,
     pub unknown_state_grace_millis: u64,
+    /// Frozen registered policy. None denotes a preserved legacy revision.
+    pub launch_policy: Option<agent_profiles::ResolvedLaunchPolicy>,
 }
 
 /// A durable attempt to dispatch one Task or interactive Grilling to an external Agent.

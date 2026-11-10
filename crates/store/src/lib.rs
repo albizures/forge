@@ -1674,6 +1674,14 @@ fn migrate_agent_profile_schema(connection: &Connection) -> Result<(), Registrat
         connection.execute("ALTER TABLE agent_profiles ADD COLUMN acknowledgement_timeout_overridden INTEGER NOT NULL DEFAULT 0", []).map_err(storage_error)?;
         connection.execute("UPDATE agent_profiles SET acknowledgement_timeout_overridden = 1 WHERE record_type = 'task' AND revision > 1", []).map_err(storage_error)?;
     }
+    if !columns.iter().any(|column| column == "launch_policy_json") {
+        connection
+            .execute(
+                "ALTER TABLE agent_profiles ADD COLUMN launch_policy_json TEXT",
+                [],
+            )
+            .map_err(storage_error)?;
+    }
     Ok(())
 }
 
@@ -1697,7 +1705,7 @@ fn load_agent_profile(
     revision: u32,
 ) -> Result<AgentProfile, RegistrationError> {
     connection.query_row(
-        "SELECT record_type, revision, provider, agent_kind, model, prompt_template, retry_limit, retry_backoff_millis, startup_timeout_millis, unknown_state_grace_millis, acknowledgement_timeout_millis, acknowledgement_timeout_overridden FROM agent_profiles WHERE record_type = ?1 AND revision = ?2",
+        "SELECT record_type, revision, provider, agent_kind, model, prompt_template, retry_limit, retry_backoff_millis, startup_timeout_millis, unknown_state_grace_millis, acknowledgement_timeout_millis, acknowledgement_timeout_overridden, launch_policy_json FROM agent_profiles WHERE record_type = ?1 AND revision = ?2",
         params![record_type_name(profile_record_type), revision],
         |row| Ok(AgentProfile {
             record_type: match row.get::<_, String>(0)?.as_str() {
@@ -1712,6 +1720,7 @@ fn load_agent_profile(
             startup_timeout_millis: row.get::<_, i64>(8)?.cast_unsigned(), unknown_state_grace_millis: row.get::<_, i64>(9)?.cast_unsigned(),
             acknowledgement_timeout_millis: row.get::<_, i64>(10)?.cast_unsigned(),
             acknowledgement_timeout_overridden: row.get(11)?,
+            launch_policy: row.get::<_, Option<String>>(12)?.map(|json| serde_json::from_str(&json).map_err(|error| rusqlite::Error::FromSqlConversionFailure(12, rusqlite::types::Type::Text, Box::new(error)))).transpose()?,
         }),
     ).map_err(|error| match error { rusqlite::Error::QueryReturnedNoRows => RegistrationError::new("agent-profile-not-found", "Agent Profile revision does not exist"), error => storage_error(error) })
 }
@@ -1943,7 +1952,7 @@ impl AgentDispatchRepository for SqliteProjectRepository {
         let transaction = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(storage_error)?;
-        transaction.execute("INSERT INTO agent_profiles (record_type, revision, provider, agent_kind, model, prompt_template, retry_limit, retry_backoff_millis, startup_timeout_millis, unknown_state_grace_millis, acknowledgement_timeout_millis, acknowledgement_timeout_overridden) SELECT record_type, revision + 1, provider, agent_kind, model, prompt_template, retry_limit, retry_backoff_millis, startup_timeout_millis, unknown_state_grace_millis, ?1, ?2 FROM agent_profiles WHERE record_type = 'task' ORDER BY revision DESC LIMIT 1", params![timeout, timeout_millis.is_some()]).map_err(storage_error)?;
+        transaction.execute("INSERT INTO agent_profiles (record_type, revision, provider, agent_kind, model, prompt_template, retry_limit, retry_backoff_millis, startup_timeout_millis, unknown_state_grace_millis, acknowledgement_timeout_millis, acknowledgement_timeout_overridden, launch_policy_json) SELECT record_type, revision + 1, provider, agent_kind, model, prompt_template, retry_limit, retry_backoff_millis, startup_timeout_millis, unknown_state_grace_millis, ?1, ?2, launch_policy_json FROM agent_profiles WHERE record_type = 'task' ORDER BY revision DESC LIMIT 1", params![timeout, timeout_millis.is_some()]).map_err(storage_error)?;
         let revision: u32 = transaction
             .query_row(
                 "SELECT MAX(revision) FROM agent_profiles WHERE record_type = 'task'",

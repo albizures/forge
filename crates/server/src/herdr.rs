@@ -54,7 +54,10 @@ impl HerdrAdapterFactory {
     }
 
     pub fn validate_profile(profile: &AgentProfile) -> Result<(), AgentAdapterError> {
-        if profile.provider != "herdr"
+        // Registered closed policies remain disabled until the runtime loader and
+        // authenticated bootstrap enforce the full contract (#617/#621).
+        if profile.launch_policy.is_some()
+            || profile.provider != "herdr"
             || profile.agent_kind != "pi"
             || profile.model.trim().is_empty()
         {
@@ -901,6 +904,25 @@ impl AgentDispatchAdapter for HerdrAdapter {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn registered_policy_cannot_launch_before_closed_runtime_enforcement_exists() {
+        use forge_app::{AgentDispatchRepository, RecordType};
+        let store = forge_store::SqliteProjectRepository::in_memory().unwrap();
+        let mut profile = store.agent_profile(RecordType::Task, 1).unwrap();
+        assert!(super::HerdrAdapterFactory::validate_profile(&profile).is_ok());
+        profile.launch_policy = Some(forge_app::agent_profiles::ResolvedLaunchPolicy {
+            version: 1,
+            runtime: "herdr/pi".into(),
+            model: "openai/gpt-5".into(),
+            tools: vec![],
+            behavior: "behavior".into(),
+            skills: vec![],
+            extensions: vec![],
+            mcp_servers: vec![],
+        });
+        assert!(super::HerdrAdapterFactory::validate_profile(&profile).is_err());
+    }
+
     #[cfg(unix)]
     use forge_app::AgentDispatchAdapter;
 

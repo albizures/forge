@@ -183,6 +183,58 @@ impl WorkspaceDispatchRepository for SqliteProjectRepository {
         tx.commit().map_err(storage_error)
     }
 
+    fn register_agent_profile(
+        &self,
+        workspace: &str,
+        record_type: RecordType,
+        policy: &forge_app::agent_profiles::ResolvedLaunchPolicy,
+    ) -> Result<forge_app::AgentProfile, RegistrationError> {
+        let kind = match record_type {
+            RecordType::Task => "task",
+            RecordType::Grilling => "grilling",
+            _ => {
+                return Err(RegistrationError::new(
+                    "invalid-profile-type",
+                    "only Task and Grilling profiles can be registered",
+                ));
+            }
+        };
+        policy.validate_direct_inputs().map_err(|_| {
+            RegistrationError::new(
+                "invalid-profile-input",
+                "selected direct inputs are unavailable or drifted",
+            )
+        })?;
+        let payload = serde_json::to_string(policy).map_err(|_| {
+            RegistrationError::new("invalid-profile-policy", "cannot encode resolved policy")
+        })?;
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "profile storage lock is poisoned"))?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        workspaces::get(&tx, workspace)?;
+        let selected: Option<Option<u32>> = tx.query_row(
+            if record_type == RecordType::Task { "SELECT task_profile_revision FROM workspace_dispatch_configuration WHERE workspace_id = ?1" } else { "SELECT grilling_profile_revision FROM workspace_dispatch_configuration WHERE workspace_id = ?1" },
+            [workspace], |row| row.get(0)).optional().map_err(storage_error)?;
+        let base = selected.flatten().unwrap_or(1);
+        let revision: u32 = tx
+            .query_row(
+                "SELECT MAX(revision) + 1 FROM agent_profiles WHERE record_type = ?1",
+                [kind],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        tx.execute("INSERT INTO agent_profiles (record_type, revision, provider, agent_kind, model, prompt_template, retry_limit, retry_backoff_millis, startup_timeout_millis, unknown_state_grace_millis, acknowledgement_timeout_millis, acknowledgement_timeout_overridden, launch_policy_json)
+            SELECT record_type, ?1, 'herdr', 'pi', ?2, prompt_template, retry_limit, retry_backoff_millis, startup_timeout_millis, unknown_state_grace_millis, acknowledgement_timeout_millis, acknowledgement_timeout_overridden, ?3 FROM agent_profiles WHERE record_type = ?4 AND revision = ?5",
+            params![revision, policy.model, payload, kind, base]).map_err(storage_error)?;
+        let profile = load_agent_profile(&tx, record_type, revision)?;
+        tx.commit().map_err(storage_error)?;
+        Ok(profile)
+    }
+
     fn configure_workspace_acknowledgement_timeout(
         &self,
         workspace: &str,
@@ -219,8 +271,8 @@ impl WorkspaceDispatchRepository for SqliteProjectRepository {
                 |row| row.get(0),
             )
             .map_err(storage_error)?;
-        tx.execute("INSERT INTO agent_profiles (record_type, revision, provider, agent_kind, model, prompt_template, retry_limit, retry_backoff_millis, startup_timeout_millis, unknown_state_grace_millis, acknowledgement_timeout_millis, acknowledgement_timeout_overridden)
-            SELECT record_type, ?1, provider, agent_kind, model, prompt_template, retry_limit, retry_backoff_millis, startup_timeout_millis, unknown_state_grace_millis, ?2, ?3 FROM agent_profiles WHERE record_type = 'task' AND revision = ?4", params![revision, timeout, timeout_millis.is_some(), selected]).map_err(storage_error)?;
+        tx.execute("INSERT INTO agent_profiles (record_type, revision, provider, agent_kind, model, prompt_template, retry_limit, retry_backoff_millis, startup_timeout_millis, unknown_state_grace_millis, acknowledgement_timeout_millis, acknowledgement_timeout_overridden, launch_policy_json)
+            SELECT record_type, ?1, provider, agent_kind, model, prompt_template, retry_limit, retry_backoff_millis, startup_timeout_millis, unknown_state_grace_millis, ?2, ?3, launch_policy_json FROM agent_profiles WHERE record_type = 'task' AND revision = ?4", params![revision, timeout, timeout_millis.is_some(), selected]).map_err(storage_error)?;
         tx.execute("UPDATE workspace_dispatch_configuration SET task_profile_revision = ?2 WHERE workspace_id = ?1", params![workspace, revision]).map_err(storage_error)?;
         let profile = load_agent_profile(&tx, RecordType::Task, revision)?;
         tx.commit().map_err(storage_error)?;

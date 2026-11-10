@@ -22,6 +22,21 @@ Binding changes/removal are rejected while the owning Forge Workspace has live A
 
 Forge preserves Managed Worktrees and assignment history during recovery. A confirmed lost agent results in a Dispatch Hold and explicit operator resume before a replacement attempt.
 
+## Immutable launch-policy persistence (Spec #614)
+
+An Agent Profile revision now also retains resolved launch policy, canonical
+selected-resource identities, narrow direct-input fingerprints and behavioral
+Markdown in the existing revision store. Registration is separate from Workspace
+selection. Lifecycle-policy copies retain that launch payload unchanged. This
+freezes configuration and behavior, not runtime/resource dependencies.
+
+Assignments continue to bind the same per-Record-Type revision and exact execution
+ownership facts. New-execution validation must not become a prerequisite for
+existing authenticated operations, reconciliation or retirement when source files
+are missing. Profile registration does not relax one-shot launch, conservative
+capacity accounting or capability-delivery decisions; new policy execution stays
+disabled until runtime enforcement and authenticated bootstrap are implemented.
+
 ## Consequences
 
 - Operators retain ownership of the shared workspace and their other tabs.

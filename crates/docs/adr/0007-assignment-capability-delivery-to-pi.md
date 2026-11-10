@@ -12,6 +12,16 @@ A Pi extension needs the owning Agent Assignment Identifier, Forge endpoint, and
 
 Forge dispatch will launch Pi with environment variables carrying the Assignment Identifier, capability endpoint, and absolute owner-only capability-secret-file path. The Pi extension reads the capability value from that file at runtime. Forge never writes the capability value into a prompt, a tool argument or result, or an environment variable.
 
+## Record Type generalization (Spec #614)
+
+The delivery/credential ownership decision applies to both Task and Grilling
+Assignments. Acknowledgement proves receipt/connectivity, not Record start or
+permission to launch again. Both Record Types must authenticate, acknowledge,
+start their assigned Record, then fetch trusted context before behavioral
+instructions are delivered. This intentionally generalizes Task-only bootstrap
+language; the authenticated bootstrap/runtime implementation remains in the
+follow-on Tasks, not the profile persistence foundation.
+
 ## Consequences
 
 - The dispatch adapter and Pi extension share an explicit, machine-readable integration contract.

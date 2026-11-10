@@ -165,7 +165,7 @@ A human-in-the-loop decision Record type that is a leaf child of one Wayfinder. 
 _Avoid_: question, approval
 
 **Agent Assignment**:
-A Forge-owned, durable association between one Record and an externally managed Agent. Its identifier is the stable external-provisioning identity for one work attempt; its bound Agent starts its Open Task after provisioning when necessary, and assignments remain as history after an Agent is removed or replaced.
+A Forge-owned, durable association between one Record and an externally managed Agent for one work attempt, binding an Agent Profile revision and execution identity. Its Agent authenticates, acknowledges and starts its assigned Task or Grilling before working; the Assignment remains as history after the Agent is removed or replaced.
 _Avoid_: record agent metadata, agent link
 
 **Dispatcher**:
@@ -173,7 +173,7 @@ Forge’s scheduling and dispatch application service that automatically selects
 _Avoid_: agent dispatcher, Herdr dispatcher
 
 **Assignment Capability**:
-An opaque, revocable credential Forge issues for one open Agent Assignment. It grants only that Assignment's permitted agent-initiated operations through the Forge daemon, including starting its bound Open Task; the daemon is the sole authorization gateway, and the credential is not protection against a hostile process running as the same OS user.
+An opaque, revocable credential Forge issues for one open Agent Assignment. It authorizes that Assignment's bounded reads, subscriptions and own-Record actions through the Forge daemon; it does not protect against a hostile process running as the same OS user.
 _Avoid_: agent token, agent credential
 
 **Assignment Capability Delivery**:
@@ -197,12 +197,12 @@ The renewable time-bounded validity of a Record Update Subscription. Opening Sub
 _Avoid_: heartbeat, connection timeout
 
 **Assignment Context**:
-The bounded Forge information an Agent Assignment may read: its assigned Record and directly related Records. A Child Record assignment may read its Parent Record but not sibling Child Records; a Parent Record assignment may read its direct Child Records. An assignment may also read its direct prerequisite, dependent, and generated-by Records across Project Scopes. It does not include transitive relationship traversal.
-_Avoid_: project visibility, record graph access
+The bounded Forge information an Agent Assignment may read, combining its bound execution identity with live assigned-Record, Forge Workspace and Project Scope information and directly related Records. Related visibility includes one-hop parent/child, prerequisite/dependent and generated-by relationships in either direction, but neither transitive traversal nor shared-membership access.
+_Avoid_: project visibility, record graph access, execution snapshot
 
 **Agent Profile**:
-A versioned Forge-owned configuration for a Record Type that specifies how Forge provisions an Agent, including its adapter, model, retry policy, and initial-prompt template. Forge Workspaces select profiles for Task and Grilling dispatch, and Assignments retain their bound revisions.
-_Avoid_: agent configuration, record profile
+An immutable, revisioned Forge-owned configuration for a Record Type that combines registered agent launch policy and behavioral instructions with Forge-owned lifecycle policy. Forge Workspaces explicitly select Task and Grilling revisions; each Agent Assignment retains its bound revision, freezing configuration and behavior rather than the complete runtime or resource filesystem.
+_Avoid_: agent configuration, mutable profile, record profile
 
 **Agent Workspace**:
 The filesystem folder in which an Agent works for an Agent Assignment. Task Assignments use their bound Managed Worktree; Grilling Assignments use their Forge Workspace root.
@@ -217,7 +217,7 @@ A durable condition that reserves Project dispatch capacity while an Agent Assig
 _Avoid_: failed Task, completed Agent
 
 **Assignment Acknowledgement**:
-A capability-authenticated signal that an Agent has received its Agent Assignment and can communicate with Forge. It does not itself start the assigned Task.
+A capability-authenticated signal that an Agent has received its Agent Assignment and can communicate with Forge. It does not itself start the assigned Record or authorize another launch.
 _Avoid_: task start, heartbeat
 
 **Assignment Heartbeat**:
