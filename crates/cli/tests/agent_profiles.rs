@@ -141,6 +141,10 @@ async fn preview_registration_and_explicit_selections_are_isolated_immutable_and
     );
     assert!(!preview.to_string().contains("BEHAVIOR_SENTINEL"));
     assert!(preview["limitations"].as_array().unwrap().len() >= 3);
+    let limitations = preview["limitations"].to_string();
+    assert!(limitations.contains("do not attest runtime identity or closed enforcement"));
+    assert!(limitations.contains("Selected MCP servers are unsupported at launch"));
+    assert!(limitations.contains("native reload and ambient user settings are not guarded"));
     assert!(
         store
             .workspace_dispatch_configuration("one")

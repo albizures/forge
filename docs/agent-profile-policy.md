@@ -10,6 +10,8 @@ resources. Final input validation is repeated before launch.
 During #617 the human explicitly chose “use only flags for now”, superseding the
 custom-loader/runtime-attestation requirements for this implementation slice
 (recorded on #614). Flags configure Pi; they do not attest a closed runtime.
+See the [acceptance coverage handoff](agent-profile-acceptance.md) for test
+mapping and the guarantees superseded by that decision.
 
 ## Authoring and resolution
 
@@ -153,15 +155,13 @@ companion mutation/deletion.
 The registered-policy argument path in `crates/server/src/herdr.rs` uses the
 existing Herdr `agent.start` request, with no wrapper, custom loader, SDK runtime,
 PATH changes or machine-wide configuration changes. Legacy profiles retain
-exactly their existing model/prompt arguments. The registered path is prepared
-for #621; profile validation still rejects registered-policy dispatch until that
-Task integrates authenticated bootstrap and preflight.
+their existing model configuration. Registered policies use authenticated bootstrap
+and dispatch preflight; legacy revisions also use protected bootstrap.
 
 For registered policies the adapter:
 
-- Validates the stored policy's direct inputs before any provider request or
-  provisioning intent. This local check is not the full dispatch preflight
-  ordering promised by #621.
+- Validates the stored policy's direct inputs before provider allocation and
+  checks them again immediately before launch.
 - Splits the stored provider-qualified model into `--provider` and `--model`.
 - Passes `--no-approve`, overriding ambient saved/default project trust. It does
   not pass `--no-context-files`: repository and ancestor instructions remain
@@ -261,7 +261,7 @@ Dependent context/runtime Tasks must use these existing durable ownership facts:
   Forge Workspace root; a first Project root is not an execution-root proxy.
 - Lifecycle policy remains part of the bound profile; `launch_policy` adds the
   frozen model/resources/behavior, not authority to alter retries or holds.
-- Future context envelopes must keep bound identity separate from live Record,
+- Context envelopes keep bound identity separate from live Record,
   relationships, comments/history and complete Project Scope, with freshness
   metadata. Never expose the persisted MCP configuration as public context.
 - Missing companion/direct files must not prevent existing authenticated actions,
@@ -269,6 +269,6 @@ Dependent context/runtime Tasks must use these existing durable ownership facts:
   execution and supported reload. It must not erase ownership evidence, prove
   process exit, release capacity, or replay one-shot launch.
 
-The context schemaVersion remains a subsequent Task deliverable. Runtime
+Assignment context uses schemaVersion 1. Runtime
 identity/closed-loader enforcement is not implemented under the approved
 flags-only scope; no persisted runtime-attestation fields are claimed.

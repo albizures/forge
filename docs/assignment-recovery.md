@@ -31,7 +31,11 @@ resource identities across restart; changing current selections never redirects
 cleanup. Binding changes are guarded by the owning Workspace's live Assignments
 and retained resources; socket changes apply that guard daemon-wide. After a safe
 socket change, every Workspace needs fresh binding verification before dispatch.
-See [Workspace ownership](workspaces.md).
+See [Workspace ownership](workspaces.md). Missing profile companions or direct
+resource files do not prevent authenticated operations, reconciliation or
+retirement of an existing Assignment. Repairing them may unblock a new launch,
+but does not clear holds or resolve uncertain resources; see
+[profile preflight and drift](dispatch.md#profile-preflight-and-drift).
 
 ```sh
 forge dispatcher assignment-info <assignment-id>

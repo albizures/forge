@@ -115,8 +115,9 @@ Preview reads catalogs without executing extensions, connecting MCP servers or
 changing registration/selections. Registration persists a new immutable per-type
 revision without selecting it. Inspect the returned revision, then explicitly
 select with `dispatcher config set task-profile|grilling-profile <revision>`.
-Selection is independent of runtime readiness; registered policies currently
-remain launch-blocked pending closed-policy enforcement and trusted bootstrap.
+Selection is independent of launch readiness. Registered policies use protected
+bootstrap and Pi flags; selected MCP servers are unsupported, and the flags do
+not attest a closed runtime.
 For schema, catalog membership, redacted output, fingerprint limits and an
 isolated runnable example, read [Agent Profile policy](../../docs/agent-profile-policy.md).
 

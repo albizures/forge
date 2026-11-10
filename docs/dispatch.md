@@ -95,13 +95,13 @@ forge dispatcher config unset project-limit --project alpha
 forge dispatcher profile
 ```
 
-The profile identifies provider, agent kind, model, and prompt configuration.
-The current catalog contains seeded Task and Grilling revisions, plus Task timeout
-revisions created by configuration. `task-profile` and `grilling-profile` select
-existing supported revisions independently per Workspace; unknown revisions are
-rejected atomically. General model/prompt overrides and a new profile-document
-format are not provided. Changing a selection affects future claims only;
-existing Assignments and recovery retain their original revision and provider identity.
+Profiles include seeded revisions, registered immutable revisions and Task timeout
+revisions. Author, preview and register a `forge-agent.md` as described in
+[Agent Profile policy](agent-profile-policy.md); registration never selects it.
+`task-profile` and `grilling-profile` select revisions independently per Workspace
+and Record Type; unknown revisions are rejected. There is no automatic latest
+selection. Existing Assignments and recovery retain their bound revision and
+provider identity when selections change.
 
 ## Explicit Record dispatch
 
@@ -117,7 +117,7 @@ Explicit Task selection attempts the requested Task even if an older Task is
 waiting. It still checks readiness, single-Project eligibility, dependencies,
 Project capacity, Dispatch Holds, assignment uniqueness, and retained-resource
 safety. Tasks use their Managed Worktrees; Grillings launch interactively without
-a Managed Worktree or Task bootstrap and are never scheduled automatically.
+a Managed Worktree, use authenticated Assignment bootstrap, and are never scheduled automatically.
 Grillings may span multiple Projects within their Workspace; each scoped Project
 must have capacity, and the Assignment reserves capacity in each, including while
 a closed Assignment retains resources. Projectless Records remain planning-only
@@ -139,8 +139,8 @@ through an owner-only secret file outside the Agent Workspace.
 Agents use `forge assignment bootstrap` with their delivered environment;
 credentials are never supplied as command arguments. The authenticated bootstrap
 route acknowledges and starts the assigned Record, then fetches trusted context
-before returning separately labelled behavior. Grilling launch integration is
-still pending. Acknowledgement makes the Assignment Working; it does not itself
+before returning separately labelled behavior for both Tasks and Grillings.
+Acknowledgement makes the Assignment Working; it does not itself
 start the Record. If bootstrap fails or is uncertain, the agent must not begin
 work. Failed instruction retrieval also stops
 bootstrap without permitting implementation.
@@ -164,6 +164,20 @@ evidence, and capacity with a Dispatch Hold. Pre-upgrade Provisioning Assignment
 without a deadline are uncertain, not automatically relaunched. Late
 acknowledgement may still let the existing agent start, without clearing the hold.
 **Do not infer agent absence or launch a replacement to bypass a hold.**
+
+## Profile preflight and drift
+
+Before a new claim, Forge checks the selected revision's direct inputs, supported
+provider/profile, selected MCP configuration and neighboring CLI. A redacted
+configuration blocker is distinct from a Dispatch Hold; repair the inputs or
+explicitly select a supported revision and recheck status. Repair does not clear
+an unrelated hold. A final direct-input check before launch can fail after
+allocation; retain the resources and follow the recovery runbook. Existing
+Assignment actions and recovery do not depend on source files remaining available.
+
+Pi flags configure resource loading, but do not attest runtime identity or closed
+execution. Selected MCP servers are currently unsupported; native reload is not
+guarded. See [policy limits and runtime verification](agent-profile-policy.md#limits-and-verification).
 
 ## Ownership and authorization
 

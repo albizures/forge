@@ -34,8 +34,9 @@ Assignments continue to bind the same per-Record-Type revision and exact executi
 ownership facts. New-execution validation must not become a prerequisite for
 existing authenticated operations, reconciliation or retirement when source files
 are missing. Profile registration does not relax one-shot launch, conservative
-capacity accounting or capability-delivery decisions; new policy execution stays
-disabled until runtime enforcement and authenticated bootstrap are implemented.
+capacity accounting or capability-delivery decisions. Registered-policy execution
+uses authenticated bootstrap and Pi flags, not closed-runtime attestation; selected
+MCP servers are unsupported. See [Agent Profile policy](../../../docs/agent-profile-policy.md).
 
 ## Consequences
 

@@ -38,7 +38,7 @@ Use the Record Body for Markdown work content. Creation supports `--body -` for 
 
 1. Inspect the Record, its Comments, and Update Log before changing it.
 2. Preserve dependencies with `record relate --kind depends-on`; `--to` names the prerequisite. `generated-by` records provenance, not a dependency or parent.
-3. For manual work, advance Open → In Progress with `record start`. An assigned Task instead starts through its assignment bootstrap below.
+3. For manual work, advance Open → In Progress with `record start`. An assigned Task or Grilling instead starts through its assignment bootstrap below.
 4. Record substantive outcomes with `record comment --message`. Comments are immutable; revise a non-Done Record's canonical content with `record edit --body`.
 5. Complete In Progress work with `record done`. Completion Resolution is optional free text, not a required slug. Complete a parent only after its children are Done.
 
@@ -52,9 +52,9 @@ When launched with Forge Assignment Capability Delivery, bootstrap before beginn
 forge assignment bootstrap
 ```
 
-Bootstrap reads `FORGE_ASSIGNMENT_ID`, `FORGE_ASSIGNMENT_DAEMON_URL`, and the owner-only file named by `FORGE_ASSIGNMENT_CAPABILITY_SECRET_FILE`. It acknowledges the Assignment, confirms the bound Task has started, and only then prints instructions. If any step fails or is uncertain, stop implementation and report the diagnostic. Keep the capability secret out of prompts, comments, shell arguments, and logs.
+Bootstrap reads `FORGE_ASSIGNMENT_ID`, `FORGE_ASSIGNMENT_DAEMON_URL`, and the owner-only file named by `FORGE_ASSIGNMENT_CAPABILITY_SECRET_FILE`. It authenticates, acknowledges, starts the bound Task or Grilling and fetches context before returning separately labelled behavior. If any step fails or is uncertain, stop and report the diagnostic. Keep the capability secret out of prompts, comments, shell arguments, and logs.
 
-Work in the assigned Agent Workspace and follow the returned instructions. Bootstrap's assignment endpoint is separate from ordinary CLI endpoint selection; do not assume bootstrap configured later ordinary commands. Do not bypass assignment ownership with a manual `record start` or replace an agent merely because it has not acknowledged.
+Work in the bound execution directory and follow the returned trusted constraints and behavior. Use `forge assignment` for bounded reads, own-Record actions and subscriptions; read [Assignment context](../../docs/assignment-context.md) for commands, scope and Grilling confirmation. Bootstrap's assignment endpoint is separate from ordinary CLI endpoint selection. Do not bypass assignment ownership with a manual `record start` or replace an agent merely because it has not acknowledged.
 
 ## Operators
 

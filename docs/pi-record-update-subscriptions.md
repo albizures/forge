@@ -8,8 +8,8 @@ The implemented authentication, readable-set, replay and lease rules are in the
 [Assignment context contract](assignment-context.md#authenticated-subscriptions-and-events).
 The older [SSE research contract](research/record-update-subscription-sse-contract.md)
 is historical; it does not supersede that authenticated contract. This guide describes
-the Pi consumer boundary. Protected Grilling launch integration and the Assignment
-CLI remain separate work (#621/#620); this wrapper does not enable dispatch.
+the Pi consumer boundary. Both Task and Grilling launches use protected bootstrap;
+the wrapper is optional and does not itself enable dispatch.
 
 ## Prerequisite: Forge-launched Pi Assignment
 

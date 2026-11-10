@@ -106,8 +106,8 @@ impl AgentProfileDocumentResponse {
                 "No recursive dependency pinning or atomic validation-to-runtime-load filesystem snapshot.".into(),
                 "External services, models and credentials are not frozen; registration does not select or enable dispatch.".into(),
                 "No OS/same-user isolation. Selected extensions are trusted unsandboxed code. MCP configuration and behavior are omitted from this view.".into(),
-                "Closed-policy runtime enforcement and authenticated bootstrap must be available before launch; this preview does not attest runtime compatibility.".into(),
-                "Empty resource lists load none; built-in tools are an exact allowlist. Ambient templates, themes and arbitrary system-prompt customization are disabled by the policy.".into(),
+                "Pi flags configure launch but do not attest runtime identity or closed enforcement; native reload and ambient user settings are not guarded.".into(),
+                "Selected MCP servers are unsupported at launch. Empty lists and the tool allowlist configure Pi flags, not a sandbox for trusted extensions.".into(),
             ],
         }
     }

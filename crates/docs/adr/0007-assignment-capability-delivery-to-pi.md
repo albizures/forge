@@ -19,8 +19,8 @@ Assignments. Acknowledgement proves receipt/connectivity, not Record start or
 permission to launch again. Both Record Types must authenticate, acknowledge,
 start their assigned Record, then fetch trusted context before behavioral
 instructions are delivered. This intentionally generalizes Task-only bootstrap
-language; the authenticated bootstrap/runtime implementation remains in the
-follow-on Tasks, not the profile persistence foundation.
+language. Both use the protected bootstrap; Pi flags configure launch but do not
+attest a closed runtime or protect against same-user processes.
 
 ## Consequences
 

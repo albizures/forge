@@ -137,5 +137,6 @@ data is rejected with an actionable new-store diagnostic, not silently adopted
 into a default Workspace. Preserve existing evidence before changing stores; a
 new store is not a way to reconcile an uncertain old agent.
 
-A new profile-document format, skill/tool discovery and general structured
-Assignment context are separate follow-on work, not part of this contract.
+Author and register immutable profile revisions using [Agent Profile policy](agent-profile-policy.md);
+registration never changes a Workspace selection. For the delivered agent's
+bounded bootstrap, actions and subscriptions, see [Assignment context](assignment-context.md).

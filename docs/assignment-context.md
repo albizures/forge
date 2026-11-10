@@ -58,7 +58,7 @@ launch. Context bootstrap evidence is durable and only marked after an
 acknowledged In Progress Record's context is assembled. Instructions cannot be
 retrieved after acknowledgement/start alone. Repeating bootstrap is safe while
 the Record remains In Progress; normal lifecycle rules still apply after Done.
-Launch/acknowledgement race integration remains #621.
+Launch and acknowledgement races retain one-shot launch and recovery safeguards.
 
 Context separates:
 
@@ -166,8 +166,7 @@ not independent human authentication. Never supply `--confirmed` without that
 conversation. Subscription events are hints: reread context or the relevant
 Record to reconcile current state. Event `--json` emits one versioned JSON object
 per notification; without it, the command streams SSE frames. Follow `nextCursor` with `--cursor` for the
-next bounded page. These examples do not create a launch or delivery; #621 owns
-that integration.
+next bounded page. These examples require an existing launch and delivery.
 
 ## Authenticated subscriptions and events
 
