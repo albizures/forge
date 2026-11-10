@@ -1,9 +1,14 @@
 # Agent Profile policy boundary
 
-Implementation contract for Spec #614, Tasks #615–616. Operator preview,
-registration and explicit selection are available. Authenticated Assignment
-context, preflight ordering and closed runtime loading are subsequent Tasks. **Registered policies cannot yet launch through Herdr.** This is not a
-claim that outgoing Pi flags enforce the policy.
+Implementation contract for Spec #614, Tasks #615–617. Operator preview,
+registration and explicit selection are available. The Herdr adapter has a
+flags-only Pi argument path; authenticated Assignment bootstrap and dispatch
+preflight integration remain subsequent Tasks. **Registered policies cannot yet
+launch through the configured Herdr adapter.**
+
+During #617 the human explicitly chose “use only flags for now”, superseding the
+custom-loader/runtime-attestation requirements for this implementation slice
+(recorded on #614). Flags configure Pi; they do not attest a closed runtime.
 
 ## Authoring and resolution
 
@@ -139,6 +144,78 @@ exercise this command sequence with isolated operator/Workspace catalogs plus
 extension/MCP sentinels, two Workspaces, both Record Types, new revisions and
 companion mutation/deletion.
 
+## Flags-only Pi launch configuration
+
+The registered-policy argument path in `crates/server/src/herdr.rs` uses the
+existing Herdr `agent.start` request, with no wrapper, custom loader, SDK runtime,
+PATH changes or machine-wide configuration changes. Legacy profiles retain
+exactly their existing model/prompt arguments. The registered path is prepared
+for #621; profile validation still rejects registered-policy dispatch until that
+Task integrates authenticated bootstrap and preflight.
+
+For registered policies the adapter:
+
+- Validates the stored policy's direct inputs before any provider request or
+  provisioning intent. This local check is not the full dispatch preflight
+  ordering promised by #621.
+- Splits the stored provider-qualified model into `--provider` and `--model`.
+- Passes `--no-approve`, overriding ambient saved/default project trust. It does
+  not pass `--no-context-files`: repository and ancestor instructions remain
+  available. Instructions are not a security boundary.
+- Passes `--no-extensions` and `--no-skills`, then explicit repeated
+  `--extension <canonical-entry-file>` and `--skill <canonical-SKILL.md>` arguments
+  for the selections. Empty lists add no paths. Skills remain on demand; their
+  bodies and registered behavioral Markdown are not inserted into these flags.
+- Passes `--tools <comma-separated-built-ins>` or `--no-tools` for an empty list.
+- Passes `--no-prompt-templates`, `--no-themes` and `--no-mcp`.
+- Passes explicit empty-string values for `--system-prompt` and
+  `--append-system-prompt`. On Pi 1.5.0 these suppress ambient `SYSTEM.md` and
+  `APPEND_SYSTEM.md` discovery while retaining Pi's default prompt. Herdr must
+  preserve these empty arguments, not drop them.
+- Terminates options with `--` before the trusted bootstrap prompt. Behavior and
+  credential-bearing MCP configuration are never argument payloads.
+
+**Selected MCP servers are currently unsupported.** Pi 1.5.0 has no documented
+per-run flag for supplying the persisted selected MCP configuration. A nonempty
+`mcpServers` list is rejected rather than connecting ambient servers, ignoring
+selections or putting credentials on the command line. Preview/registration can
+still store such a policy; registration is not a launch-compatibility check.
+
+### Limits and verification
+
+This is configuration, not runtime attestation. Forge does not probe or record
+which Pi installation Herdr actually resolves, enforce an exact effective model
+beyond Pi's own model lookup, freeze ambient user settings/model definitions, or
+guard/disable native `/reload` and subsequent resource/setting changes. User
+credentials and non-contract preferences remain available; `--no-approve`
+suppresses most project settings, but Pi can read project `sessionDir` before
+trust resolution. Selected extensions remain trusted unsandboxed code and may
+add resources, tools, MCP replacements or change prompts. `--no-mcp` disables
+Pi's built-in MCP support, not a selected extension's independent MCP client.
+Tool selection does not constrain bash, filesystem access, same-user processes
+or arbitrary extension code. Direct-input checks are not recursive dependency
+pinning or an atomic validation-to-load filesystem snapshot.
+
+Default-parallel Rust tests cover the Herdr argument payload, unchanged legacy
+launches, bootstrap/behavior separation, and rejection of drifted, unsupported
+MCP and non-UTF-8 resource inputs without substitution. An opt-in test executes
+the real Pi CLI with isolated HOME/agent/cwd, cleared environment (PATH retained
+for Node), offline catalogs and a loopback-only fixture model using a dummy key:
+
+```sh
+FORGE_TEST_PI=/absolute/path/to/pi cargo test -p forge-server pi_flags_runtime -- --ignored --nocapture
+```
+
+It observes selected extension execution and on-demand skill advertisement,
+empty resource/tool lists, an actual allowed `read` in the execution directory,
+repository/ancestor instructions, ambient prompt/template suppression and no
+ambient extension/MCP process start (fixtures include all four MCP exposure
+modes). It does not allocate Herdr tabs or test Herdr's shell argument escaping,
+malicious extensions, reload protection or runtime attestation. The test is
+explicitly ignored in the portable default suite because Pi is an external
+runtime; run it separately when changing the flag contract. Verified against Pi
+1.5.0, not a promise that arbitrary other installations support these flags.
+
 ## Frozen revision payload
 
 `ResolvedLaunchPolicy` is the shared application boundary for preview,
@@ -188,5 +265,6 @@ Dependent context/runtime Tasks must use these existing durable ownership facts:
   execution and supported reload. It must not erase ownership evidence, prove
   process exit, release capacity, or replay one-shot launch.
 
-The actual runtime identity/enforcement checks and context schemaVersion are
-subsequent Task deliverables, not fields claimed persisted by this foundation.
+The context schemaVersion remains a subsequent Task deliverable. Runtime
+identity/closed-loader enforcement is not implemented under the approved
+flags-only scope; no persisted runtime-attestation fields are claimed.

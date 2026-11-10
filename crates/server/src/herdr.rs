@@ -36,6 +36,69 @@ fn capability_launch_environment(
     })
 }
 
+/// Pi CLI configuration only, not runtime attestation or a security boundary.
+/// Keep behavior out: only authenticated bootstrap may deliver it (#621).
+fn pi_launch_arguments(
+    profile: &AgentProfile,
+    prompt: &str,
+) -> Result<Vec<String>, AgentAdapterError> {
+    let Some(policy) = &profile.launch_policy else {
+        return Ok(vec!["--model".into(), profile.model.clone(), prompt.into()]);
+    };
+    policy
+        .validate_direct_inputs()
+        .map_err(AgentAdapterError::InvalidRequest)?;
+    // Pi 1.5 has no per-run CLI flag for a persisted MCP configuration. Never
+    // substitute ambient mcp.json or put credential-bearing configuration in args.
+    if !policy.mcp_servers.is_empty() {
+        return Err(AgentAdapterError::InvalidRequest(
+            "selected MCP servers are unsupported by the flags-only Pi launch".into(),
+        ));
+    }
+    let (provider, model) = policy.model.split_once('/').ok_or_else(|| {
+        AgentAdapterError::InvalidRequest("provider-qualified Pi model is required".into())
+    })?;
+    let mut args: Vec<String> = [
+        "--provider",
+        provider,
+        "--model",
+        model,
+        "--no-approve",
+        "--no-extensions",
+        "--no-skills",
+        "--no-prompt-templates",
+        "--no-themes",
+        "--no-mcp",
+        // Empty explicit values suppress SYSTEM.md/APPEND_SYSTEM.md discovery
+        // while retaining Pi's default prompt and repository context files.
+        "--system-prompt",
+        "",
+        "--append-system-prompt",
+        "",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    if policy.tools.is_empty() {
+        args.push("--no-tools".into());
+    } else {
+        args.extend(["--tools".into(), policy.tools.join(",")]);
+    }
+    for (flag, entries) in [
+        ("--skill", &policy.skills),
+        ("--extension", &policy.extensions),
+    ] {
+        for entry in entries {
+            let path = entry.path.to_str().ok_or_else(|| {
+                AgentAdapterError::InvalidRequest("Pi resource path must be UTF-8".into())
+            })?;
+            args.extend([flag.into(), path.into()]);
+        }
+    }
+    args.extend(["--".into(), prompt.into()]);
+    Ok(args)
+}
+
 /// Constructs Herdr adapters from the configured Unix socket endpoint.
 pub struct HerdrAdapterFactory {
     socket_path: Option<PathBuf>,
@@ -54,8 +117,8 @@ impl HerdrAdapterFactory {
     }
 
     pub fn validate_profile(profile: &AgentProfile) -> Result<(), AgentAdapterError> {
-        // Registered closed policies remain disabled until the runtime loader and
-        // authenticated bootstrap enforce the full contract (#617/#621).
+        // Registered policies remain disabled until authenticated bootstrap and
+        // preflight integration (#621). #617 configures Pi using flags only.
         if profile.launch_policy.is_some()
             || profile.provider != "herdr"
             || profile.agent_kind != "pi"
@@ -660,9 +723,9 @@ impl HerdrAdapter {
         &self,
         context: &AgentDispatchContext,
         resources: &dyn AgentDispatchRepository,
-        prompt: &str,
         label: &str,
         workspace: &str,
+        launch_args: &[String],
     ) -> Result<(), AgentAdapterError> {
         if !resources
             .begin_agent_provision(&context.assignment.id)
@@ -733,7 +796,7 @@ impl HerdrAdapter {
                     "launch was already attempted or Assignment is no longer provisioning".into(),
                 ));
             }
-            self.request("agent.start", json!({"name": label, "kind": "pi", "pane_id": pane, "args": ["--model", context.assignment.profile.model, prompt], "timeout_ms": context.assignment.profile.startup_timeout_millis}))?;
+            self.request("agent.start", json!({"name": label, "kind": "pi", "pane_id": pane, "args": launch_args, "timeout_ms": context.assignment.profile.startup_timeout_millis}))?;
             Self::retain(resources, context, "agent-name", label)?;
         }
         Ok(())
@@ -762,10 +825,11 @@ impl AgentDispatchAdapter for HerdrAdapter {
         resources: &dyn AgentDispatchRepository,
     ) -> Result<(), AgentAdapterError> {
         let prompt = provisioning_prompt(context)?;
+        let launch_args = pi_launch_arguments(&context.assignment.profile, prompt)?;
         self.probe()?;
         let label = Self::label(context)?;
         let workspace = self.dispatch_workspace_from_context(context)?;
-        self.provision_resources(context, resources, prompt, &label, &workspace)
+        self.provision_resources(context, resources, &label, &workspace, &launch_args)
     }
 
     fn observe(
@@ -902,10 +966,13 @@ impl AgentDispatchAdapter for HerdrAdapter {
     }
 }
 
+#[cfg(all(test, unix))]
+mod pi_flags_tests;
+
 #[cfg(test)]
 mod tests {
     #[test]
-    fn registered_policy_cannot_launch_before_closed_runtime_enforcement_exists() {
+    fn registered_policy_cannot_launch_before_authenticated_bootstrap_integration() {
         use forge_app::{AgentDispatchRepository, RecordType};
         let store = forge_store::SqliteProjectRepository::in_memory().unwrap();
         let mut profile = store.agent_profile(RecordType::Task, 1).unwrap();
@@ -1038,15 +1105,20 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn provisioning_launches_only_short_bootstrap_and_delivers_secret_path() {
-        provisioning_launch_contract(forge_app::RecordType::Task);
+        provisioning_launch_contract(forge_app::RecordType::Task, false);
     }
 
     #[test]
     fn grilling_provisions_interactively_without_worktree_or_task_capability() {
-        provisioning_launch_contract(forge_app::RecordType::Grilling);
+        provisioning_launch_contract(forge_app::RecordType::Grilling, false);
     }
 
-    fn provisioning_launch_contract(record_type: forge_app::RecordType) {
+    #[test]
+    fn registered_profile_uses_explicit_pi_flags_without_delivering_behavior() {
+        provisioning_launch_contract(forge_app::RecordType::Task, true);
+    }
+
+    fn provisioning_launch_contract(record_type: forge_app::RecordType, registered: bool) {
         use forge_app::{
             AgentDispatchContext, AgentDispatchRepository, AssignmentCapabilityDelivery,
             DispatchWorkspace, NewAgentAssignment, NewTypedRecord, RecordRepository,
@@ -1077,6 +1149,20 @@ mod tests {
                 id: "workspace".into(),
             })
             .unwrap();
+        let mut assignment = assignment;
+        if registered {
+            assignment.profile.launch_policy =
+                Some(forge_app::agent_profiles::ResolvedLaunchPolicy {
+                    version: 1,
+                    runtime: "herdr/pi".into(),
+                    model: "openai/gpt-5".into(),
+                    tools: vec![],
+                    behavior: "private registered behavior".into(),
+                    skills: vec![],
+                    extensions: vec![],
+                    mcp_servers: vec![],
+                });
+        }
         let context = AgentDispatchContext {
             assignment: assignment.clone(),
             project_root: "/project".into(),
@@ -1110,7 +1196,7 @@ mod tests {
         ));
         let listener = UnixListener::bind(&path).unwrap();
         let model = assignment.profile.model.clone();
-        let server = launch_contract_server(listener, interactive, model);
+        let server = launch_contract_server(listener, interactive, model, registered);
         let adapter = super::HerdrAdapter {
             socket_path: path.clone(),
         };
@@ -1139,6 +1225,7 @@ mod tests {
         listener: std::os::unix::net::UnixListener,
         interactive: bool,
         model: String,
+        registered: bool,
     ) -> std::thread::JoinHandle<()> {
         use std::io::{BufRead, BufReader, Write};
         std::thread::spawn(move || {
@@ -1187,8 +1274,27 @@ mod tests {
                     }
                 }
                 if method == "agent.start" {
-                    assert_eq!(
-                        request["params"]["args"],
+                    let expected = if registered {
+                        serde_json::json!([
+                            "--provider",
+                            "openai",
+                            "--model",
+                            "gpt-5",
+                            "--no-approve",
+                            "--no-extensions",
+                            "--no-skills",
+                            "--no-prompt-templates",
+                            "--no-themes",
+                            "--no-mcp",
+                            "--system-prompt",
+                            "",
+                            "--append-system-prompt",
+                            "",
+                            "--no-tools",
+                            "--",
+                            "short bootstrap"
+                        ])
+                    } else {
                         serde_json::json!([
                             "--model",
                             model,
@@ -1198,7 +1304,9 @@ mod tests {
                                 "short bootstrap"
                             }
                         ])
-                    );
+                    };
+                    assert_eq!(request["params"]["args"], expected);
+                    assert!(!line.contains("private registered behavior"));
                     if !interactive {
                         assert!(!line.contains("private full instructions"));
                     }
