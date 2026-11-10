@@ -1,9 +1,9 @@
 # Authenticated Assignment context and actions
 
 The application/RPC boundary and `forge assignment` CLI implement authenticated
-Assignment operations. Protected Task/Grilling launch integration remains #621;
-registered-policy dispatch remains disabled. The flags-only runtime limitations
-in [Agent Profile policy](agent-profile-policy.md) are unchanged.
+Assignment operations. Task and Grilling launches, including legacy revisions, use
+protected bootstrap; the flags-only runtime limitations in
+[Agent Profile policy](agent-profile-policy.md) remain.
 
 ## Authority and delivery
 

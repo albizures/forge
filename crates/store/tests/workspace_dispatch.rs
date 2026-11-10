@@ -110,6 +110,130 @@ fn registered_policy_survives_reopen_and_lifecycle_revision_without_selection() 
     );
 }
 
+#[test]
+fn profile_preflight_blockers_are_durable_revision_bound_and_independent() {
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    fixture.register(&store);
+    store
+        .select_workspace_profile("one", RecordType::Task, Some(1))
+        .unwrap();
+    store
+        .select_workspace_profile("one", RecordType::Grilling, Some(1))
+        .unwrap();
+    assert!(
+        store
+            .record_profile_preflight("one", RecordType::Task, 1, true)
+            .unwrap()
+    );
+    assert!(
+        store
+            .record_profile_preflight("one", RecordType::Grilling, 1, true)
+            .unwrap()
+    );
+    drop(store);
+    let store = fixture.open();
+    let blockers = store
+        .workspace_dispatch_configuration("one")
+        .unwrap()
+        .profile_preflight_blockers;
+    assert_eq!(blockers.len(), 2);
+    assert!(
+        blockers
+            .iter()
+            .any(|b| b.record_type == RecordType::Task && b.profile_revision == 1)
+    );
+    assert!(
+        blockers
+            .iter()
+            .any(|b| b.record_type == RecordType::Grilling && b.profile_revision == 1)
+    );
+    let revised = store
+        .configure_workspace_acknowledgement_timeout("one", Some(1234))
+        .unwrap();
+    assert!(
+        !store
+            .record_profile_preflight("one", RecordType::Task, 1, false)
+            .unwrap()
+    );
+    assert!(
+        store
+            .record_profile_preflight("one", RecordType::Task, revised.revision, false)
+            .unwrap()
+    );
+    let blockers = store
+        .workspace_dispatch_configuration("one")
+        .unwrap()
+        .profile_preflight_blockers;
+    assert_eq!(blockers.len(), 1);
+    assert_eq!(blockers[0].record_type, RecordType::Grilling);
+    assert!(
+        store
+            .workspace_dispatch_configuration("two")
+            .unwrap()
+            .profile_preflight_blockers
+            .is_empty()
+    );
+}
+
+#[test]
+fn checked_claims_reject_selection_changes_before_any_assignment() {
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    fixture.register(&store);
+    let old = fixture.assignment(&store, "one", "history");
+    store
+        .close_agent_assignment("history", AgentAssignmentClosureReason::Retired)
+        .unwrap();
+    for kind in [RecordType::Task, RecordType::Grilling] {
+        store
+            .select_workspace_profile("one", kind, Some(1))
+            .unwrap();
+    }
+    store
+        .retain_verified_workspace_binding(
+            "one",
+            Some(&DispatchWorkspace { id: "exact".into() }),
+            0,
+        )
+        .unwrap();
+    let expected = forge_app::DispatchPreflightSelection {
+        task_revision: 1,
+        grilling_revision: 1,
+        provider_generation: 0,
+        binding_id: "exact".into(),
+    };
+    store
+        .configure_workspace_acknowledgement_timeout("one", Some(1234))
+        .unwrap();
+    assert_eq!(
+        store
+            .claim_record_agent_assignment_checked(old.record_id, "explicit", &expected)
+            .unwrap_err()
+            .code,
+        "dispatch-preflight-stale"
+    );
+    assert_eq!(
+        store
+            .claim_next_agent_assignment_checked("one/api", "automatic", &expected)
+            .unwrap_err()
+            .code,
+        "dispatch-preflight-stale"
+    );
+    assert_eq!(
+        store.list_agent_assignments(old.record_id).unwrap().len(),
+        1
+    );
+    store
+        .select_workspace_profile("one", RecordType::Task, Some(1))
+        .unwrap();
+    let (claimed, duplicate) = store
+        .claim_record_agent_assignment_checked(old.record_id, "valid", &expected)
+        .unwrap();
+    assert!(!duplicate);
+    assert_eq!(claimed.profile.revision, 1);
+}
+
 static NEXT: AtomicU64 = AtomicU64::new(0);
 struct Fixture(PathBuf);
 impl Fixture {

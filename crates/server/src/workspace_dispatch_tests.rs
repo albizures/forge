@@ -1,8 +1,8 @@
 //! Production composition against the Herdr socket seam (no provider resources by label).
 use super::*;
 use forge_app::{
-    AgentDispatchRepository, NewTypedRecord, ProjectRepository, RecordRepository, RecordType,
-    WorkspaceDispatchRepository, WorkspaceRepository,
+    AgentDispatchRepository, ManagedWorktreeRepository, NewTypedRecord, ProjectRepository,
+    RecordRepository, RecordType, WorkspaceDispatchRepository, WorkspaceRepository,
 };
 use serde_json::{Value, json};
 use std::{
@@ -177,11 +177,14 @@ impl Fixture {
         SqliteProjectRepository::open(&self.database).unwrap()
     }
     fn app(&self) -> Application {
-        application_from_config(&DaemonConfig {
-            bind_addr: "127.0.0.1:0".parse().unwrap(),
-            store_path: self.database.clone(),
-            managed: None,
-        })
+        application_from_config_with_cli(
+            &DaemonConfig {
+                bind_addr: "127.0.0.1:0".parse().unwrap(),
+                store_path: self.database.clone(),
+                managed: None,
+            },
+            Some(std::env::current_exe().unwrap()),
+        )
         .unwrap()
     }
     fn configure(&self, app: &Application, provider: &Provider, workspace: &str) {
@@ -376,6 +379,106 @@ fn production_readiness_distinguishes_configuration_outage_and_exact_identity() 
 }
 
 #[test]
+fn registered_profile_blocker_is_durable_redacted_and_clears_on_input_repair() {
+    let fixture = Fixture::new();
+    let app = fixture.app();
+    let provider = Provider::new(fixture.root.join("herdr.sock"));
+    fixture.configure(&app, &provider, "one");
+    let root = fixture.root.join("one");
+    let skill = root.join(".agents/skills/entry");
+    std::fs::create_dir_all(&skill).unwrap();
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: entry\ndescription: entry\n---\nbody",
+    )
+    .unwrap();
+    std::fs::write(skill.join("forge-agent.md"), "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\ntools: []\nskills: [{name: entry}]\n---\nPRIVATE_BEHAVIOR\n").unwrap();
+    let profile = app
+        .register_agent_profile(
+            "one",
+            &fixture.root.join("two"),
+            std::path::Path::new(".agents/skills/entry/forge-agent.md"),
+            RecordType::Task,
+        )
+        .unwrap();
+    std::fs::write(skill.join("SKILL.md"), "drifted direct input").unwrap();
+    app.workspace_dispatch_config_set("one", "task-profile", &profile.revision.to_string(), None)
+        .unwrap();
+    let ready = app.workspace_dispatch_readiness("one").unwrap();
+    assert!(has(&ready, "task-profile-invalid"));
+    assert!(
+        ready
+            .blockers
+            .iter()
+            .any(|b| b.message.contains(&profile.revision.to_string()))
+    );
+    assert!(!format!("{ready:?}").contains("PRIVATE_BEHAVIOR"));
+    let task = fixture
+        .store()
+        .open_typed_record(&NewTypedRecord {
+            record_type: RecordType::Task,
+            task_kind: None,
+            body: "task".into(),
+            project_slugs: vec!["one/api".into()],
+            generated_by_ids: vec![],
+        })
+        .unwrap();
+    let store = fixture.store();
+    let sentinel = fixture.root.join("setup-hook-ran");
+    store
+        .set_project_setup_hook("one/api", Some(&format!("touch {}", sentinel.display())))
+        .unwrap();
+    store
+        .set_task_base_commit(task.id, "0123456789012345678901234567890123456789")
+        .unwrap();
+    assert!(app.dispatch_record(task.id).is_err());
+    assert!(store.list_agent_assignments(task.id).unwrap().is_empty());
+    assert!(
+        forge_app::ManagedWorktreeRepository::worktree_claim(&store, task.id)
+            .unwrap()
+            .is_none()
+    );
+    assert!(!sentinel.exists());
+    assert!(!fixture.root.join("assignment-capabilities").exists());
+    provider.no_provisioning();
+    drop(app);
+    let persisted = fixture
+        .store()
+        .workspace_dispatch_configuration("one")
+        .unwrap();
+    assert!(
+        persisted
+            .profile_preflight_blockers
+            .iter()
+            .any(|b| b.record_type == RecordType::Task && b.profile_revision == profile.revision)
+    );
+    let store = fixture.store();
+    store
+        .hold_dispatch(task.id, "operator review required")
+        .unwrap();
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: entry\ndescription: entry\n---\nbody",
+    )
+    .unwrap();
+    let app = fixture.app();
+    assert!(
+        app.workspace_dispatch_readiness("one")
+            .unwrap()
+            .dispatchable
+    );
+    assert!(store.dispatch_hold(task.id).unwrap().is_some());
+    assert!(
+        fixture
+            .store()
+            .workspace_dispatch_configuration("one")
+            .unwrap()
+            .profile_preflight_blockers
+            .is_empty()
+    );
+}
+
+#[test]
 fn provider_identity_loss_between_readiness_and_provisioning_has_no_launch_side_effects() {
     let fixture = Fixture::new();
     let app = fixture.app();
@@ -498,7 +601,10 @@ fn production_grilling_launch_uses_its_selected_revision_and_retained_container(
     let record = fixture.grilling("two");
     let (assignment, duplicate) = app.dispatch_record(record.id).unwrap();
     assert!(!duplicate);
-    assert_eq!(assignment.state, forge_app::AgentAssignmentState::Working);
+    assert_eq!(
+        assignment.state,
+        forge_app::AgentAssignmentState::Provisioning
+    );
     assert_eq!(
         fixture
             .store()
@@ -524,11 +630,8 @@ fn production_grilling_launch_uses_its_selected_revision_and_retained_container(
         .iter()
         .find(|call| call["method"] == "agent.start")
         .unwrap();
-    assert!(
-        launch
-            .to_string()
-            .contains(fixture.root.join("two").to_str().unwrap())
-    );
+    assert!(launch.to_string().contains("assignment bootstrap"));
+    assert!(!launch.to_string().contains("decision"));
     assert_eq!(
         calls
             .calls
@@ -653,9 +756,27 @@ fn workspace_launch_context_and_recovery_stay_with_the_original_owner_after_rest
             .nth(1)
             .unwrap();
         let prompt = launch["params"]["args"][2].as_str().unwrap();
-        assert!(prompt.contains(&format!("two/api: {}", fixture.root.join("two").display())));
-        assert!(prompt.contains(&format!("two/web: {}", nested.display())));
-        assert!(!prompt.contains(fixture.root.join("one").to_str().unwrap()));
+        assert!(prompt.contains("assignment bootstrap"));
+        assert!(!prompt.contains("multi-project decision"));
+    }
+    let secret_root = fixture.root.join("assignment-capabilities");
+    for assignment in [&first, &second] {
+        let secret = std::fs::read_to_string(secret_root.join(&assignment.id)).unwrap();
+        let bootstrap = app
+            .assignment(&secret_root, &assignment.id, secret.trim())
+            .unwrap()
+            .bootstrap()
+            .unwrap();
+        if assignment.id == second.id {
+            assert_eq!(bootstrap.context.projects.len(), 2);
+            assert!(
+                bootstrap
+                    .context
+                    .projects
+                    .iter()
+                    .any(|p| p.project_root == nested)
+            );
+        }
     }
     assert!(
         store

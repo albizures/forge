@@ -1,8 +1,8 @@
 //! Durable Workspace selections and exclusive provider identities.
 use super::{SqliteProjectRepository, load_agent_profile, storage_error, workspaces};
 use forge_app::{
-    DispatchWorkspace, RecordType, RegistrationError, WorkspaceDispatchConfiguration,
-    WorkspaceDispatchRepository,
+    DispatchWorkspace, ProfilePreflightBlocker, RecordType, RegistrationError,
+    WorkspaceDispatchConfiguration, WorkspaceDispatchRepository,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
@@ -39,6 +39,12 @@ pub(super) fn initialize(connection: &Connection) -> Result<(), RegistrationErro
             FOREIGN KEY(task_profile_type, task_profile_revision) REFERENCES agent_profiles(record_type, revision),
             FOREIGN KEY(grilling_profile_type, grilling_profile_revision) REFERENCES agent_profiles(record_type, revision)
          );
+         CREATE TABLE IF NOT EXISTS workspace_profile_preflight_blockers (
+            workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            record_type TEXT NOT NULL CHECK(record_type IN ('task', 'grilling')),
+            profile_revision INTEGER NOT NULL CHECK(profile_revision > 0),
+            PRIMARY KEY(workspace_id, record_type)
+         );
          CREATE TRIGGER IF NOT EXISTS assignment_workspace_binding
          AFTER INSERT ON agent_assignments
          BEGIN UPDATE agent_assignments SET workspace_id = (SELECT workspace_id FROM records WHERE id = NEW.record_id),
@@ -56,6 +62,26 @@ pub(super) fn initialize(connection: &Connection) -> Result<(), RegistrationErro
          WHEN OLD.herdr_socket_path IS NOT NEW.herdr_socket_path
          BEGIN UPDATE dispatch_provider_generation SET generation = generation + 1 WHERE singleton = 1; END;"
     ).map_err(storage_error)
+}
+
+pub(super) fn verify_preflight_selection(
+    connection: &Connection,
+    record_id: u64,
+    expected: &forge_app::DispatchPreflightSelection,
+) -> Result<(), RegistrationError> {
+    let matches: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM records r JOIN workspace_dispatch_configuration c ON c.workspace_id = r.workspace_id JOIN dispatch_provider_generation g ON g.singleton = 1 WHERE r.id = ?1 AND c.task_profile_revision = ?2 AND c.grilling_profile_revision = ?3 AND c.herdr_workspace_id = ?4 AND c.verified_generation = ?5 AND g.generation = ?5)",
+        params![record_id.cast_signed(), expected.task_revision, expected.grilling_revision, expected.binding_id, expected.provider_generation.cast_signed()],
+        |row| row.get(0),
+    ).map_err(storage_error)?;
+    if matches {
+        Ok(())
+    } else {
+        Err(RegistrationError::new(
+            "dispatch-preflight-stale",
+            "Workspace dispatch selection changed after preflight; retry dispatch",
+        ))
+    }
 }
 
 pub(super) fn selected_revision(
@@ -138,8 +164,27 @@ impl WorkspaceDispatchRepository for SqliteProjectRepository {
             verified,
         } = selected.unwrap_or_default();
         let provider_generation = generation(&tx)?;
+        let profile_preflight_blockers = {
+            let mut statement = tx.prepare("SELECT b.record_type, b.profile_revision FROM workspace_profile_preflight_blockers b JOIN workspace_dispatch_configuration c ON c.workspace_id = b.workspace_id WHERE b.workspace_id = ?1 AND ((b.record_type = 'task' AND b.profile_revision = c.task_profile_revision) OR (b.record_type = 'grilling' AND b.profile_revision = c.grilling_profile_revision)) ORDER BY b.record_type").map_err(storage_error)?;
+            statement
+                .query_map([workspace], |row| {
+                    let kind: String = row.get(0)?;
+                    Ok(ProfilePreflightBlocker {
+                        record_type: if kind == "task" {
+                            RecordType::Task
+                        } else {
+                            RecordType::Grilling
+                        },
+                        profile_revision: row.get(1)?,
+                    })
+                })
+                .map_err(storage_error)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(storage_error)?
+        };
         Ok(WorkspaceDispatchConfiguration {
             workspace_id: workspace.into(),
+            profile_preflight_blockers,
             task_profile: task
                 .map(|revision| load_agent_profile(&tx, RecordType::Task, revision))
                 .transpose()?,
@@ -151,6 +196,51 @@ impl WorkspaceDispatchRepository for SqliteProjectRepository {
             binding: binding.map(|id| DispatchWorkspace { id }),
             provider_generation,
         })
+    }
+
+    fn record_profile_preflight(
+        &self,
+        workspace: &str,
+        record_type: RecordType,
+        revision: u32,
+        invalid: bool,
+    ) -> Result<bool, RegistrationError> {
+        let (kind, column) = match record_type {
+            RecordType::Task => ("task", "task_profile_revision"),
+            RecordType::Grilling => ("grilling", "grilling_profile_revision"),
+            _ => {
+                return Err(RegistrationError::new(
+                    "unsupported-profile-selection",
+                    "preflight supports Task and Grilling profiles only",
+                ));
+            }
+        };
+        let mut connection = self.connection.lock().map_err(|_| {
+            RegistrationError::new("storage", "Workspace dispatch storage lock is poisoned")
+        })?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        let selected: Option<Option<u32>> = tx
+            .query_row(
+                &format!(
+                    "SELECT {column} FROM workspace_dispatch_configuration WHERE workspace_id = ?1"
+                ),
+                [workspace],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage_error)?;
+        if selected.flatten() != Some(revision) {
+            return Ok(false);
+        }
+        if invalid {
+            tx.execute("INSERT INTO workspace_profile_preflight_blockers (workspace_id, record_type, profile_revision) VALUES (?1, ?2, ?3) ON CONFLICT(workspace_id, record_type) DO UPDATE SET profile_revision = excluded.profile_revision", params![workspace, kind, revision]).map_err(storage_error)?;
+        } else {
+            tx.execute("DELETE FROM workspace_profile_preflight_blockers WHERE workspace_id = ?1 AND record_type = ?2", params![workspace, kind]).map_err(storage_error)?;
+        }
+        tx.commit().map_err(storage_error)?;
+        Ok(true)
     }
 
     fn select_workspace_profile(

@@ -2078,10 +2078,11 @@ impl AgentDispatchRepository for SqliteProjectRepository {
         })
     }
 
-    fn claim_record_agent_assignment(
+    fn claim_record_agent_assignment_with_selection(
         &self,
         record_id: u64,
         assignment_id: &str,
+        selection: Option<&forge_app::DispatchPreflightSelection>,
     ) -> Result<(AgentAssignment, bool), RegistrationError> {
         if assignment_id.trim().is_empty() {
             return Err(RegistrationError::new(
@@ -2153,6 +2154,9 @@ impl AgentDispatchRepository for SqliteProjectRepository {
                     "Project dispatch capacity is reserved; inspect open Assignments and recovery blockers",
                 ));
             }
+        }
+        if let Some(selection) = selection {
+            workspace_dispatch::verify_preflight_selection(&transaction, record_id, selection)?;
         }
         let revision =
             workspace_dispatch::selected_revision(&transaction, record_id, record.record_type)?;
@@ -2309,10 +2313,11 @@ impl AgentDispatchRepository for SqliteProjectRepository {
         Ok(changed == 1)
     }
 
-    fn claim_next_agent_assignment(
+    fn claim_next_agent_assignment_with_selection(
         &self,
         project_slug: &str,
         assignment_id: &str,
+        selection: Option<&forge_app::DispatchPreflightSelection>,
     ) -> Result<Option<AgentAssignment>, RegistrationError> {
         if assignment_id.trim().is_empty() {
             return Err(RegistrationError::new(
@@ -2337,6 +2342,9 @@ impl AgentDispatchRepository for SqliteProjectRepository {
             let Some(record_id) = record_id else {
                 return Ok(None);
             };
+            if let Some(selection) = selection {
+                workspace_dispatch::verify_preflight_selection(&connection, record_id, selection)?;
+            }
             let revision =
                 workspace_dispatch::selected_revision(&connection, record_id, RecordType::Task)?;
             let profile = load_agent_profile(&connection, RecordType::Task, revision)?;
@@ -6048,34 +6056,37 @@ mod tests {
                 unreachable!()
             }
         }
-        let store = SqliteProjectRepository::in_memory().unwrap();
-        store.register(&project("alpha", "/repos/alpha")).unwrap();
-        let task = store
-            .open_typed_record(&NewTypedRecord {
-                record_type: RecordType::Task,
-                task_kind: None,
-                body: "task".into(),
-                project_slugs: vec!["alpha".into()],
-                generated_by_ids: vec![],
-            })
-            .unwrap();
-        let assignment = store
-            .create_agent_assignment(&NewAgentAssignment {
-                id: "race".into(),
-                record_id: task.id,
-                project_slug: "alpha".into(),
-                profile_revision: 1,
-            })
-            .unwrap();
-        assert!(matches!(
-            forge_app::reconcile_agent_assignment(&store, &RacingAdapter, &assignment).unwrap(),
-            forge_app::AssignmentReconciliation::Stale
-        ));
-        assert_eq!(
-            store.agent_assignment("race").unwrap().state,
-            forge_app::AgentAssignmentState::Working
-        );
-        assert!(store.dispatch_hold(task.id).unwrap().is_none());
+        for kind in [RecordType::Task, RecordType::Grilling] {
+            let store = SqliteProjectRepository::in_memory().unwrap();
+            store.register(&project("alpha", "/repos/alpha")).unwrap();
+            let task = store
+                .open_typed_record(&NewTypedRecord {
+                    record_type: kind,
+                    task_kind: None,
+                    body: "task".into(),
+                    project_slugs: vec!["alpha".into()],
+                    generated_by_ids: vec![],
+                })
+                .unwrap();
+            let assignment = store
+                .create_agent_assignment(&NewAgentAssignment {
+                    id: "race".into(),
+                    record_id: task.id,
+                    project_slug: "alpha".into(),
+                    profile_revision: 1,
+                })
+                .unwrap();
+            assert!(matches!(
+                forge_app::reconcile_agent_assignment(&store, &RacingAdapter, &assignment).unwrap(),
+                forge_app::AssignmentReconciliation::Stale
+            ));
+            assert_eq!(
+                store.agent_assignment("race").unwrap().state,
+                forge_app::AgentAssignmentState::Working
+            );
+            assert!(store.dispatch_hold(task.id).unwrap().is_none());
+            assert!(!store.begin_agent_launch("race", 2_000).unwrap());
+        }
     }
 
     #[test]
@@ -6124,19 +6135,24 @@ mod tests {
                 unreachable!()
             }
         }
-        for fail in [false, true] {
+        for (fail, kind) in [
+            (false, RecordType::Task),
+            (true, RecordType::Task),
+            (false, RecordType::Grilling),
+            (true, RecordType::Grilling),
+        ] {
             let store = SqliteProjectRepository::in_memory().unwrap();
             store.register(&project("alpha", "/repos/alpha")).unwrap();
             let task = store
                 .open_typed_record(&NewTypedRecord {
-                    record_type: RecordType::Task,
+                    record_type: kind,
                     task_kind: None,
                     body: "task".into(),
                     project_slugs: vec!["alpha".into()],
                     generated_by_ids: vec![],
                 })
                 .unwrap();
-            let assignment = store
+            let mut assignment = store
                 .create_agent_assignment(&NewAgentAssignment {
                     id: "launch".into(),
                     record_id: task.id,
@@ -6144,6 +6160,19 @@ mod tests {
                     profile_revision: 1,
                 })
                 .unwrap();
+            if kind == RecordType::Grilling {
+                assignment.profile.launch_policy =
+                    Some(forge_app::agent_profiles::ResolvedLaunchPolicy {
+                        version: 1,
+                        runtime: "herdr/pi".into(),
+                        model: "openai/test".into(),
+                        tools: vec![],
+                        behavior: String::new(),
+                        skills: vec![],
+                        extensions: vec![],
+                        mcp_servers: vec![],
+                    });
+            }
             assert!(matches!(
                 forge_app::reconcile_agent_assignment(&store, &LaunchAdapter { fail }, &assignment)
                     .unwrap(),

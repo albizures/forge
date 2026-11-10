@@ -771,15 +771,66 @@ pub fn write_assignment_capability_secret(
         })
 }
 
+fn matching_forge_cli_beside(daemon: &Path) -> Result<PathBuf, forge_app::AgentAdapterError> {
+    let cli = daemon.parent().map(|parent| parent.join("forge"));
+    let executable = cli
+        .as_ref()
+        .and_then(|path| std::fs::metadata(path).ok())
+        .is_some_and(|metadata| {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+            }
+            #[cfg(not(unix))]
+            {
+                metadata.is_file()
+            }
+        });
+    if executable {
+        Ok(cli.expect("executable path exists"))
+    } else {
+        Err(forge_app::AgentAdapterError::Endpoint(
+            "matching Forge CLI is unavailable beside the daemon".into(),
+        ))
+    }
+}
+
+fn matching_forge_cli() -> Result<PathBuf, forge_app::AgentAdapterError> {
+    let daemon = std::env::current_exe().map_err(|_| {
+        forge_app::AgentAdapterError::Endpoint(
+            "matching Forge CLI is unavailable beside the daemon".into(),
+        )
+    })?;
+    matching_forge_cli_beside(&daemon)
+}
+
 struct ServerAgentDispatchAdapterFactory {
     herdr: HerdrAdapterFactory,
     daemon_url: String,
     capability_secret_root: PathBuf,
+    cli_override: Option<PathBuf>,
+}
+
+impl ServerAgentDispatchAdapterFactory {
+    fn cli_path(&self) -> Result<PathBuf, forge_app::AgentAdapterError> {
+        self.cli_override
+            .clone()
+            .map_or_else(matching_forge_cli, Ok)
+    }
 }
 
 impl AgentDispatchAdapterFactory for ServerAgentDispatchAdapterFactory {
     fn validate_profile(&self, profile: &AgentProfile) -> Result<(), forge_app::AgentAdapterError> {
         HerdrAdapterFactory::validate_profile(profile)
+    }
+    fn validate_preflight(
+        &self,
+        profile: &AgentProfile,
+    ) -> Result<(), forge_app::AgentAdapterError> {
+        herdr::pi_launch_arguments(profile, "")?;
+        self.cli_path()?;
+        self.validate_profile(profile)
     }
     fn adapter_for(
         &self,
@@ -790,6 +841,7 @@ impl AgentDispatchAdapterFactory for ServerAgentDispatchAdapterFactory {
                 inner: adapter,
                 daemon_url: self.daemon_url.clone(),
                 capability_secret_root: self.capability_secret_root.clone(),
+                cli_override: self.cli_override.clone(),
             }) as Box<dyn AgentDispatchAdapter>
         })
     }
@@ -801,6 +853,7 @@ struct CapabilityDeliveryAdapter {
     inner: herdr::HerdrAdapter,
     daemon_url: String,
     capability_secret_root: PathBuf,
+    cli_override: Option<PathBuf>,
 }
 
 impl CapabilityDeliveryAdapter {
@@ -808,14 +861,19 @@ impl CapabilityDeliveryAdapter {
         &self,
         context: &AgentDispatchContext,
     ) -> Result<AgentDispatchContext, forge_app::AgentAdapterError> {
-        if context.assignment.profile.record_type == forge_app::RecordType::Grilling {
-            return Ok(context.clone());
-        }
-        if context.assignment.profile.record_type != forge_app::RecordType::Task {
+        if !matches!(
+            context.assignment.profile.record_type,
+            forge_app::RecordType::Task | forge_app::RecordType::Grilling
+        ) {
             return Err(forge_app::AgentAdapterError::InvalidRequest(
-                "bootstrap is only supported for Task Assignments".into(),
+                "bootstrap is only supported for Task and Grilling Assignments".into(),
             ));
         }
+        // Resolve the bootstrap executable before creating any capability file.
+        let cli_path = self
+            .cli_override
+            .clone()
+            .map_or_else(matching_forge_cli, Ok)?;
         let secret_file = self.capability_secret_root.join(&context.assignment.id);
         if !secret_file.exists() {
             let mut bytes = [0_u8; 32];
@@ -834,7 +892,7 @@ impl CapabilityDeliveryAdapter {
             );
             let workspace = context.agent_workspace.as_deref().ok_or_else(|| {
                 forge_app::AgentAdapterError::InvalidRequest(
-                    "Task capability delivery requires its active Managed Worktree".into(),
+                    "capability delivery requires its bound execution directory".into(),
                 )
             })?;
             write_assignment_capability_secret(&secret_file, workspace, &secret).map_err(
@@ -846,15 +904,6 @@ impl CapabilityDeliveryAdapter {
                 },
             )?;
         }
-        let cli_path = std::env::current_exe()
-            .ok()
-            .and_then(|path| path.parent().map(|parent| parent.join("forge")))
-            .filter(|path| path.is_file())
-            .ok_or_else(|| {
-                forge_app::AgentAdapterError::Endpoint(
-                    "matching Forge CLI is unavailable beside the daemon".into(),
-                )
-            })?;
         let mut delivered = context.clone();
         delivered.bootstrap_prompt = Some("Run `\"$FORGE_ASSIGNMENT_FORGE_CLI\" assignment bootstrap` now. Only if it succeeds, follow the instructions it prints. If it fails, stop and wait; do not begin work.".into());
         delivered.capability_delivery = Some(AssignmentCapabilityDelivery {
@@ -883,6 +932,9 @@ impl AgentDispatchAdapter for CapabilityDeliveryAdapter {
         context: &AgentDispatchContext,
         resources: &dyn forge_app::AgentDispatchRepository,
     ) -> Result<(), forge_app::AgentAdapterError> {
+        // Reject deterministic policy failures before provider contact or capability issuance.
+        // Herdr checks again immediately before provisioning the launch.
+        herdr::pi_launch_arguments(&context.assignment.profile, "")?;
         self.inner.probe()?;
         let binding = context.dispatch_workspace.as_ref().ok_or_else(|| {
             forge_app::AgentAdapterError::Conflict(
@@ -917,6 +969,13 @@ impl AgentDispatchAdapter for CapabilityDeliveryAdapter {
 }
 
 fn application_from_config(config: &DaemonConfig) -> Result<Application, String> {
+    application_from_config_with_cli(config, None)
+}
+
+fn application_from_config_with_cli(
+    config: &DaemonConfig,
+    cli_override: Option<PathBuf>,
+) -> Result<Application, String> {
     let store_root = config.store_path.parent().unwrap_or_else(|| Path::new("."));
     let capability_secret_root = if store_root.is_absolute() {
         store_root.to_owned()
@@ -943,6 +1002,7 @@ fn application_from_config(config: &DaemonConfig) -> Result<Application, String>
             herdr: HerdrAdapterFactory::from_configuration_store(config.store_path.clone()),
             daemon_url: format!("http://{}", config.bind_addr),
             capability_secret_root,
+            cli_override,
         }),
         Box::new(GitInspector),
     )
@@ -1096,7 +1156,16 @@ impl AgentDispatchApiServer for Daemon {
         self.record_application(&selection, &mut [])?
             .show_record(request.record_id)
             .map_err(rpc_error)?;
-        let result = self.application.dispatch_record(request.record_id);
+        let application = self.application.clone();
+        let result =
+            tokio::task::spawn_blocking(move || application.dispatch_record(request.record_id))
+                .await
+                .map_err(|_| {
+                    rpc_error(RegistrationError::new(
+                        "agent-dispatch-unavailable",
+                        "dispatch worker failed",
+                    ))
+                })?;
         self.delivery.publish(&self.application);
         result
             .map(|(assignment, already_assigned)| DispatchRecordResponse {
@@ -2781,6 +2850,30 @@ mod tests {
         serve, write_assignment_capability_secret,
     };
 
+    #[cfg(unix)]
+    #[test]
+    fn bootstrap_cli_preflight_requires_an_executable_next_to_daemon() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "forge-cli-preflight-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let daemon = root.join("forge-server");
+        let cli = root.join("forge");
+        assert!(super::matching_forge_cli_beside(&daemon).is_err());
+        std::fs::write(&cli, "not executable").unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(super::matching_forge_cli_beside(&daemon).is_err());
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(super::matching_forge_cli_beside(&daemon).unwrap(), cli);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn capability_secret_files_are_owner_restricted_and_outside_the_workspace() {
         let root = std::env::temp_dir().join(format!(
@@ -3009,7 +3102,10 @@ mod tests {
                 .iter()
                 .all(|(assignment, _)| assignment.id == grilling_assignment.id)
         );
-        assert_eq!(grilling_assignment.state, AgentAssignmentState::Working);
+        assert_eq!(
+            grilling_assignment.state,
+            AgentAssignmentState::Provisioning
+        );
         for (record, expected) in [
             (records[1].id, task_assignment.id),
             (records[2].id, grilling_assignment.id.clone()),
@@ -3433,6 +3529,7 @@ mod tests {
                             daemon_url: "http://127.0.0.1:45003".into(),
                             capability_secret_root: std::env::temp_dir()
                                 .join("forge-test-capabilities"),
+                            cli_override: None,
                         }),
                         Box::new(TestInspector),
                     ));
@@ -4280,6 +4377,7 @@ mod tests {
                 herdr: super::HerdrAdapterFactory::from_configuration_store(database_path.clone()),
                 daemon_url: "http://127.0.0.1:45003".into(),
                 capability_secret_root: std::env::temp_dir().join("forge-test-capabilities"),
+                cli_override: None,
             }),
             Box::new(TestInspector),
         ));

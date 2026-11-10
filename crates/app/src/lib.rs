@@ -14,8 +14,8 @@ mod workspaces;
 pub use workspaces::{Workspace, WorkspaceRepository};
 mod workspace_dispatch;
 pub use workspace_dispatch::{
-    DispatchBlocker, WorkspaceDispatchConfiguration, WorkspaceDispatchReadiness,
-    WorkspaceDispatchRepository,
+    DispatchBlocker, ProfilePreflightBlocker, WorkspaceDispatchConfiguration,
+    WorkspaceDispatchReadiness, WorkspaceDispatchRepository,
 };
 mod projects;
 pub use projects::{ProjectReference, canonical_project_root};
@@ -998,6 +998,10 @@ pub trait AgentDispatchAdapterFactory: Send + Sync {
     fn validate_profile(&self, _profile: &AgentProfile) -> Result<(), AgentAdapterError> {
         Ok(())
     }
+    /// Validate mutable direct inputs for a new dispatch, not existing Assignment recovery.
+    fn validate_preflight(&self, profile: &AgentProfile) -> Result<(), AgentAdapterError> {
+        self.validate_profile(profile)
+    }
     fn adapter_for(
         &self,
         profile: &AgentProfile,
@@ -1045,11 +1049,9 @@ pub fn reconcile_agent_assignment<A: AgentDispatchAdapter + ?Sized>(
         | AgentAssignmentState::Blocked
         | AgentAssignmentState::Unknown => adapter.observe(&context),
     };
-    // Tasks must acknowledge through their authenticated bootstrap. Interactive Grillings
-    // have no Task capability; a confirmed provider launch moves them to Working directly.
-    // Failed launches with retained launch intent still require conservative recovery.
+    // Both Tasks and Grillings require authenticated bootstrap. Failed launches with
+    // retained intent still require conservative recovery for either kind.
     if assignment.state == AgentAssignmentState::Provisioning
-        && (assignment.profile.record_type != RecordType::Grilling || observed.is_err())
         && (observed.is_ok() || repository.agent_launch_intent(&assignment.id)?.is_some())
     {
         return if repository.agent_assignment(&assignment.id)?.state
@@ -1481,6 +1483,15 @@ pub struct DispatchHold {
     pub reason: String,
 }
 
+/// Configuration identity whose profiles and provider binding were preflighted.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DispatchPreflightSelection {
+    pub task_revision: u32,
+    pub grilling_revision: u32,
+    pub provider_generation: u64,
+    pub binding_id: String,
+}
+
 /// Durable persistence boundary for provider-neutral dispatch foundations.
 #[allow(clippy::missing_errors_doc)]
 pub trait AgentDispatchRepository: RecordRepository + WorkspaceDispatchRepository {
@@ -1518,6 +1529,22 @@ pub trait AgentDispatchRepository: RecordRepository + WorkspaceDispatchRepositor
         &self,
         record_id: u64,
         assignment_id: &str,
+    ) -> Result<(AgentAssignment, bool), RegistrationError> {
+        self.claim_record_agent_assignment_with_selection(record_id, assignment_id, None)
+    }
+    fn claim_record_agent_assignment_checked(
+        &self,
+        record_id: u64,
+        assignment_id: &str,
+        selection: &DispatchPreflightSelection,
+    ) -> Result<(AgentAssignment, bool), RegistrationError> {
+        self.claim_record_agent_assignment_with_selection(record_id, assignment_id, Some(selection))
+    }
+    fn claim_record_agent_assignment_with_selection(
+        &self,
+        record_id: u64,
+        assignment_id: &str,
+        selection: Option<&DispatchPreflightSelection>,
     ) -> Result<(AgentAssignment, bool), RegistrationError>;
     /// Persists successful trusted-context bootstrap independently of source files.
     fn mark_assignment_context_read(&self, _assignment_id: &str) -> Result<(), RegistrationError> {
@@ -1557,6 +1584,26 @@ pub trait AgentDispatchRepository: RecordRepository + WorkspaceDispatchRepositor
         &self,
         project_slug: &str,
         assignment_id: &str,
+    ) -> Result<Option<AgentAssignment>, RegistrationError> {
+        self.claim_next_agent_assignment_with_selection(project_slug, assignment_id, None)
+    }
+    fn claim_next_agent_assignment_checked(
+        &self,
+        project_slug: &str,
+        assignment_id: &str,
+        selection: &DispatchPreflightSelection,
+    ) -> Result<Option<AgentAssignment>, RegistrationError> {
+        self.claim_next_agent_assignment_with_selection(
+            project_slug,
+            assignment_id,
+            Some(selection),
+        )
+    }
+    fn claim_next_agent_assignment_with_selection(
+        &self,
+        project_slug: &str,
+        assignment_id: &str,
+        selection: Option<&DispatchPreflightSelection>,
     ) -> Result<Option<AgentAssignment>, RegistrationError>;
     /// Conditionally persists a normalized observation without letting a stale observer win.
     fn compare_and_set_agent_assignment_state(
@@ -2243,9 +2290,12 @@ impl Application {
             return Ok((assignment, true));
         }
         let readiness = self.workspace_dispatch_readiness(&record.workspace_id)?;
-        readiness.require_dispatchable()?;
-        let (assignment, already_assigned) =
-            dispatch.claim_record_agent_assignment(record_id, &next_dispatch_assignment_id())?;
+        let selection = readiness.preflight_selection()?;
+        let (assignment, already_assigned) = dispatch.claim_record_agent_assignment_checked(
+            record_id,
+            &next_dispatch_assignment_id(),
+            &selection,
+        )?;
         if already_assigned {
             return Ok((assignment, true));
         }
@@ -2730,11 +2780,13 @@ impl Application {
             .collect();
         for project_slug in projects {
             let owner = dispatch.project(&project_slug)?.workspace_id;
-            if !self.workspace_dispatch_readiness(&owner)?.dispatchable {
+            let readiness = self.workspace_dispatch_readiness(&owner)?;
+            if !readiness.dispatchable {
                 continue;
             }
+            let selection = readiness.preflight_selection()?;
             while let Some(assignment) = dispatch
-                .claim_next_agent_assignment(&project_slug, &next_dispatch_assignment_id())
+                .claim_next_agent_assignment_checked(&project_slug, &next_dispatch_assignment_id(), &selection)
                 .inspect_err(|error| {
                     tracing::warn!(operation = "claim-assignment", project = %project_slug, code = error.code, "agent dispatch scheduling failed");
                 })?

@@ -288,6 +288,7 @@ fn authenticated_grilling_bootstrap_separates_bound_identity_and_live_context() 
             ),
             daemon_url: "http://127.0.0.1:1".into(),
             capability_secret_root: root.clone(),
+            cli_override: None,
         }),
         Box::new(TestInspector),
     )

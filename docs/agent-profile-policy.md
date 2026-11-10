@@ -1,11 +1,11 @@
 # Agent Profile policy boundary
 
-Implementation contract for Spec #614, Tasks #615–618. Operator preview,
-registration and explicit selection are available. The Herdr adapter has a
-flags-only Pi argument path. [Authenticated Assignment context/actions](assignment-context.md)
-are implemented at the application/RPC boundary; CLI delivery and dispatch
-preflight/bootstrap integration remain subsequent Tasks. **Registered policies cannot yet
-launch through the configured Herdr adapter.**
+Implementation contract for Spec #614, Tasks #615–621. Operator preview,
+registration and explicit selection are available. The Herdr adapter uses a
+flags-only Pi argument path and protected [Assignment bootstrap and context](assignment-context.md)
+for registered Task and Grilling policies. Dispatch preflight checks selected direct
+inputs and the neighboring Forge CLI before preparing a worktree or allocating provider
+resources. Final input validation is repeated before launch.
 
 During #617 the human explicitly chose “use only flags for now”, superseding the
 custom-loader/runtime-attestation requirements for this implementation slice
@@ -95,7 +95,10 @@ Selection stores a registered revision even when the runtime is unavailable or
 not yet compatible. It does **not** certify enforcement or enable unsupported
 launches. Legacy revision selections retain the existing provider validation.
 `forge dispatcher status --workspace development` reports launch readiness
-separately; registered policies currently remain blocked by the Herdr adapter.
+separately. Invalid or unavailable selections are blocked; selected nonempty MCP
+configuration is unsupported by the flags-only Pi launch. Restoring direct inputs
+or selecting a supported revision allows readiness to be reevaluated without clearing
+an unrelated Dispatch Hold.
 
 ### Isolated executable example
 

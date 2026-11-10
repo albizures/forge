@@ -200,7 +200,7 @@ async fn configuration_dispatch_and_recovery_round_trip_without_duplicate_launch
     );
     let first: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
     assert_eq!(first["already_assigned"], false);
-    assert_eq!(first["assignment"]["state"], "working");
+    assert_eq!(first["assignment"]["state"], "provisioning");
     let repeated = run(&ids[0], true);
     assert!(repeated.status.success());
     let repeated: serde_json::Value = serde_json::from_slice(&repeated.stdout).unwrap();

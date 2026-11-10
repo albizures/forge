@@ -6,6 +6,7 @@ fn context_test_application(database: &Path, secrets: &Path) -> Application {
             herdr: super::HerdrAdapterFactory::from_configuration_store(database.to_owned()),
             daemon_url: "http://127.0.0.1:1".into(),
             capability_secret_root: secrets.to_owned(),
+            cli_override: None,
         }),
         Box::new(TestInspector),
     )

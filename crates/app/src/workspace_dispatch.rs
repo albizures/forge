@@ -18,6 +18,29 @@ pub struct WorkspaceDispatchReadiness {
     pub blockers: Vec<DispatchBlocker>,
 }
 impl WorkspaceDispatchReadiness {
+    pub(crate) fn preflight_selection(
+        &self,
+    ) -> Result<crate::DispatchPreflightSelection, RegistrationError> {
+        self.require_dispatchable()?;
+        let configuration = &self.configuration;
+        let (Some(task), Some(grilling), Some(binding)) = (
+            &configuration.task_profile,
+            &configuration.grilling_profile,
+            &configuration.binding,
+        ) else {
+            return Err(RegistrationError::new(
+                "workspace-dispatch-blocked",
+                "validated dispatch configuration is incomplete",
+            ));
+        };
+        Ok(crate::DispatchPreflightSelection {
+            task_revision: task.revision,
+            grilling_revision: grilling.revision,
+            provider_generation: configuration.provider_generation,
+            binding_id: binding.id.clone(),
+        })
+    }
+
     pub(crate) fn require_dispatchable(&self) -> Result<(), RegistrationError> {
         if self.dispatchable {
             return Ok(());
@@ -38,28 +61,47 @@ fn readiness<F: AgentDispatchAdapterFactory + ?Sized>(
     factory: &F,
     workspace: &str,
 ) -> Result<WorkspaceDispatchReadiness, RegistrationError> {
-    let configuration = repository.workspace_dispatch_configuration(workspace)?;
+    let mut configuration = repository.workspace_dispatch_configuration(workspace)?;
     let mut blockers = Vec::new();
-    for (kind, profile) in [
-        ("task", &configuration.task_profile),
-        ("grilling", &configuration.grilling_profile),
+    let mut profile_preflight_blockers = Vec::new();
+    for (kind, record_type, profile) in [
+        ("task", RecordType::Task, &configuration.task_profile),
+        (
+            "grilling",
+            RecordType::Grilling,
+            &configuration.grilling_profile,
+        ),
     ] {
-        match profile {
-            None => blockers.push(DispatchBlocker {
+        let Some(profile) = profile else {
+            blockers.push(DispatchBlocker {
                 code: format!("{kind}-profile-missing"),
                 message: format!("set {kind}-profile to a valid revision in Workspace {workspace}"),
-            }),
-            Some(profile) if factory.validate_profile(profile).is_err() => {
-                blockers.push(DispatchBlocker {
-                    code: format!("{kind}-profile-invalid"),
-                    message: format!(
-                        "select a supported {kind} profile revision in Workspace {workspace}"
-                    ),
-                });
-            }
-            _ => (),
+            });
+            continue;
+        };
+        let invalid = factory.validate_preflight(profile).is_err();
+        if !repository.record_profile_preflight(
+            workspace,
+            record_type,
+            profile.revision,
+            invalid,
+        )? {
+            blockers.push(DispatchBlocker {
+                code: format!("{kind}-profile-changed"),
+                message: "profile selection changed during validation; retry dispatch".into(),
+            });
+        } else if invalid {
+            profile_preflight_blockers.push(ProfilePreflightBlocker {
+                record_type,
+                profile_revision: profile.revision,
+            });
+            blockers.push(DispatchBlocker {
+                code: format!("{kind}-profile-invalid"),
+                message: format!("selected {kind} profile revision {} is invalid or unsupported in Workspace {workspace}", profile.revision),
+            });
         }
     }
+    configuration.profile_preflight_blockers = profile_preflight_blockers;
     if configuration.binding.is_none() {
         blockers.push(DispatchBlocker {
             code: "binding-missing".into(),
@@ -494,6 +536,13 @@ impl Application {
     }
 }
 
+/// Last redacted configuration failure for a currently selected immutable revision.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProfilePreflightBlocker {
+    pub record_type: RecordType,
+    pub profile_revision: u32,
+}
+
 /// Durable configuration facts, not a promise that the provider is currently reachable.
 /// Callers must probe the provider and verify the bound identity before provisioning.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -501,6 +550,7 @@ pub struct WorkspaceDispatchConfiguration {
     pub workspace_id: String,
     pub task_profile: Option<AgentProfile>,
     pub grilling_profile: Option<AgentProfile>,
+    pub profile_preflight_blockers: Vec<ProfilePreflightBlocker>,
     pub binding: Option<DispatchWorkspace>,
     /// Changes whenever the daemon-wide provider endpoint changes.
     pub provider_generation: u64,
@@ -516,6 +566,16 @@ pub trait WorkspaceDispatchRepository: Send + Sync {
         &self,
         workspace: &str,
     ) -> Result<WorkspaceDispatchConfiguration, RegistrationError>;
+
+    /// Persist a redacted validation result if this revision is still selected.
+    /// Returns false on a selection race; never changes Dispatch Holds.
+    fn record_profile_preflight(
+        &self,
+        workspace: &str,
+        record_type: RecordType,
+        revision: u32,
+        invalid: bool,
+    ) -> Result<bool, RegistrationError>;
 
     /// Registers a resolved policy with lifecycle settings copied from the selected
     /// revision (or seed when unselected). Never changes Workspace selection.

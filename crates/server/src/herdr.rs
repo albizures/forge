@@ -38,7 +38,7 @@ fn capability_launch_environment(
 
 /// Pi CLI configuration only, not runtime attestation or a security boundary.
 /// Keep behavior out: only authenticated bootstrap may deliver it (#621).
-fn pi_launch_arguments(
+pub(super) fn pi_launch_arguments(
     profile: &AgentProfile,
     prompt: &str,
 ) -> Result<Vec<String>, AgentAdapterError> {
@@ -117,10 +117,7 @@ impl HerdrAdapterFactory {
     }
 
     pub fn validate_profile(profile: &AgentProfile) -> Result<(), AgentAdapterError> {
-        // Registered policies remain disabled until authenticated bootstrap and
-        // preflight integration (#621). #617 configures Pi using flags only.
-        if profile.launch_policy.is_some()
-            || profile.provider != "herdr"
+        if profile.provider != "herdr"
             || profile.agent_kind != "pi"
             || profile.model.trim().is_empty()
         {
@@ -682,7 +679,7 @@ impl HerdrAdapter {
 
 fn provisioning_prompt(context: &AgentDispatchContext) -> Result<&str, AgentAdapterError> {
     match context.assignment.profile.record_type {
-        forge_app::RecordType::Task => {
+        forge_app::RecordType::Task | forge_app::RecordType::Grilling => {
             let bootstrap = context
                 .bootstrap_prompt
                 .as_deref()
@@ -698,19 +695,15 @@ fn provisioning_prompt(context: &AgentDispatchContext) -> Result<&str, AgentAdap
                 ));
             }
             if context.agent_workspace.is_none() {
-                return Err(AgentAdapterError::InvalidRequest(
-                    "Task provisioning requires its active Managed Worktree".into(),
-                ));
+                let message =
+                    if context.assignment.profile.record_type == forge_app::RecordType::Task {
+                        "Task provisioning requires its active Managed Worktree"
+                    } else {
+                        "Grilling provisioning requires its Forge Workspace root"
+                    };
+                return Err(AgentAdapterError::InvalidRequest(message.into()));
             }
             Ok(bootstrap)
-        }
-        forge_app::RecordType::Grilling => {
-            if context.agent_workspace.is_none() {
-                return Err(AgentAdapterError::InvalidRequest(
-                    "Grilling provisioning requires its Forge Workspace root".into(),
-                ));
-            }
-            Ok(context.rendered_initial_prompt.as_str())
         }
         _ => Err(AgentAdapterError::InvalidRequest(
             "explicit dispatch supports only Tasks and Grillings".into(),
@@ -778,6 +771,9 @@ impl HerdrAdapter {
             pane
         };
         if Self::active(&context.resources, "agent-name").is_none() {
+            // Inputs may have changed while allocating the tab. Keep the retained
+            // resources for recovery, but never record or send a launch on drift.
+            pi_launch_arguments(&context.assignment.profile, "")?;
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_err(|_| {
@@ -972,7 +968,7 @@ mod pi_flags_tests;
 #[cfg(test)]
 mod tests {
     #[test]
-    fn registered_policy_cannot_launch_before_authenticated_bootstrap_integration() {
+    fn registered_policy_uses_supported_herdr_adapter() {
         use forge_app::{AgentDispatchRepository, RecordType};
         let store = forge_store::SqliteProjectRepository::in_memory().unwrap();
         let mut profile = store.agent_profile(RecordType::Task, 1).unwrap();
@@ -987,7 +983,7 @@ mod tests {
             extensions: vec![],
             mcp_servers: vec![],
         });
-        assert!(super::HerdrAdapterFactory::validate_profile(&profile).is_err());
+        assert!(super::HerdrAdapterFactory::validate_profile(&profile).is_ok());
     }
 
     #[cfg(unix)]
@@ -1109,7 +1105,7 @@ mod tests {
     }
 
     #[test]
-    fn grilling_provisions_interactively_without_worktree_or_task_capability() {
+    fn legacy_grilling_uses_protected_bootstrap_at_workspace_root() {
         provisioning_launch_contract(forge_app::RecordType::Grilling, false);
     }
 
@@ -1118,6 +1114,12 @@ mod tests {
         provisioning_launch_contract(forge_app::RecordType::Task, true);
     }
 
+    #[test]
+    fn registered_grilling_uses_protected_bootstrap_at_workspace_root() {
+        provisioning_launch_contract(forge_app::RecordType::Grilling, true);
+    }
+
+    #[allow(clippy::too_many_lines)]
     fn provisioning_launch_contract(record_type: forge_app::RecordType, registered: bool) {
         use forge_app::{
             AgentDispatchContext, AgentDispatchRepository, AssignmentCapabilityDelivery,
@@ -1178,8 +1180,8 @@ mod tests {
                 id: "workspace".into(),
             }),
             rendered_initial_prompt: "private full instructions".into(),
-            bootstrap_prompt: (!interactive).then(|| "short bootstrap".into()),
-            capability_delivery: (!interactive).then(|| AssignmentCapabilityDelivery {
+            bootstrap_prompt: Some("short bootstrap".into()),
+            capability_delivery: Some(AssignmentCapabilityDelivery {
                 endpoint: "http://127.0.0.1:45003".into(),
                 secret_file: "/secrets/assignment".into(),
                 cli_path: "/bin/forge".into(),
@@ -1201,6 +1203,20 @@ mod tests {
             socket_path: path.clone(),
         };
         adapter.provision(&context, &repository).unwrap();
+        if registered {
+            let mut missing_bootstrap = context.clone();
+            missing_bootstrap.bootstrap_prompt = None;
+            assert!(matches!(
+                adapter.provision(&missing_bootstrap, &repository),
+                Err(forge_app::AgentAdapterError::InvalidRequest(_))
+            ));
+            let mut missing_delivery = context.clone();
+            missing_delivery.capability_delivery = None;
+            assert!(matches!(
+                adapter.provision(&missing_delivery, &repository),
+                Err(forge_app::AgentAdapterError::InvalidRequest(_))
+            ));
+        }
         assert!(
             repository
                 .agent_launch_intent(&assignment.id)
@@ -1264,14 +1280,10 @@ mod tests {
                             "/worktree"
                         }
                     );
-                    if interactive {
-                        assert!(request["params"].get("env").is_none());
-                    } else {
-                        assert_eq!(
-                            request["params"]["env"]["FORGE_ASSIGNMENT_CAPABILITY_SECRET_FILE"],
-                            "/secrets/assignment"
-                        );
-                    }
+                    assert_eq!(
+                        request["params"]["env"]["FORGE_ASSIGNMENT_CAPABILITY_SECRET_FILE"],
+                        "/secrets/assignment"
+                    );
                 }
                 if method == "agent.start" {
                     let expected = if registered {
@@ -1295,21 +1307,11 @@ mod tests {
                             "short bootstrap"
                         ])
                     } else {
-                        serde_json::json!([
-                            "--model",
-                            model,
-                            if interactive {
-                                "private full instructions"
-                            } else {
-                                "short bootstrap"
-                            }
-                        ])
+                        serde_json::json!(["--model", model, "short bootstrap"])
                     };
                     assert_eq!(request["params"]["args"], expected);
                     assert!(!line.contains("private registered behavior"));
-                    if !interactive {
-                        assert!(!line.contains("private full instructions"));
-                    }
+                    assert!(!line.contains("private full instructions"));
                     assert!(!line.contains("/secrets/assignment"));
                 }
                 serde_json::to_writer(

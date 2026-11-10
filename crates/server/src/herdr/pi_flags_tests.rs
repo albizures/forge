@@ -129,8 +129,13 @@ fn pi_flags_drift_and_unsupported_mcp_fail_before_provider_or_provision_intent()
             }),
             resources: vec![],
         };
-        let adapter = super::HerdrAdapter {
-            socket_path: fixture.0.join("no-provider.sock"),
+        let adapter = crate::CapabilityDeliveryAdapter {
+            inner: super::HerdrAdapter {
+                socket_path: fixture.0.join("no-provider.sock"),
+            },
+            daemon_url: "http://127.0.0.1:45003".into(),
+            capability_secret_root: fixture.0.join("capabilities"),
+            cli_override: None,
         };
         let Err(forge_app::AgentAdapterError::InvalidRequest(message)) =
             adapter.provision(&context, &store)
@@ -145,6 +150,10 @@ fn pi_flags_drift_and_unsupported_mcp_fail_before_provider_or_provision_intent()
         ] {
             assert!(!message.contains(forbidden));
         }
+        assert!(
+            !fixture.0.join("capabilities").exists(),
+            "invalid policy must not issue a capability"
+        );
         assert_eq!(store.agent_launch_intent("flag-preflight").unwrap(), None);
         assert!(
             store
@@ -157,6 +166,200 @@ fn pi_flags_drift_and_unsupported_mcp_fail_before_provider_or_provision_intent()
             "must not consume provision intent"
         );
     }
+}
+
+#[test]
+fn registered_grilling_receives_protected_capability_from_production_adapter() {
+    use forge_app::{NewAgentAssignment, NewTypedRecord, RecordRepository};
+    use std::os::unix::fs::PermissionsExt;
+    if std::env::var_os("FORGE_CONTEXT_CHILD").is_none() {
+        let fixture = Fixture::new();
+        fs::create_dir_all(&fixture.0).unwrap();
+        let executable = fixture.0.join("forge-server");
+        fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
+        let cli = fixture.0.join("forge");
+        for available in [false, true] {
+            if available {
+                fs::write(&cli, "#!/bin/sh\nexit 0\n").unwrap();
+                fs::set_permissions(&cli, fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            let output = Command::new(&executable)
+                .args(["--exact", "herdr::pi_flags_tests::registered_grilling_receives_protected_capability_from_production_adapter", "--nocapture"])
+                .env("FORGE_CONTEXT_CHILD", if available { "available" } else { "missing" }).output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        return;
+    }
+    let fixture = Fixture::new();
+    let mut profile = fixture.profile(false);
+    profile.record_type = RecordType::Grilling;
+    let store = forge_store::SqliteProjectRepository::in_memory().unwrap();
+    crate::test_projects::register(&store, "project", None);
+    let record = store
+        .open_typed_record(&NewTypedRecord {
+            record_type: RecordType::Grilling,
+            task_kind: None,
+            body: "Grilling".into(),
+            project_slugs: vec!["project".into()],
+            generated_by_ids: vec![],
+        })
+        .unwrap();
+    let mut assignment = store
+        .create_agent_assignment(&NewAgentAssignment {
+            id: "grilling-delivery".into(),
+            record_id: record.id,
+            project_slug: "project".into(),
+            profile_revision: 1,
+        })
+        .unwrap();
+    assignment.profile = profile;
+    let context = forge_app::AgentDispatchContext {
+        assignment,
+        project_root: fixture.0.join("catalog"),
+        agent_workspace: Some(fixture.0.join("catalog")),
+        dispatch_workspace: None,
+        rendered_initial_prompt: "private instructions".into(),
+        bootstrap_prompt: None,
+        capability_delivery: None,
+        resources: vec![],
+    };
+    let adapter = crate::CapabilityDeliveryAdapter {
+        inner: super::HerdrAdapter {
+            socket_path: fixture.0.join("unused.sock"),
+        },
+        daemon_url: "http://127.0.0.1:45003".into(),
+        capability_secret_root: fixture.0.join("secrets"),
+        cli_override: None,
+    };
+    if std::env::var("FORGE_CONTEXT_CHILD").unwrap() == "missing" {
+        assert!(adapter.context(&context).is_err());
+        assert!(!fixture.0.join("secrets").exists());
+        return;
+    }
+    let delivered = adapter.context(&context).unwrap();
+    assert!(
+        delivered
+            .bootstrap_prompt
+            .unwrap()
+            .contains("assignment bootstrap")
+    );
+    let delivery = delivered.capability_delivery.unwrap();
+    assert_eq!(delivery.cli_path.file_name().unwrap(), "forge");
+    assert_eq!(
+        fs::metadata(&delivery.secret_file)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    assert_eq!(
+        fs::read_to_string(delivery.secret_file)
+            .unwrap()
+            .trim()
+            .len(),
+        64
+    );
+}
+
+#[test]
+fn direct_input_drift_after_tab_allocation_blocks_launch_and_retains_evidence() {
+    use forge_app::{AgentDispatchAdapter, NewAgentAssignment, NewTypedRecord, RecordRepository};
+    use std::os::unix::net::UnixListener;
+    let fixture = Fixture::new();
+    let profile = fixture.profile(true);
+    let store = forge_store::SqliteProjectRepository::in_memory().unwrap();
+    crate::test_projects::register(&store, "project", None);
+    let record = store
+        .open_typed_record(&NewTypedRecord {
+            record_type: RecordType::Task,
+            task_kind: None,
+            body: "task".into(),
+            project_slugs: vec!["project".into()],
+            generated_by_ids: vec![],
+        })
+        .unwrap();
+    let mut assignment = store
+        .create_agent_assignment(&NewAgentAssignment {
+            id: "drift-after-tab".into(),
+            record_id: record.id,
+            project_slug: "project".into(),
+            profile_revision: 1,
+        })
+        .unwrap();
+    assignment.profile = profile;
+    let context = forge_app::AgentDispatchContext {
+        assignment,
+        project_root: "/project".into(),
+        agent_workspace: Some("/worktree".into()),
+        dispatch_workspace: Some(forge_app::DispatchWorkspace {
+            id: "workspace".into(),
+        }),
+        rendered_initial_prompt: "private".into(),
+        bootstrap_prompt: Some("bootstrap".into()),
+        capability_delivery: Some(forge_app::AssignmentCapabilityDelivery {
+            endpoint: "http://127.0.0.1:45003".into(),
+            secret_file: "/secret".into(),
+            cli_path: "/forge".into(),
+        }),
+        resources: vec![],
+    };
+    let socket = fixture.0.join("herdr.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let extension = fixture.0.join("catalog/.pi/extensions/chosen.mjs");
+    let server = thread::spawn(move || {
+        for (method, result) in [
+            ("ping", serde_json::json!({"type":"pong","protocol":22})),
+            (
+                "session.snapshot",
+                serde_json::json!({"type":"session_snapshot","snapshot":{"protocol":22,"schema_version":1,"workspaces":[]}}),
+            ),
+            (
+                "workspace.get",
+                serde_json::json!({"workspace":{"workspace_id":"workspace"}}),
+            ),
+            (
+                "tab.create",
+                serde_json::json!({"tab":{"tab_id":"tab"},"root_pane":{"pane_id":"pane"}}),
+            ),
+        ] {
+            let mut stream = listener.accept().unwrap().0;
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["method"], method);
+            if method == "tab.create" {
+                fs::write(&extension, "changed after allocation").unwrap();
+            }
+            serde_json::to_writer(&mut stream, &serde_json::json!({"result":result})).unwrap();
+            stream.write_all(b"\n").unwrap();
+        }
+    });
+    let adapter = super::HerdrAdapter {
+        socket_path: socket,
+    };
+    assert!(matches!(
+        adapter.provision(&context, &store),
+        Err(forge_app::AgentAdapterError::InvalidRequest(_))
+    ));
+    server.join().unwrap();
+    let retained = store
+        .list_agent_assignment_resources("drift-after-tab")
+        .unwrap();
+    assert!(retained.iter().any(|r| r.resource_kind == "tab"));
+    assert!(retained.iter().any(|r| r.resource_kind == "pane"));
+    assert!(
+        store
+            .agent_launch_intent("drift-after-tab")
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
