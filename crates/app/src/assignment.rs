@@ -160,6 +160,80 @@ fn unhex(text: &str) -> Result<Vec<u8>, RegistrationError> {
 }
 
 impl AuthenticatedAssignment<'_> {
+    /// Creates a leased notification request over the current readable set.
+    /// # Errors
+    /// Rejects invalid delivery, empty/oversized targets and unauthorized neighbors.
+    pub fn create_subscription(
+        &self,
+        targets: Vec<u64>,
+        filters: Vec<crate::RecordUpdateKindFilter>,
+    ) -> Result<crate::RecordUpdateSubscription, RegistrationError> {
+        self.authenticate()?;
+        if targets.is_empty() || targets.len() > 100 {
+            return Err(RegistrationError::new(
+                "invalid-subscription-targets",
+                "expected 1..=100 targets",
+            ));
+        }
+        for target in &targets {
+            self.record(*target)?;
+        }
+        self.application
+            .dispatch()?
+            .create_record_update_subscription(&crate::NewRecordUpdateSubscription {
+                assignment_id: self.id.into(),
+                target_record_ids: targets,
+                kind_filters: filters,
+            })
+    }
+
+    /// Validates ownership, lease, actual delivery and every target on each call.
+    /// # Errors
+    /// Rejects revoked/closed delivery, foreign ownership, expiry or removed edges.
+    pub fn subscription(
+        &self,
+        id: crate::RecordUpdateSubscriptionId,
+    ) -> Result<crate::RecordUpdateSubscription, RegistrationError> {
+        self.authenticate()?;
+        let subscription = self
+            .application
+            .dispatch()?
+            .record_update_subscription(id)?;
+        if subscription.assignment_id != self.id {
+            return Err(denied());
+        }
+        for target in &subscription.target_record_ids {
+            self.record(*target)?;
+        }
+        Ok(subscription)
+    }
+
+    /// Renews only an owned, currently authorized lease.
+    /// # Errors
+    /// Returns the same authorization and expiry failures as delivery.
+    pub fn renew_subscription(
+        &self,
+        id: crate::RecordUpdateSubscriptionId,
+    ) -> Result<crate::RecordUpdateSubscription, RegistrationError> {
+        self.subscription(id)?;
+        self.application
+            .dispatch()?
+            .renew_record_update_subscription(id)
+    }
+
+    /// Deletes only an owned, currently authorized lease.
+    /// # Errors
+    /// Returns the same authorization and expiry failures as delivery.
+    pub fn delete_subscription(
+        &self,
+        id: crate::RecordUpdateSubscriptionId,
+    ) -> Result<(), RegistrationError> {
+        self.subscription(id)?;
+        self.application
+            .dispatch()?
+            .delete_record_update_subscription(id)
+    }
+
     /// Reads a bounded page of authorized Comments in stable identifier order.
     /// # Errors
     /// Rejects invalid delivery, removed relationships, oversized pages and substituted cursors.

@@ -3257,26 +3257,29 @@ impl RecordUpdateSubscriptionRepository for SqliteProjectRepository {
             .lock()
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
         let subscription = load_subscription(&connection, id, now_millis()?)?;
-        if after < subscription.start_cursor {
+        let head = connection
+            .query_row(
+                "SELECT COALESCE(MAX(id), 0) FROM record_updates",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(storage_error)?;
+        if after < subscription.start_cursor || after.0 > head.cast_unsigned() {
             return Err(RegistrationError::new(
                 "invalid-cursor",
-                "cursor predates the Subscription creation cursor",
+                "cursor lies outside the Subscription replay interval",
             ));
         }
-        let updates = connection.prepare("SELECT id, record_id, created_at_millis, kind, from_status, to_status, related_record_id, comment_id, relationship_kind FROM record_updates WHERE id > ?1 ORDER BY id ASC").map_err(storage_error)?.query_map([after.0.cast_signed()], update_envelope_from_row).map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)?;
-        Ok(updates
-            .into_iter()
-            .filter(|update| {
-                subscription
-                    .target_record_ids
-                    .binary_search(&update.record_id)
-                    .is_ok()
-                    && (subscription.kind_filters.is_empty()
-                        || subscription
-                            .kind_filters
-                            .contains(&kind_filter(&update.update.kind)))
-            })
-            .collect())
+        // Filter and bound in SQL: unrelated global traffic must not cause an
+        // unbounded allocation or force reconciliation for a quiet subscription.
+        let updates = connection.prepare("SELECT id, record_id, created_at_millis, kind, from_status, to_status, related_record_id, comment_id, relationship_kind FROM record_updates u WHERE id > ?1 AND EXISTS (SELECT 1 FROM record_update_subscription_targets t WHERE t.subscription_id = ?2 AND t.record_id = u.record_id) AND (NOT EXISTS (SELECT 1 FROM record_update_subscription_filters f WHERE f.subscription_id = ?2) OR EXISTS (SELECT 1 FROM record_update_subscription_filters f WHERE f.subscription_id = ?2 AND f.kind = u.kind)) ORDER BY id ASC LIMIT 257").map_err(storage_error)?.query_map(params![after.0.cast_signed(), id.0.cast_signed()], update_envelope_from_row).map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)?;
+        if updates.len() > 256 {
+            return Err(RegistrationError::new(
+                "invalid-cursor",
+                "replay exceeds 256 notifications; authoritative reconciliation required",
+            ));
+        }
+        Ok(updates)
     }
 }
 
@@ -3309,17 +3312,6 @@ fn filter_name(filter: RecordUpdateKindFilter) -> &'static str {
         RecordUpdateKindFilter::RelationshipRemoved => "relationship-removed",
         RecordUpdateKindFilter::CommentAdded => "comment-added",
         RecordUpdateKindFilter::CommentDeleted => "comment-deleted",
-    }
-}
-fn kind_filter(kind: &RecordUpdateKind) -> RecordUpdateKindFilter {
-    match kind {
-        RecordUpdateKind::Created => RecordUpdateKindFilter::Created,
-        RecordUpdateKind::BodyEdited => RecordUpdateKindFilter::BodyEdited,
-        RecordUpdateKind::StatusTransition { .. } => RecordUpdateKindFilter::StatusTransition,
-        RecordUpdateKind::RelationshipAdded { .. } => RecordUpdateKindFilter::RelationshipAdded,
-        RecordUpdateKind::RelationshipRemoved { .. } => RecordUpdateKindFilter::RelationshipRemoved,
-        RecordUpdateKind::CommentAdded { .. } => RecordUpdateKindFilter::CommentAdded,
-        RecordUpdateKind::CommentDeleted { .. } => RecordUpdateKindFilter::CommentDeleted,
     }
 }
 fn subscription_from_parts(

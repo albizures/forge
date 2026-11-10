@@ -1,8 +1,8 @@
 # Authenticated Assignment context and actions
 
-Implemented application/RPC boundary for Spec #614, Task #618. This is **not yet
-an integrated launch feature**: the Assignment CLI is #620, subscription/event
-security is #619, and protected Task/Grilling launch integration is #621.
+Implemented application/RPC boundary for Spec #614, Tasks #618–619. This is **not yet
+an integrated launch feature**: the Assignment CLI is #620 and protected
+Task/Grilling launch integration is #621.
 Registered-policy dispatch remains disabled. The flags-only runtime limitations
 in [Agent Profile policy](agent-profile-policy.md) are unchanged.
 
@@ -45,7 +45,7 @@ Retained `agentDispatch_assignmentAcknowledge`, `assignmentTaskStart`,
 application capability authentication. Caller correlation/capability strings are
 not persisted as audit authority. Bootstrap-failure reporting records a fixed
 redacted stop/review message rather than caller-supplied diagnostics. Subscription
-routes are explicitly deferred to #619; they are not certified by this Task.
+routes now use the same application session; their contract is described below.
 
 ## Bootstrap and context
 
@@ -128,6 +128,49 @@ independently authenticated human proof**. Its affirmative flag, nonblank
 confirmation and nonblank outcome are required and retained atomically in the
 completion resolution. They do not bypass lifecycle validation.
 
+## Authenticated subscriptions and events
+
+The retained production RPC methods are `agentSubscription_create`,
+`agentSubscription_renew` and `agentSubscription_delete`, POSTed to `/rpc`
+with positional parameters `[request]`. Their legacy snake_case requests use
+`assignment_id`, `capability_id` (the **actual delivered secret**, not a capability
+identifier), and `correlation_id` (ignored for authority/audits). Create also takes
+`target_record_ids` (1–100 entries) and `kind_filters` (empty means all); renew and
+delete take `subscription_id`. Unknown fields reject. These transport credentials
+must be derived by the client, never exposed as model-facing arguments. The
+existing subscription response fields remain snake_case.
+
+Targets are exactly the same self/direct-neighbor readable set as Record reads,
+for both Tasks and Grillings. All three operations verify actual delivery, open
+Assignment/profile identity, current relationships and ownership; renew/delete
+also require an unexpired lease. A removed edge cannot be used to renew or delete
+a subscription. Invalid subscriptions expire normally if they cannot be deleted.
+Neither management nor delivery consults profile source files.
+
+SSE uses the daemon-root route
+`/v1/agent-assignments/{assignment_id}/record-update-subscriptions/{subscription_id}/events`
+with `Authorization: Bearer <delivered secret>`. URL-query credentials are rejected;
+only the optional numeric `after` cursor is accepted there. `Last-Event-ID` is
+preferred; conflicting cursor values reject. Initial connection authenticates
+before returning replay/cursor facts. Missing/wrong delivery or foreign/removed
+target authority yields 401; an authenticated expired/missing subscription yields
+410/404. Non-loopback peers are rejected.
+
+A lease lasts 30 minutes and can be explicitly renewed without reconnecting.
+Reconnecting replaces the previous connection but does not renew the lease.
+Every replayed/queued notification rechecks the credential, owning Assignment,
+lease and all targets before emission, including after backpressure. Idle streams
+recheck at 100 ms intervals; revocation, closure, deletion, edge removal or expiry
+ends delivery without requiring another update. This is application authorization,
+not atomic authorization-to-network-write or same-user isolation.
+
+Replay filters in SQL and reads at most 257 matching updates. More than 256, or a
+cursor outside the subscription-creation/current-head interval, returns 409
+`resync-required` with the current head; reconcile authoritatively before resuming.
+Live queues are bounded at 256; overflow closes the connection. Notifications are
+at-least-once hints, never authority to traverse farther or proof of completion.
+See the [Pi wrapper guide](pi-record-update-subscriptions.md) for derived delivery.
+
 ## Verification
 
 The application and production `/rpc` tests cover actual credential checks,
@@ -140,4 +183,9 @@ Grilling scope, selection changes, source/direct-input deletion, store reopen,
 and execution-binding retention during claim cleanup. Audit/error and captured
 normal-log tests scan sentinel credentials, delivery paths and behavior. These
 fixtures allocate no real provider resources and make no runtime/MCP connections;
-full launch/recovery and subscription verification remain separate Tasks.
+full launch/recovery verification remains separate. Production subscription tests
+cover both Record Types and every domain-valid direct edge, foreign ownership,
+wrong/missing/revoked credentials, closed Assignments, edge removal, bounded
+replay/reconnect, renewal/deletion and expiry (including idle/queued delivery).
+Wrapper tests assert the actual `/rpc` method/parameter shape and authenticated
+root-relative SSE route; normal-log/audit/error scans include subscription calls.

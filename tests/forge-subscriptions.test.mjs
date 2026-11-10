@@ -49,8 +49,9 @@ test("uses JSON-RPC, rereads the capability file, normalizes results, and never 
 		let raw = "";
 		for await (const chunk of request) raw += chunk;
 		const body = JSON.parse(raw);
+		assert.equal(request.url, "/rpc");
 		requests.push(body);
-		const result = body.method === "agentSubscription.delete"
+		const result = body.method === "agentSubscription_delete"
 			? null
 			: { id: 9, assignment_id: "assignment-1", target_record_ids: [41], kind_filters: [], start_cursor: 12, lease_expires_at_millis: 999 };
 		response.setHeader("content-type", "application/json");
@@ -72,13 +73,19 @@ test("uses JSON-RPC, rereads the capability file, normalizes results, and never 
 		await writeFile(secretFile, "second-secret\n");
 		const deleted = await tools.get("forge_delete_subscription").execute("call", { subscription_id: 9 });
 		assert.deepEqual(deleted.details, { outcome: "deleted", response: null });
-		assert.deepEqual(requests.map((request) => request.method), ["agentSubscription.create", "agentSubscription.delete"]);
-		assert.equal(requests[0].params.capability_id, "first-secret");
-		assert.equal(requests[1].params.capability_id, "second-secret");
-		assert.deepEqual(requests[0].params.target_record_ids, [41]);
+		assert.deepEqual(requests.map((request) => request.method), ["agentSubscription_create", "agentSubscription_delete"]);
+		assert.equal(requests[0].params[0].capability_id, "first-secret");
+		assert.equal(requests[1].params[0].capability_id, "second-secret");
+		assert.deepEqual(requests[0].params[0].target_record_ids, [41]);
 		await writeFile(secretFile, "\n");
-		assert.deepEqual((await tools.get("forge_subscribe").execute("call", { target_record_ids: [41] })).details, { outcome: "not_configured" });
+		await assert.rejects(() => tools.get("forge_subscribe").execute("call", { target_record_ids: [41] }), /delivery unavailable/);
 		assert.equal(requests.length, 2);
+		await rm(secretFile);
+		await assert.rejects(() => tools.get("forge_subscribe").execute("call", { target_record_ids: [41] }), (error) => {
+			assert.equal(error.message, "Forge Assignment delivery unavailable");
+			assert.equal(error.message.includes(secretFile), false);
+			return true;
+		});
 	} finally {
 		await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
 		await rm(root, { recursive: true, force: true });
@@ -102,6 +109,7 @@ test("waits for bounded ordered SSE batches and returns recovery outcomes", asyn
 		}
 		if (id === 59) return response.writeHead(410).end();
 		if (id === 60) return response.writeHead(404).end();
+		if (id === 62) return response.writeHead(401).end();
 		response.writeHead(200, { "content-type": "text/event-stream; charset=utf-8" });
 		if (id === 55) {
 			response.write("retry: 1000\n\n");
@@ -138,11 +146,13 @@ test("waits for bounded ordered SSE batches and returns recovery outcomes", asyn
 			next_cursor: 12,
 		});
 		assert.equal(requests[0].headers["last-event-id"], "10");
+		assert.equal(requests[0].headers.authorization, "Bearer secret");
 		assert.deepEqual((await wait.execute("call", { subscription_id: 56, after: 12, timeout_ms: 10 })).details, { outcome: "timeout", next_cursor: 12 });
 		assert.deepEqual((await wait.execute("call", { subscription_id: 57, after: 12, timeout_ms: 1_000 })).details, { outcome: "connection_lost", next_cursor: 12 });
 		assert.deepEqual((await wait.execute("call", { subscription_id: 58, after: 12 })).details, { outcome: "resync_required", code: "resync-required", subscription_id: 58, retention_floor: 0, start_after_update_id: 8, head: 12, next_cursor: 12 });
 		assert.deepEqual((await wait.execute("call", { subscription_id: 59, after: 12 })).details, { outcome: "subscription_expired", next_cursor: 12 });
 		assert.deepEqual((await wait.execute("call", { subscription_id: 60, after: 12 })).details, { outcome: "subscription_deleted", next_cursor: 12 });
+		assert.deepEqual((await wait.execute("call", { subscription_id: 62, after: 12 })).details, { outcome: "authorization_denied", next_cursor: 12 });
 		const running = wait.execute("call", { subscription_id: 61, after: 12, timeout_ms: 1_000 });
 		const heldResponse = await firstWait;
 		await assert.rejects(() => wait.execute("call", { subscription_id: 61, after: 12 }), /already in flight/);
@@ -165,22 +175,24 @@ test("boots an Assignment Capability Delivery session through subscription creat
 			let raw = "";
 			for await (const chunk of request) raw += chunk;
 			const body = JSON.parse(raw);
-			assert.equal(body.method, "agentSubscription.create");
-			assert.deepEqual(body.params, {
+			assert.equal(request.url, "/rpc");
+			assert.equal(body.method, "agentSubscription_create");
+			assert.deepEqual(body.params[0], {
 				assignment_id: "assignment-dispatched-by-forge",
 				capability_id: "capability-delivered-outside-the-workspace",
-				correlation_id: body.params.correlation_id,
+				correlation_id: body.params[0].correlation_id,
 				target_record_ids: [41],
 				kind_filters: [],
 			});
 			response.setHeader("content-type", "application/json");
-			response.end(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { id: 72, assignment_id: body.params.assignment_id, target_record_ids: [41], kind_filters: [], start_cursor: 100, lease_expires_at_millis: 999 } }));
+			response.end(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { id: 72, assignment_id: body.params[0].assignment_id, target_record_ids: [41], kind_filters: [], start_cursor: 100, lease_expires_at_millis: 999 } }));
 			subscriptionCreated();
 			return;
 		}
 		assert.equal(request.method, "GET");
 		assert.equal(request.url, "/v1/agent-assignments/assignment-dispatched-by-forge/record-update-subscriptions/72/events");
 		assert.equal(request.headers["last-event-id"], "100");
+		assert.equal(request.headers.authorization, "Bearer capability-delivered-outside-the-workspace");
 		response.writeHead(200, { "content-type": "text/event-stream" });
 		response.end("id: 101\nevent: record-update\ndata: {\"subscription_id\":72,\"record_update_id\":101,\"record_id\":41,\"kind\":\"body-edited\"}\n\n");
 	});
@@ -236,6 +248,8 @@ test("returns typed authorization and expiry outcomes but rejects malformed RPC 
 		assert.deepEqual((await tools.get("forge_renew_subscription").execute("call", { subscription_id: 9 })).details, { outcome: "subscription_expired" });
 		reply = { error: { code: -32001, message: "deleted", data: "subscription-not-found" } };
 		assert.deepEqual((await tools.get("forge_delete_subscription").execute("call", { subscription_id: 9 })).details, { outcome: "subscription_deleted" });
+		reply = { error: { code: -32001, message: "secret PRIVATE-PATH BEHAVIOR MCP-CREDENTIAL", data: "unexpected" } };
+		await assert.rejects(() => tools.get("forge_renew_subscription").execute("call", { subscription_id: 9 }), { message: "Forge subscription request rejected" });
 		reply = { result: "not-a-subscription" };
 		await assert.rejects(() => tools.get("forge_renew_subscription").execute("call", { subscription_id: 9 }), /invalid subscription/);
 	} finally {

@@ -65,27 +65,34 @@ function isRpcResponse(value: unknown): value is RpcSuccess | RpcFailure {
 	return typeof value === "object" && value !== null && "jsonrpc" in value && (value as { jsonrpc: unknown }).jsonrpc === "2.0";
 }
 
+async function credential(configuration: Configuration): Promise<string> {
+	try {
+		const secret = (await readFile(configuration.secretFile, "utf8")).trim();
+		if (secret) return secret;
+	} catch { /* Never expose the secret-file path from filesystem errors. */ }
+	throw new Error("Forge Assignment delivery unavailable");
+}
+
 async function call(configuration: Configuration, method: string, params: Record<string, unknown>, signal?: AbortSignal) {
 	// Deliberately read at call time: the bearer never enters extension state, diagnostics, or results.
-	const capabilityId = (await readFile(configuration.secretFile, "utf8")).trim();
-	if (!capabilityId) return { outcome: "not_configured" };
+	const capabilityId = await credential(configuration);
 
 	const id = crypto.randomUUID();
 	let response: Response;
 	try {
-		response = await fetch(configuration.daemonUrl, {
+		response = await fetch(new URL("/rpc", configuration.daemonUrl), {
 			method: "POST",
 			headers: { "content-type": "application/json" },
 			body: JSON.stringify({
 				jsonrpc: "2.0",
 				id,
-				method,
-				params: { assignment_id: configuration.assignmentId, capability_id: capabilityId, correlation_id: crypto.randomUUID(), ...params },
+				method: method.replaceAll(".", "_"),
+				params: [{ assignment_id: configuration.assignmentId, capability_id: capabilityId, correlation_id: crypto.randomUUID(), ...params }],
 			}),
 			signal,
 		});
 	} catch (error) {
-		throw new Error(`Forge subscription request failed: ${error instanceof Error ? error.message : "transport failure"}`);
+		throw new Error("Forge subscription request transport failed");
 	}
 	if (!response.ok) throw new Error(`Forge subscription request failed with HTTP ${response.status}`);
 
@@ -101,7 +108,7 @@ async function call(configuration: Configuration, method: string, params: Record
 	if ("error" in body) {
 		const outcome = expectedOutcome(body.error);
 		if (outcome) return outcome;
-		throw new Error(`Forge subscription request failed: ${body.error.message}`);
+		throw new Error("Forge subscription request rejected");
 	}
 	return body.result;
 }
@@ -114,7 +121,7 @@ type WaitResult = Record<string, unknown>;
 
 function eventsUrl(configuration: Configuration, subscriptionId: number): string {
 	return new URL(
-		`v1/agent-assignments/${encodeURIComponent(configuration.assignmentId)}/record-update-subscriptions/${subscriptionId}/events`,
+		`/v1/agent-assignments/${encodeURIComponent(configuration.assignmentId)}/record-update-subscriptions/${subscriptionId}/events`,
 		configuration.daemonUrl.endsWith("/") ? configuration.daemonUrl : `${configuration.daemonUrl}/`,
 	).toString();
 }
@@ -167,16 +174,17 @@ async function waitForUpdates(configuration: Configuration, subscriptionId: numb
 	try {
 		let response: Response;
 		try {
-			response = await fetch(eventsUrl(configuration, subscriptionId), { headers: { "Last-Event-ID": String(after) }, signal: requestSignal });
+			response = await fetch(eventsUrl(configuration, subscriptionId), { headers: { "Last-Event-ID": String(after), Authorization: `Bearer ${await credential(configuration)}` }, signal: requestSignal });
 		} catch (error) {
 			if (timeout.signal.aborted) return { outcome: "timeout", next_cursor: after };
-			throw new Error(`Forge subscription stream failed: ${error instanceof Error ? error.message : "transport failure"}`);
+			throw new Error("Forge subscription stream transport failed");
 		}
 		if (response.status === 409) {
 			let body: unknown;
 			try { body = await response.json(); } catch { throw new Error("Forge subscription stream returned malformed resync JSON"); }
 			return resyncResult(subscriptionId, body);
 		}
+		if (response.status === 401 || response.status === 403) return { outcome: "authorization_denied", next_cursor: after };
 		if (response.status === 410) return { outcome: "subscription_expired", next_cursor: after };
 		if (response.status === 404) return { outcome: "subscription_deleted", next_cursor: after };
 		if (!response.ok) throw new Error(`Forge subscription stream failed with HTTP ${response.status}`);
@@ -192,7 +200,7 @@ async function waitForUpdates(configuration: Configuration, subscriptionId: numb
 				let read: ReadableStreamReadResult<Uint8Array>;
 				try { read = await reader.read(); } catch (error) {
 					if (timeout.signal.aborted) return updates.length ? { outcome: "updates", updates, next_cursor: nextCursor } : { outcome: "timeout", next_cursor: after };
-					throw new Error(`Forge subscription stream failed: ${error instanceof Error ? error.message : "connection lost"}`);
+					throw new Error("Forge subscription stream connection lost");
 				}
 				if (read.done) return updates.length ? { outcome: "updates", updates, next_cursor: nextCursor } : { outcome: "connection_lost", next_cursor: after };
 				pending += decoder.decode(read.value, { stream: true }).replace(/\r\n/g, "\n").replace(/\r/g, "\n");

@@ -730,7 +730,9 @@ impl From<AgentDispatchReconcileResult> for AgentDispatchReconcileResponse {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+// Legacy field name capability_id carries the actual secret, never an audit identity.
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateAgentSubscriptionRequest {
     pub assignment_id: String,
     pub capability_id: String,
@@ -738,7 +740,8 @@ pub struct CreateAgentSubscriptionRequest {
     pub target_record_ids: Vec<u64>,
     pub kind_filters: Vec<String>,
 }
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ManageAgentSubscriptionRequest {
     pub assignment_id: String,
     pub capability_id: String,

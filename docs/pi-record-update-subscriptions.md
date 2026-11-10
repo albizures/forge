@@ -4,7 +4,12 @@
 
 The Forge project extension lets a Pi process launched for an open Agent Assignment manage durable Record Update Subscriptions and receive their SSE wake notifications. It does **not** read authoritative Record state: a wake is a prompt to reconcile through the Assignment's authorized Forge read capability.
 
-The wire-level lifecycle, SSE framing, authorization, cursor validation, and recovery rules are separately normative in the [Record Update Subscription SSE replay and recovery contract](research/record-update-subscription-sse-contract.md). This guide describes the Pi launch and consumer boundary.
+The implemented authentication, readable-set, replay and lease rules are in the
+[Assignment context contract](assignment-context.md#authenticated-subscriptions-and-events).
+The older [SSE research contract](research/record-update-subscription-sse-contract.md)
+is historical; it does not supersede that authenticated contract. This guide describes
+the Pi consumer boundary. Protected Grilling launch integration and the Assignment
+CLI remain separate work (#621/#620); this wrapper does not enable dispatch.
 
 ## Prerequisite: Forge-launched Pi Assignment
 
@@ -14,7 +19,7 @@ Configure Forge's dispatch provider and reconcile it as described in the [dispat
 - `FORGE_ASSIGNMENT_DAEMON_URL` — daemon root URL; the extension derives JSON-RPC and SSE URLs.
 - `FORGE_ASSIGNMENT_CAPABILITY_SECRET_FILE` — absolute path to an owner-only Assignment Capability file outside the Agent Workspace.
 
-The capability value is never in the prompt or an environment variable. The extension reads its file immediately before each management request, never caches, displays, or writes its value. If configuration is absent or invalid, no model-callable subscription tools are registered. `/forge-subscriptions` reports only safe availability diagnostics.
+The capability value is never in the prompt or an environment variable. The extension reads its file immediately before each management request or SSE connection, never persists, displays, or writes its value. Management uses `/rpc` with underscore method names and positional `[request]`; SSE uses the root-relative `/v1/.../events` route with a Bearer header, never query credentials. If configuration is absent or invalid, no model-callable subscription tools are registered. `/forge-subscriptions` reports only safe availability diagnostics.
 
 ## Agent workflow
 
@@ -35,9 +40,10 @@ Subscriptions survive Pi reload and shutdown until their lease expires, their ow
 - `timeout` — no update arrived during this bounded wait; retry deliberately from `next_cursor`.
 - `connection_lost` — reconcile first, then open a new wait from the returned cursor; the extension never reconnects itself.
 - `resync_required` — reconcile first; use its returned cursor facts, including `head`, to choose the next explicit cursor.
+- `authorization_denied` — stop; delivery, Assignment or target authority is no longer valid.
 - `subscription_expired` or `subscription_deleted` — stop waiting; create a new subscription only when the Assignment still needs one.
 
-Management tools similarly return expected outcomes such as `not_configured`, `authorization_denied`, `subscription_expired`, and `subscription_deleted`. Malformed daemon responses and unexpected transport failures are tool errors, not recoverable notification results.
+Management tools similarly return expected outcomes such as `authorization_denied`, `subscription_expired`, and `subscription_deleted`. Unavailable/empty secret files raise a redacted delivery error without revealing a filesystem path. Malformed daemon responses and unexpected transport failures are tool errors, not recoverable notification results.
 
 ## Release handoff
 
@@ -54,7 +60,7 @@ Forge now includes a Pi project extension for assignment-owned Record Update Sub
 
 ### Support and recovery
 
-- `not_configured` means the session was not launched with a valid Assignment Capability Delivery contract; correct dispatch configuration and relaunch rather than supplying credentials manually.
+- Unavailable tools or delivery errors mean the session lacks usable Assignment Capability Delivery; correct dispatch configuration rather than supplying credentials manually.
 - `authorization_denied`, `subscription_expired`, and `subscription_deleted` are lifecycle outcomes. Recreate a subscription only while the Assignment still needs it and remains authorized.
 - On `connection_lost` or `resync_required`, reconcile authoritative Record state before opening another wait from the returned cursor facts. Do not treat an SSE envelope as current Record state.
 - Malformed daemon responses and unexpected transport failures are errors to investigate at the daemon/extension boundary; they are not notification recovery outcomes.
@@ -68,4 +74,10 @@ NODE_PATH=/home/a/.volta/tools/image/packages/@earendil-works/pi-coding-agent/li
   node --test tests/forge-subscriptions.test.mjs
 ```
 
-That harness covers launch configuration, tool gating, capability rotation and non-disclosure, JSON-RPC lifecycle management, bounded SSE waits and recovery, and assignment launch through committed-update wakeup. Workspace Clippy with warnings denied remains blocked by five pre-existing, unrelated `forge-app` lint violations (four missing `# Errors` docs and one `match_same_arms`); no integration defect was found.
+That isolated HTTP harness covers configuration/tool gating, credential rotation and
+non-disclosure, the production-compatible RPC wire shape, header-authenticated SSE,
+bounded waits and recovery. It does not provision an Agent or prove integrated
+launch. Rust production-router coverage separately exercises actual authentication,
+readable-set/ongoing authorization, leases and bounded replay. See the #619 Forge
+outcome for current workspace gate results; this guide is not a claim that later
+launch/release Tasks are complete.

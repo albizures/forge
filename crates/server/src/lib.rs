@@ -1361,19 +1361,14 @@ impl AgentSubscriptionApiServer for Daemon {
         &self,
         request: CreateAgentSubscriptionRequest,
     ) -> RpcResult<RecordUpdateSubscriptionResponse> {
+        let session = self.assignment_session(&request.assignment_id, &request.capability_id)?;
         let filters = request
             .kind_filters
             .iter()
             .map(|filter| record_update_kind_filter(filter))
             .collect::<Result<Vec<_>, _>>()?;
-        self.application
-            .create_assignment_subscription(
-                &request.assignment_id,
-                &request.capability_id,
-                &request.correlation_id,
-                request.target_record_ids,
-                filters,
-            )
+        session
+            .create_subscription(request.target_record_ids, filters)
             .map(Into::into)
             .map_err(rpc_error)
     }
@@ -1383,13 +1378,8 @@ impl AgentSubscriptionApiServer for Daemon {
         request: ManageAgentSubscriptionRequest,
     ) -> RpcResult<RecordUpdateSubscriptionResponse> {
         let id = RecordUpdateSubscriptionId(request.subscription_id);
-        self.application
-            .renew_assignment_subscription(
-                &request.assignment_id,
-                &request.capability_id,
-                &request.correlation_id,
-                id,
-            )
+        self.assignment_session(&request.assignment_id, &request.capability_id)?
+            .renew_subscription(id)
             .map(|subscription| {
                 self.delivery
                     .renew_subscription(id, subscription.lease_expires_at_millis);
@@ -1400,13 +1390,8 @@ impl AgentSubscriptionApiServer for Daemon {
 
     async fn delete(&self, request: ManageAgentSubscriptionRequest) -> RpcResult<()> {
         let id = RecordUpdateSubscriptionId(request.subscription_id);
-        self.application
-            .delete_assignment_subscription(
-                &request.assignment_id,
-                &request.capability_id,
-                &request.correlation_id,
-                id,
-            )
+        self.assignment_session(&request.assignment_id, &request.capability_id)?
+            .delete_subscription(id)
             .inspect(|()| self.delivery.cancel_subscription(id))
             .map_err(rpc_error)
     }
@@ -2006,11 +1991,28 @@ async fn subscription_events(
     if !peer.ip().is_loopback() {
         return StatusCode::FORBIDDEN.into_response();
     }
-    let id = RecordUpdateSubscriptionId(subscription_id);
-    let subscription = match daemon
-        .application
-        .assignment_subscription_delivery(&assignment_id, id)
+    // Credentials are accepted only in the Authorization header, never a URL.
+    if request
+        .uri()
+        .query()
+        .is_some_and(|query| query.split('&').any(|part| !part.starts_with("after=")))
     {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let Some(secret) = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .filter(|value| !value.is_empty())
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let id = RecordUpdateSubscriptionId(subscription_id);
+    let Ok(session) = daemon.assignment_session(&assignment_id, secret) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let subscription = match session.subscription(id) {
         Ok(subscription) => subscription,
         Err(error) if error.code == "subscription-not-found" => {
             return StatusCode::NOT_FOUND.into_response();
@@ -2026,7 +2028,7 @@ async fn subscription_events(
     let Ok(cursor) = subscription_cursor(&request, subscription.start_cursor) else {
         return (StatusCode::BAD_REQUEST, "invalid-cursor").into_response();
     };
-    subscription_event_stream(&daemon, id, &subscription, cursor)
+    subscription_event_stream(&daemon, id, &subscription, cursor, secret.to_owned())
 }
 
 fn subscription_cursor(
@@ -2062,6 +2064,7 @@ fn subscription_event_stream(
     id: RecordUpdateSubscriptionId,
     subscription: &forge_app::RecordUpdateSubscription,
     cursor: RecordUpdateId,
+    secret: String,
 ) -> Response {
     if cursor < subscription.start_cursor {
         return match daemon.application.record_update_head() {
@@ -2094,10 +2097,27 @@ fn subscription_event_stream(
             .into_iter()
             .map(move |update| Ok(record_update_event(id, &update))),
     );
+    let auth_daemon = daemon.clone();
+    let auth_assignment = subscription.assignment_id.clone();
+    let watch_daemon = daemon.clone();
+    let watch_assignment = auth_assignment.clone();
+    let watch_secret = secret.clone();
     let stream = tokio_stream::iter(initial)
         .chain(
             ReceiverStream::new(receiver).map(move |update| Ok(record_update_event(id, &update))),
         )
+        // Recheck before each replayed or queued notification, including after backpressure.
+        .take_while(move |_| {
+            let allowed = auth_daemon
+                .assignment_session(&auth_assignment, &secret)
+                .is_ok_and(|session| session.subscription(id).is_ok());
+            if !allowed {
+                auth_daemon
+                    .delivery
+                    .cancel_current_connection(id, connection_id);
+            }
+            std::future::ready(allowed)
+        })
         .take_until({
             let delivery = daemon.delivery.clone();
             async move {
@@ -2111,6 +2131,13 @@ fn subscription_event_stream(
                         () = time::sleep(deadline) => {
                             delivery.cancel_current_connection(id, connection_id);
                             return;
+                        }
+                        () = time::sleep(Duration::from_millis(100)) => {
+                            if !watch_daemon.assignment_session(&watch_assignment, &watch_secret)
+                                .is_ok_and(|session| session.subscription(id).is_ok()) {
+                                delivery.cancel_current_connection(id, connection_id);
+                                return;
+                            }
                         }
                         changed = cancellation.changed() => {
                             let _ = changed;
@@ -2713,6 +2740,7 @@ mod tests {
     include!("assignment_actions_tests.rs");
     include!("assignment_context_tests.rs");
     include!("assignment_redaction_tests.rs");
+    include!("assignment_subscription_tests.rs");
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
         path::{Path, PathBuf},
@@ -3324,6 +3352,8 @@ mod tests {
         fn drop(&mut self) {
             let daemon = std::mem::replace(&mut self.daemon, Daemon::new(test_application()));
             drop(daemon);
+            let _ =
+                std::fs::remove_dir_all(self.database_path.with_extension("subscription-secrets"));
             let _ = std::fs::remove_file(&self.database_path);
         }
     }
@@ -3387,21 +3417,28 @@ mod tests {
         drop(store);
         let records = SqliteProjectRepository::open(&database_path).unwrap();
         let dispatch = SqliteProjectRepository::open(&database_path).unwrap();
+        let root = database_path.with_extension("subscription-secrets");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("owner-assignment"), "subscription-test-secret").unwrap();
         (
             SubscriptionTestDaemon {
-                daemon: Daemon::new(Application::with_agent_dispatch(
-                    Box::new(records),
-                    Box::new(dispatch),
-                    Box::new(super::ServerAgentDispatchAdapterFactory {
-                        herdr: super::HerdrAdapterFactory::from_configuration_store(
-                            database_path.clone(),
-                        ),
-                        daemon_url: "http://127.0.0.1:45003".into(),
-                        capability_secret_root: std::env::temp_dir()
-                            .join("forge-test-capabilities"),
-                    }),
-                    Box::new(TestInspector),
-                )),
+                daemon: {
+                    let mut daemon = Daemon::new(Application::with_agent_dispatch(
+                        Box::new(records),
+                        Box::new(dispatch),
+                        Box::new(super::ServerAgentDispatchAdapterFactory {
+                            herdr: super::HerdrAdapterFactory::from_configuration_store(
+                                database_path.clone(),
+                            ),
+                            daemon_url: "http://127.0.0.1:45003".into(),
+                            capability_secret_root: std::env::temp_dir()
+                                .join("forge-test-capabilities"),
+                        }),
+                        Box::new(TestInspector),
+                    ));
+                    daemon.capability_secret_root = Some(root);
+                    daemon
+                },
                 database_path,
             },
             "owner-assignment".into(),
@@ -4153,7 +4190,11 @@ mod tests {
     }
 
     fn loopback_request(uri: String) -> Request<Body> {
-        let mut request = Request::builder().uri(uri).body(Body::empty()).unwrap();
+        let mut request = Request::builder()
+            .uri(uri)
+            .header(header::AUTHORIZATION, "Bearer subscription-test-secret")
+            .body(Body::empty())
+            .unwrap();
         request.extensions_mut().insert(ConnectInfo(SocketAddr::new(
             IpAddr::V4(Ipv4Addr::LOCALHOST),
             45678,
@@ -4227,8 +4268,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn subscription_rpc_authorizes_task_prerequisites_and_spec_children_only() {
+    async fn subscription_rpc_authorizes_neighbors_but_not_spec_assignments() {
         let (database_path, prerequisite, generated, child) = subscription_authorization_fixture();
+        let root = database_path.with_extension("subscription-secrets");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("owner-assignment"), "cap-owner").unwrap();
         let daemon = Daemon::new(Application::with_agent_dispatch(
             Box::new(SqliteProjectRepository::open(&database_path).unwrap()),
             Box::new(SqliteProjectRepository::open(&database_path).unwrap()),
@@ -4239,6 +4283,8 @@ mod tests {
             }),
             Box::new(TestInspector),
         ));
+        let mut daemon = daemon;
+        daemon.capability_secret_root = Some(root.clone());
         let request = |assignment_id: &str, target_record_id| CreateAgentSubscriptionRequest {
             assignment_id: assignment_id.into(),
             capability_id: "cap-owner".into(),
@@ -4253,19 +4299,17 @@ mod tests {
                 .target_record_ids,
             vec![prerequisite]
         );
-        assert!(
-            AgentSubscriptionApiServer::create(&daemon, request("owner-assignment", generated))
-                .await
-                .unwrap_err()
-                .to_string()
-                .contains("assignment-capability-denied")
-        );
         assert_eq!(
-            AgentSubscriptionApiServer::create(&daemon, request("spec-assignment", child))
+            AgentSubscriptionApiServer::create(&daemon, request("owner-assignment", generated))
                 .await
                 .unwrap()
                 .target_record_ids,
-            vec![child]
+            vec![generated]
+        );
+        assert!(
+            AgentSubscriptionApiServer::create(&daemon, request("spec-assignment", child))
+                .await
+                .is_err()
         );
         assert!(
             AgentSubscriptionApiServer::create(&daemon, request("spec-assignment", prerequisite))
@@ -4275,6 +4319,7 @@ mod tests {
                 .contains("assignment-capability-denied")
         );
         drop(daemon);
+        std::fs::remove_dir_all(root).unwrap();
         std::fs::remove_file(database_path).unwrap();
     }
 
@@ -4858,6 +4903,7 @@ mod tests {
             .with_extension("delivery-start-secrets");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("target-assignment"), "target-secret\n").unwrap();
+        std::fs::write(root.join(&assignment_id), "subscription-test-secret").unwrap();
         let mut daemon = fixture.daemon();
         daemon.capability_secret_root = Some(root.clone());
         AgentDispatchApiServer::assignment_acknowledge(
