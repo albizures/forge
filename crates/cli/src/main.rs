@@ -2,6 +2,7 @@ mod agent_profiles;
 mod assignment_check_commands;
 mod check_templates;
 mod checks;
+mod findings;
 mod project_selection;
 mod workspaces;
 
@@ -272,6 +273,11 @@ enum GrillingCommand {
 }
 #[derive(Debug, Subcommand)]
 enum TaskCommand {
+    /// Retain review Findings and verification history.
+    Finding {
+        #[command(subcommand)]
+        command: findings::FindingCommand,
+    },
     /// Inspect and assess immutable Task completion criteria.
     Check {
         #[command(subcommand)]
@@ -776,6 +782,7 @@ async fn run(cli: Cli) -> i32 {
             GrillingCommand::Open(args) => open_grilling_under_wayfinder(args, cli.workspace).await,
         },
         Command::Task { command } => match command {
+            TaskCommand::Finding { command } => findings::run(command, cli.workspace).await,
             TaskCommand::Check { command } => checks::run(command, cli.workspace).await,
             TaskCommand::Open(args) => open_task(args, cli.workspace).await,
             TaskCommand::UnderSpec(args) => open_task_under_spec(args, cli.workspace).await,

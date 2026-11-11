@@ -1116,10 +1116,58 @@ pub async fn request_task_check_list_compared(
         .await
         .map_err(record_error("task check list"))
 }
-/// Inspect one criterion and a bounded Assessment page.
+/// List a bounded page of Task-owned Findings.
 ///
 /// # Errors
-/// Returns endpoint, scope, Check ownership, or pagination errors.
+/// Returns endpoint, scope, Record type or pagination errors.
+pub async fn request_task_finding_list(
+    url: impl Into<RecordEndpoint>,
+    request: forge_rpc::TaskFindingListRequest,
+) -> Result<forge_rpc::FindingList, String> {
+    record_client(url)?
+        .task_finding_list(request)
+        .await
+        .map_err(record_error("task finding list"))
+}
+/// Inspect a Finding and bounded activity page.
+/// # Errors
+/// Returns endpoint, scope, ownership or pagination errors.
+pub async fn request_task_finding_show(
+    url: impl Into<RecordEndpoint>,
+    request: forge_rpc::TaskFindingShowRequest,
+) -> Result<forge_rpc::FindingPage, String> {
+    record_client(url)?
+        .task_finding_show(request)
+        .await
+        .map_err(record_error("task finding show"))
+}
+/// Raise an attributed Finding.
+/// # Errors
+/// Returns endpoint, scope, validation, origin or frozen-state errors.
+pub async fn request_task_finding_raise(
+    url: impl Into<RecordEndpoint>,
+    request: forge_rpc::TaskFindingRaiseRequest,
+) -> Result<forge_rpc::Finding, String> {
+    record_client(url)?
+        .task_finding_raise(request)
+        .await
+        .map_err(record_error("task finding raise"))
+}
+/// Resolve a Finding at its observed version.
+/// # Errors
+/// Returns endpoint, validation, ownership, stale-version or transition errors.
+pub async fn request_task_finding_resolve(
+    url: impl Into<RecordEndpoint>,
+    request: forge_rpc::TaskFindingResolveRequest,
+) -> Result<forge_rpc::Finding, String> {
+    record_client(url)?
+        .task_finding_resolve(request)
+        .await
+        .map_err(record_error("task finding resolve"))
+}
+/// Inspect a Check and bounded Assessment history.
+/// # Errors
+/// Returns endpoint, scope, ownership or pagination errors.
 pub async fn request_task_check_show(
     url: impl Into<RecordEndpoint>,
     request: forge_rpc::TaskCheckShowRequest,
@@ -1373,7 +1421,9 @@ pub fn render_record_updates(updates: &ListRecordUpdatesResponse) -> String {
         .updates
         .iter()
         .map(|update| {
-            let detail = if let Some(id) = update.assessment_id {
+            let detail = if let Some(id) = update.finding_activity_id {
+                format!(" Finding Activity {id}")
+            } else if let Some(id) = update.assessment_id {
                 format!(" Assessment {id}")
             } else {
                 match (
@@ -1600,6 +1650,7 @@ mod tests {
             render_record_updates(&ListRecordUpdatesResponse {
                 updates: vec![RecordUpdateResponse {
                     assessment_id: None,
+                    finding_activity_id: None,
                     id: 7,
                     created_at_millis: 42,
                     kind: "status-transition".into(),

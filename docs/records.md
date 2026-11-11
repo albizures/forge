@@ -115,7 +115,8 @@ forge task check show 44 1 --compare-revision aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 
 All Checks must have a latest `pass` Assessment before either `record done` or
 `assignment done` may complete a Task. Pending and failed criteria block completion;
-`checks-not-passed` reports every blocked Check ID. Existing lifecycle and child
+`checks-not-passed` reports every blocked Check ID together with unresolved blocking
+Finding IDs. Finding-only failures use `completion-blocked`. Existing lifecycle and child
 constraints still apply. Completion never fabricates an Assessment. Assessments
 and invalidations are frozen once the Task is Done (`record-done`). Other Record
 Types are unchanged.
@@ -179,7 +180,66 @@ fields. Invalid attribution/evidence, wrong Record
 type or Check ownership, stale versions, frozen Tasks and completion blockers have
 distinct error categories. Assignment completion shares these gates.
 
-### Capability-bound Assignment Checks
+## Task Findings (operator slice)
+
+Findings retain review issues independently of Check verdicts. Passing a Check
+never closes a Finding. Minor Findings default nonblocking; major and critical
+Findings default blocking. An explicit `--blocking true|false` overrides that
+creation default. Findings have no separate title.
+
+```sh
+forge task finding raise 44 --severity major --check 1 --assessment 7 \
+  --actor reviewer --message 'Validation missing' --dirty false --workspace personal --json
+forge task finding list 44 --limit 50 --workspace personal --json
+forge task finding show 44 2 --after 0 --limit 50 --workspace personal --json
+forge task finding resolve 44 2 --expected-version 1 --actor reviewer \
+  --message-file verification.md --workspace personal --json
+```
+
+Raise and resolve require nonblank `--actor` and exactly one nonblank explanation
+via `--message` or `--message-file` (`-` reads stdin). Optional `--revision` is a
+full 40-hex SHA; `--dirty true|false` is caller-reported, with omission unknown.
+List/show accept `--compare-revision` with the same read-only Project-context
+comparison rules as Check evidence. No Git operation is performed.
+
+Optional `--check` and `--assessment` origins must belong to the same Task.
+An Assessment implies its Check; a conflicting explicit Check fails with
+`invalid-finding-origin`. Invalidated Assessments remain valid historical origins.
+Raised text, evidence and origins are immutable. `resolve` records a verification
+explanation and evidence, moving an open Finding to resolved without changing
+severity or blocking. Re-resolving fails `invalid-transition`; stale versions fail
+`stale-version`, with no activity or log changes. Each successful mutation returns
+the observed `version` and atomically appends an attributed activity plus a minimal
+`finding-activity` Record Update (`finding_activity_id`).
+
+List returns `{findings, next_cursor}` in ascending Finding ID order. Show returns
+`{finding, activities, next_cursor}` with ascending activity IDs. Both support
+`--limit` 1–100 (default 50) and `--after`; pass `next_cursor` to continue, null
+means the end. Current summaries include the immutable `raised` activity and
+`latest_activity`, so a bounded older history page does not hide current state.
+All commands support text/JSON and existing Workspace confinement. Wrong Task
+ownership is `finding-not-found`; unavailable Workspace records retain existing
+non-disclosure behavior. Blank attribution/explanation is `invalid-finding`,
+malformed evidence `invalid-revision`, and invalid pagination `invalid-page`.
+
+Both operator and Assignment Task completion transactionally enforce all Check
+and unresolved blocking Finding gates. Nonblocking Findings do not block Done.
+Completion adds no Finding/Assessment activity. Raising on Done fails `record-done`;
+reviewer resolution of an existing nonblocking Finding remains allowed without
+reversing completion or reviving Assignment capabilities.
+
+Typed operator RPCs (flattened Workspace/cwd envelope):
+- `record_taskFindingList`: `task`, `after`, `limit`, `compare_revision` → Finding list page.
+- `record_taskFindingShow`: `task`, `finding`, `after`, `limit`, `compare_revision` → Finding/activity page.
+- `record_taskFindingRaise`: `task`, `finding` containing `severity`, optional `blocking`,
+  `check_id`, `assessment_id`, plus `actor`, `message`, `revision`, `dirty` → Finding.
+- `record_taskFindingResolve`: `task`, `finding` ID, `resolution` containing mandatory
+  `expected_version`, `actor`, `message`, optional `revision`, `dirty` → Finding.
+
+Further review-cycle actions and capability-bound Finding commands are separate
+follow-up delivery; this slice exposes only raise/list/show/resolve.
+
+## Capability-bound Assignment Checks
 
 ```sh
 forge assignment check list --compare-revision aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --json

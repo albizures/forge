@@ -11,6 +11,7 @@ pub mod agent_profiles;
 pub mod assignment;
 pub mod check_templates;
 pub mod checks;
+pub mod findings;
 mod profile_catalog;
 mod workspaces;
 pub use workspaces::{Workspace, WorkspaceRepository};
@@ -180,6 +181,9 @@ pub enum RecordUpdateKind {
     },
     CheckInvalidated {
         assessment_id: u64,
+    },
+    FindingActivity {
+        activity_id: u64,
     },
     StatusTransition {
         from: RecordStatus,
@@ -464,10 +468,65 @@ pub trait RecordRepository: ProjectRepository {
             "Check Templates are not supported",
         ))
     }
-    /// Inspect immutable completion criteria for a Task.
-    ///
+    /// Raise a Finding and its immutable origin activity atomically.
     /// # Errors
-    /// Returns scope, Record type, or storage errors.
+    /// Returns validation, scope, origin, frozen-state or storage errors.
+    fn raise_task_finding(
+        &self,
+        _task: u64,
+        _input: &findings::FindingRaiseInput,
+    ) -> Result<findings::Finding, RegistrationError> {
+        Err(RegistrationError::new(
+            "unsupported",
+            "Findings are not supported",
+        ))
+    }
+    /// Resolve an unresolved Finding at the observed version.
+    /// # Errors
+    /// Returns validation, scope, stale-version, transition or storage errors.
+    fn resolve_task_finding(
+        &self,
+        _task: u64,
+        _finding: u64,
+        _input: &findings::FindingResolveInput,
+    ) -> Result<findings::Finding, RegistrationError> {
+        Err(RegistrationError::new(
+            "unsupported",
+            "Findings are not supported",
+        ))
+    }
+    /// List a bounded page ordered by Finding ID.
+    /// # Errors
+    /// Returns scope, type, pagination or storage errors.
+    fn list_task_findings(
+        &self,
+        _task: u64,
+        _after: Option<u64>,
+        _limit: u32,
+    ) -> Result<findings::FindingList, RegistrationError> {
+        Err(RegistrationError::new(
+            "unsupported",
+            "Findings are not supported",
+        ))
+    }
+    /// Inspect a Finding and bounded activity history.
+    /// # Errors
+    /// Returns scope, type, ownership, pagination or storage errors.
+    fn show_task_finding(
+        &self,
+        _task: u64,
+        _finding: u64,
+        _after: Option<u64>,
+        _limit: u32,
+    ) -> Result<findings::FindingPage, RegistrationError> {
+        Err(RegistrationError::new(
+            "unsupported",
+            "Findings are not supported",
+        ))
+    }
+    /// Inspect immutable completion criteria for a Task.
+    /// # Errors
+    /// Returns scope, Record type or storage errors.
     fn list_task_checks(&self, _task: u64) -> Result<Vec<checks::TaskCheck>, RegistrationError> {
         Err(RegistrationError::new(
             "checks-unavailable",

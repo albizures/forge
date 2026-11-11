@@ -460,6 +460,18 @@ fn authenticated_actions_require_acknowledgement_and_normal_lifecycle_validation
     );
     assert_eq!(session.done(Some("implemented"), None).unwrap_err().code, "checks-not-passed");
     check_tests::pass_checks(&store, owner);
+    let finding = store.raise_task_finding(owner, &forge_app::findings::FindingRaiseInput {
+        severity: forge_app::findings::Severity::Critical, blocking: None,
+        check_id: None, assessment_id: None, actor: "reviewer".into(),
+        message: "Missing validation".into(), revision: None, dirty: None,
+    }).unwrap();
+    let blocked = session.done(Some("implemented"), None).unwrap_err();
+    assert_eq!(blocked.code, "completion-blocked");
+    assert!(blocked.message.contains(&format!("Finding IDs: [{}]", finding.id)));
+    store.resolve_task_finding(owner, finding.id, &forge_app::findings::FindingResolveInput {
+        expected_version: 1, actor: "verifier".into(), message: "Verified correction".into(),
+        revision: None, dirty: None,
+    }).unwrap();
     session.done(Some("implemented"), None).unwrap();
     assert!(session.start().is_err());
     std::fs::remove_dir_all(root).unwrap();

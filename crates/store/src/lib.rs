@@ -20,6 +20,7 @@ use rusqlite::{Connection, ErrorCode, OptionalExtension, params};
 
 mod check_templates;
 mod checks;
+mod findings;
 mod record_workspaces;
 mod workspace_dispatch;
 mod workspaces;
@@ -89,8 +90,9 @@ impl SqliteProjectRepository {
                 id INTEGER PRIMARY KEY NOT NULL,
                 record_id INTEGER NOT NULL REFERENCES records(id),
                 created_at_millis INTEGER NOT NULL,
-                kind TEXT NOT NULL CHECK (kind IN ('created', 'body-edited', 'status-transition', 'relationship-added', 'relationship-removed', 'comment-added', 'comment-deleted', 'check-assessed', 'check-invalidated')),
+                kind TEXT NOT NULL CHECK (kind IN ('created', 'body-edited', 'status-transition', 'relationship-added', 'relationship-removed', 'comment-added', 'comment-deleted', 'check-assessed', 'check-invalidated', 'finding-activity')),
                 assessment_id INTEGER,
+                finding_activity_id INTEGER,
                 from_status TEXT,
                 to_status TEXT,
                 related_record_id INTEGER REFERENCES records(id),
@@ -206,6 +208,7 @@ impl SqliteProjectRepository {
             )
             .map_err(storage_error)?;
         checks::schema(&connection)?;
+        findings::schema(&connection)?;
         check_templates::schema(&connection)?;
         migrate_record_status_schema(&connection)?;
         migrate_record_type_schema(&connection)?;
@@ -675,6 +678,38 @@ impl RecordRepository for SqliteProjectRepository {
         input: &forge_app::checks::InvalidationInput,
     ) -> Result<forge_app::checks::TaskCheck, RegistrationError> {
         self.invalidate_check(task, check, input, None)
+    }
+    fn raise_task_finding(
+        &self,
+        task: u64,
+        input: &forge_app::findings::FindingRaiseInput,
+    ) -> Result<forge_app::findings::Finding, RegistrationError> {
+        self.raise_finding(task, input)
+    }
+    fn resolve_task_finding(
+        &self,
+        task: u64,
+        finding: u64,
+        input: &forge_app::findings::FindingResolveInput,
+    ) -> Result<forge_app::findings::Finding, RegistrationError> {
+        self.resolve_finding(task, finding, input)
+    }
+    fn list_task_findings(
+        &self,
+        task: u64,
+        after: Option<u64>,
+        limit: u32,
+    ) -> Result<forge_app::findings::FindingList, RegistrationError> {
+        self.list_findings(task, after, limit)
+    }
+    fn show_task_finding(
+        &self,
+        task: u64,
+        finding: u64,
+        after: Option<u64>,
+        limit: u32,
+    ) -> Result<forge_app::findings::FindingPage, RegistrationError> {
+        self.show_finding(task, finding, after, limit)
     }
     fn list_task_checks(
         &self,
@@ -1538,7 +1573,7 @@ impl RecordRepository for SqliteProjectRepository {
             .connection
             .lock()
             .map_err(|_| RegistrationError::new("storage", "store lock poisoned"))?;
-        connection.prepare("SELECT id, created_at_millis, kind, from_status, to_status, related_record_id, comment_id, relationship_kind, assessment_id FROM record_updates WHERE record_id = ?1 AND id > ?2 AND id <= ?3 ORDER BY id LIMIT ?4").map_err(storage_error)?.query_map(params![id.cast_signed(), after.cast_signed(), through.cast_signed(), limit], update_from_row).map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)
+        connection.prepare("SELECT id, created_at_millis, kind, from_status, to_status, related_record_id, comment_id, relationship_kind, assessment_id, finding_activity_id FROM record_updates WHERE record_id = ?1 AND id > ?2 AND id <= ?3 ORDER BY id LIMIT ?4").map_err(storage_error)?.query_map(params![id.cast_signed(), after.cast_signed(), through.cast_signed(), limit], update_from_row).map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)
     }
 
     fn list_record_updates(&self, id: u64) -> Result<Vec<RecordUpdate>, RegistrationError> {
@@ -1548,7 +1583,7 @@ impl RecordRepository for SqliteProjectRepository {
             .lock()
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
         load_record(&connection, id)?;
-        connection.prepare("SELECT id, created_at_millis, kind, from_status, to_status, related_record_id, comment_id, relationship_kind, assessment_id FROM record_updates WHERE record_id = ?1 ORDER BY created_at_millis DESC, id DESC")
+        connection.prepare("SELECT id, created_at_millis, kind, from_status, to_status, related_record_id, comment_id, relationship_kind, assessment_id, finding_activity_id FROM record_updates WHERE record_id = ?1 ORDER BY created_at_millis DESC, id DESC")
             .map_err(storage_error)?
             .query_map([id.cast_signed()], update_from_row)
             .map_err(storage_error)?
@@ -3305,6 +3340,10 @@ fn insert_update(
 ) -> Result<(), RegistrationError> {
     let (kind, from_status, to_status, related_record_id, comment_id, relationship_kind) =
         match kind {
+            RecordUpdateKind::FindingActivity { activity_id } => {
+                connection.execute("INSERT INTO record_updates (record_id, created_at_millis, kind, finding_activity_id) VALUES (?1, ?2, 'finding-activity', ?3)", params![record_id.cast_signed(), now_millis()?, activity_id.cast_signed()]).map_err(storage_error)?;
+                return Ok(());
+            }
             RecordUpdateKind::CheckInvalidated { assessment_id } => {
                 connection.execute("INSERT INTO record_updates (record_id, created_at_millis, kind, assessment_id) VALUES (?1, ?2, 'check-invalidated', ?3)", params![record_id.cast_signed(), now_millis()?, assessment_id.cast_signed()]).map_err(storage_error)?;
                 return Ok(());
@@ -3394,6 +3433,9 @@ fn update_from_row_at(
         _ => Err(rusqlite::Error::InvalidQuery),
     };
     let kind = match kind.as_str() {
+        "finding-activity" => RecordUpdateKind::FindingActivity {
+            activity_id: row.get::<_, i64>(created_at_index + 8)?.cast_unsigned(),
+        },
         "check-invalidated" => RecordUpdateKind::CheckInvalidated {
             assessment_id: row.get::<_, i64>(created_at_index + 7)?.cast_unsigned(),
         },
@@ -3902,6 +3944,9 @@ fn storage_error(error: rusqlite::Error) -> RegistrationError {
 
 #[cfg(test)]
 mod tests {
+    mod finding_tests {
+        include!("finding_tests.rs");
+    }
     mod check_tests {
         include!("check_tests.rs");
     }

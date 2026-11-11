@@ -113,10 +113,17 @@ pub(super) fn gate(connection: &Connection, task: u64) -> Result<(), Registratio
             "Task has no provisioned Checks",
         ));
     }
-    if !blocked.is_empty() {
+    let findings = super::findings::blockers(connection, task)?;
+    if !blocked.is_empty() || !findings.is_empty() {
         return Err(RegistrationError::new(
-            "checks-not-passed",
-            format!("pending or failed Check IDs: {blocked:?}"),
+            if blocked.is_empty() {
+                "completion-blocked"
+            } else {
+                "checks-not-passed"
+            },
+            format!(
+                "pending or failed Check IDs: {blocked:?}; unresolved blocking Finding IDs: {findings:?}"
+            ),
         ));
     }
     Ok(())

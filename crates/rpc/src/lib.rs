@@ -13,6 +13,10 @@ pub use forge_app::check_templates::{
 pub use forge_app::checks::{
     Assessment, AssessmentInput, CheckPage, InvalidationInput, TaskCheck, Verdict,
 };
+pub use forge_app::findings::{
+    Finding, FindingActivity, FindingList, FindingPage, FindingRaiseInput, FindingResolveInput,
+    FindingState, Severity,
+};
 pub use record_selection::*;
 
 use forge_app::{
@@ -215,6 +219,26 @@ pub trait RecordApi {
         &self,
         request: SelectedRecordRequest<CheckTemplateSetRequest>,
     ) -> RpcResult<CheckTemplate>;
+    #[method(name = "taskFindingList")]
+    async fn task_finding_list(
+        &self,
+        request: SelectedRecordRequest<TaskFindingListRequest>,
+    ) -> RpcResult<FindingList>;
+    #[method(name = "taskFindingShow")]
+    async fn task_finding_show(
+        &self,
+        request: SelectedRecordRequest<TaskFindingShowRequest>,
+    ) -> RpcResult<FindingPage>;
+    #[method(name = "taskFindingRaise")]
+    async fn task_finding_raise(
+        &self,
+        request: SelectedRecordRequest<TaskFindingRaiseRequest>,
+    ) -> RpcResult<Finding>;
+    #[method(name = "taskFindingResolve")]
+    async fn task_finding_resolve(
+        &self,
+        request: SelectedRecordRequest<TaskFindingResolveRequest>,
+    ) -> RpcResult<Finding>;
     #[method(name = "taskCheckList")]
     async fn task_check_list(
         &self,
@@ -327,6 +351,32 @@ pub struct CheckTemplateShowRequest {
 pub struct CheckTemplateSetRequest {
     pub project: String,
     pub replacement: TemplateReplacement,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TaskFindingListRequest {
+    pub task: u64,
+    pub after: Option<u64>,
+    pub limit: u32,
+    pub compare_revision: Option<String>,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TaskFindingShowRequest {
+    pub task: u64,
+    pub finding: u64,
+    pub after: Option<u64>,
+    pub limit: u32,
+    pub compare_revision: Option<String>,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TaskFindingRaiseRequest {
+    pub task: u64,
+    pub finding: FindingRaiseInput,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TaskFindingResolveRequest {
+    pub task: u64,
+    pub finding: u64,
+    pub resolution: FindingResolveInput,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TaskCheckListRequest {
@@ -1020,9 +1070,14 @@ pub struct RecordUpdateResponse {
     pub relationship_kind: Option<String>,
     pub comment_id: Option<u64>,
     pub assessment_id: Option<u64>,
+    pub finding_activity_id: Option<u64>,
 }
 impl From<RecordUpdate> for RecordUpdateResponse {
     fn from(update: RecordUpdate) -> Self {
+        let finding_activity_id = match &update.kind {
+            RecordUpdateKind::FindingActivity { activity_id } => Some(*activity_id),
+            _ => None,
+        };
         let assessment_id = match &update.kind {
             RecordUpdateKind::CheckAssessed { assessment_id }
             | RecordUpdateKind::CheckInvalidated { assessment_id } => Some(*assessment_id),
@@ -1030,6 +1085,9 @@ impl From<RecordUpdate> for RecordUpdateResponse {
         };
         let (kind, from_status, to_status, related_record_id, relationship_kind, comment_id) =
             match update.kind {
+                RecordUpdateKind::FindingActivity { .. } => {
+                    ("finding-activity", None, None, None, None, None)
+                }
                 RecordUpdateKind::CheckInvalidated { .. } => {
                     ("check-invalidated", None, None, None, None, None)
                 }
@@ -1090,6 +1148,7 @@ impl From<RecordUpdate> for RecordUpdateResponse {
             relationship_kind,
             comment_id,
             assessment_id,
+            finding_activity_id,
         }
     }
 }

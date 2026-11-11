@@ -1272,6 +1272,52 @@ impl RecordApiServer for Daemon {
             .replace_check_template(&r.project, &r.replacement)
             .map_err(rpc_error)
     }
+    async fn task_finding_list(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<forge_rpc::TaskFindingListRequest>,
+    ) -> RpcResult<forge_rpc::FindingList> {
+        let application = self.record_application(&request.selection, &mut [])?;
+        let r = request.record;
+        application
+            .list_task_findings(r.task, r.after, r.limit, r.compare_revision.as_deref())
+            .map_err(rpc_error)
+    }
+    async fn task_finding_show(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<forge_rpc::TaskFindingShowRequest>,
+    ) -> RpcResult<forge_rpc::FindingPage> {
+        let application = self.record_application(&request.selection, &mut [])?;
+        let r = request.record;
+        application
+            .show_task_finding(
+                r.task,
+                r.finding,
+                r.after,
+                r.limit,
+                r.compare_revision.as_deref(),
+            )
+            .map_err(rpc_error)
+    }
+    async fn task_finding_raise(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<forge_rpc::TaskFindingRaiseRequest>,
+    ) -> RpcResult<forge_rpc::Finding> {
+        let application = self.record_application(&request.selection, &mut [])?;
+        let r = request.record;
+        application
+            .raise_task_finding(r.task, &r.finding)
+            .map_err(rpc_error)
+    }
+    async fn task_finding_resolve(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<forge_rpc::TaskFindingResolveRequest>,
+    ) -> RpcResult<forge_rpc::Finding> {
+        let application = self.record_application(&request.selection, &mut [])?;
+        let r = request.record;
+        application
+            .resolve_task_finding(r.task, r.finding, &r.resolution)
+            .map_err(rpc_error)
+    }
     async fn task_check_list(
         &self,
         request: forge_rpc::SelectedRecordRequest<forge_rpc::TaskCheckListRequest>,
