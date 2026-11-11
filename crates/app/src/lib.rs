@@ -9,6 +9,7 @@ use std::{
 
 pub mod agent_profiles;
 pub mod assignment;
+pub mod checks;
 mod profile_catalog;
 mod workspaces;
 pub use workspaces::{Workspace, WorkspaceRepository};
@@ -173,6 +174,9 @@ pub struct RecordComment {
 pub enum RecordUpdateKind {
     Created,
     BodyEdited,
+    CheckAssessed {
+        assessment_id: u64,
+    },
     StatusTransition {
         from: RecordStatus,
         to: RecordStatus,
@@ -427,6 +431,47 @@ pub struct ManagedWorktreeInfo {
 
 /// Persistence operations for generic Records.
 pub trait RecordRepository: ProjectRepository {
+    /// Inspect immutable completion criteria for a Task.
+    ///
+    /// # Errors
+    /// Returns scope, Record type, or storage errors.
+    fn list_task_checks(&self, _task: u64) -> Result<Vec<checks::TaskCheck>, RegistrationError> {
+        Err(RegistrationError::new(
+            "checks-unavailable",
+            "Task Checks are unavailable",
+        ))
+    }
+    /// Inspect one Check and an ascending, bounded Assessment history page.
+    ///
+    /// # Errors
+    /// Returns scope, Check ownership, pagination, or storage errors.
+    fn show_task_check(
+        &self,
+        _task: u64,
+        _check: u64,
+        _after: Option<u64>,
+        _limit: u32,
+    ) -> Result<checks::CheckPage, RegistrationError> {
+        Err(RegistrationError::new(
+            "checks-unavailable",
+            "Task Checks are unavailable",
+        ))
+    }
+    /// Append an Assessment if the observed Check version is still current.
+    ///
+    /// # Errors
+    /// Rejects invalid input, stale versions, Done Tasks, or inaccessible Checks.
+    fn assess_task_check(
+        &self,
+        _task: u64,
+        _check: u64,
+        _input: &checks::AssessmentInput,
+    ) -> Result<checks::TaskCheck, RegistrationError> {
+        Err(RegistrationError::new(
+            "checks-unavailable",
+            "Task Checks are unavailable",
+        ))
+    }
     /// Returns a request-local repository confined to an existing Workspace.
     ///
     /// # Errors

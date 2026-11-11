@@ -140,6 +140,26 @@ _Avoid_: specification, issue
 A leaf Record type that represents a unit of work with exactly one Project when opened under a Project-scoped Wayfinder, selected from that Wayfinder's Project Scope; a Projectless Wayfinder's Task remains Projectless. It may also be opened under one Spec, from which it receives its Project Scope, or opened without a parent. Its membership and scope are immutable after opening. A branch may be recorded as its work output but is not Forge lifecycle or relationship state.
 _Avoid_: subtask, to-do
 
+**Check Template**:
+An operator-managed, Project-configured set of additional completion criteria copied into each new Task as immutable Checks alongside its mandatory Implementation Check. Changes to the template affect future Tasks, not Checks already created.
+_Avoid_: live checklist, check runner configuration
+
+**Check**:
+An immutable named completion criterion automatically provided to a Task, either as its mandatory Implementation Check or from its Check Template, with a stable identity and description; every Check is required for completion. It describes what must be established, not how to execute verification, and cannot be individually added, edited, or retired on a Task.
+_Avoid_: executable check, check runner
+
+**Implementation Check**:
+The mandatory baseline Check on every Task, including Projectless Tasks, establishing that the work and deliverables described by the Task are complete. It applies to all Task Kinds, not only work that produces code.
+_Avoid_: coding check, implementation progress
+
+**Assessment**:
+An immutable pass or fail verdict for one Check, optionally carrying revision evidence. The latest Assessment is authoritative; explicitly invalidating it leaves the Check unassessed rather than restoring an older verdict.
+_Avoid_: check result, mutable verdict
+
+**Finding**:
+A structured issue belonging to one Task, optionally linked to a Check and its originating Assessment, with append-only activity. Its severity is distinct from whether it blocks Task completion.
+_Avoid_: review comment, response entity
+
 **Task Kind**:
 An optional immutable semantic classification of a Task: Research, Prototype, or Review. It does not alter the Task lifecycle, dependency behavior, or branch-output handling.
 _Avoid_: task type, profile

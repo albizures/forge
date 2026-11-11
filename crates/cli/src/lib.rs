@@ -1060,6 +1060,46 @@ pub async fn request_list_records(
         .map_err(record_error("list"))
 }
 
+/// Read immutable Task criteria through a Workspace-selected operator request.
+///
+/// # Errors
+/// Returns endpoint, Workspace selection, or daemon validation errors.
+pub async fn request_task_check_list(
+    url: impl Into<RecordEndpoint>,
+    task: u64,
+) -> Result<Vec<forge_rpc::TaskCheck>, String> {
+    record_client(url)?
+        .task_check_list(RecordIdRequest { id: task })
+        .await
+        .map_err(record_error("task check list"))
+}
+/// Inspect one criterion and a bounded Assessment page.
+///
+/// # Errors
+/// Returns endpoint, scope, Check ownership, or pagination errors.
+pub async fn request_task_check_show(
+    url: impl Into<RecordEndpoint>,
+    request: forge_rpc::TaskCheckShowRequest,
+) -> Result<forge_rpc::CheckPage, String> {
+    record_client(url)?
+        .task_check_show(request)
+        .await
+        .map_err(record_error("task check show"))
+}
+/// Append an attributed Assessment using the observed Check version.
+///
+/// # Errors
+/// Returns endpoint, validation, stale-version, frozen-Task, or scope errors.
+pub async fn request_task_check_assess(
+    url: impl Into<RecordEndpoint>,
+    request: forge_rpc::TaskCheckAssessRequest,
+) -> Result<forge_rpc::TaskCheck, String> {
+    record_client(url)?
+        .task_check_assess(request)
+        .await
+        .map_err(record_error("task check assess"))
+}
+
 /// Requests a Record lifecycle operation through the daemon.
 ///
 /// # Errors
@@ -1260,20 +1300,24 @@ pub fn render_record_updates(updates: &ListRecordUpdatesResponse) -> String {
         .updates
         .iter()
         .map(|update| {
-            let detail = match (
-                &update.from_status,
-                &update.to_status,
-                update.related_record_id.or(update.comment_id),
-            ) {
-                (Some(from), Some(to), _) => format!(" {from} -> {to}"),
-                (_, _, Some(id)) => format!(
-                    " Record {id}{}",
-                    update
-                        .relationship_kind
-                        .as_deref()
-                        .map_or(String::new(), |kind| format!(" ({kind})"))
-                ),
-                _ => String::new(),
+            let detail = if let Some(id) = update.assessment_id {
+                format!(" Assessment {id}")
+            } else {
+                match (
+                    &update.from_status,
+                    &update.to_status,
+                    update.related_record_id.or(update.comment_id),
+                ) {
+                    (Some(from), Some(to), _) => format!(" {from} -> {to}"),
+                    (_, _, Some(id)) => format!(
+                        " Record {id}{}",
+                        update
+                            .relationship_kind
+                            .as_deref()
+                            .map_or(String::new(), |kind| format!(" ({kind})"))
+                    ),
+                    _ => String::new(),
+                }
             };
             format!(
                 "Update {} {} {}{}",
@@ -1481,6 +1525,7 @@ mod tests {
         assert_eq!(
             render_record_updates(&ListRecordUpdatesResponse {
                 updates: vec![RecordUpdateResponse {
+                    assessment_id: None,
                     id: 7,
                     created_at_millis: 42,
                     kind: "status-transition".into(),

@@ -92,6 +92,64 @@ retained rather than deleted. Comments are immutable; `record updates` is the
 Forge-authored Update Log. Assignment recovery retains its separate, conservative
 [reopen and retirement rules](assignment-recovery.md).
 
+## Task Checks and Assessments
+
+Every new Task receives an immutable, required **Implementation** Check in the
+same transaction as opening the Task. Its criterion is “The work and deliverables
+described by this Task are complete.” This applies to all Task Kinds, parentage
+paths and Projectless Tasks; Research/Review/Prototype Tasks need not produce code.
+Check IDs, names, descriptions and ordering cannot be edited or removed.
+
+```sh
+forge task check list 44 --workspace personal --json
+forge task check show 44 1 --limit 50 --workspace personal --json
+forge task check assess 44 1 --verdict pass --expected-version 1 \
+  --actor reviewer --message 'Deliverables verified' --workspace personal --json
+forge task check assess 44 1 --verdict fail --expected-version 2 \
+  --actor reviewer --message-file explanation.md --workspace personal
+```
+
+All Checks must have a latest `pass` Assessment before either `record done` or
+`assignment done` may complete a Task. Pending and failed criteria block completion;
+`checks-not-passed` reports every blocked Check ID. Existing lifecycle and child
+constraints still apply. Completion never fabricates an Assessment. Assessments
+are frozen once the Task is Done (`record-done`). Other Record Types are unchanged.
+
+Each immutable Assessment retains its numeric ID, verdict (`pass` or `fail`),
+actor, explanation and timestamp. The latest Assessment alone is authoritative:
+a new fail supersedes an older pass. List/show and successful assessment return
+the observed Check `version`; assessment requires `--expected-version`. A stale
+write returns `stale-version` without changing verdict, version, history or Update
+Log. Each successful assessment atomically adds a minimal `check-assessed` Record
+Update referring to its Assessment ID, not a copy of the explanation.
+
+Operators must supply a nonblank `--actor` and exactly one of `--message` or
+`--message-file`. Explanations must be nonblank; `--message-file -` reads stdin.
+Optional caller-reported `--revision` accepts a full 40-hex commit SHA and `--dirty
+true|false` distinguishes a known state from omitted/unknown state. Evidence is
+retained without fetching Git data, running commands or changing verdict authority.
+
+List ordering follows immutable Check position, then ID. Show returns current
+Check state and an ascending Assessment history page (`--limit` 1–100, default 50).
+Use its `next_cursor` with `--after` for the next page; a null cursor ends history.
+Current state may be newer than the history page. Histories never expand to an
+unbounded dump. All commands support text and `--json` output and the same Workspace
+selection/confinement as Record commands.
+
+Typed operator RPC additions are `record_taskCheckList` (`id`),
+`record_taskCheckShow` (`task`, `check`, `after`, `limit`) and
+`record_taskCheckAssess` (`task`, `check`, `assessment`). Each uses the flattened
+Workspace/cwd selection envelope. Assessment input contains `expected_version`,
+`verdict`, `actor`, `message`, optional `revision` and optional `dirty`. Responses
+are respectively a Check array, `{check, assessments, next_cursor}`, and the updated
+Check (including its latest Assessment). Invalid attribution/evidence, wrong Record
+type or Check ownership, stale versions, frozen Tasks and completion blockers have
+distinct error categories. Assignment completion already shares these gates;
+capability-bound Check operations are a separate delivery.
+
+This Check schema requires a fresh development store: no pre-feature Task backfill,
+legacy database upgrade or no-Check completion fallback is provided.
+
 ## Workflow readiness
 
 ```sh

@@ -404,6 +404,59 @@ async fn record_commands_and_rpc_are_confined_by_explicit_or_client_cwd_selectio
         &one,
     ));
     json(run(&["record", "start", &task_id, "--json"], &one));
+    let checks = json(run(&["task", "check", "list", &task_id, "--json"], &one));
+    rejected(run(&["task", "check", "list", &task_id, "--json"], &two));
+    for check in checks.as_array().unwrap() {
+        rejected(run(
+            &[
+                "task",
+                "check",
+                "show",
+                &task_id,
+                &check["id"].to_string(),
+                "--json",
+            ],
+            &two,
+        ));
+        rejected(run(
+            &[
+                "task",
+                "check",
+                "assess",
+                &task_id,
+                &check["id"].to_string(),
+                "--expected-version",
+                &check["version"].to_string(),
+                "--verdict",
+                "pass",
+                "--actor",
+                "foreign operator",
+                "--message",
+                "Forbidden",
+                "--json",
+            ],
+            &two,
+        ));
+        json(run(
+            &[
+                "task",
+                "check",
+                "assess",
+                &task_id,
+                &check["id"].to_string(),
+                "--expected-version",
+                &check["version"].to_string(),
+                "--verdict",
+                "pass",
+                "--actor",
+                "test operator",
+                "--message",
+                "Fixture deliverables verified",
+                "--json",
+            ],
+            &one,
+        ));
+    }
     json(run(
         &[
             "record",

@@ -1250,6 +1250,34 @@ impl WorktreeApiServer for Daemon {
 
 #[async_trait]
 impl RecordApiServer for Daemon {
+    async fn task_check_list(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<RecordIdRequest>,
+    ) -> RpcResult<Vec<forge_app::checks::TaskCheck>> {
+        self.record_application(&request.selection, &mut [])?
+            .list_task_checks(request.record.id)
+            .map_err(rpc_error)
+    }
+    async fn task_check_show(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<forge_rpc::TaskCheckShowRequest>,
+    ) -> RpcResult<forge_app::checks::CheckPage> {
+        let application = self.record_application(&request.selection, &mut [])?;
+        let r = request.record;
+        application
+            .show_task_check(r.task, r.check, r.after, r.limit)
+            .map_err(rpc_error)
+    }
+    async fn task_check_assess(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<forge_rpc::TaskCheckAssessRequest>,
+    ) -> RpcResult<forge_app::checks::TaskCheck> {
+        let application = self.record_application(&request.selection, &mut [])?;
+        let r = request.record;
+        application
+            .assess_task_check(r.task, r.check, &r.assessment)
+            .map_err(rpc_error)
+    }
     async fn open_initiative(
         &self,
         request: forge_rpc::SelectedRecordRequest<OpenRecordRequest>,
@@ -2217,6 +2245,9 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
+    mod check_tests {
+        include!("check_tests.rs");
+    }
     include!("assignment_actions_tests.rs");
     include!("assignment_context_tests.rs");
     include!("assignment_redaction_tests.rs");
@@ -3586,6 +3617,7 @@ mod tests {
         );
         let store = SqliteProjectRepository::open(database_path).unwrap();
         store.start_record(other_task).unwrap();
+        check_tests::pass_checks(&store, other_task);
         store.done_record(other_task, Some("done")).unwrap();
         assert!(
             AgentDispatchApiServer::assignment_task_start(

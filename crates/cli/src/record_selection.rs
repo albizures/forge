@@ -96,6 +96,9 @@ dispatch_requests! {
     dispatch_record(forge_rpc::DispatchRecordRequest) -> forge_rpc::DispatchRecordResponse;
 }
 requests! {
+    task_check_list(RecordIdRequest) -> Vec<forge_rpc::TaskCheck>;
+    task_check_show(forge_rpc::TaskCheckShowRequest) -> forge_rpc::CheckPage;
+    task_check_assess(forge_rpc::TaskCheckAssessRequest) -> forge_rpc::TaskCheck;
     open_initiative(OpenRecordRequest) -> RecordResponse;
     ready(ReadyRecordsRequest) -> ReadyRecordsResponse;
     open(OpenRecordRequest) -> RecordResponse;

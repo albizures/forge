@@ -1,0 +1,210 @@
+use super::{SqliteProjectRepository, insert_update, load_record, now_millis, storage_error};
+use forge_app::checks::{
+    Assessment, AssessmentInput, CheckPage, IMPLEMENTATION_CRITERION, TaskCheck, Verdict,
+};
+use forge_app::{Record, RecordStatus, RecordType, RecordUpdateKind, RegistrationError};
+use rusqlite::{Connection, OptionalExtension, params};
+
+pub(super) fn schema(connection: &Connection) -> Result<(), RegistrationError> {
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS task_checks (
+        id INTEGER PRIMARY KEY NOT NULL, task_id INTEGER NOT NULL REFERENCES records(id),
+        name TEXT NOT NULL, description TEXT NOT NULL, position INTEGER NOT NULL,
+        version INTEGER NOT NULL DEFAULT 1, UNIQUE(task_id, position), UNIQUE(task_id, name));
+        CREATE TABLE IF NOT EXISTS check_assessments (
+        id INTEGER PRIMARY KEY NOT NULL, check_id INTEGER NOT NULL REFERENCES task_checks(id),
+        verdict TEXT NOT NULL CHECK(verdict IN ('pass','fail')), actor TEXT NOT NULL,
+        message TEXT NOT NULL, created_at_millis INTEGER NOT NULL, revision TEXT, dirty INTEGER);
+        CREATE INDEX IF NOT EXISTS assessments_by_check ON check_assessments(check_id, id);",
+        )
+        .map_err(storage_error)
+}
+
+pub(super) fn provision(connection: &Connection, task: u64) -> Result<(), RegistrationError> {
+    connection.execute("INSERT INTO task_checks (task_id, name, description, position) VALUES (?1, 'Implementation', ?2, 0)",
+        params![task.cast_signed(), IMPLEMENTATION_CRITERION]).map_err(storage_error)?;
+    Ok(())
+}
+
+fn assessment(row: &rusqlite::Row<'_>) -> rusqlite::Result<Assessment> {
+    Ok(Assessment {
+        id: row.get::<_, i64>(0)?.cast_unsigned(),
+        check_id: row.get::<_, i64>(1)?.cast_unsigned(),
+        verdict: match row.get::<_, String>(2)?.as_str() {
+            "pass" => Verdict::Pass,
+            "fail" => Verdict::Fail,
+            _ => return Err(rusqlite::Error::InvalidQuery),
+        },
+        actor: row.get(3)?,
+        message: row.get(4)?,
+        created_at_millis: row.get::<_, i64>(5)?.cast_unsigned(),
+        revision: row.get(6)?,
+        dirty: row.get(7)?,
+    })
+}
+const ASSESSMENT_COLUMNS: &str =
+    "id, check_id, verdict, actor, message, created_at_millis, revision, dirty";
+
+fn load(connection: &Connection, task: u64, check: u64) -> Result<TaskCheck, RegistrationError> {
+    let mut check = connection.query_row("SELECT id, task_id, name, description, position, version FROM task_checks WHERE task_id = ?1 AND id = ?2",
+        params![task.cast_signed(), check.cast_signed()], |row| Ok(TaskCheck {
+            id: row.get::<_, i64>(0)?.cast_unsigned(), task_id: row.get::<_, i64>(1)?.cast_unsigned(),
+            name: row.get(2)?, description: row.get(3)?, position: row.get::<_, i64>(4)?.cast_unsigned(),
+            version: row.get::<_, i64>(5)?.cast_unsigned(), latest_assessment: None,
+        })).optional().map_err(storage_error)?.ok_or_else(|| RegistrationError::new("check-not-found", "Check does not belong to this Task"))?;
+    check.latest_assessment = connection.query_row(&format!("SELECT {ASSESSMENT_COLUMNS} FROM check_assessments WHERE check_id = ?1 ORDER BY id DESC LIMIT 1"),
+        [check.id.cast_signed()], assessment).optional().map_err(storage_error)?;
+    Ok(check)
+}
+
+pub(super) fn gate(connection: &Connection, task: u64) -> Result<(), RegistrationError> {
+    let mut statement = connection.prepare("SELECT c.id FROM task_checks c WHERE c.task_id = ?1 AND COALESCE((SELECT a.verdict FROM check_assessments a WHERE a.check_id = c.id ORDER BY a.id DESC LIMIT 1), 'pending') != 'pass' ORDER BY c.id").map_err(storage_error)?;
+    let blocked = statement
+        .query_map([task.cast_signed()], |row| {
+            row.get::<_, i64>(0).map(i64::cast_unsigned)
+        })
+        .map_err(storage_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(storage_error)?;
+    // Fresh stores provision every Task; missing criteria are a corrupt invariant, never a bypass.
+    let count: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM task_checks WHERE task_id = ?1",
+            [task.cast_signed()],
+            |row| row.get(0),
+        )
+        .map_err(storage_error)?;
+    if count == 0 {
+        return Err(RegistrationError::new(
+            "checks-not-passed",
+            "Task has no provisioned Checks",
+        ));
+    }
+    if !blocked.is_empty() {
+        return Err(RegistrationError::new(
+            "checks-not-passed",
+            format!("pending or failed Check IDs: {blocked:?}"),
+        ));
+    }
+    Ok(())
+}
+
+impl SqliteProjectRepository {
+    pub(super) fn check_task(
+        &self,
+        connection: &Connection,
+        task: u64,
+    ) -> Result<Record, RegistrationError> {
+        self.ensure_record_workspace(connection, task)?;
+        let record = load_record(connection, task)?;
+        if record.record_type != RecordType::Task {
+            return Err(RegistrationError::new(
+                "invalid-record-type",
+                "Checks belong only to Tasks",
+            ));
+        }
+        Ok(record)
+    }
+    pub(super) fn list_checks(&self, task: u64) -> Result<Vec<TaskCheck>, RegistrationError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "storage lock is poisoned"))?;
+        let transaction = connection.transaction().map_err(storage_error)?;
+        self.check_task(&transaction, task)?;
+        let ids = transaction
+            .prepare("SELECT id FROM task_checks WHERE task_id = ?1 ORDER BY position, id")
+            .map_err(storage_error)?
+            .query_map([task.cast_signed()], |row| {
+                row.get::<_, i64>(0).map(i64::cast_unsigned)
+            })
+            .map_err(storage_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(storage_error)?;
+        ids.into_iter()
+            .map(|id| load(&transaction, task, id))
+            .collect()
+    }
+    pub(super) fn show_check(
+        &self,
+        task: u64,
+        check: u64,
+        after: Option<u64>,
+        limit: u32,
+    ) -> Result<CheckPage, RegistrationError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "storage lock is poisoned"))?;
+        let transaction = connection.transaction().map_err(storage_error)?;
+        self.check_task(&transaction, task)?;
+        if !(1..=100).contains(&limit) {
+            return Err(RegistrationError::new(
+                "invalid-page",
+                "limit must be between 1 and 100",
+            ));
+        }
+        let check = load(&transaction, task, check)?;
+        let mut assessments = transaction.prepare(&format!("SELECT {ASSESSMENT_COLUMNS} FROM check_assessments WHERE check_id = ?1 AND id > ?2 ORDER BY id LIMIT ?3")).map_err(storage_error)?
+            .query_map(params![check.id.cast_signed(), after.unwrap_or(0).cast_signed(), limit + 1], assessment).map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)?;
+        let more = assessments.len() > limit as usize;
+        assessments.truncate(limit as usize);
+        let next_cursor = if more {
+            assessments.last().map(|a| a.id)
+        } else {
+            None
+        };
+        Ok(CheckPage {
+            check,
+            assessments,
+            next_cursor,
+        })
+    }
+    pub(super) fn assess_check(
+        &self,
+        task: u64,
+        check: u64,
+        input: &AssessmentInput,
+    ) -> Result<TaskCheck, RegistrationError> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "storage lock is poisoned"))?;
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        let record = self.check_task(&transaction, task)?;
+        input.validate()?;
+        let current = load(&transaction, task, check)?;
+        if record.status == RecordStatus::Done {
+            return Err(RegistrationError::new(
+                "record-done",
+                "Done Task Assessments are frozen",
+            ));
+        }
+        if current.version != input.expected_version {
+            return Err(RegistrationError::new(
+                "stale-version",
+                "Check version changed; read it again before assessing",
+            ));
+        }
+        transaction.execute("INSERT INTO check_assessments (check_id, verdict, actor, message, created_at_millis, revision, dirty) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![check.cast_signed(), match input.verdict { Verdict::Pass => "pass", Verdict::Fail => "fail" }, input.actor, input.message, now_millis()?, input.revision, input.dirty]).map_err(storage_error)?;
+        let assessment_id = transaction.last_insert_rowid().cast_unsigned();
+        transaction
+            .execute(
+                "UPDATE task_checks SET version = version + 1 WHERE id = ?1",
+                [check.cast_signed()],
+            )
+            .map_err(storage_error)?;
+        insert_update(
+            &transaction,
+            task,
+            RecordUpdateKind::CheckAssessed { assessment_id },
+        )?;
+        let updated = load(&transaction, task, check)?;
+        transaction.commit().map_err(storage_error)?;
+        Ok(updated)
+    }
+}

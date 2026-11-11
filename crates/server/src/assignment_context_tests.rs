@@ -263,6 +263,9 @@ async fn persisted_task_and_multi_project_grilling_context_survives_source_delet
         daemon.capability_secret_root = Some(root.clone());
         verify_source_independent_context_routes(&daemon, own.id, &bound).await;
         verify_context_route_authentication(&daemon, own.id).await;
+        if kind == RecordType::Task {
+            check_tests::pass_checks(&store, own.id);
+        }
         verify_context_completion(&daemon, kind).await;
         assert!(
             store.dispatch_hold(own.id).unwrap().is_some(),

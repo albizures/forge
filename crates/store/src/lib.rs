@@ -18,6 +18,7 @@ use forge_app::{
 };
 use rusqlite::{Connection, ErrorCode, OptionalExtension, params};
 
+mod checks;
 mod record_workspaces;
 mod workspace_dispatch;
 mod workspaces;
@@ -87,7 +88,8 @@ impl SqliteProjectRepository {
                 id INTEGER PRIMARY KEY NOT NULL,
                 record_id INTEGER NOT NULL REFERENCES records(id),
                 created_at_millis INTEGER NOT NULL,
-                kind TEXT NOT NULL CHECK (kind IN ('created', 'body-edited', 'status-transition', 'relationship-added', 'relationship-removed')),
+                kind TEXT NOT NULL CHECK (kind IN ('created', 'body-edited', 'status-transition', 'relationship-added', 'relationship-removed', 'comment-added', 'comment-deleted', 'check-assessed')),
+                assessment_id INTEGER,
                 from_status TEXT,
                 to_status TEXT,
                 related_record_id INTEGER REFERENCES records(id),
@@ -202,6 +204,7 @@ impl SqliteProjectRepository {
             );",
             )
             .map_err(storage_error)?;
+        checks::schema(&connection)?;
         migrate_record_status_schema(&connection)?;
         migrate_record_type_schema(&connection)?;
         migrate_task_kind_schema(&connection)?;
@@ -648,6 +651,29 @@ impl ManagedWorktreeRepository for SqliteProjectRepository {
 }
 
 impl RecordRepository for SqliteProjectRepository {
+    fn list_task_checks(
+        &self,
+        task: u64,
+    ) -> Result<Vec<forge_app::checks::TaskCheck>, RegistrationError> {
+        self.list_checks(task)
+    }
+    fn show_task_check(
+        &self,
+        task: u64,
+        check: u64,
+        after: Option<u64>,
+        limit: u32,
+    ) -> Result<forge_app::checks::CheckPage, RegistrationError> {
+        self.show_check(task, check, after, limit)
+    }
+    fn assess_task_check(
+        &self,
+        task: u64,
+        check: u64,
+        input: &forge_app::checks::AssessmentInput,
+    ) -> Result<forge_app::checks::TaskCheck, RegistrationError> {
+        self.assess_check(task, check, input)
+    }
     fn records_in_workspace(
         &self,
         workspace: &str,
@@ -762,6 +788,9 @@ impl RecordRepository for SqliteProjectRepository {
             )
             .map_err(storage_error)?;
         let id = transaction.last_insert_rowid().cast_unsigned();
+        if record.record_type == RecordType::Task {
+            checks::provision(&transaction, id)?;
+        }
         for slug in &record.project_slugs {
             transaction
                 .execute(
@@ -805,6 +834,7 @@ impl RecordRepository for SqliteProjectRepository {
             )
             .map_err(storage_error)?;
         let task_id = transaction.last_insert_rowid().cast_unsigned();
+        checks::provision(&transaction, task_id)?;
         transaction
             .execute(
                 "INSERT INTO record_projects (record_id, project_slug) SELECT ?1, project_slug FROM record_projects WHERE record_id = ?2",
@@ -886,6 +916,7 @@ impl RecordRepository for SqliteProjectRepository {
             )
             .map_err(storage_error)?;
         let task_id = transaction.last_insert_rowid().cast_unsigned();
+        checks::provision(&transaction, task_id)?;
         for project_slug in project_slugs {
             transaction
                 .execute(
@@ -1168,6 +1199,13 @@ impl RecordRepository for SqliteProjectRepository {
                 "all child Records must be Done before completing a parent",
             ));
         }
+        let current = load_record(&transaction, id)?;
+        if current.status != RecordStatus::InProgress {
+            return record_or_transition_error(&transaction, id);
+        }
+        if current.record_type == RecordType::Task {
+            checks::gate(&transaction, id)?;
+        }
         let updated = transaction.execute("UPDATE records SET status = 'done', completion_resolution = ?1 WHERE id = ?2 AND status = 'in_progress'", params![completion_resolution, id.cast_signed()]).map_err(storage_error)?;
         if updated == 0 {
             return record_or_transition_error(&transaction, id);
@@ -1436,7 +1474,7 @@ impl RecordRepository for SqliteProjectRepository {
             .connection
             .lock()
             .map_err(|_| RegistrationError::new("storage", "store lock poisoned"))?;
-        connection.prepare("SELECT id, created_at_millis, kind, from_status, to_status, related_record_id, comment_id, relationship_kind FROM record_updates WHERE record_id = ?1 AND id > ?2 AND id <= ?3 ORDER BY id LIMIT ?4").map_err(storage_error)?.query_map(params![id.cast_signed(), after.cast_signed(), through.cast_signed(), limit], update_from_row).map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)
+        connection.prepare("SELECT id, created_at_millis, kind, from_status, to_status, related_record_id, comment_id, relationship_kind, assessment_id FROM record_updates WHERE record_id = ?1 AND id > ?2 AND id <= ?3 ORDER BY id LIMIT ?4").map_err(storage_error)?.query_map(params![id.cast_signed(), after.cast_signed(), through.cast_signed(), limit], update_from_row).map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)
     }
 
     fn list_record_updates(&self, id: u64) -> Result<Vec<RecordUpdate>, RegistrationError> {
@@ -1446,7 +1484,7 @@ impl RecordRepository for SqliteProjectRepository {
             .lock()
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
         load_record(&connection, id)?;
-        connection.prepare("SELECT id, created_at_millis, kind, from_status, to_status, related_record_id, comment_id, relationship_kind FROM record_updates WHERE record_id = ?1 ORDER BY created_at_millis DESC, id DESC")
+        connection.prepare("SELECT id, created_at_millis, kind, from_status, to_status, related_record_id, comment_id, relationship_kind, assessment_id FROM record_updates WHERE record_id = ?1 ORDER BY created_at_millis DESC, id DESC")
             .map_err(storage_error)?
             .query_map([id.cast_signed()], update_from_row)
             .map_err(storage_error)?
@@ -3203,6 +3241,10 @@ fn insert_update(
 ) -> Result<(), RegistrationError> {
     let (kind, from_status, to_status, related_record_id, comment_id, relationship_kind) =
         match kind {
+            RecordUpdateKind::CheckAssessed { assessment_id } => {
+                connection.execute("INSERT INTO record_updates (record_id, created_at_millis, kind, assessment_id) VALUES (?1, ?2, 'check-assessed', ?3)", params![record_id.cast_signed(), now_millis()?, assessment_id.cast_signed()]).map_err(storage_error)?;
+                return Ok(());
+            }
             RecordUpdateKind::Created => ("created", None, None, None, None, None),
             RecordUpdateKind::BodyEdited => ("body-edited", None, None, None, None, None),
             RecordUpdateKind::StatusTransition { from, to } => (
@@ -3284,6 +3326,9 @@ fn update_from_row_at(
         _ => Err(rusqlite::Error::InvalidQuery),
     };
     let kind = match kind.as_str() {
+        "check-assessed" => RecordUpdateKind::CheckAssessed {
+            assessment_id: row.get::<_, i64>(created_at_index + 7)?.cast_unsigned(),
+        },
         "created" => RecordUpdateKind::Created,
         "body-edited" => RecordUpdateKind::BodyEdited,
         "status-transition" => RecordUpdateKind::StatusTransition {
@@ -3786,6 +3831,9 @@ fn storage_error(error: rusqlite::Error) -> RegistrationError {
 
 #[cfg(test)]
 mod tests {
+    mod check_tests {
+        include!("check_tests.rs");
+    }
     include!("subscription_removal_tests.rs");
     use super::SqliteProjectRepository as Repository;
     use forge_app::{RegistrationError, WorkspaceRepository};
@@ -4107,6 +4155,7 @@ mod tests {
             "relationship-cycle"
         );
         store.start_record(prerequisite.id).unwrap();
+        check_tests::assess(&store, prerequisite.id, forge_app::checks::Verdict::Pass);
         store.done_record(prerequisite.id, None).unwrap();
         store.start_record(blocked.id).unwrap();
         assert_eq!(
@@ -4171,12 +4220,14 @@ mod tests {
             )
         );
         store.start_record(first.id).unwrap();
+        check_tests::assess(&store, first.id, forge_app::checks::Verdict::Pass);
         store.done_record(first.id, None).unwrap();
         assert_eq!(
             store.start_record(blocked.id).unwrap_err().code,
             "dependencies-not-done"
         );
         store.start_record(second.id).unwrap();
+        check_tests::assess(&store, second.id, forge_app::checks::Verdict::Pass);
         store.done_record(second.id, None).unwrap();
         assert_eq!(
             store.start_record(blocked.id).unwrap().status,
@@ -5433,6 +5484,7 @@ mod tests {
             vec![cleanup.clone()]
         );
         store.start_record(task.id).unwrap();
+        check_tests::assess(&store, task.id, forge_app::checks::Verdict::Pass);
         store.done_record(task.id, None).unwrap();
         assert_eq!(
             store.worktree_claim(task.id).unwrap(),
@@ -5871,6 +5923,7 @@ mod tests {
             "record-not-ready"
         );
         store.start_record(prerequisite.id).unwrap();
+        check_tests::assess(&store, prerequisite.id, forge_app::checks::Verdict::Pass);
         store.done_record(prerequisite.id, Some("done")).unwrap();
         store.hold_dispatch(task.id, "investigate").unwrap();
         assert_eq!(
@@ -6535,6 +6588,7 @@ mod tests {
         );
         assignment_add_comment(&store, "attempt", "cap-1", "comment-2", task.id, "finished")
             .unwrap();
+        check_tests::assess(&store, task.id, forge_app::checks::Verdict::Pass);
         assignment_complete_task(
             &store,
             "attempt",

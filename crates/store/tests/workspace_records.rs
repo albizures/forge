@@ -255,6 +255,21 @@ fn every_existing_record_kind_inherits_one_workspace_and_keeps_local_relationshi
     one.start_record(grilling.id).unwrap();
     one.done_record(grilling.id, Some("decided")).unwrap();
     one.start_record(task.id).unwrap();
+    for check in one.list_task_checks(task.id).unwrap() {
+        one.assess_task_check(
+            task.id,
+            check.id,
+            &forge_app::checks::AssessmentInput {
+                expected_version: check.version,
+                verdict: forge_app::checks::Verdict::Pass,
+                actor: "test operator".into(),
+                message: "Fixture deliverables verified".into(),
+                revision: None,
+                dirty: None,
+            },
+        )
+        .unwrap();
+    }
     one.done_record(task.id, Some("implemented")).unwrap();
     assert_eq!(one.list_records(&all()).unwrap().len(), 3);
     assert!(two.list_records(&all()).unwrap().is_empty());

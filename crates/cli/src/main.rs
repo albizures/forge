@@ -1,4 +1,5 @@
 mod agent_profiles;
+mod checks;
 mod project_selection;
 mod workspaces;
 
@@ -265,6 +266,11 @@ enum GrillingCommand {
 }
 #[derive(Debug, Subcommand)]
 enum TaskCommand {
+    /// Inspect and assess immutable Task completion criteria.
+    Check {
+        #[command(subcommand)]
+        command: checks::CheckCommand,
+    },
     /// Open a standalone Task with zero or one Project.
     Open(OpenTaskArgs),
     /// Open a Task beneath a Spec, inheriting the Spec's Project Scope.
@@ -759,6 +765,7 @@ async fn run(cli: Cli) -> i32 {
             GrillingCommand::Open(args) => open_grilling_under_wayfinder(args, cli.workspace).await,
         },
         Command::Task { command } => match command {
+            TaskCommand::Check { command } => checks::run(command, cli.workspace).await,
             TaskCommand::Open(args) => open_task(args, cli.workspace).await,
             TaskCommand::UnderSpec(args) => open_task_under_spec(args, cli.workspace).await,
             TaskCommand::UnderWayfinder(args) => {

@@ -54,6 +54,7 @@ async fn production_assignment_routes_authenticate_and_reject_spoofed_fields() {
     );
     let store = SqliteProjectRepository::open(&fixture.database_path).unwrap();
     store.start_record(neighbor).unwrap();
+    check_tests::pass_checks(&store, neighbor);
     store.done_record(neighbor, Some("satisfied")).unwrap();
     let owner = store.agent_assignment(&assignment).unwrap().record_id;
     let legacy_own = assignment_rpc(daemon.clone(), "agentDispatch.taskStart", serde_json::json!({"assignment_id":assignment,"capability_id":assignment,"correlation_id":"actual-secret","task_id":owner})).await;
@@ -427,6 +428,7 @@ fn authenticated_actions_require_acknowledgement_and_normal_lifecycle_validation
     );
     let store = SqliteProjectRepository::open(&fixture.database_path).unwrap();
     store.start_record(prerequisite).unwrap();
+    check_tests::pass_checks(&store, prerequisite);
     store.done_record(prerequisite, Some("satisfied")).unwrap();
     assert_eq!(
         session.start().unwrap().status,
@@ -456,6 +458,8 @@ fn authenticated_actions_require_acknowledgement_and_normal_lifecycle_validation
         session.done(Some("  "), None).unwrap_err().code,
         "invalid-resolution"
     );
+    assert_eq!(session.done(Some("implemented"), None).unwrap_err().code, "checks-not-passed");
+    check_tests::pass_checks(&store, owner);
     session.done(Some("implemented"), None).unwrap();
     assert!(session.start().is_err());
     std::fs::remove_dir_all(root).unwrap();

@@ -7,6 +7,7 @@ pub use assignment::*;
 mod workspaces;
 pub use workspaces::*;
 mod record_selection;
+pub use forge_app::checks::{Assessment, AssessmentInput, CheckPage, TaskCheck, Verdict};
 pub use record_selection::*;
 
 use forge_app::{
@@ -199,6 +200,21 @@ pub trait RecordApi {
         &self,
         request: SelectedRecordRequest<OpenSpecRequest>,
     ) -> RpcResult<RecordResponse>;
+    #[method(name = "taskCheckList")]
+    async fn task_check_list(
+        &self,
+        request: SelectedRecordRequest<RecordIdRequest>,
+    ) -> RpcResult<Vec<forge_app::checks::TaskCheck>>;
+    #[method(name = "taskCheckShow")]
+    async fn task_check_show(
+        &self,
+        request: SelectedRecordRequest<TaskCheckShowRequest>,
+    ) -> RpcResult<forge_app::checks::CheckPage>;
+    #[method(name = "taskCheckAssess")]
+    async fn task_check_assess(
+        &self,
+        request: SelectedRecordRequest<TaskCheckAssessRequest>,
+    ) -> RpcResult<forge_app::checks::TaskCheck>;
     #[method(name = "openTask")]
     async fn open_task(
         &self,
@@ -279,6 +295,20 @@ pub trait RecordApi {
         &self,
         request: SelectedRecordRequest<DeleteRecordCommentRequest>,
     ) -> RpcResult<()>;
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TaskCheckShowRequest {
+    pub task: u64,
+    pub check: u64,
+    pub after: Option<u64>,
+    pub limit: u32,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TaskCheckAssessRequest {
+    pub task: u64,
+    pub check: u64,
+    pub assessment: forge_app::checks::AssessmentInput,
 }
 
 /// Immutable daemon build facts reported through the management protocol.
@@ -946,11 +976,19 @@ pub struct RecordUpdateResponse {
     pub related_record_id: Option<u64>,
     pub relationship_kind: Option<String>,
     pub comment_id: Option<u64>,
+    pub assessment_id: Option<u64>,
 }
 impl From<RecordUpdate> for RecordUpdateResponse {
     fn from(update: RecordUpdate) -> Self {
+        let assessment_id = match &update.kind {
+            RecordUpdateKind::CheckAssessed { assessment_id } => Some(*assessment_id),
+            _ => None,
+        };
         let (kind, from_status, to_status, related_record_id, relationship_kind, comment_id) =
             match update.kind {
+                RecordUpdateKind::CheckAssessed { .. } => {
+                    ("check-assessed", None, None, None, None, None)
+                }
                 RecordUpdateKind::Created => ("created", None, None, None, None, None),
                 RecordUpdateKind::BodyEdited => ("body-edited", None, None, None, None, None),
                 RecordUpdateKind::StatusTransition { from, to } => (
@@ -1004,6 +1042,7 @@ impl From<RecordUpdate> for RecordUpdateResponse {
             related_record_id,
             relationship_kind,
             comment_id,
+            assessment_id,
         }
     }
 }
