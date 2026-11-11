@@ -107,13 +107,18 @@ forge task check assess 44 1 --verdict pass --expected-version 1 \
   --actor reviewer --message 'Deliverables verified' --workspace personal --json
 forge task check assess 44 1 --verdict fail --expected-version 2 \
   --actor reviewer --message-file explanation.md --workspace personal
+forge task check invalidate 44 1 --assessment 7 --expected-version 3 \
+  --actor reviewer --message 'Evidence withdrawn' --workspace personal --json
+forge task check show 44 1 --compare-revision aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  --workspace personal --json
 ```
 
 All Checks must have a latest `pass` Assessment before either `record done` or
 `assignment done` may complete a Task. Pending and failed criteria block completion;
 `checks-not-passed` reports every blocked Check ID. Existing lifecycle and child
 constraints still apply. Completion never fabricates an Assessment. Assessments
-are frozen once the Task is Done (`record-done`). Other Record Types are unchanged.
+and invalidations are frozen once the Task is Done (`record-done`). Other Record
+Types are unchanged.
 
 Each immutable Assessment retains its numeric ID, verdict (`pass` or `fail`),
 actor, explanation and timestamp. The latest Assessment alone is authoritative:
@@ -123,26 +128,54 @@ write returns `stale-version` without changing verdict, version, history or Upda
 Log. Each successful assessment atomically adds a minimal `check-assessed` Record
 Update referring to its Assessment ID, not a copy of the explanation.
 
+`invalidate` requires the observed Check version and `--assessment` ID. Only the
+latest, not-yet-invalidated Assessment may be invalidated (`invalid-transition`
+otherwise). It appends attributed invalidation metadata and activity, preserving
+the original Assessment payload. The Check becomes pending: an older pass never
+revives. A new Assessment establishes a new verdict. Invalidation, version increment,
+activity and minimal `check-invalidated` Record Update (referencing the Assessment)
+commit together. Failed or stale attempts leave no partial history or Update Log.
+Invalidation accepts the same explanation, actor and optional evidence inputs as
+assessment. Repeating it at the old version is stale; at the current version it is
+an invalid transition.
+
 Operators must supply a nonblank `--actor` and exactly one of `--message` or
 `--message-file`. Explanations must be nonblank; `--message-file -` reads stdin.
 Optional caller-reported `--revision` accepts a full 40-hex commit SHA and `--dirty
 true|false` distinguishes a known state from omitted/unknown state. Evidence is
 retained without fetching Git data, running commands or changing verdict authority.
+List/show accept explicit `--compare-revision` (a full SHA). Assessment and invalidation
+`comparison` is `matching`, `mismatching` or `unknown`, separate from `dirty`.
+Matching is case-insensitive SHA equality within the Task's Project context;
+missing evidence, omitted comparison or Projectless context yields unknown.
+There is no `--repository` option and no automatic evidence collection or verification.
+Comparisons are read-only and never invalidate Assessments or alter completion gates.
 
 List ordering follows immutable Check position, then ID. Show returns current
-Check state and an ascending Assessment history page (`--limit` 1–100, default 50).
-Use its `next_cursor` with `--after` for the next page; a null cursor ends history.
+Check state and an ascending activity page (`--limit` 1–100, default 50).
+`activities` contains stable numeric activity IDs and Assessment references, with
+invalidation metadata on invalidation activities; `assessments` contains the
+Assessment payloads for assessment activities in that page. Retained Assessment
+payloads also expose any appended `invalidation` metadata. Use its `next_cursor`
+with `--after` for the next page; cursors are activity IDs, not Assessment IDs.
+A null cursor ends history. Empty pages beyond the last ID have a null cursor.
 Current state may be newer than the history page. Histories never expand to an
 unbounded dump. All commands support text and `--json` output and the same Workspace
-selection/confinement as Record commands.
+selection/confinement as Record commands. Check JSON includes `current_verdict`
+(`pass`/`fail`, or null for pending), `version`, `project` and the retained
+`latest_assessment` (which may be invalidated). `record show` for Tasks embeds
+current `checks` summaries, never history; its text output labels pending Checks.
 
-Typed operator RPC additions are `record_taskCheckList` (`id`),
-`record_taskCheckShow` (`task`, `check`, `after`, `limit`) and
-`record_taskCheckAssess` (`task`, `check`, `assessment`). Each uses the flattened
+Typed operator RPC additions are `record_taskCheckList` (`task`, optional `compare_revision`),
+`record_taskCheckShow` (`task`, `check`, `after`, `limit`, optional `compare_revision`),
+`record_taskCheckAssess` (`task`, `check`, `assessment`) and
+`record_taskCheckInvalidate` (`task`, `check`, `invalidation`). Each uses the flattened
 Workspace/cwd selection envelope. Assessment input contains `expected_version`,
 `verdict`, `actor`, `message`, optional `revision` and optional `dirty`. Responses
-are respectively a Check array, `{check, assessments, next_cursor}`, and the updated
-Check (including its latest Assessment). Invalid attribution/evidence, wrong Record
+are respectively a Check array, `{check, assessments, activities, next_cursor}`, and
+an updated Check for either mutation (including its latest Assessment). Invalidation
+input replaces `verdict` with `assessment_id`, retaining the other Assessment input
+fields. Invalid attribution/evidence, wrong Record
 type or Check ownership, stale versions, frozen Tasks and completion blockers have
 distinct error categories. Assignment completion already shares these gates;
 capability-bound Check operations are a separate delivery.

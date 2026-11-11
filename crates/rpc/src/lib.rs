@@ -10,7 +10,9 @@ mod record_selection;
 pub use forge_app::check_templates::{
     CheckCriterion, CheckTemplate, TemplateChange, TemplatePage, TemplateReplacement,
 };
-pub use forge_app::checks::{Assessment, AssessmentInput, CheckPage, TaskCheck, Verdict};
+pub use forge_app::checks::{
+    Assessment, AssessmentInput, CheckPage, InvalidationInput, TaskCheck, Verdict,
+};
 pub use record_selection::*;
 
 use forge_app::{
@@ -216,7 +218,7 @@ pub trait RecordApi {
     #[method(name = "taskCheckList")]
     async fn task_check_list(
         &self,
-        request: SelectedRecordRequest<RecordIdRequest>,
+        request: SelectedRecordRequest<TaskCheckListRequest>,
     ) -> RpcResult<Vec<forge_app::checks::TaskCheck>>;
     #[method(name = "taskCheckShow")]
     async fn task_check_show(
@@ -228,6 +230,11 @@ pub trait RecordApi {
         &self,
         request: SelectedRecordRequest<TaskCheckAssessRequest>,
     ) -> RpcResult<forge_app::checks::TaskCheck>;
+    #[method(name = "taskCheckInvalidate")]
+    async fn task_check_invalidate(
+        &self,
+        request: SelectedRecordRequest<TaskCheckInvalidateRequest>,
+    ) -> RpcResult<TaskCheck>;
     #[method(name = "openTask")]
     async fn open_task(
         &self,
@@ -322,7 +329,19 @@ pub struct CheckTemplateSetRequest {
     pub replacement: TemplateReplacement,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TaskCheckListRequest {
+    pub task: u64,
+    pub compare_revision: Option<String>,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TaskCheckInvalidateRequest {
+    pub task: u64,
+    pub check: u64,
+    pub invalidation: InvalidationInput,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TaskCheckShowRequest {
+    pub compare_revision: Option<String>,
     pub task: u64,
     pub check: u64,
     pub after: Option<u64>,
@@ -1005,11 +1024,15 @@ pub struct RecordUpdateResponse {
 impl From<RecordUpdate> for RecordUpdateResponse {
     fn from(update: RecordUpdate) -> Self {
         let assessment_id = match &update.kind {
-            RecordUpdateKind::CheckAssessed { assessment_id } => Some(*assessment_id),
+            RecordUpdateKind::CheckAssessed { assessment_id }
+            | RecordUpdateKind::CheckInvalidated { assessment_id } => Some(*assessment_id),
             _ => None,
         };
         let (kind, from_status, to_status, related_record_id, relationship_kind, comment_id) =
             match update.kind {
+                RecordUpdateKind::CheckInvalidated { .. } => {
+                    ("check-invalidated", None, None, None, None, None)
+                }
                 RecordUpdateKind::CheckAssessed { .. } => {
                     ("check-assessed", None, None, None, None, None)
                 }
@@ -1135,6 +1158,8 @@ pub struct RecordRelationshipResponse {
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RecordResponse {
+    /// Current Check summaries on Task inspection; no history is embedded.
+    pub checks: Option<Vec<TaskCheck>>,
     pub workspace_id: String,
     pub id: u64,
     pub record_type: String,
@@ -1148,6 +1173,7 @@ pub struct RecordResponse {
 impl From<Record> for RecordResponse {
     fn from(record: Record) -> Self {
         Self {
+            checks: None,
             workspace_id: record.workspace_id,
             id: record.id,
             record_type: record_type_name(record.record_type),

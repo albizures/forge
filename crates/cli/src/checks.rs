@@ -12,10 +12,14 @@ pub enum CheckCommand {
     Show(ShowArgs),
     /// Append a pass/fail Assessment using the observed Check version.
     Assess(AssessArgs),
+    /// Invalidate the latest active Assessment, leaving the Check pending.
+    Invalidate(InvalidateArgs),
 }
 #[derive(Debug, Args)]
 pub struct ListArgs {
     task: u64,
+    #[arg(long)]
+    compare_revision: Option<String>,
     #[arg(long)]
     server_url: Option<String>,
     #[arg(long)]
@@ -24,6 +28,8 @@ pub struct ListArgs {
 #[derive(Debug, Args)]
 pub struct ShowArgs {
     task: u64,
+    #[arg(long)]
+    compare_revision: Option<String>,
     check: u64,
     #[arg(long)]
     after: Option<u64>,
@@ -59,12 +65,53 @@ pub struct AssessArgs {
     json: bool,
 }
 
+#[derive(Debug, Args)]
+#[command(group(clap::ArgGroup::new("message_source").required(true).args(["message", "message_file"])))]
+pub struct InvalidateArgs {
+    task: u64,
+    check: u64,
+    #[arg(long)]
+    assessment: u64,
+    #[arg(long)]
+    expected_version: u64,
+    #[arg(long)]
+    actor: String,
+    #[arg(long)]
+    message: Option<String>,
+    #[arg(long)]
+    message_file: Option<String>,
+    #[arg(long)]
+    revision: Option<String>,
+    #[arg(long, action = clap::ArgAction::Set)]
+    dirty: Option<bool>,
+    #[arg(long)]
+    server_url: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+fn explanation(message: Option<String>, file: Option<String>) -> Result<String, String> {
+    match (message, file) {
+        (Some(message), None) => Ok(message),
+        (None, Some(file)) if file == "-" => {
+            let mut message = String::new();
+            std::io::stdin()
+                .read_to_string(&mut message)
+                .map(|_| message)
+                .map_err(|e| e.to_string())
+        }
+        (None, Some(file)) => std::fs::read_to_string(file).map_err(|e| e.to_string()),
+        _ => Err("exactly one explanation source is required".into()),
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 pub async fn run(command: CheckCommand, workspace: Option<String>) -> i32 {
     let (url, json) = match &command {
         CheckCommand::List(a) => (&a.server_url, a.json),
         CheckCommand::Show(a) => (&a.server_url, a.json),
         CheckCommand::Assess(a) => (&a.server_url, a.json),
+        CheckCommand::Invalidate(a) => (&a.server_url, a.json),
     };
     let url = match super::resolve_managed_endpoint(url.as_deref()).await {
         Ok(url) => url,
@@ -75,7 +122,20 @@ pub async fn run(command: CheckCommand, workspace: Option<String>) -> i32 {
     };
     let endpoint = (url.as_str(), workspace.as_deref());
     let result = match command {
-        CheckCommand::List(a) => forge_cli::request_task_check_list(endpoint, a.task)
+        CheckCommand::Invalidate(a) => match explanation(a.message, a.message_file) {
+            Err(error) => Err(error),
+            Ok(message) => forge_cli::request_task_check_invalidate(endpoint, forge_rpc::TaskCheckInvalidateRequest {
+                task: a.task, check: a.check,
+                invalidation: forge_rpc::InvalidationInput {
+                    expected_version: a.expected_version, assessment_id: a.assessment,
+                    actor: a.actor, message, revision: a.revision, dirty: a.dirty,
+                },
+            }).await.map(|check| {
+                let text = render_check(&check);
+                (serde_json::to_value(check).expect("serializable Check"), text)
+            }),
+        },
+        CheckCommand::List(a) => forge_cli::request_task_check_list_compared(endpoint, a.task, a.compare_revision)
             .await
             .map(|checks| {
                 let text = checks
@@ -91,6 +151,7 @@ pub async fn run(command: CheckCommand, workspace: Option<String>) -> i32 {
         CheckCommand::Show(a) => forge_cli::request_task_check_show(
             endpoint,
             TaskCheckShowRequest {
+                compare_revision: a.compare_revision,
                 task: a.task,
                 check: a.check,
                 after: a.after,
@@ -100,16 +161,12 @@ pub async fn run(command: CheckCommand, workspace: Option<String>) -> i32 {
         .await
         .map(|page| {
             let mut text = render_check(&page.check);
-            for assessment in &page.assessments {
-                let _ = write!(
-                    text,
-                    "\nAssessment {} {:?} by {} at {}\n{}",
-                    assessment.id,
-                    assessment.verdict,
-                    assessment.actor,
-                    assessment.created_at_millis,
-                    assessment.message
-                );
+            for activity in &page.activities {
+                if let Some(i) = &activity.invalidation {
+                    let _ = write!(text, "\nActivity {}: Invalidation {} of Assessment {} by {} at {}\n{}\nrevision {:?}, dirty {:?}, comparison {:?}", activity.id, i.id, i.assessment_id, i.actor, i.created_at_millis, i.message, i.revision, i.dirty, i.comparison);
+                } else if let Some(a) = page.assessments.iter().find(|a| a.id == activity.assessment_id) {
+                    let _ = write!(text, "\nActivity {}: Assessment {} {:?} by {} at {}\n{}\nrevision {:?}, dirty {:?}, comparison {:?}", activity.id, a.id, a.verdict, a.actor, a.created_at_millis, a.message, a.revision, a.dirty, a.comparison);
+                }
             }
             if let Some(cursor) = page.next_cursor {
                 let _ = write!(text, "\nNext cursor: {cursor}");
@@ -120,18 +177,7 @@ pub async fn run(command: CheckCommand, workspace: Option<String>) -> i32 {
             )
         }),
         CheckCommand::Assess(a) => {
-            let message = match (a.message, a.message_file) {
-                (Some(message), None) => Ok(message),
-                (None, Some(file)) if file == "-" => {
-                    let mut message = String::new();
-                    std::io::stdin()
-                        .read_to_string(&mut message)
-                        .map(|_| message)
-                        .map_err(|e| e.to_string())
-                }
-                (None, Some(file)) => std::fs::read_to_string(file).map_err(|e| e.to_string()),
-                _ => Err("exactly one explanation source is required".into()),
-            };
+            let message = explanation(a.message, a.message_file);
             match message {
                 Err(error) => Err(error),
                 Ok(message) => forge_cli::request_task_check_assess(
@@ -180,13 +226,21 @@ pub async fn run(command: CheckCommand, workspace: Option<String>) -> i32 {
     }
 }
 fn render_check(check: &TaskCheck) -> String {
-    let verdict = match check.latest_assessment.as_ref().map(|a| a.verdict) {
+    let verdict = match check.verdict() {
         None => "pending",
         Some(Verdict::Pass) => "pass",
         Some(Verdict::Fail) => "fail",
     };
-    format!(
+    let mut text = format!(
         "Check {} {} [{}] version {}\n{}",
         check.id, check.name, verdict, check.version, check.description
-    )
+    );
+    if let Some(a) = &check.latest_assessment {
+        let _ = write!(
+            text,
+            "\nLatest Assessment {}: revision {:?}, dirty {:?}, comparison {:?}, invalidation {:?}",
+            a.id, a.revision, a.dirty, a.comparison, a.invalidation
+        );
+    }
+    text
 }

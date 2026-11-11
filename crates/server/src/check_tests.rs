@@ -51,7 +51,10 @@ async fn checks_round_trip_over_typed_rpc_and_preserve_workspace_bounds() {
         .await
         .unwrap();
     let check = client
-        .task_check_list(selected(RecordIdRequest { id: task.id }))
+        .task_check_list(selected(forge_rpc::TaskCheckListRequest {
+            task: task.id,
+            compare_revision: None,
+        }))
         .await
         .unwrap()
         .remove(0);
@@ -97,6 +100,7 @@ async fn checks_round_trip_over_typed_rpc_and_preserve_workspace_bounds() {
     assert!(stale.to_string().contains("stale-version"));
     let page = client
         .task_check_show(selected(TaskCheckShowRequest {
+            compare_revision: None,
             task: task.id,
             check: check.id,
             after: None,
@@ -106,8 +110,13 @@ async fn checks_round_trip_over_typed_rpc_and_preserve_workspace_bounds() {
         .unwrap();
     assert_eq!(page.assessments.len(), 1);
     assert_eq!(page.check, passed);
-    let wrong_workspace =
-        SelectedRecordRequest::selected("missing", RecordIdRequest { id: task.id });
+    let wrong_workspace = SelectedRecordRequest::selected(
+        "missing",
+        forge_rpc::TaskCheckListRequest {
+            task: task.id,
+            compare_revision: None,
+        },
+    );
     assert!(client.task_check_list(wrong_workspace).await.is_err());
     let updates = client
         .updates(selected(RecordIdRequest { id: task.id }))
@@ -117,6 +126,90 @@ async fn checks_round_trip_over_typed_rpc_and_preserve_workspace_bounds() {
         updates.updates[0].assessment_id,
         Some(page.assessments[0].id)
     );
+    let invalidate = forge_rpc::TaskCheckInvalidateRequest {
+        task: task.id,
+        check: check.id,
+        invalidation: forge_rpc::InvalidationInput {
+            expected_version: passed.version,
+            assessment_id: page.assessments[0].id,
+            actor: "operator".into(),
+            message: "Withdraw verdict".into(),
+            revision: None,
+            dirty: None,
+        },
+    };
+    assert!(
+        client
+            .task_check_invalidate(SelectedRecordRequest::selected(
+                "missing",
+                invalidate.clone()
+            ))
+            .await
+            .is_err()
+    );
+    let pending = client
+        .task_check_invalidate(selected(invalidate.clone()))
+        .await
+        .unwrap();
+    assert_eq!(pending.current_verdict, None);
+    assert_eq!(pending.version, 3);
+    let stale = client
+        .task_check_invalidate(selected(invalidate))
+        .await
+        .unwrap_err();
+    assert!(stale.to_string().contains("stale-version"));
+    let summary = client
+        .show(selected(RecordIdRequest { id: task.id }))
+        .await
+        .unwrap();
+    assert_eq!(
+        summary.checks.unwrap().as_slice(),
+        std::slice::from_ref(&pending)
+    );
+    let page = client
+        .task_check_show(selected(TaskCheckShowRequest {
+            task: task.id,
+            check: check.id,
+            after: None,
+            limit: 1,
+            compare_revision: Some("a".repeat(40)),
+        }))
+        .await
+        .unwrap();
+    let next = client
+        .task_check_show(selected(TaskCheckShowRequest {
+            task: task.id,
+            check: check.id,
+            after: page.next_cursor,
+            limit: 1,
+            compare_revision: None,
+        }))
+        .await
+        .unwrap();
+    assert_eq!(
+        next.activities[0].invalidation.as_ref().unwrap().message,
+        "Withdraw verdict"
+    );
+    assert!(
+        client
+            .done(selected(DoneRecordRequest {
+                id: task.id,
+                completion_resolution: None
+            }))
+            .await
+            .is_err()
+    );
+    let passed = client
+        .task_check_assess(selected(TaskCheckAssessRequest {
+            task: task.id,
+            check: check.id,
+            assessment: AssessmentInput {
+                expected_version: pending.version,
+                ..input.clone()
+            },
+        }))
+        .await
+        .unwrap();
     client
         .done(selected(DoneRecordRequest {
             id: task.id,

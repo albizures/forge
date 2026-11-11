@@ -178,6 +178,9 @@ pub enum RecordUpdateKind {
     CheckAssessed {
         assessment_id: u64,
     },
+    CheckInvalidated {
+        assessment_id: u64,
+    },
     StatusTransition {
         from: RecordStatus,
         to: RecordStatus,
@@ -500,6 +503,21 @@ pub trait RecordRepository: ProjectRepository {
         Err(RegistrationError::new(
             "checks-unavailable",
             "Task Checks are unavailable",
+        ))
+    }
+    /// Invalidate the latest active Assessment atomically with its Record Update.
+    ///
+    /// # Errors
+    /// Returns validation, scope, stale version, transition or storage errors.
+    fn invalidate_task_check(
+        &self,
+        _task: u64,
+        _check: u64,
+        _input: &checks::InvalidationInput,
+    ) -> Result<checks::TaskCheck, RegistrationError> {
+        Err(RegistrationError::new(
+            "checks-unavailable",
+            "Check invalidation is unavailable",
         ))
     }
     /// Returns a request-local repository confined to an existing Workspace.

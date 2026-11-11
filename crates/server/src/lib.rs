@@ -1274,10 +1274,13 @@ impl RecordApiServer for Daemon {
     }
     async fn task_check_list(
         &self,
-        request: forge_rpc::SelectedRecordRequest<RecordIdRequest>,
+        request: forge_rpc::SelectedRecordRequest<forge_rpc::TaskCheckListRequest>,
     ) -> RpcResult<Vec<forge_app::checks::TaskCheck>> {
         self.record_application(&request.selection, &mut [])?
-            .list_task_checks(request.record.id)
+            .compare_task_checks(
+                request.record.task,
+                request.record.compare_revision.as_deref(),
+            )
             .map_err(rpc_error)
     }
     async fn task_check_show(
@@ -1287,7 +1290,23 @@ impl RecordApiServer for Daemon {
         let application = self.record_application(&request.selection, &mut [])?;
         let r = request.record;
         application
-            .show_task_check(r.task, r.check, r.after, r.limit)
+            .compare_task_check(
+                r.task,
+                r.check,
+                r.after,
+                r.limit,
+                r.compare_revision.as_deref(),
+            )
+            .map_err(rpc_error)
+    }
+    async fn task_check_invalidate(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<forge_rpc::TaskCheckInvalidateRequest>,
+    ) -> RpcResult<forge_app::checks::TaskCheck> {
+        let application = self.record_application(&request.selection, &mut [])?;
+        let r = request.record;
+        application
+            .invalidate_task_check(r.task, r.check, &r.invalidation)
             .map_err(rpc_error)
     }
     async fn task_check_assess(
@@ -1504,10 +1523,17 @@ impl RecordApiServer for Daemon {
             selection,
             record: request,
         } = request;
-        self.record_application(&selection, &mut [])?
-            .show_record(request.id)
-            .map(Into::into)
-            .map_err(rpc_error)
+        let application = self.record_application(&selection, &mut [])?;
+        let record = application.show_record(request.id).map_err(rpc_error)?;
+        let mut response = RecordResponse::from(record);
+        if response.record_type == "task" {
+            response.checks = Some(
+                application
+                    .list_task_checks(request.id)
+                    .map_err(rpc_error)?,
+            );
+        }
+        Ok(response)
     }
 
     async fn list(

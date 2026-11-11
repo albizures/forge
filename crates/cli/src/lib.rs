@@ -1095,8 +1095,22 @@ pub async fn request_task_check_list(
     url: impl Into<RecordEndpoint>,
     task: u64,
 ) -> Result<Vec<forge_rpc::TaskCheck>, String> {
+    request_task_check_list_compared(url, task, None).await
+}
+/// List Checks with an optional caller-reported comparison revision.
+///
+/// # Errors
+/// Returns endpoint, scope or revision validation errors.
+pub async fn request_task_check_list_compared(
+    url: impl Into<RecordEndpoint>,
+    task: u64,
+    compare_revision: Option<String>,
+) -> Result<Vec<forge_rpc::TaskCheck>, String> {
     record_client(url)?
-        .task_check_list(RecordIdRequest { id: task })
+        .task_check_list(forge_rpc::TaskCheckListRequest {
+            task,
+            compare_revision,
+        })
         .await
         .map_err(record_error("task check list"))
 }
@@ -1125,6 +1139,20 @@ pub async fn request_task_check_assess(
         .task_check_assess(request)
         .await
         .map_err(record_error("task check assess"))
+}
+
+/// Invalidate the latest active Assessment at an observed version.
+///
+/// # Errors
+/// Returns endpoint, validation, scope, transition or stale version errors.
+pub async fn request_task_check_invalidate(
+    url: impl Into<RecordEndpoint>,
+    request: forge_rpc::TaskCheckInvalidateRequest,
+) -> Result<forge_rpc::TaskCheck, String> {
+    record_client(url)?
+        .task_check_invalidate(request)
+        .await
+        .map_err(record_error("task check invalidate"))
 }
 
 /// Requests a Record lifecycle operation through the daemon.
@@ -1287,10 +1315,26 @@ fn record_error(operation: &'static str) -> impl FnOnce(jsonrpsee::core::client:
 }
 #[must_use]
 pub fn render_record(record: &RecordResponse) -> String {
-    format!(
+    use std::fmt::Write as _;
+    let mut text = format!(
         "{} {} ({})\n\n{}",
         record.record_type, record.id, record.status, record.body
-    )
+    );
+    if let Some(checks) = &record.checks {
+        for check in checks {
+            let verdict = match check.verdict() {
+                Some(forge_rpc::Verdict::Pass) => "pass",
+                Some(forge_rpc::Verdict::Fail) => "fail",
+                None => "pending",
+            };
+            let _ = write!(
+                text,
+                "\nCheck {} {} [{verdict}] version {}",
+                check.id, check.name, check.version
+            );
+        }
+    }
+    text
 }
 #[must_use]
 pub fn render_record_list(records: &ListRecordsResponse) -> String {
@@ -1531,6 +1575,7 @@ mod tests {
     fn record_list_renders_records_in_response_order() {
         let records = ListRecordsResponse {
             records: vec![RecordResponse {
+                checks: None,
                 workspace_id: "test".into(),
                 id: 4,
                 record_type: "generic".into(),
@@ -1571,6 +1616,7 @@ mod tests {
     fn record_output_identifies_the_new_record() {
         assert_eq!(
             render_record_opened(&RecordResponse {
+                checks: None,
                 workspace_id: "test".into(),
                 id: 4,
                 record_type: "generic".into(),

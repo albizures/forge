@@ -89,7 +89,7 @@ impl SqliteProjectRepository {
                 id INTEGER PRIMARY KEY NOT NULL,
                 record_id INTEGER NOT NULL REFERENCES records(id),
                 created_at_millis INTEGER NOT NULL,
-                kind TEXT NOT NULL CHECK (kind IN ('created', 'body-edited', 'status-transition', 'relationship-added', 'relationship-removed', 'comment-added', 'comment-deleted', 'check-assessed')),
+                kind TEXT NOT NULL CHECK (kind IN ('created', 'body-edited', 'status-transition', 'relationship-added', 'relationship-removed', 'comment-added', 'comment-deleted', 'check-assessed', 'check-invalidated')),
                 assessment_id INTEGER,
                 from_status TEXT,
                 to_status TEXT,
@@ -667,6 +667,14 @@ impl RecordRepository for SqliteProjectRepository {
         input: &forge_app::check_templates::TemplateReplacement,
     ) -> Result<forge_app::check_templates::CheckTemplate, RegistrationError> {
         self.replace_template(project, input)
+    }
+    fn invalidate_task_check(
+        &self,
+        task: u64,
+        check: u64,
+        input: &forge_app::checks::InvalidationInput,
+    ) -> Result<forge_app::checks::TaskCheck, RegistrationError> {
+        self.invalidate_check(task, check, input)
     }
     fn list_task_checks(
         &self,
@@ -3279,6 +3287,10 @@ fn insert_update(
 ) -> Result<(), RegistrationError> {
     let (kind, from_status, to_status, related_record_id, comment_id, relationship_kind) =
         match kind {
+            RecordUpdateKind::CheckInvalidated { assessment_id } => {
+                connection.execute("INSERT INTO record_updates (record_id, created_at_millis, kind, assessment_id) VALUES (?1, ?2, 'check-invalidated', ?3)", params![record_id.cast_signed(), now_millis()?, assessment_id.cast_signed()]).map_err(storage_error)?;
+                return Ok(());
+            }
             RecordUpdateKind::CheckAssessed { assessment_id } => {
                 connection.execute("INSERT INTO record_updates (record_id, created_at_millis, kind, assessment_id) VALUES (?1, ?2, 'check-assessed', ?3)", params![record_id.cast_signed(), now_millis()?, assessment_id.cast_signed()]).map_err(storage_error)?;
                 return Ok(());
@@ -3364,6 +3376,9 @@ fn update_from_row_at(
         _ => Err(rusqlite::Error::InvalidQuery),
     };
     let kind = match kind.as_str() {
+        "check-invalidated" => RecordUpdateKind::CheckInvalidated {
+            assessment_id: row.get::<_, i64>(created_at_index + 7)?.cast_unsigned(),
+        },
         "check-assessed" => RecordUpdateKind::CheckAssessed {
             assessment_id: row.get::<_, i64>(created_at_index + 7)?.cast_unsigned(),
         },
@@ -3874,6 +3889,9 @@ mod tests {
     }
     mod check_template_tests {
         include!("check_template_tests.rs");
+    }
+    mod check_invalidation_tests {
+        include!("check_invalidation_tests.rs");
     }
     include!("subscription_removal_tests.rs");
     use super::SqliteProjectRepository as Repository;
