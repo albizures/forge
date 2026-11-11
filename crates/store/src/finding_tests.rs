@@ -423,10 +423,18 @@ fn findings_survive_restart_and_application_compares_evidence_without_git() {
             .resolve_task_finding(task.id, finding.id, &resolve(2))
             .is_err()
     );
-    assert!(other.mutate_task_finding(task.id, finding.id, &forge_app::findings::FindingMutationInput {
-        change: forge_app::findings::FindingMutation::Note,
-        explanation: resolve(2),
-    }).is_err());
+    assert!(
+        other
+            .mutate_task_finding(
+                task.id,
+                finding.id,
+                &forge_app::findings::FindingMutationInput {
+                    change: forge_app::findings::FindingMutation::Note,
+                    explanation: resolve(2),
+                }
+            )
+            .is_err()
+    );
     assert_eq!(repository.list_record_updates(task.id).unwrap(), before);
     drop(other);
     drop(repository);
