@@ -1,5 +1,6 @@
 mod agent_profiles;
 mod assignment_check_commands;
+mod assignment_finding_commands;
 mod check_templates;
 mod checks;
 mod findings;
@@ -292,6 +293,11 @@ enum TaskCommand {
 }
 #[derive(Debug, Subcommand)]
 enum AssignmentCommand {
+    /// Inspect and review only the assigned Task's Findings.
+    Finding {
+        #[command(subcommand)]
+        command: assignment_finding_commands::Command,
+    },
     /// Inspect, assess or invalidate only the assigned Task's Checks.
     Check {
         #[command(subcommand)]
@@ -1030,6 +1036,7 @@ async fn assignment(command: AssignmentCommand) -> i32 {
     let history = matches!(&command, AssignmentCommand::History(_));
     match command {
         AssignmentCommand::Check { command } => assignment_check_commands::run(command).await,
+        AssignmentCommand::Finding { command } => assignment_finding_commands::run(command).await,
         AssignmentCommand::Done(args) => {
             let human = args.confirmation.zip(args.agreed_outcome);
             render_assignment_result(

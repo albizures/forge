@@ -2353,6 +2353,8 @@ mod tests {
         include!("check_tests.rs");
     }
     include!("assignment_actions_tests.rs");
+    include!("assignment_finding_tests.rs");
+    include!("assignment_finding_security_tests.rs");
     include!("assignment_context_tests.rs");
     include!("assignment_redaction_tests.rs");
     use std::{

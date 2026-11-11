@@ -180,7 +180,7 @@ fields. Invalid attribution/evidence, wrong Record
 type or Check ownership, stale versions, frozen Tasks and completion blockers have
 distinct error categories. Assignment completion shares these gates.
 
-## Task Findings (operator review cycles)
+## Task Findings (review cycles)
 
 Findings retain review issues independently of Check verdicts. Passing a Check
 never closes a Finding. Minor Findings default nonblocking; major and critical
@@ -270,8 +270,61 @@ Typed operator RPCs (flattened Workspace/cwd envelope):
   - `{ "action": "resolve" }`, `{ "action": "dismiss" }`, `{ "action": "reopen" }`, `{ "action": "note" }`
   - `{ "action": "amend", "severity": "minor", "blocking": false }` (at least one field)
 
-Capability-bound Finding commands are separate follow-up delivery. Operator
-review does not extend capability lifetime or introduce execution orchestration.
+### Capability-bound Assignment Findings
+
+```sh
+forge assignment finding list --after 0 --limit 50 --json
+forge assignment finding show 2 --limit 50 --compare-revision aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --json
+forge assignment finding raise --severity major --check 1 --assessment 7 --message 'Validation missing' --dirty false --json
+forge assignment finding respond 2 --response fixed --expected-version 1 --message-file - --json
+forge assignment finding resolve 2 --expected-version 2 --message-file verification.md --json
+forge assignment finding reopen 2 --expected-version 3 --message 'Still reproducible'
+forge assignment finding dismiss 2 --expected-version 4 --message 'Not applicable'
+forge assignment finding amend 2 --severity minor --blocking false --expected-version 5 --message 'Impact clarified'
+forge assignment finding note 2 --expected-version 6 --message-file correction.md
+```
+
+All nine commands implicitly target only the authenticated Assignment's Task.
+They use protected Assignment delivery (`FORGE_ASSIGNMENT_ID`,
+`FORGE_ASSIGNMENT_DAEMON_URL`, `FORGE_ASSIGNMENT_CAPABILITY_SECRET_FILE`), never
+operator Workspace selection or endpoint overrides. No Task selector or `--actor`
+is accepted. Findings and origin Check/Assessment IDs from other Tasks or
+Workspaces are unavailable, even when a related Record is readable through
+Assignment context. Unknown and foreign IDs have the same non-disclosing errors.
+Grilling Assignments cannot operate on Task Findings.
+
+Every operation revalidates delivery and durable Assignment validity. Closed
+Assignments and revoked/replaced secret files fail `assignment-capability-denied`.
+Permitted post-Done review still requires valid existing authorization; it never
+revives capabilities or reverses Task completion. There is no template mutation,
+identity registration, or execution orchestration through these commands.
+
+The same explanation, evidence, observed-version, lifecycle, pagination and atomic
+Record Update rules apply as for operators. Mutations require exactly one of
+`--message` and `--message-file` (`-` reads stdin). Text and JSON expose current
+state and bounded history. Each activity retains authenticated Assignment ID as
+`actor` and a separate `assignment_id` linking immutable profile/execution
+provenance. Operator activities keep `assignment_id: null`, even if actor text
+matches an Assignment ID. Neither route requires distinct reviewer identities.
+Both completion routes use the same transactional Check/Finding gates.
+
+Typed RPC requests contain `assignmentId` and `secret` (no Debug implementation),
+with no Workspace/cwd envelope or caller Task/actor override:
+- `assignment_findingList`: optional `after`, required `limit`, optional
+  `compareRevision` → Finding list page.
+- `assignment_findingShow`: `finding`, optional `after`, required `limit`, optional
+  `compareRevision` → Finding/activity page.
+- `assignment_findingRaise`: `severity`, optional `blocking`, `checkId`,
+  `assessmentId`, required `message`, optional `revision`, `dirty` → Finding.
+- `assignment_findingMutate`: `finding`, mandatory `expectedVersion`, `message`,
+  optional `revision`, `dirty`, and `change` → Finding. `change` uses the same
+  typed action objects listed above; all six existing-Finding CLI actions use
+  this method (including resolve).
+
+Unknown request fields, including Task/actor overrides inside `change`, are
+rejected as invalid RPC parameters. Valid requests retain stable domain errors
+listed above; the CLI reports allowlisted categories without echoing server
+messages, secrets, or delivery endpoints.
 
 ## Capability-bound Assignment Checks
 

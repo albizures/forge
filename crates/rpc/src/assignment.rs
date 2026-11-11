@@ -201,8 +201,106 @@ pub struct AssignmentCheckInvalidateRequest {
     pub dirty: Option<bool>,
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssignmentFindingListRequest {
+    pub assignment_id: String,
+    pub secret: String,
+    pub after: Option<u64>,
+    pub limit: u32,
+    pub compare_revision: Option<String>,
+}
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssignmentFindingShowRequest {
+    pub assignment_id: String,
+    pub secret: String,
+    pub finding: u64,
+    pub after: Option<u64>,
+    pub limit: u32,
+    pub compare_revision: Option<String>,
+}
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssignmentFindingRaiseRequest {
+    pub assignment_id: String,
+    pub secret: String,
+    pub severity: crate::Severity,
+    pub blocking: Option<bool>,
+    pub check_id: Option<u64>,
+    pub assessment_id: Option<u64>,
+    pub message: String,
+    pub revision: Option<String>,
+    pub dirty: Option<bool>,
+}
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssignmentFindingMutationRequest {
+    pub assignment_id: String,
+    pub secret: String,
+    pub finding: u64,
+    pub expected_version: u64,
+    #[serde(deserialize_with = "strict_finding_change")]
+    pub change: crate::FindingMutation,
+    pub message: String,
+    pub revision: Option<String>,
+    pub dirty: Option<bool>,
+}
+
+// Serde's internally tagged unit variants otherwise ignore extra fields, even with
+// deny_unknown_fields. Keep capability payloads strict for every action shape.
+fn strict_finding_change<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<crate::FindingMutation, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(tag = "action", rename_all = "lowercase", deny_unknown_fields)]
+    enum Change {
+        Respond {
+            response: crate::FindingResponse,
+        },
+        Resolve {},
+        Dismiss {},
+        Reopen {},
+        Amend {
+            severity: Option<crate::Severity>,
+            blocking: Option<bool>,
+        },
+        Note {},
+    }
+    Ok(match Change::deserialize(deserializer)? {
+        Change::Respond { response } => crate::FindingMutation::Respond { response },
+        Change::Resolve {} => crate::FindingMutation::Resolve,
+        Change::Dismiss {} => crate::FindingMutation::Dismiss,
+        Change::Reopen {} => crate::FindingMutation::Reopen,
+        Change::Amend { severity, blocking } => {
+            crate::FindingMutation::Amend { severity, blocking }
+        }
+        Change::Note {} => crate::FindingMutation::Note,
+    })
+}
+
 #[rpc(client, server, namespace = "assignment")]
 pub trait AssignmentApi {
+    #[method(name = "findingList")]
+    async fn finding_list(
+        &self,
+        request: AssignmentFindingListRequest,
+    ) -> RpcResult<crate::FindingList>;
+    #[method(name = "findingShow")]
+    async fn finding_show(
+        &self,
+        request: AssignmentFindingShowRequest,
+    ) -> RpcResult<crate::FindingPage>;
+    #[method(name = "findingRaise")]
+    async fn finding_raise(
+        &self,
+        request: AssignmentFindingRaiseRequest,
+    ) -> RpcResult<crate::Finding>;
+    #[method(name = "findingMutate")]
+    async fn finding_mutate(
+        &self,
+        request: AssignmentFindingMutationRequest,
+    ) -> RpcResult<crate::Finding>;
     #[method(name = "checkList")]
     async fn check_list(
         &self,

@@ -152,7 +152,7 @@ async fn mutate(
     .await
     .map(value)
 }
-fn render(f: &Finding) -> String {
+pub(super) fn render(f: &Finding) -> String {
     format!(
         "Finding {} [{:?}] {:?}, blocking {}, version {}\nCheck {:?}, Assessment {:?}\nRaised by {} at {} (Assignment {:?}): {}\nrevision {:?}, dirty {:?}, comparison {:?}\nLatest Activity {} {:?} by {} at {} (Assignment {:?}): {}\nrevision {:?}, dirty {:?}, comparison {:?}\nresponse {:?}, amendment {:?}",
         f.id,
@@ -182,6 +182,42 @@ fn render(f: &Finding) -> String {
         f.latest_activity.amendment
     )
 }
+pub(super) fn render_list(page: &forge_rpc::FindingList) -> String {
+    let mut text = page
+        .findings
+        .iter()
+        .map(render)
+        .collect::<Vec<_>>()
+        .join("\n");
+    if let Some(cursor) = page.next_cursor {
+        let _ = write!(text, "\nNext cursor: {cursor}");
+    }
+    text
+}
+pub(super) fn render_page(page: &forge_rpc::FindingPage) -> String {
+    let mut text = render(&page.finding);
+    for activity in &page.activities {
+        let _ = write!(
+            text,
+            "\nActivity {} {:?} by {} at {} (Assignment {:?}): {}\nrevision {:?}, dirty {:?}, comparison {:?}\nresponse {:?}, amendment {:?}",
+            activity.id,
+            activity.action,
+            activity.actor,
+            activity.created_at_millis,
+            activity.assignment_id,
+            activity.message,
+            activity.revision,
+            activity.dirty,
+            activity.comparison,
+            activity.response,
+            activity.amendment
+        );
+    }
+    if let Some(cursor) = page.next_cursor {
+        let _ = write!(text, "\nNext cursor: {cursor}");
+    }
+    text
+}
 fn value(f: Finding) -> (serde_json::Value, String) {
     let text = render(&f);
     (serde_json::to_value(f).expect("serializable Finding"), text)
@@ -209,30 +245,117 @@ pub async fn run(command: FindingCommand, workspace: Option<String>) -> i32 {
     };
     let endpoint = (url.as_str(), workspace.as_deref());
     let result = match command {
-        FindingCommand::List(a) => forge_cli::request_task_finding_list(endpoint, TaskFindingListRequest { task: a.task, after: a.page.after, limit: a.page.limit, compare_revision: a.page.compare_revision }).await.map(|page| {
-            let mut text = page.findings.iter().map(render).collect::<Vec<_>>().join("\n");
-            if let Some(cursor) = page.next_cursor { let _ = write!(text, "\nNext cursor: {cursor}"); }
-            (serde_json::to_value(page).expect("serializable Findings"), text)
+        FindingCommand::List(a) => forge_cli::request_task_finding_list(
+            endpoint,
+            TaskFindingListRequest {
+                task: a.task,
+                after: a.page.after,
+                limit: a.page.limit,
+                compare_revision: a.page.compare_revision,
+            },
+        )
+        .await
+        .map(|page| {
+            let text = render_list(&page);
+            (
+                serde_json::to_value(page).expect("serializable Findings"),
+                text,
+            )
         }),
-        FindingCommand::Show(a) => forge_cli::request_task_finding_show(endpoint, TaskFindingShowRequest { task: a.task, finding: a.finding, after: a.page.after, limit: a.page.limit, compare_revision: a.page.compare_revision }).await.map(|page| {
-            let mut text = render(&page.finding);
-            for activity in &page.activities { let _ = write!(text, "\nActivity {} {:?} by {} at {} (Assignment {:?}): {}\nrevision {:?}, dirty {:?}, comparison {:?}\nresponse {:?}, amendment {:?}", activity.id, activity.action, activity.actor, activity.created_at_millis, activity.assignment_id, activity.message, activity.revision, activity.dirty, activity.comparison, activity.response, activity.amendment); }
-            if let Some(cursor) = page.next_cursor { let _ = write!(text, "\nNext cursor: {cursor}"); }
-            (serde_json::to_value(page).expect("serializable Finding page"), text)
+        FindingCommand::Show(a) => forge_cli::request_task_finding_show(
+            endpoint,
+            TaskFindingShowRequest {
+                task: a.task,
+                finding: a.finding,
+                after: a.page.after,
+                limit: a.page.limit,
+                compare_revision: a.page.compare_revision,
+            },
+        )
+        .await
+        .map(|page| {
+            let text = render_page(&page);
+            (
+                serde_json::to_value(page).expect("serializable Finding page"),
+                text,
+            )
         }),
-        FindingCommand::Raise(a) => match super::checks::explanation(a.explanation.message, a.explanation.message_file) {
-            Err(error) => Err(error),
-            Ok(message) => forge_cli::request_task_finding_raise(endpoint, TaskFindingRaiseRequest { task: a.task, finding: FindingRaiseInput { severity: match a.severity.as_str() { "minor" => Severity::Minor, "major" => Severity::Major, _ => Severity::Critical }, blocking: a.blocking, check_id: a.check, assessment_id: a.assessment, actor: a.explanation.actor, message, revision: a.explanation.revision, dirty: a.explanation.dirty } }).await.map(value),
-        },
-        FindingCommand::Respond(a) => mutate(endpoint, a.common, FindingMutation::Respond { response: if a.response == "fixed" { FindingResponse::Fixed } else { FindingResponse::Rejected } }).await,
+        FindingCommand::Raise(a) => {
+            match super::checks::explanation(a.explanation.message, a.explanation.message_file) {
+                Err(error) => Err(error),
+                Ok(message) => forge_cli::request_task_finding_raise(
+                    endpoint,
+                    TaskFindingRaiseRequest {
+                        task: a.task,
+                        finding: FindingRaiseInput {
+                            severity: match a.severity.as_str() {
+                                "minor" => Severity::Minor,
+                                "major" => Severity::Major,
+                                _ => Severity::Critical,
+                            },
+                            blocking: a.blocking,
+                            check_id: a.check,
+                            assessment_id: a.assessment,
+                            actor: a.explanation.actor,
+                            message,
+                            revision: a.explanation.revision,
+                            dirty: a.explanation.dirty,
+                        },
+                    },
+                )
+                .await
+                .map(value),
+            }
+        }
+        FindingCommand::Respond(a) => {
+            mutate(
+                endpoint,
+                a.common,
+                FindingMutation::Respond {
+                    response: if a.response == "fixed" {
+                        FindingResponse::Fixed
+                    } else {
+                        FindingResponse::Rejected
+                    },
+                },
+            )
+            .await
+        }
         FindingCommand::Dismiss(a) => mutate(endpoint, a, FindingMutation::Dismiss).await,
         FindingCommand::Reopen(a) => mutate(endpoint, a, FindingMutation::Reopen).await,
         FindingCommand::Note(a) => mutate(endpoint, a, FindingMutation::Note).await,
-        FindingCommand::Amend(a) => mutate(endpoint, a.common, FindingMutation::Amend { severity: a.severity.as_deref().map(severity), blocking: a.blocking }).await,
-        FindingCommand::Resolve(a) => match super::checks::explanation(a.explanation.message, a.explanation.message_file) {
-            Err(error) => Err(error),
-            Ok(message) => forge_cli::request_task_finding_resolve(endpoint, TaskFindingResolveRequest { task: a.task, finding: a.finding, resolution: FindingResolveInput { expected_version: a.expected_version, actor: a.explanation.actor, message, revision: a.explanation.revision, dirty: a.explanation.dirty } }).await.map(value),
-        },
+        FindingCommand::Amend(a) => {
+            mutate(
+                endpoint,
+                a.common,
+                FindingMutation::Amend {
+                    severity: a.severity.as_deref().map(severity),
+                    blocking: a.blocking,
+                },
+            )
+            .await
+        }
+        FindingCommand::Resolve(a) => {
+            match super::checks::explanation(a.explanation.message, a.explanation.message_file) {
+                Err(error) => Err(error),
+                Ok(message) => forge_cli::request_task_finding_resolve(
+                    endpoint,
+                    TaskFindingResolveRequest {
+                        task: a.task,
+                        finding: a.finding,
+                        resolution: FindingResolveInput {
+                            expected_version: a.expected_version,
+                            actor: a.explanation.actor,
+                            message,
+                            revision: a.explanation.revision,
+                            dirty: a.explanation.dirty,
+                        },
+                    },
+                )
+                .await
+                .map(value),
+            }
+        }
     };
     match result {
         Ok((value, text)) => {

@@ -684,7 +684,7 @@ impl RecordRepository for SqliteProjectRepository {
         task: u64,
         input: &forge_app::findings::FindingRaiseInput,
     ) -> Result<forge_app::findings::Finding, RegistrationError> {
-        self.raise_finding(task, input)
+        self.raise_finding(task, input, None)
     }
     fn resolve_task_finding(
         &self,
@@ -700,7 +700,24 @@ impl RecordRepository for SqliteProjectRepository {
         finding: u64,
         input: &forge_app::findings::FindingMutationInput,
     ) -> Result<forge_app::findings::Finding, RegistrationError> {
-        self.mutate_finding(task, finding, input)
+        self.mutate_finding(task, finding, input, None)
+    }
+    fn raise_assignment_finding(
+        &self,
+        task: u64,
+        input: &forge_app::findings::FindingRaiseInput,
+        assignment: &str,
+    ) -> Result<forge_app::findings::Finding, RegistrationError> {
+        self.raise_finding(task, input, Some(assignment))
+    }
+    fn mutate_assignment_finding(
+        &self,
+        task: u64,
+        finding: u64,
+        input: &forge_app::findings::FindingMutationInput,
+        assignment: &str,
+    ) -> Result<forge_app::findings::Finding, RegistrationError> {
+        self.mutate_finding(task, finding, input, Some(assignment))
     }
     fn list_task_findings(
         &self,

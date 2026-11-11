@@ -127,8 +127,9 @@ fn append(
     message: &str,
     revision: Option<&str>,
     dirty: Option<bool>,
+    assignment: Option<&str>,
 ) -> Result<u64, RegistrationError> {
-    c.execute("INSERT INTO finding_activities (finding_id, action, actor, message, revision, dirty, created_at_millis) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)", params![finding.cast_signed(), action, actor, message, revision, dirty, now_millis()?]).map_err(storage_error)?;
+    c.execute("INSERT INTO finding_activities (finding_id, action, actor, message, revision, dirty, created_at_millis, assignment_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)", params![finding.cast_signed(), action, actor, message, revision, dirty, now_millis()?, assignment]).map_err(storage_error)?;
     let activity_id = c.last_insert_rowid().cast_unsigned();
     insert_update(c, task, RecordUpdateKind::FindingActivity { activity_id })?;
     Ok(activity_id)
@@ -141,6 +142,7 @@ impl SqliteProjectRepository {
         &self,
         task: u64,
         input: &FindingRaiseInput,
+        assignment: Option<&str>,
     ) -> Result<Finding, RegistrationError> {
         let mut connection = self
             .connection
@@ -200,6 +202,7 @@ impl SqliteProjectRepository {
             &input.message,
             input.revision.as_deref(),
             input.dirty,
+            assignment,
         )?;
         let finding = load(&tx, task, id, record.project_slugs.into_iter().next())?;
         tx.commit().map_err(storage_error)?;
@@ -218,6 +221,7 @@ impl SqliteProjectRepository {
                 change: FindingMutation::Resolve,
                 explanation: input.clone(),
             },
+            None,
         )
     }
     pub(super) fn mutate_finding(
@@ -225,6 +229,7 @@ impl SqliteProjectRepository {
         task: u64,
         id: u64,
         mutation: &FindingMutationInput,
+        assignment: Option<&str>,
     ) -> Result<Finding, RegistrationError> {
         let mut connection = self
             .connection
@@ -303,6 +308,7 @@ impl SqliteProjectRepository {
             &input.message,
             input.revision.as_deref(),
             input.dirty,
+            assignment,
         )?;
         let response = response.map(|r| match r {
             FindingResponse::Fixed => "fixed",

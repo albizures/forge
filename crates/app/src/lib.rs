@@ -509,6 +509,35 @@ pub trait RecordRepository: ProjectRepository {
             "Findings are not supported",
         ))
     }
+    /// Raise a Finding with authenticated Assignment provenance.
+    /// # Errors
+    /// Returns unsupported-operation or normal Finding validation errors.
+    fn raise_assignment_finding(
+        &self,
+        _task: u64,
+        _input: &findings::FindingRaiseInput,
+        _assignment: &str,
+    ) -> Result<findings::Finding, RegistrationError> {
+        Err(RegistrationError::new(
+            "unsupported",
+            "Assignment Findings are not supported",
+        ))
+    }
+    /// Append a review action with authenticated Assignment provenance.
+    /// # Errors
+    /// Returns unsupported-operation or normal Finding validation errors.
+    fn mutate_assignment_finding(
+        &self,
+        _task: u64,
+        _finding: u64,
+        _input: &findings::FindingMutationInput,
+        _assignment: &str,
+    ) -> Result<findings::Finding, RegistrationError> {
+        Err(RegistrationError::new(
+            "unsupported",
+            "Assignment Findings are not supported",
+        ))
+    }
     /// List a bounded page ordered by Finding ID.
     /// # Errors
     /// Returns scope, type, pagination or storage errors.

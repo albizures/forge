@@ -38,6 +38,59 @@ impl Daemon {
 
 #[async_trait]
 impl AssignmentApiServer for Daemon {
+    async fn finding_list(
+        &self,
+        r: forge_rpc::AssignmentFindingListRequest,
+    ) -> RpcResult<forge_rpc::FindingList> {
+        self.assignment_session(&r.assignment_id, &r.secret)?
+            .finding_list(r.after, r.limit, r.compare_revision.as_deref())
+            .map_err(rpc_error)
+    }
+    async fn finding_show(
+        &self,
+        r: forge_rpc::AssignmentFindingShowRequest,
+    ) -> RpcResult<forge_rpc::FindingPage> {
+        self.assignment_session(&r.assignment_id, &r.secret)?
+            .finding_show(r.finding, r.after, r.limit, r.compare_revision.as_deref())
+            .map_err(rpc_error)
+    }
+    async fn finding_raise(
+        &self,
+        r: forge_rpc::AssignmentFindingRaiseRequest,
+    ) -> RpcResult<forge_rpc::Finding> {
+        self.assignment_session(&r.assignment_id, &r.secret)?
+            .finding_raise(&forge_rpc::FindingRaiseInput {
+                severity: r.severity,
+                blocking: r.blocking,
+                check_id: r.check_id,
+                assessment_id: r.assessment_id,
+                actor: String::new(),
+                message: r.message,
+                revision: r.revision,
+                dirty: r.dirty,
+            })
+            .map_err(rpc_error)
+    }
+    async fn finding_mutate(
+        &self,
+        r: forge_rpc::AssignmentFindingMutationRequest,
+    ) -> RpcResult<forge_rpc::Finding> {
+        self.assignment_session(&r.assignment_id, &r.secret)?
+            .finding_mutate(
+                r.finding,
+                &forge_rpc::FindingMutationInput {
+                    change: r.change,
+                    explanation: forge_rpc::FindingResolveInput {
+                        expected_version: r.expected_version,
+                        actor: String::new(),
+                        message: r.message,
+                        revision: r.revision,
+                        dirty: r.dirty,
+                    },
+                },
+            )
+            .map_err(rpc_error)
+    }
     async fn check_list(
         &self,
         r: forge_rpc::AssignmentCheckListRequest,

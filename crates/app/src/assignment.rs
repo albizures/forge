@@ -160,6 +160,77 @@ fn unhex(text: &str) -> Result<Vec<u8>, RegistrationError> {
 }
 
 impl AuthenticatedAssignment<'_> {
+    /// Read a bounded page of the assigned Task's Findings.
+    /// # Errors
+    /// Rejects invalid delivery, non-Tasks, malformed revisions and invalid pagination.
+    pub fn finding_list(
+        &self,
+        after: Option<u64>,
+        limit: u32,
+        revision: Option<&str>,
+    ) -> Result<crate::findings::FindingList, RegistrationError> {
+        let assignment = self.authenticate()?;
+        self.record(assignment.record_id)?;
+        self.application
+            .list_task_findings(assignment.record_id, after, limit, revision)
+    }
+
+    /// Read one own-Task Finding and bounded activity history.
+    /// # Errors
+    /// Rejects invalid delivery, foreign Findings and invalid evidence/page arguments.
+    pub fn finding_show(
+        &self,
+        finding: u64,
+        after: Option<u64>,
+        limit: u32,
+        revision: Option<&str>,
+    ) -> Result<crate::findings::FindingPage, RegistrationError> {
+        let assignment = self.authenticate()?;
+        self.record(assignment.record_id)?;
+        self.application
+            .show_task_finding(assignment.record_id, finding, after, limit, revision)
+    }
+
+    /// Raise an own-Task Finding, replacing caller attribution with authenticated identity.
+    /// # Errors
+    /// Returns authorization, origin, validation or Done-freeze errors.
+    pub fn finding_raise(
+        &self,
+        input: &crate::findings::FindingRaiseInput,
+    ) -> Result<crate::findings::Finding, RegistrationError> {
+        let assignment = self.authenticate()?;
+        self.record(assignment.record_id)?;
+        let mut input = input.clone();
+        input.actor.clone_from(&assignment.id);
+        input.validate()?;
+        self.application.records.raise_assignment_finding(
+            assignment.record_id,
+            &input,
+            &assignment.id,
+        )
+    }
+
+    /// Append an own-Task review action with authenticated attribution and provenance.
+    /// # Errors
+    /// Returns authorization, version, transition, validation or Done-freeze errors.
+    pub fn finding_mutate(
+        &self,
+        finding: u64,
+        input: &crate::findings::FindingMutationInput,
+    ) -> Result<crate::findings::Finding, RegistrationError> {
+        let assignment = self.authenticate()?;
+        self.record(assignment.record_id)?;
+        let mut input = input.clone();
+        input.explanation.actor.clone_from(&assignment.id);
+        input.validate()?;
+        self.application.records.mutate_assignment_finding(
+            assignment.record_id,
+            finding,
+            &input,
+            &assignment.id,
+        )
+    }
+
     /// Read the assigned Task's Checks, with optional explicit evidence comparison.
     /// # Errors
     /// Rejects invalid delivery, non-Tasks and malformed comparison revisions.
