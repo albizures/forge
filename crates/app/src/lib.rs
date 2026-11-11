@@ -505,6 +505,38 @@ pub trait RecordRepository: ProjectRepository {
             "Task Checks are unavailable",
         ))
     }
+    /// Append an Assessment with authenticated Assignment provenance.
+    ///
+    /// # Errors
+    /// Returns unsupported-operation or normal Check validation errors.
+    fn assess_assignment_check(
+        &self,
+        _task: u64,
+        _check: u64,
+        _input: &checks::AssessmentInput,
+        _assignment: &str,
+    ) -> Result<checks::TaskCheck, RegistrationError> {
+        Err(RegistrationError::new(
+            "checks-unavailable",
+            "Assignment Checks are unavailable",
+        ))
+    }
+    /// Invalidate with authenticated Assignment provenance.
+    ///
+    /// # Errors
+    /// Returns unsupported-operation or normal Check validation errors.
+    fn invalidate_assignment_check(
+        &self,
+        _task: u64,
+        _check: u64,
+        _input: &checks::InvalidationInput,
+        _assignment: &str,
+    ) -> Result<checks::TaskCheck, RegistrationError> {
+        Err(RegistrationError::new(
+            "checks-unavailable",
+            "Assignment Checks are unavailable",
+        ))
+    }
     /// Invalidate the latest active Assessment atomically with its Record Update.
     ///
     /// # Errors

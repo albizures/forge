@@ -674,7 +674,7 @@ impl RecordRepository for SqliteProjectRepository {
         check: u64,
         input: &forge_app::checks::InvalidationInput,
     ) -> Result<forge_app::checks::TaskCheck, RegistrationError> {
-        self.invalidate_check(task, check, input)
+        self.invalidate_check(task, check, input, None)
     }
     fn list_task_checks(
         &self,
@@ -697,7 +697,25 @@ impl RecordRepository for SqliteProjectRepository {
         check: u64,
         input: &forge_app::checks::AssessmentInput,
     ) -> Result<forge_app::checks::TaskCheck, RegistrationError> {
-        self.assess_check(task, check, input)
+        self.assess_check(task, check, input, None)
+    }
+    fn assess_assignment_check(
+        &self,
+        task: u64,
+        check: u64,
+        input: &forge_app::checks::AssessmentInput,
+        assignment: &str,
+    ) -> Result<forge_app::checks::TaskCheck, RegistrationError> {
+        self.assess_check(task, check, input, Some(assignment))
+    }
+    fn invalidate_assignment_check(
+        &self,
+        task: u64,
+        check: u64,
+        input: &forge_app::checks::InvalidationInput,
+        assignment: &str,
+    ) -> Result<forge_app::checks::TaskCheck, RegistrationError> {
+        self.invalidate_check(task, check, input, Some(assignment))
     }
     fn records_in_workspace(
         &self,

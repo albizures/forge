@@ -160,6 +160,77 @@ fn unhex(text: &str) -> Result<Vec<u8>, RegistrationError> {
 }
 
 impl AuthenticatedAssignment<'_> {
+    /// Read the assigned Task's Checks, with optional explicit evidence comparison.
+    /// # Errors
+    /// Rejects invalid delivery, non-Tasks and malformed comparison revisions.
+    pub fn check_list(
+        &self,
+        revision: Option<&str>,
+    ) -> Result<Vec<crate::checks::TaskCheck>, RegistrationError> {
+        let assignment = self.authenticate()?;
+        self.record(assignment.record_id)?;
+        self.application
+            .compare_task_checks(assignment.record_id, revision)
+    }
+
+    /// Read a bounded activity page of an own-Task Check.
+    /// # Errors
+    /// Rejects invalid delivery, foreign Checks and invalid page arguments.
+    pub fn check_show(
+        &self,
+        check: u64,
+        after: Option<u64>,
+        limit: u32,
+        revision: Option<&str>,
+    ) -> Result<crate::checks::CheckPage, RegistrationError> {
+        let assignment = self.authenticate()?;
+        self.record(assignment.record_id)?;
+        self.application
+            .compare_task_check(assignment.record_id, check, after, limit, revision)
+    }
+
+    /// Assess an own-Task Check; caller attribution is always replaced by authenticated identity.
+    /// # Errors
+    /// Returns authorization, version, validation or Done-freeze errors.
+    pub fn check_assess(
+        &self,
+        check: u64,
+        input: &crate::checks::AssessmentInput,
+    ) -> Result<crate::checks::TaskCheck, RegistrationError> {
+        let assignment = self.authenticate()?;
+        self.record(assignment.record_id)?;
+        let mut input = input.clone();
+        input.actor.clone_from(&assignment.id);
+        input.validate()?;
+        self.application.records.assess_assignment_check(
+            assignment.record_id,
+            check,
+            &input,
+            &assignment.id,
+        )
+    }
+
+    /// Invalidate exactly the latest active own-Task Assessment with authenticated provenance.
+    /// # Errors
+    /// Returns authorization, version, transition, validation or Done-freeze errors.
+    pub fn check_invalidate(
+        &self,
+        check: u64,
+        input: &crate::checks::InvalidationInput,
+    ) -> Result<crate::checks::TaskCheck, RegistrationError> {
+        let assignment = self.authenticate()?;
+        self.record(assignment.record_id)?;
+        let mut input = input.clone();
+        input.actor.clone_from(&assignment.id);
+        input.validate()?;
+        self.application.records.invalidate_assignment_check(
+            assignment.record_id,
+            check,
+            &input,
+            &assignment.id,
+        )
+    }
+
     /// Reads a bounded page of authorized Comments in stable identifier order.
     /// # Errors
     /// Rejects invalid delivery, removed relationships, oversized pages and substituted cursors.

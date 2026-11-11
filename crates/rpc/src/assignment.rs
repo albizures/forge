@@ -159,8 +159,67 @@ pub struct AssignmentPageResponse<T> {
     pub freshness: u64,
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssignmentCheckListRequest {
+    pub assignment_id: String,
+    pub secret: String,
+    pub compare_revision: Option<String>,
+}
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssignmentCheckShowRequest {
+    pub assignment_id: String,
+    pub secret: String,
+    pub check: u64,
+    pub after: Option<u64>,
+    pub limit: u32,
+    pub compare_revision: Option<String>,
+}
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssignmentCheckAssessRequest {
+    pub assignment_id: String,
+    pub secret: String,
+    pub check: u64,
+    pub expected_version: u64,
+    pub verdict: crate::Verdict,
+    pub message: String,
+    pub revision: Option<String>,
+    pub dirty: Option<bool>,
+}
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssignmentCheckInvalidateRequest {
+    pub assignment_id: String,
+    pub secret: String,
+    pub check: u64,
+    pub expected_version: u64,
+    pub assessment_id: u64,
+    pub message: String,
+    pub revision: Option<String>,
+    pub dirty: Option<bool>,
+}
+
 #[rpc(client, server, namespace = "assignment")]
 pub trait AssignmentApi {
+    #[method(name = "checkList")]
+    async fn check_list(
+        &self,
+        request: AssignmentCheckListRequest,
+    ) -> RpcResult<Vec<crate::TaskCheck>>;
+    #[method(name = "checkShow")]
+    async fn check_show(&self, request: AssignmentCheckShowRequest) -> RpcResult<crate::CheckPage>;
+    #[method(name = "checkAssess")]
+    async fn check_assess(
+        &self,
+        request: AssignmentCheckAssessRequest,
+    ) -> RpcResult<crate::TaskCheck>;
+    #[method(name = "checkInvalidate")]
+    async fn check_invalidate(
+        &self,
+        request: AssignmentCheckInvalidateRequest,
+    ) -> RpcResult<crate::TaskCheck>;
     #[method(name = "bootstrap")]
     async fn bootstrap(
         &self,

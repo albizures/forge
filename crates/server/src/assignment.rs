@@ -38,6 +38,58 @@ impl Daemon {
 
 #[async_trait]
 impl AssignmentApiServer for Daemon {
+    async fn check_list(
+        &self,
+        r: forge_rpc::AssignmentCheckListRequest,
+    ) -> RpcResult<Vec<forge_rpc::TaskCheck>> {
+        self.assignment_session(&r.assignment_id, &r.secret)?
+            .check_list(r.compare_revision.as_deref())
+            .map_err(rpc_error)
+    }
+    async fn check_show(
+        &self,
+        r: forge_rpc::AssignmentCheckShowRequest,
+    ) -> RpcResult<forge_rpc::CheckPage> {
+        self.assignment_session(&r.assignment_id, &r.secret)?
+            .check_show(r.check, r.after, r.limit, r.compare_revision.as_deref())
+            .map_err(rpc_error)
+    }
+    async fn check_assess(
+        &self,
+        r: forge_rpc::AssignmentCheckAssessRequest,
+    ) -> RpcResult<forge_rpc::TaskCheck> {
+        self.assignment_session(&r.assignment_id, &r.secret)?
+            .check_assess(
+                r.check,
+                &forge_rpc::AssessmentInput {
+                    actor: String::new(),
+                    expected_version: r.expected_version,
+                    verdict: r.verdict,
+                    message: r.message,
+                    revision: r.revision,
+                    dirty: r.dirty,
+                },
+            )
+            .map_err(rpc_error)
+    }
+    async fn check_invalidate(
+        &self,
+        r: forge_rpc::AssignmentCheckInvalidateRequest,
+    ) -> RpcResult<forge_rpc::TaskCheck> {
+        self.assignment_session(&r.assignment_id, &r.secret)?
+            .check_invalidate(
+                r.check,
+                &forge_rpc::InvalidationInput {
+                    actor: String::new(),
+                    expected_version: r.expected_version,
+                    assessment_id: r.assessment_id,
+                    message: r.message,
+                    revision: r.revision,
+                    dirty: r.dirty,
+                },
+            )
+            .map_err(rpc_error)
+    }
     async fn bootstrap(
         &self,
         request: AssignmentCredentials,

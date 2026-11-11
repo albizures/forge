@@ -90,7 +90,7 @@ pub struct InvalidateArgs {
     json: bool,
 }
 
-fn explanation(message: Option<String>, file: Option<String>) -> Result<String, String> {
+pub(super) fn explanation(message: Option<String>, file: Option<String>) -> Result<String, String> {
     match (message, file) {
         (Some(message), None) => Ok(message),
         (None, Some(file)) if file == "-" => {
@@ -124,30 +124,45 @@ pub async fn run(command: CheckCommand, workspace: Option<String>) -> i32 {
     let result = match command {
         CheckCommand::Invalidate(a) => match explanation(a.message, a.message_file) {
             Err(error) => Err(error),
-            Ok(message) => forge_cli::request_task_check_invalidate(endpoint, forge_rpc::TaskCheckInvalidateRequest {
-                task: a.task, check: a.check,
-                invalidation: forge_rpc::InvalidationInput {
-                    expected_version: a.expected_version, assessment_id: a.assessment,
-                    actor: a.actor, message, revision: a.revision, dirty: a.dirty,
+            Ok(message) => forge_cli::request_task_check_invalidate(
+                endpoint,
+                forge_rpc::TaskCheckInvalidateRequest {
+                    task: a.task,
+                    check: a.check,
+                    invalidation: forge_rpc::InvalidationInput {
+                        expected_version: a.expected_version,
+                        assessment_id: a.assessment,
+                        actor: a.actor,
+                        message,
+                        revision: a.revision,
+                        dirty: a.dirty,
+                    },
                 },
-            }).await.map(|check| {
-                let text = render_check(&check);
-                (serde_json::to_value(check).expect("serializable Check"), text)
-            }),
-        },
-        CheckCommand::List(a) => forge_cli::request_task_check_list_compared(endpoint, a.task, a.compare_revision)
+            )
             .await
-            .map(|checks| {
-                let text = checks
-                    .iter()
-                    .map(render_check)
-                    .collect::<Vec<_>>()
-                    .join("\n");
+            .map(|check| {
+                let text = render_check(&check);
                 (
-                    serde_json::to_value(checks).expect("serializable Checks"),
+                    serde_json::to_value(check).expect("serializable Check"),
                     text,
                 )
             }),
+        },
+        CheckCommand::List(a) => {
+            forge_cli::request_task_check_list_compared(endpoint, a.task, a.compare_revision)
+                .await
+                .map(|checks| {
+                    let text = checks
+                        .iter()
+                        .map(render_check)
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    (
+                        serde_json::to_value(checks).expect("serializable Checks"),
+                        text,
+                    )
+                })
+        }
         CheckCommand::Show(a) => forge_cli::request_task_check_show(
             endpoint,
             TaskCheckShowRequest {
@@ -160,17 +175,7 @@ pub async fn run(command: CheckCommand, workspace: Option<String>) -> i32 {
         )
         .await
         .map(|page| {
-            let mut text = render_check(&page.check);
-            for activity in &page.activities {
-                if let Some(i) = &activity.invalidation {
-                    let _ = write!(text, "\nActivity {}: Invalidation {} of Assessment {} by {} at {}\n{}\nrevision {:?}, dirty {:?}, comparison {:?}", activity.id, i.id, i.assessment_id, i.actor, i.created_at_millis, i.message, i.revision, i.dirty, i.comparison);
-                } else if let Some(a) = page.assessments.iter().find(|a| a.id == activity.assessment_id) {
-                    let _ = write!(text, "\nActivity {}: Assessment {} {:?} by {} at {}\n{}\nrevision {:?}, dirty {:?}, comparison {:?}", activity.id, a.id, a.verdict, a.actor, a.created_at_millis, a.message, a.revision, a.dirty, a.comparison);
-                }
-            }
-            if let Some(cursor) = page.next_cursor {
-                let _ = write!(text, "\nNext cursor: {cursor}");
-            }
+            let text = render_page(&page);
             (
                 serde_json::to_value(page).expect("serializable Check page"),
                 text,
@@ -225,7 +230,52 @@ pub async fn run(command: CheckCommand, workspace: Option<String>) -> i32 {
         }
     }
 }
-fn render_check(check: &TaskCheck) -> String {
+pub(super) fn render_page(page: &forge_rpc::CheckPage) -> String {
+    let mut text = render_check(&page.check);
+    for activity in &page.activities {
+        if let Some(i) = &activity.invalidation {
+            let _ = write!(
+                text,
+                "\nActivity {}: Invalidation {} of Assessment {} by {} (Assignment {:?}) at {}\n{}\nrevision {:?}, dirty {:?}, comparison {:?}",
+                activity.id,
+                i.id,
+                i.assessment_id,
+                i.actor,
+                i.assignment_id,
+                i.created_at_millis,
+                i.message,
+                i.revision,
+                i.dirty,
+                i.comparison
+            );
+        } else if let Some(a) = page
+            .assessments
+            .iter()
+            .find(|a| a.id == activity.assessment_id)
+        {
+            let _ = write!(
+                text,
+                "\nActivity {}: Assessment {} {:?} by {} (Assignment {:?}) at {}\n{}\nrevision {:?}, dirty {:?}, comparison {:?}",
+                activity.id,
+                a.id,
+                a.verdict,
+                a.actor,
+                a.assignment_id,
+                a.created_at_millis,
+                a.message,
+                a.revision,
+                a.dirty,
+                a.comparison
+            );
+        }
+    }
+    if let Some(cursor) = page.next_cursor {
+        let _ = write!(text, "\nNext cursor: {cursor}");
+    }
+    text
+}
+
+pub(super) fn render_check(check: &TaskCheck) -> String {
     let verdict = match check.verdict() {
         None => "pending",
         Some(Verdict::Pass) => "pass",
@@ -238,8 +288,16 @@ fn render_check(check: &TaskCheck) -> String {
     if let Some(a) = &check.latest_assessment {
         let _ = write!(
             text,
-            "\nLatest Assessment {}: revision {:?}, dirty {:?}, comparison {:?}, invalidation {:?}",
-            a.id, a.revision, a.dirty, a.comparison, a.invalidation
+            "\nLatest Assessment {} by {} (Assignment {:?}) at {}: {}\nrevision {:?}, dirty {:?}, comparison {:?}, invalidation {:?}",
+            a.id,
+            a.actor,
+            a.assignment_id,
+            a.created_at_millis,
+            a.message,
+            a.revision,
+            a.dirty,
+            a.comparison,
+            a.invalidation
         );
     }
     text

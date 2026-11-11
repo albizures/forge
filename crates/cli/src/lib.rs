@@ -1,5 +1,7 @@
 //! Command-line adapter that calls the running Forge daemon.
 
+mod assignment_checks;
+pub use assignment_checks::{AssignmentCheckAction, assignment_check};
 mod record_selection;
 pub use record_selection::RecordEndpoint;
 use record_selection::record_client;

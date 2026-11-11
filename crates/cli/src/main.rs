@@ -1,4 +1,5 @@
 mod agent_profiles;
+mod assignment_check_commands;
 mod check_templates;
 mod checks;
 mod project_selection;
@@ -285,6 +286,11 @@ enum TaskCommand {
 }
 #[derive(Debug, Subcommand)]
 enum AssignmentCommand {
+    /// Inspect, assess or invalidate only the assigned Task's Checks.
+    Check {
+        #[command(subcommand)]
+        command: assignment_check_commands::Command,
+    },
     /// Authenticate, acknowledge, start and fetch context before returning behavior.
     Bootstrap {
         #[arg(long)]
@@ -1016,6 +1022,7 @@ fn render_assignment_result(result: Result<serde_json::Value, String>, json: boo
 async fn assignment(command: AssignmentCommand) -> i32 {
     let history = matches!(&command, AssignmentCommand::History(_));
     match command {
+        AssignmentCommand::Check { command } => assignment_check_commands::run(command).await,
         AssignmentCommand::Done(args) => {
             let human = args.confirmation.zip(args.agreed_outcome);
             render_assignment_result(

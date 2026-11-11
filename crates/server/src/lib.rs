@@ -2933,11 +2933,16 @@ mod tests {
             drop(daemon);
             let _ =
                 std::fs::remove_dir_all(self.database_path.with_extension("assignment-secrets"));
+            let _ = std::fs::remove_dir_all(self.database_path.with_extension("owner-root"));
             let _ = std::fs::remove_file(&self.database_path);
         }
     }
 
     fn assignment_test_daemon() -> (AssignmentTestDaemon, String, u64) {
+        assignment_test_daemon_scoped(false)
+    }
+
+    fn assignment_test_daemon_scoped(scoped: bool) -> (AssignmentTestDaemon, String, u64) {
         let database_path = std::env::temp_dir().join(format!(
             "forge-assignment-endpoint-{}-{}.sqlite3",
             std::process::id(),
@@ -2947,7 +2952,15 @@ mod tests {
                 .as_nanos()
         ));
         let store = SqliteProjectRepository::open(&database_path).unwrap();
-        super::test_projects::register(&store, "alpha", None);
+        if scoped {
+            let root = database_path.with_extension("owner-root");
+            std::fs::create_dir_all(&root).unwrap();
+            forge_app::WorkspaceRepository::create_workspace(&store, "test", "Test", &root)
+                .unwrap();
+            super::test_projects::register(&store, "alpha", Some(&root.join("alpha")));
+        } else {
+            super::test_projects::register(&store, "alpha", None);
+        }
         let owner = store
             .open_typed_record(&NewTypedRecord {
                 record_type: RecordType::Task,
@@ -3283,6 +3296,413 @@ mod tests {
                 "assignment_id": "owner-assignment", "secret": "agent-secret"
             }))
             .is_err()
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn assignment_checks_are_bound_and_attributed() {
+        use forge_rpc::{
+            AssignmentApiServer, AssignmentCheckAssessRequest, AssignmentCheckListRequest,
+        };
+        let (fixture, assignment, _) = assignment_test_daemon();
+        let root = fixture.database_path.with_extension("check-secrets");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join(&assignment), "check-secret\n").unwrap();
+        let mut daemon = fixture.daemon();
+        daemon.capability_secret_root = Some(root.clone());
+        let checks = AssignmentApiServer::check_list(
+            &daemon,
+            AssignmentCheckListRequest {
+                assignment_id: assignment.clone(),
+                secret: "check-secret".into(),
+                compare_revision: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(checks[0].name, "Implementation");
+        let assessed = AssignmentApiServer::check_assess(
+            &daemon,
+            AssignmentCheckAssessRequest {
+                assignment_id: assignment.clone(),
+                secret: "check-secret".into(),
+                check: checks[0].id,
+                expected_version: checks[0].version,
+                verdict: forge_app::checks::Verdict::Pass,
+                message: "deliverables verified".into(),
+                revision: None,
+                dirty: Some(false),
+            },
+        )
+        .await
+        .unwrap();
+        let assessment = assessed.latest_assessment.unwrap();
+        assert_eq!(assessment.actor, assignment);
+        assert_eq!(
+            assessment.assignment_id.as_deref(),
+            Some(assignment.as_str())
+        );
+        assert_eq!(assessment.dirty, Some(false));
+        let session = daemon
+            .assignment_session(&assignment, "check-secret")
+            .unwrap();
+        let store = SqliteProjectRepository::open(&fixture.database_path).unwrap();
+        let task = store.agent_assignment(&assignment).unwrap().record_id;
+        let check = checks[0].id;
+        let input = forge_app::checks::AssessmentInput {
+            actor: "forged operator".into(),
+            expected_version: assessed.version,
+            verdict: forge_app::checks::Verdict::Fail,
+            message: "needs work".into(),
+            revision: Some("a".repeat(40)),
+            dirty: Some(true),
+        };
+        let failed = session.check_assess(check, &input).unwrap();
+        assert_eq!(failed.latest_assessment.as_ref().unwrap().actor, assignment);
+        let before = store.list_record_updates(task).unwrap();
+        assert_eq!(
+            session.check_assess(check, &input).unwrap_err().code,
+            "stale-version"
+        );
+        assert_eq!(store.list_record_updates(task).unwrap(), before);
+        let invalidation = forge_app::checks::InvalidationInput {
+            actor: "untrusted".into(),
+            expected_version: failed.version,
+            assessment_id: failed.latest_assessment.as_ref().unwrap().id,
+            message: "withdraw evidence".into(),
+            revision: Some("b".repeat(40)),
+            dirty: None,
+        };
+        let pending = AssignmentApiServer::check_invalidate(
+            &daemon,
+            forge_rpc::AssignmentCheckInvalidateRequest {
+                assignment_id: assignment.clone(),
+                secret: "check-secret".into(),
+                check,
+                expected_version: invalidation.expected_version,
+                assessment_id: invalidation.assessment_id,
+                message: invalidation.message.clone(),
+                revision: invalidation.revision.clone(),
+                dirty: invalidation.dirty,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(pending.current_verdict, None);
+        let i = pending
+            .latest_assessment
+            .as_ref()
+            .unwrap()
+            .invalidation
+            .as_ref()
+            .unwrap();
+        assert_eq!(i.actor, assignment);
+        assert_eq!(i.assignment_id.as_deref(), Some(assignment.as_str()));
+        let mut repeated = invalidation.clone();
+        repeated.expected_version = pending.version;
+        assert_eq!(
+            session.check_invalidate(check, &repeated).unwrap_err().code,
+            "invalid-transition"
+        );
+        repeated.assessment_id = assessment.id;
+        assert_eq!(
+            session.check_invalidate(check, &repeated).unwrap_err().code,
+            "invalid-transition"
+        );
+        let page = session
+            .check_show(check, None, 1, Some(&"a".repeat(40)))
+            .unwrap();
+        assert_eq!(page.activities.len(), 1);
+        assert_eq!(
+            page.check.latest_assessment.as_ref().unwrap().comparison,
+            forge_app::checks::RevisionComparison::Matching
+        );
+        assert_eq!(
+            page.check
+                .latest_assessment
+                .as_ref()
+                .unwrap()
+                .invalidation
+                .as_ref()
+                .unwrap()
+                .comparison,
+            forge_app::checks::RevisionComparison::Mismatching
+        );
+        let next = session
+            .check_show(check, page.next_cursor, 1, None)
+            .unwrap();
+        assert!(next.activities[0].id > page.activities[0].id);
+        assert_eq!(
+            session.check_show(check, None, 101, None).unwrap_err().code,
+            "invalid-page"
+        );
+        // A related Task may be read through the existing context API, but its Checks
+        // cannot be substituted into own-Task operations.
+        let other = store
+            .agent_assignment("target-assignment")
+            .unwrap()
+            .record_id;
+        let foreign = store.list_task_checks(other).unwrap()[0].id;
+        assert!(session.record(other).is_ok());
+        assert_eq!(
+            session
+                .check_show(foreign, None, 10, None)
+                .unwrap_err()
+                .code,
+            "check-not-found"
+        );
+        let mut fresh = input.clone();
+        fresh.expected_version = pending.version;
+        assert_eq!(
+            session.check_assess(foreign, &fresh).unwrap_err().code,
+            "check-not-found"
+        );
+        assert!(
+            daemon
+                .assignment_session(&assignment, "wrong-secret")
+                .is_err()
+        );
+        std::fs::remove_file(root.join(&assignment)).unwrap();
+        assert_eq!(
+            session.check_list(None).unwrap_err().code,
+            "assignment-capability-denied"
+        );
+        std::fs::write(root.join(&assignment), "check-secret\n").unwrap();
+        // Satisfy existing lifecycle/dependency constraints before comparing Check gates.
+        let other_check = store.list_task_checks(other).unwrap().remove(0);
+        store
+            .assess_task_check(
+                other,
+                other_check.id,
+                &forge_app::checks::AssessmentInput {
+                    expected_version: other_check.version,
+                    verdict: forge_app::checks::Verdict::Pass,
+                    ..fresh.clone()
+                },
+            )
+            .unwrap();
+        store.start_record(other).unwrap();
+        store.done_record(other, None).unwrap();
+        session.acknowledge().unwrap();
+        session.start().unwrap();
+        // Pending completion reports exactly the repository's shared blockers.
+        let operator_error = store.done_record(task, None).unwrap_err();
+        let assignment_error = session.done(None, None).unwrap_err();
+        assert_eq!(operator_error, assignment_error);
+        assert!(operator_error.message.contains(&check.to_string()));
+        fresh.verdict = forge_app::checks::Verdict::Pass;
+        let passed = session.check_assess(check, &fresh).unwrap();
+        fresh.expected_version = passed.version;
+        session.done(None, None).unwrap();
+        assert_eq!(
+            session.check_assess(check, &fresh).unwrap_err().code,
+            "record-done"
+        );
+        store
+            .close_agent_assignment(
+                &assignment,
+                forge_app::AgentAssignmentClosureReason::Retired,
+            )
+            .unwrap();
+        assert_eq!(
+            session.check_list(None).unwrap_err().code,
+            "assignment-capability-denied"
+        );
+        assert_eq!(
+            session.check_assess(check, &fresh).unwrap_err().code,
+            "assignment-capability-denied"
+        );
+        let reopened = SqliteProjectRepository::open(&fixture.database_path).unwrap();
+        let persisted = reopened.show_task_check(task, check, None, 10).unwrap();
+        assert!(
+            persisted
+                .assessments
+                .iter()
+                .all(|a| a.assignment_id.as_deref() == Some(assignment.as_str()))
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn assignment_template_checks_share_gates_and_reject_foreign_scope() {
+        use forge_app::check_templates::{CheckCriterion, TemplateReplacement};
+        let (fixture, _, _) = assignment_test_daemon_scoped(true);
+        let store = SqliteProjectRepository::open(&fixture.database_path).unwrap();
+        store
+            .replace_check_template(
+                "alpha",
+                &TemplateReplacement {
+                    expected_version: 0,
+                    actor: "operator".into(),
+                    message: "require review".into(),
+                    criteria: vec![CheckCriterion {
+                        name: "Review".into(),
+                        description: "Review deliverables".into(),
+                    }],
+                },
+            )
+            .unwrap();
+        let task = store
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Task,
+                task_kind: None,
+                body: "templated".into(),
+                project_slugs: vec!["alpha".into()],
+                generated_by_ids: vec![],
+            })
+            .unwrap();
+        store
+            .create_agent_assignment(&NewAgentAssignment {
+                id: "templated".into(),
+                record_id: task.id,
+                project_slug: "alpha".into(),
+                profile_revision: 1,
+            })
+            .unwrap();
+        let root = fixture.database_path.with_extension("template-secrets");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("templated"), "secret").unwrap();
+        let mut daemon = fixture.daemon();
+        daemon.capability_secret_root = Some(root.clone());
+        let session = daemon.assignment_session("templated", "secret").unwrap();
+        session.acknowledge().unwrap();
+        session.start().unwrap();
+        let checks = session.check_list(None).unwrap();
+        assert_eq!(
+            checks.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+            ["Implementation", "Review"]
+        );
+        let error = session.done(None, None).unwrap_err();
+        assert_eq!(error, store.done_record(task.id, None).unwrap_err());
+        for check in &checks {
+            assert!(error.message.contains(&check.id.to_string()));
+        }
+        let input = forge_app::checks::AssessmentInput {
+            actor: "ignored".into(),
+            expected_version: 1,
+            verdict: forge_app::checks::Verdict::Pass,
+            message: "verified".into(),
+            revision: None,
+            dirty: None,
+        };
+        let mut invalid = input.clone();
+        invalid.message = " ".into();
+        let updates = store.list_record_updates(task.id).unwrap();
+        assert_eq!(
+            session
+                .check_assess(checks[0].id, &invalid)
+                .unwrap_err()
+                .code,
+            "invalid-assessment"
+        );
+        invalid.message = "ok".into();
+        invalid.revision = Some("short".into());
+        assert_eq!(
+            session
+                .check_assess(checks[0].id, &invalid)
+                .unwrap_err()
+                .code,
+            "invalid-revision"
+        );
+        assert_eq!(store.list_record_updates(task.id).unwrap(), updates);
+        session.check_assess(checks[0].id, &input).unwrap();
+        assert!(session.done(None, None).is_err());
+        // Cross-Workspace Check IDs do not acquire authority through capability requests.
+        forge_app::WorkspaceRepository::create_workspace(&store, "foreign", "Foreign", &root)
+            .unwrap();
+        let foreign_store = store.records_in_workspace("foreign").unwrap();
+        let foreign = foreign_store
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Task,
+                task_kind: None,
+                body: "foreign".into(),
+                project_slugs: vec![],
+                generated_by_ids: vec![],
+            })
+            .unwrap();
+        let foreign_check = foreign_store
+            .list_task_checks(foreign.id)
+            .unwrap()
+            .remove(0);
+        assert!(session.record(foreign.id).is_err());
+        assert_eq!(
+            session
+                .check_assess(foreign_check.id, &input)
+                .unwrap_err()
+                .code,
+            "check-not-found"
+        );
+        assert_eq!(
+            session
+                .check_show(foreign_check.id, None, 1, None)
+                .unwrap_err()
+                .code,
+            "check-not-found"
+        );
+        session.check_assess(checks[1].id, &input).unwrap();
+        session.done(None, None).unwrap();
+        let grilling = store
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Grilling,
+                task_kind: None,
+                body: "decision".into(),
+                project_slugs: vec!["alpha".into()],
+                generated_by_ids: vec![],
+            })
+            .unwrap();
+        store
+            .create_agent_assignment(&NewAgentAssignment {
+                id: "grilling-checks".into(),
+                record_id: grilling.id,
+                project_slug: "alpha".into(),
+                profile_revision: 1,
+            })
+            .unwrap();
+        std::fs::write(root.join("grilling-checks"), "secret").unwrap();
+        let grilling_session = daemon
+            .assignment_session("grilling-checks", "secret")
+            .unwrap();
+        assert_eq!(
+            grilling_session.check_list(None).unwrap_err().code,
+            "invalid-record-type"
+        );
+        assert_eq!(
+            grilling_session
+                .check_assess(checks[0].id, &input)
+                .unwrap_err()
+                .code,
+            "invalid-record-type"
+        );
+        // Operator attribution remains explicitly distinct, even if it uses the same actor text.
+        assert_eq!(
+            foreign_store
+                .assess_task_check(foreign.id, foreign_check.id, &input)
+                .unwrap()
+                .latest_assessment
+                .unwrap()
+                .assignment_id,
+            None
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn assignment_check_wire_rejects_caller_identity_and_task_selection() {
+        let base = serde_json::json!({"assignmentId":"a", "secret":"s", "check":1,
+            "expectedVersion":1, "verdict":"pass", "message":"verified"});
+        for field in ["actor", "task", "target", "assignment_id", "criteria"] {
+            let mut request = base.clone();
+            request[field] = serde_json::json!("injected");
+            assert!(
+                serde_json::from_value::<forge_rpc::AssignmentCheckAssessRequest>(request).is_err()
+            );
+        }
+        let mut request = base;
+        request.as_object_mut().unwrap().remove("expectedVersion");
+        assert!(
+            serde_json::from_value::<forge_rpc::AssignmentCheckAssessRequest>(request).is_err()
         );
     }
 

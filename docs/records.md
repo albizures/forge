@@ -177,8 +177,49 @@ an updated Check for either mutation (including its latest Assessment). Invalida
 input replaces `verdict` with `assessment_id`, retaining the other Assessment input
 fields. Invalid attribution/evidence, wrong Record
 type or Check ownership, stale versions, frozen Tasks and completion blockers have
-distinct error categories. Assignment completion already shares these gates;
-capability-bound Check operations are a separate delivery.
+distinct error categories. Assignment completion shares these gates.
+
+### Capability-bound Assignment Checks
+
+```sh
+forge assignment check list --compare-revision aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --json
+forge assignment check show 3 --after 9 --limit 50 --json
+forge assignment check assess 3 --verdict pass --expected-version 1 --message 'Verified deliverables' --dirty false --json
+forge assignment check invalidate 3 --assessment 4 --expected-version 2 --message-file - --json
+```
+
+These use only protected Assignment delivery (`FORGE_ASSIGNMENT_ID`,
+`FORGE_ASSIGNMENT_DAEMON_URL`, `FORGE_ASSIGNMENT_CAPABILITY_SECRET_FILE`), not
+operator Workspace selection or endpoint overrides. No Task selector or `--actor`
+is accepted: all four operations implicitly target the authenticated Assignment's
+Task. They grant no template mutation or arbitrary cross-Task access, even to
+Checks of Records readable through the existing one-hop context API. Grilling
+Assignments cannot operate on Task Checks. Every operation revalidates delivery
+and durable Assignment validity; revoked secret files and closed Assignments fail
+with the existing redacted authorization failure. Done Tasks freeze mutations
+without extending or reviving capability lifetime.
+
+The same input, evidence, pagination, version, transaction and completion rules
+apply as for operators. Mutations require exactly one nonblank `--message` or
+`--message-file` (including stdin via `-`). Both Assessments and invalidations
+retain `actor` derived from authenticated Assignment identity and a separate
+`assignment_id` provenance field; operator mutations have `assignment_id: null`,
+even if the supplied actor text happens to equal an Assignment ID. The immutable
+Assignment retains its profile/execution provenance. Attribution is not an
+independent reviewer identity registry. Text and JSON expose current state and
+bounded history using the same views as operator Check commands.
+
+Typed RPCs are `assignment_checkList`, `assignment_checkShow`,
+`assignment_checkAssess`, and `assignment_checkInvalidate`. All requests contain
+`assignmentId` and `secret` (never Debug-logged). List adds optional
+`compareRevision`; show adds `check`, `after`, `limit` and optional
+`compareRevision`. Assessment adds `check`, `expectedVersion`, `verdict`, `message`,
+optional `revision` and optional `dirty`; invalidation replaces `verdict` with
+`assessmentId`. Unknown fields, including caller `actor` or Task selectors, are
+rejected. Responses are the same Check array, Check page and updated Check shapes
+as the operator APIs. Stable server domain errors are retained; the CLI reports
+allowlisted error categories without echoing arbitrary credential-bearing server
+messages. No Git commands or automatic evidence collection are performed.
 
 This Check schema requires a fresh development store: no pre-feature Task backfill,
 legacy database upgrade or no-Check completion fallback is provided.

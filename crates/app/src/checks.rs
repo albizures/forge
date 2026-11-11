@@ -14,6 +14,8 @@ pub enum Verdict {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Assessment {
+    /// Present only for capability-authenticated mutations; None denotes operator attribution.
+    pub assignment_id: Option<String>,
     pub id: u64,
     pub check_id: u64,
     pub verdict: Verdict,
@@ -37,6 +39,7 @@ pub enum RevisionComparison {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Invalidation {
+    pub assignment_id: Option<String>,
     pub id: u64,
     pub assessment_id: u64,
     pub actor: String,

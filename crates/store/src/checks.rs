@@ -16,11 +16,11 @@ pub(super) fn schema(connection: &Connection) -> Result<(), RegistrationError> {
         CREATE TABLE IF NOT EXISTS check_assessments (
         id INTEGER PRIMARY KEY NOT NULL, check_id INTEGER NOT NULL REFERENCES task_checks(id),
         verdict TEXT NOT NULL CHECK(verdict IN ('pass','fail')), actor TEXT NOT NULL,
-        message TEXT NOT NULL, created_at_millis INTEGER NOT NULL, revision TEXT, dirty INTEGER);
+        message TEXT NOT NULL, created_at_millis INTEGER NOT NULL, revision TEXT, dirty INTEGER, assignment_id TEXT);
         CREATE INDEX IF NOT EXISTS assessments_by_check ON check_assessments(check_id, id);
         CREATE TABLE IF NOT EXISTS check_invalidations (
         id INTEGER PRIMARY KEY NOT NULL, assessment_id INTEGER NOT NULL UNIQUE REFERENCES check_assessments(id),
-        actor TEXT NOT NULL, message TEXT NOT NULL, created_at_millis INTEGER NOT NULL, revision TEXT, dirty INTEGER);
+        actor TEXT NOT NULL, message TEXT NOT NULL, created_at_millis INTEGER NOT NULL, revision TEXT, dirty INTEGER, assignment_id TEXT);
         CREATE TABLE IF NOT EXISTS check_activities (
         id INTEGER PRIMARY KEY NOT NULL, check_id INTEGER NOT NULL REFERENCES task_checks(id),
         assessment_id INTEGER NOT NULL REFERENCES check_assessments(id),
@@ -45,6 +45,7 @@ fn assessment(row: &rusqlite::Row<'_>) -> rusqlite::Result<Assessment> {
             "fail" => Verdict::Fail,
             _ => return Err(rusqlite::Error::InvalidQuery),
         },
+        assignment_id: row.get(8)?,
         actor: row.get(3)?,
         message: row.get(4)?,
         created_at_millis: row.get::<_, i64>(5)?.cast_unsigned(),
@@ -55,16 +56,16 @@ fn assessment(row: &rusqlite::Row<'_>) -> rusqlite::Result<Assessment> {
     })
 }
 const ASSESSMENT_COLUMNS: &str =
-    "id, check_id, verdict, actor, message, created_at_millis, revision, dirty";
+    "id, check_id, verdict, actor, message, created_at_millis, revision, dirty, assignment_id";
 
 fn invalidation(
     connection: &Connection,
     assessment_id: u64,
 ) -> Result<Option<Invalidation>, RegistrationError> {
-    connection.query_row("SELECT id, assessment_id, actor, message, created_at_millis, revision, dirty FROM check_invalidations WHERE assessment_id = ?1", [assessment_id.cast_signed()], |row| Ok(Invalidation {
+    connection.query_row("SELECT id, assessment_id, actor, message, created_at_millis, revision, dirty, assignment_id FROM check_invalidations WHERE assessment_id = ?1", [assessment_id.cast_signed()], |row| Ok(Invalidation {
         id: row.get::<_, i64>(0)?.cast_unsigned(), assessment_id: row.get::<_, i64>(1)?.cast_unsigned(),
         actor: row.get(2)?, message: row.get(3)?, created_at_millis: row.get::<_, i64>(4)?.cast_unsigned(),
-        revision: row.get(5)?, dirty: row.get(6)?, comparison: RevisionComparison::Unknown,
+        revision: row.get(5)?, dirty: row.get(6)?, assignment_id: row.get(7)?, comparison: RevisionComparison::Unknown,
     })).optional().map_err(storage_error)
 }
 
@@ -225,6 +226,7 @@ impl SqliteProjectRepository {
         task: u64,
         check: u64,
         input: &InvalidationInput,
+        assignment: Option<&str>,
     ) -> Result<TaskCheck, RegistrationError> {
         let mut connection = self
             .connection
@@ -258,7 +260,7 @@ impl SqliteProjectRepository {
                 "only the latest, not-yet-invalidated Assessment may be invalidated",
             ));
         }
-        transaction.execute("INSERT INTO check_invalidations (assessment_id, actor, message, created_at_millis, revision, dirty) VALUES (?1, ?2, ?3, ?4, ?5, ?6)", params![input.assessment_id.cast_signed(), input.actor, input.message, now_millis()?, input.revision, input.dirty]).map_err(storage_error)?;
+        transaction.execute("INSERT INTO check_invalidations (assessment_id, actor, message, created_at_millis, revision, dirty, assignment_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)", params![input.assessment_id.cast_signed(), input.actor, input.message, now_millis()?, input.revision, input.dirty, assignment]).map_err(storage_error)?;
         let invalidation_id = transaction.last_insert_rowid();
         transaction.execute("INSERT INTO check_activities (check_id, assessment_id, invalidation_id) VALUES (?1, ?2, ?3)", params![check.cast_signed(), input.assessment_id.cast_signed(), invalidation_id]).map_err(storage_error)?;
         transaction
@@ -283,6 +285,7 @@ impl SqliteProjectRepository {
         task: u64,
         check: u64,
         input: &AssessmentInput,
+        assignment: Option<&str>,
     ) -> Result<TaskCheck, RegistrationError> {
         let mut connection = self
             .connection
@@ -306,8 +309,8 @@ impl SqliteProjectRepository {
                 "Check version changed; read it again before assessing",
             ));
         }
-        transaction.execute("INSERT INTO check_assessments (check_id, verdict, actor, message, created_at_millis, revision, dirty) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![check.cast_signed(), match input.verdict { Verdict::Pass => "pass", Verdict::Fail => "fail" }, input.actor, input.message, now_millis()?, input.revision, input.dirty]).map_err(storage_error)?;
+        transaction.execute("INSERT INTO check_assessments (check_id, verdict, actor, message, created_at_millis, revision, dirty, assignment_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![check.cast_signed(), match input.verdict { Verdict::Pass => "pass", Verdict::Fail => "fail" }, input.actor, input.message, now_millis()?, input.revision, input.dirty, assignment]).map_err(storage_error)?;
         let assessment_id = transaction.last_insert_rowid().cast_unsigned();
         transaction
             .execute(
