@@ -181,7 +181,76 @@ async fn operator_findings_retain_explanations_and_block_completion_over_rpc() {
     );
     let updates = run(&["record", "updates", &task]);
     assert!(String::from_utf8_lossy(&updates.stdout).contains("Finding Activity"));
+    let change = |action: &str, version: &str, extra: &[&str]| {
+        run(&[
+            &[
+                "task",
+                "finding",
+                action,
+                &task,
+                &id,
+                "--expected-version",
+                version,
+                "--actor",
+                "second-reviewer",
+                "--message",
+                "Review cycle explanation",
+                "--json",
+            ][..],
+            extra,
+        ]
+        .concat())
+    };
+    assert_eq!(json(change("note", "2", &[]))["state"], "resolved");
+    let invalid = change("respond", "3", &["--response", "fixed"]);
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("invalid-transition"));
+    assert_eq!(json(change("reopen", "3", &[]))["state"], "open");
+    let response = json(change("respond", "4", &["--response", "fixed"]));
+    assert_eq!(response["state"], "awaiting-review");
+    assert_eq!(response["latest_activity"]["response"], "fixed");
+    let response = json(change("respond", "5", &["--response", "rejected"]));
+    assert_eq!(response["blocking"], true);
+    assert_eq!(response["state"], "awaiting-review");
+    assert!(!run(&["record", "done", &task]).status.success());
+    let amendment = json(change("amend", "6", &["--severity", "minor"]));
+    assert_eq!(amendment["blocking"], true);
+    assert_eq!(
+        amendment["latest_activity"]["amendment"]["old_severity"],
+        "critical"
+    );
+    assert_eq!(
+        amendment["latest_activity"]["amendment"]["new_severity"],
+        "minor"
+    );
+    assert!(!change("amend", "7", &[]).status.success());
+    assert!(!change("respond", "7", &[]).status.success());
+    assert!(
+        !change("note", "7", &["--message-file", "-"])
+            .status
+            .success()
+    );
+    assert_eq!(
+        json(change("amend", "7", &["--blocking", "false"]))["blocking"],
+        false
+    );
+    let stale = change("note", "7", &[]);
+    assert!(String::from_utf8_lossy(&stale.stderr).contains("stale-version"));
     json(run(&["record", "done", &task, "--json"]));
+    let frozen_amend = change("amend", "8", &["--blocking", "true"]);
+    assert!(String::from_utf8_lossy(&frozen_amend.stderr).contains("record-done"));
+    assert_eq!(json(change("dismiss", "8", &[]))["state"], "dismissed");
+    assert_eq!(json(change("note", "9", &[]))["state"], "dismissed");
+    assert_eq!(json(change("reopen", "10", &[]))["state"], "open");
+    assert_eq!(
+        json(change("respond", "11", &["--response", "rejected"]))["state"],
+        "awaiting-review"
+    );
+    let page = json(run(&["task", "finding", "show", &task, &id, "--json"]));
+    assert_eq!(page["finding"]["raised"], raised["raised"]);
+    assert_eq!(page["activities"].as_array().unwrap().len(), 12);
+    let text = run(&["task", "finding", "show", &task, &id]);
+    let text = String::from_utf8_lossy(&text.stdout);
+    assert!(text.contains("Rejected") && text.contains("old_severity: Critical"));
     let frozen = run(&[base.as_slice(), &["--message", "Too late"]].concat());
     assert!(String::from_utf8_lossy(&frozen.stderr).contains("record-done"));
     assert!(

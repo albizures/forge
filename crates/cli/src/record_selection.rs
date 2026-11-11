@@ -102,6 +102,7 @@ requests! {
     task_finding_show(forge_rpc::TaskFindingShowRequest) -> forge_rpc::FindingPage;
     task_finding_raise(forge_rpc::TaskFindingRaiseRequest) -> forge_rpc::Finding;
     task_finding_resolve(forge_rpc::TaskFindingResolveRequest) -> forge_rpc::Finding;
+    task_finding_mutate(forge_rpc::TaskFindingMutationRequest) -> forge_rpc::Finding;
     task_check_list(forge_rpc::TaskCheckListRequest) -> Vec<forge_rpc::TaskCheck>;
     task_check_invalidate(forge_rpc::TaskCheckInvalidateRequest) -> forge_rpc::TaskCheck;
     task_check_show(forge_rpc::TaskCheckShowRequest) -> forge_rpc::CheckPage;

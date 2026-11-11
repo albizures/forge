@@ -3,8 +3,9 @@ use forge_app::{
     RecordStatus, RecordUpdateKind, RegistrationError,
     checks::RevisionComparison,
     findings::{
-        Finding, FindingAction, FindingActivity, FindingList, FindingPage, FindingRaiseInput,
-        FindingResolveInput, FindingState, Severity,
+        Finding, FindingAction, FindingActivity, FindingAmendment, FindingList, FindingMutation,
+        FindingMutationInput, FindingPage, FindingRaiseInput, FindingResolveInput, FindingResponse,
+        FindingState, Severity,
     },
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -17,7 +18,8 @@ pub(super) fn schema(c: &Connection) -> Result<(), RegistrationError> {
         CREATE INDEX IF NOT EXISTS findings_by_task ON task_findings(task_id, id);
         CREATE TABLE IF NOT EXISTS finding_activities (
         id INTEGER PRIMARY KEY NOT NULL, finding_id INTEGER NOT NULL REFERENCES task_findings(id),
-        action TEXT NOT NULL CHECK(action IN ('raise','resolve')), actor TEXT NOT NULL, assignment_id TEXT,
+        action TEXT NOT NULL CHECK(action IN ('raise','resolve','respond','dismiss','reopen','amend','note')), actor TEXT NOT NULL, assignment_id TEXT,
+        response TEXT CHECK(response IN ('fixed','rejected')), amendment TEXT,
         message TEXT NOT NULL, revision TEXT, dirty INTEGER, created_at_millis INTEGER NOT NULL);
         CREATE INDEX IF NOT EXISTS activities_by_finding ON finding_activities(finding_id, id);").map_err(storage_error)
 }
@@ -30,8 +32,7 @@ fn page_args(after: Option<u64>, limit: u32) -> Result<(), RegistrationError> {
     }
     Ok(())
 }
-const ACTIVITY_COLUMNS: &str =
-    "id, finding_id, action, actor, assignment_id, message, revision, dirty, created_at_millis";
+const ACTIVITY_COLUMNS: &str = "id, finding_id, action, actor, assignment_id, message, revision, dirty, created_at_millis, response, amendment";
 fn activity(row: &rusqlite::Row<'_>) -> rusqlite::Result<FindingActivity> {
     Ok(FindingActivity {
         id: row.get::<_, i64>(0)?.cast_unsigned(),
@@ -39,8 +40,23 @@ fn activity(row: &rusqlite::Row<'_>) -> rusqlite::Result<FindingActivity> {
         action: match row.get::<_, String>(2)?.as_str() {
             "raise" => FindingAction::Raise,
             "resolve" => FindingAction::Resolve,
+            "respond" => FindingAction::Respond,
+            "dismiss" => FindingAction::Dismiss,
+            "reopen" => FindingAction::Reopen,
+            "amend" => FindingAction::Amend,
+            "note" => FindingAction::Note,
             _ => return Err(rusqlite::Error::InvalidQuery),
         },
+        response: match row.get::<_, Option<String>>(9)?.as_deref() {
+            Some("fixed") => Some(FindingResponse::Fixed),
+            Some("rejected") => Some(FindingResponse::Rejected),
+            None => None,
+            _ => return Err(rusqlite::Error::InvalidQuery),
+        },
+        amendment: row
+            .get::<_, Option<String>>(10)?
+            .map(|s| serde_json::from_str(&s).map_err(|_| rusqlite::Error::InvalidQuery))
+            .transpose()?,
         actor: row.get(3)?,
         assignment_id: row.get(4)?,
         message: row.get(5)?,
@@ -85,10 +101,16 @@ fn load(
         blocking,
         check_id: check_id.map(i64::cast_unsigned),
         assessment_id: assessment_id.map(i64::cast_unsigned),
-        state: match latest_activity.action {
-            FindingAction::Raise => FindingState::Open,
-            FindingAction::Resolve => FindingState::Resolved,
-        },
+        // Notes and amendments retain the latest disposition, even on closed Findings.
+        state: c.query_row("SELECT action FROM finding_activities WHERE finding_id = ?1 AND action NOT IN ('note','amend') ORDER BY id DESC LIMIT 1", [id.cast_signed()], |r| {
+            match r.get::<_, String>(0)?.as_str() {
+                "raise" | "reopen" => Ok(FindingState::Open),
+                "respond" => Ok(FindingState::AwaitingReview),
+                "resolve" => Ok(FindingState::Resolved),
+                "dismiss" => Ok(FindingState::Dismissed),
+                _ => Err(rusqlite::Error::InvalidQuery),
+            }
+        }).map_err(storage_error)?,
         raised,
         latest_activity,
         project,
@@ -105,18 +127,14 @@ fn append(
     message: &str,
     revision: Option<&str>,
     dirty: Option<bool>,
-) -> Result<(), RegistrationError> {
+) -> Result<u64, RegistrationError> {
     c.execute("INSERT INTO finding_activities (finding_id, action, actor, message, revision, dirty, created_at_millis) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)", params![finding.cast_signed(), action, actor, message, revision, dirty, now_millis()?]).map_err(storage_error)?;
-    insert_update(
-        c,
-        task,
-        RecordUpdateKind::FindingActivity {
-            activity_id: c.last_insert_rowid().cast_unsigned(),
-        },
-    )
+    let activity_id = c.last_insert_rowid().cast_unsigned();
+    insert_update(c, task, RecordUpdateKind::FindingActivity { activity_id })?;
+    Ok(activity_id)
 }
 pub(super) fn blockers(c: &Connection, task: u64) -> Result<Vec<u64>, RegistrationError> {
-    c.prepare("SELECT f.id FROM task_findings f WHERE f.task_id = ?1 AND f.blocking = 1 AND (SELECT a.action FROM finding_activities a WHERE a.finding_id = f.id ORDER BY a.id DESC LIMIT 1) NOT IN ('resolve') ORDER BY f.id").map_err(storage_error)?.query_map([task.cast_signed()], |r| r.get::<_, i64>(0).map(i64::cast_unsigned)).map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)
+    c.prepare("SELECT f.id FROM task_findings f WHERE f.task_id = ?1 AND f.blocking = 1 AND (SELECT a.action FROM finding_activities a WHERE a.finding_id = f.id AND a.action NOT IN ('note','amend') ORDER BY a.id DESC LIMIT 1) NOT IN ('resolve','dismiss') ORDER BY f.id").map_err(storage_error)?.query_map([task.cast_signed()], |r| r.get::<_, i64>(0).map(i64::cast_unsigned)).map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)
 }
 impl SqliteProjectRepository {
     pub(super) fn raise_finding(
@@ -193,6 +211,21 @@ impl SqliteProjectRepository {
         id: u64,
         input: &FindingResolveInput,
     ) -> Result<Finding, RegistrationError> {
+        self.mutate_finding(
+            task,
+            id,
+            &FindingMutationInput {
+                change: FindingMutation::Resolve,
+                explanation: input.clone(),
+            },
+        )
+    }
+    pub(super) fn mutate_finding(
+        &self,
+        task: u64,
+        id: u64,
+        mutation: &FindingMutationInput,
+    ) -> Result<Finding, RegistrationError> {
         let mut connection = self
             .connection
             .lock()
@@ -201,7 +234,8 @@ impl SqliteProjectRepository {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(storage_error)?;
         let record = self.check_task(&tx, task)?;
-        input.validate()?;
+        mutation.validate()?;
+        let input = &mutation.explanation;
         let project = record.project_slugs.into_iter().next();
         let current = load(&tx, task, id, project.clone())?;
         if current.version != input.expected_version {
@@ -210,26 +244,79 @@ impl SqliteProjectRepository {
                 "Finding version changed; read it again",
             ));
         }
-        if !matches!(
+        let closed = matches!(
             current.state,
-            FindingState::Open | FindingState::AwaitingReview
-        ) {
+            FindingState::Resolved | FindingState::Dismissed
+        );
+        if record.status == RecordStatus::Done
+            && (matches!(mutation.change, FindingMutation::Amend { .. })
+                || (current.blocking && matches!(mutation.change, FindingMutation::Reopen)))
+        {
             return Err(RegistrationError::new(
-                "invalid-transition",
-                "only unresolved Findings may be resolved",
+                "record-done",
+                "cannot amend Findings or reopen blocking Findings on a Done Task",
             ));
         }
-        // Reviewer dispositions remain permitted after Done; they never reverse completion.
-        append(
+        let (action, response, amendment) = match mutation.change {
+            FindingMutation::Respond { response } if !closed => ("respond", Some(response), None),
+            FindingMutation::Resolve if !closed => ("resolve", None, None),
+            FindingMutation::Dismiss if !closed => ("dismiss", None, None),
+            FindingMutation::Reopen if closed => ("reopen", None, None),
+            FindingMutation::Note => ("note", None, None),
+            FindingMutation::Amend { severity, blocking } => {
+                let new_severity = severity.unwrap_or(current.severity);
+                let new_blocking = blocking.unwrap_or(current.blocking);
+                let severity_text = match new_severity {
+                    Severity::Minor => "minor",
+                    Severity::Major => "major",
+                    Severity::Critical => "critical",
+                };
+                tx.execute(
+                    "UPDATE task_findings SET severity = ?1, blocking = ?2 WHERE id = ?3",
+                    params![severity_text, new_blocking, id.cast_signed()],
+                )
+                .map_err(storage_error)?;
+                (
+                    "amend",
+                    None,
+                    Some(FindingAmendment {
+                        old_severity: current.severity,
+                        new_severity,
+                        old_blocking: current.blocking,
+                        new_blocking,
+                    }),
+                )
+            }
+            _ => {
+                return Err(RegistrationError::new(
+                    "invalid-transition",
+                    "responses and dispositions require an unresolved Finding; reopening requires a closed Finding",
+                ));
+            }
+        };
+        let activity_id = append(
             &tx,
             task,
             id,
-            "resolve",
+            action,
             &input.actor,
             &input.message,
             input.revision.as_deref(),
             input.dirty,
         )?;
+        let response = response.map(|r| match r {
+            FindingResponse::Fixed => "fixed",
+            FindingResponse::Rejected => "rejected",
+        });
+        let amendment = amendment
+            .map(|a| serde_json::to_string(&a))
+            .transpose()
+            .map_err(|e| RegistrationError::new("storage", e.to_string()))?;
+        tx.execute(
+            "UPDATE finding_activities SET response = ?1, amendment = ?2 WHERE id = ?3",
+            params![response, amendment, activity_id.cast_signed()],
+        )
+        .map_err(storage_error)?;
         let finding = load(&tx, task, id, project)?;
         tx.commit().map_err(storage_error)?;
         Ok(finding)

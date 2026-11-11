@@ -694,6 +694,14 @@ impl RecordRepository for SqliteProjectRepository {
     ) -> Result<forge_app::findings::Finding, RegistrationError> {
         self.resolve_finding(task, finding, input)
     }
+    fn mutate_task_finding(
+        &self,
+        task: u64,
+        finding: u64,
+        input: &forge_app::findings::FindingMutationInput,
+    ) -> Result<forge_app::findings::Finding, RegistrationError> {
+        self.mutate_finding(task, finding, input)
+    }
     fn list_task_findings(
         &self,
         task: u64,
@@ -1287,7 +1295,10 @@ impl RecordRepository for SqliteProjectRepository {
             .connection
             .lock()
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
-        let transaction = connection.transaction().map_err(storage_error)?;
+        // Serialize completion with Check/Finding mutations before reading blockers.
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
         let incomplete_child: Option<i64> = transaction.query_row(
             "SELECT child.id FROM record_relationships relationship JOIN records child ON child.id = relationship.child_id WHERE relationship.parent_id = ?1 AND child.status != 'done' LIMIT 1",
             [id.cast_signed()], |row| row.get(0),

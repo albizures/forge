@@ -25,12 +25,75 @@ pub enum FindingState {
 pub enum FindingAction {
     Raise,
     Resolve,
+    Respond,
+    Dismiss,
+    Reopen,
+    Amend,
+    Note,
+}
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FindingResponse {
+    Fixed,
+    Rejected,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FindingAmendment {
+    pub old_severity: Severity,
+    pub new_severity: Severity,
+    pub old_blocking: bool,
+    pub new_blocking: bool,
+}
+/// Typed review action; amendment fields never acquire creation defaults.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "action", rename_all = "lowercase", deny_unknown_fields)]
+pub enum FindingMutation {
+    Respond {
+        response: FindingResponse,
+    },
+    Resolve,
+    Dismiss,
+    Reopen,
+    Amend {
+        severity: Option<Severity>,
+        blocking: Option<bool>,
+    },
+    Note,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FindingMutationInput {
+    pub change: FindingMutation,
+    #[serde(flatten)]
+    pub explanation: FindingResolveInput,
+}
+impl FindingMutationInput {
+    /// Validate explanation, evidence and the explicit amendment.
+    /// # Errors
+    /// Rejects blank attribution/explanation, malformed evidence or empty amendments.
+    pub fn validate(&self) -> Result<(), RegistrationError> {
+        self.explanation.validate()?;
+        if matches!(
+            self.change,
+            FindingMutation::Amend {
+                severity: None,
+                blocking: None
+            }
+        ) {
+            return Err(RegistrationError::new(
+                "invalid-finding",
+                "amend requires severity and/or blocking",
+            ));
+        }
+        Ok(())
+    }
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FindingActivity {
     pub id: u64,
     pub finding_id: u64,
     pub action: FindingAction,
+    pub response: Option<FindingResponse>,
+    pub amendment: Option<FindingAmendment>,
     pub actor: String,
     pub assignment_id: Option<String>,
     pub message: String,
@@ -143,6 +206,18 @@ impl Application {
     ) -> Result<Finding, RegistrationError> {
         input.validate()?;
         self.records.resolve_task_finding(task, finding, input)
+    }
+    /// Append a version-checked review action and its Record Update atomically.
+    /// # Errors
+    /// Returns validation, scope, stale-version, transition, frozen-state or storage errors.
+    pub fn mutate_task_finding(
+        &self,
+        task: u64,
+        finding: u64,
+        input: &FindingMutationInput,
+    ) -> Result<Finding, RegistrationError> {
+        input.validate()?;
+        self.records.mutate_task_finding(task, finding, input)
     }
     /// List a bounded ID-ordered page with evidence comparisons in the Task Project context.
     /// # Errors

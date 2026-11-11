@@ -495,6 +495,20 @@ pub trait RecordRepository: ProjectRepository {
             "Findings are not supported",
         ))
     }
+    /// Append a version-checked Finding review action atomically.
+    /// # Errors
+    /// Returns validation, scope, stale-version, transition, frozen-state or storage errors.
+    fn mutate_task_finding(
+        &self,
+        _task: u64,
+        _finding: u64,
+        _input: &findings::FindingMutationInput,
+    ) -> Result<findings::Finding, RegistrationError> {
+        Err(RegistrationError::new(
+            "unsupported",
+            "Findings are not supported",
+        ))
+    }
     /// List a bounded page ordered by Finding ID.
     /// # Errors
     /// Returns scope, type, pagination or storage errors.

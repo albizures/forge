@@ -14,8 +14,8 @@ pub use forge_app::checks::{
     Assessment, AssessmentInput, CheckPage, InvalidationInput, TaskCheck, Verdict,
 };
 pub use forge_app::findings::{
-    Finding, FindingActivity, FindingList, FindingPage, FindingRaiseInput, FindingResolveInput,
-    FindingState, Severity,
+    Finding, FindingActivity, FindingAmendment, FindingList, FindingMutation, FindingMutationInput,
+    FindingPage, FindingRaiseInput, FindingResolveInput, FindingResponse, FindingState, Severity,
 };
 pub use record_selection::*;
 
@@ -239,6 +239,11 @@ pub trait RecordApi {
         &self,
         request: SelectedRecordRequest<TaskFindingResolveRequest>,
     ) -> RpcResult<Finding>;
+    #[method(name = "taskFindingMutate")]
+    async fn task_finding_mutate(
+        &self,
+        request: SelectedRecordRequest<TaskFindingMutationRequest>,
+    ) -> RpcResult<Finding>;
     #[method(name = "taskCheckList")]
     async fn task_check_list(
         &self,
@@ -377,6 +382,12 @@ pub struct TaskFindingResolveRequest {
     pub task: u64,
     pub finding: u64,
     pub resolution: FindingResolveInput,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TaskFindingMutationRequest {
+    pub task: u64,
+    pub finding: u64,
+    pub mutation: FindingMutationInput,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TaskCheckListRequest {

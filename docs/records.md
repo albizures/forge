@@ -180,7 +180,7 @@ fields. Invalid attribution/evidence, wrong Record
 type or Check ownership, stale versions, frozen Tasks and completion blockers have
 distinct error categories. Assignment completion shares these gates.
 
-## Task Findings (operator slice)
+## Task Findings (operator review cycles)
 
 Findings retain review issues independently of Check verdicts. Passing a Check
 never closes a Finding. Minor Findings default nonblocking; major and critical
@@ -192,11 +192,18 @@ forge task finding raise 44 --severity major --check 1 --assessment 7 \
   --actor reviewer --message 'Validation missing' --dirty false --workspace personal --json
 forge task finding list 44 --limit 50 --workspace personal --json
 forge task finding show 44 2 --after 0 --limit 50 --workspace personal --json
-forge task finding resolve 44 2 --expected-version 1 --actor reviewer \
+forge task finding respond 44 2 --response fixed --expected-version 1 \
+  --actor implementer --message 'Corrected validation' --revision aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+forge task finding resolve 44 2 --expected-version 2 --actor reviewer \
   --message-file verification.md --workspace personal --json
+forge task finding reopen 44 2 --expected-version 3 --actor reviewer --message 'Still reproducible'
+forge task finding dismiss 44 2 --expected-version 4 --actor reviewer --message 'Not applicable'
+forge task finding amend 44 2 --severity minor --blocking false --expected-version 5 \
+  --actor reviewer --message 'Impact clarified'
+forge task finding note 44 2 --expected-version 6 --actor reviewer --message-file correction.md
 ```
 
-Raise and resolve require nonblank `--actor` and exactly one nonblank explanation
+All mutations require nonblank `--actor` and exactly one nonblank explanation
 via `--message` or `--message-file` (`-` reads stdin). Optional `--revision` is a
 full 40-hex SHA; `--dirty true|false` is caller-reported, with omission unknown.
 List/show accept `--compare-revision` with the same read-only Project-context
@@ -206,9 +213,22 @@ Optional `--check` and `--assessment` origins must belong to the same Task.
 An Assessment implies its Check; a conflicting explicit Check fails with
 `invalid-finding-origin`. Invalidated Assessments remain valid historical origins.
 Raised text, evidence and origins are immutable. `resolve` records a verification
-explanation and evidence, moving an open Finding to resolved without changing
-severity or blocking. Re-resolving fails `invalid-transition`; stale versions fail
-`stale-version`, with no activity or log changes. Each successful mutation returns
+explanation and evidence, moving an open or awaiting-review Finding to resolved
+without changing severity or blocking. `dismiss` similarly closes an unresolved
+Finding with a reason. `respond --response fixed|rejected` enters awaiting-review
+from open or awaiting-review, retaining every successive response. A response
+never closes a Finding or changes blocking. Closed Findings must `reopen` with a
+reason before responding; reopening returns to open. `note` appends a correction
+or evidence without changing disposition, including on closed Findings.
+
+`amend` requires severity and/or blocking explicitly, retaining old/new severity
+and blocking plus its reason. Severity-only amendments never reapply creation
+defaults. Amendments and notes leave disposition unchanged. Activity exposes
+`response` (fixed/rejected or null) and `amendment` (old/new severity and blocking,
+or null). Raised text and origins remain unchanged throughout review cycles.
+Every existing-Finding mutation requires `--expected-version`. Invalid transitions
+fail `invalid-transition`; stale versions fail `stale-version`, with no activity
+or log changes. Empty amendments fail `invalid-finding`. Each successful mutation returns
 the observed `version` and atomically appends an attributed activity plus a minimal
 `finding-activity` Record Update (`finding_activity_id`).
 
@@ -223,10 +243,17 @@ non-disclosure behavior. Blank attribution/explanation is `invalid-finding`,
 malformed evidence `invalid-revision`, and invalid pagination `invalid-page`.
 
 Both operator and Assignment Task completion transactionally enforce all Check
-and unresolved blocking Finding gates. Nonblocking Findings do not block Done.
-Completion adds no Finding/Assessment activity. Raising on Done fails `record-done`;
-reviewer resolution of an existing nonblocking Finding remains allowed without
-reversing completion or reviving Assignment capabilities.
+and unresolved blocking Finding gates, reporting all blocker IDs together.
+Awaiting-review remains unresolved, including rejected responses. Nonblocking
+Findings do not block Done. Completion adds no Finding/Assessment activity.
+On Done, raising, severity/blocking amendments and blocking-Finding reopening
+fail `record-done`. Valid responses, notes, resolve/dismiss and reopening of
+existing nonblocking Findings remain permitted. Notes and valid reviewer
+dispositions on existing blocking Findings remain permitted, but closed Findings
+still require reopening before responses, and blocking reopening is frozen.
+No operation reverses completion or revives Assignment capabilities. Completion
+and blocker mutations serialize transactionally; failed operations leave no
+partial activities, amendments or Record Updates.
 
 Typed operator RPCs (flattened Workspace/cwd envelope):
 - `record_taskFindingList`: `task`, `after`, `limit`, `compare_revision` → Finding list page.
@@ -236,8 +263,15 @@ Typed operator RPCs (flattened Workspace/cwd envelope):
 - `record_taskFindingResolve`: `task`, `finding` ID, `resolution` containing mandatory
   `expected_version`, `actor`, `message`, optional `revision`, `dirty` → Finding.
 
-Further review-cycle actions and capability-bound Finding commands are separate
-follow-up delivery; this slice exposes only raise/list/show/resolve.
+- `record_taskFindingMutate`: `task`, `finding` ID, `mutation` containing mandatory
+  `expected_version`, `actor`, `message`, optional `revision`, `dirty`, plus a typed
+  `change` object → Finding. `change` is one of:
+  - `{ "action": "respond", "response": "fixed" }` (or `rejected`)
+  - `{ "action": "resolve" }`, `{ "action": "dismiss" }`, `{ "action": "reopen" }`, `{ "action": "note" }`
+  - `{ "action": "amend", "severity": "minor", "blocking": false }` (at least one field)
+
+Capability-bound Finding commands are separate follow-up delivery. Operator
+review does not extend capability lifetime or introduce execution orchestration.
 
 ## Capability-bound Assignment Checks
 

@@ -1165,6 +1165,18 @@ pub async fn request_task_finding_resolve(
         .await
         .map_err(record_error("task finding resolve"))
 }
+/// Append a version-checked Finding review action.
+/// # Errors
+/// Returns endpoint, scope, validation, stale-version, transition or frozen-state errors.
+pub async fn request_task_finding_mutate(
+    url: impl Into<RecordEndpoint>,
+    request: forge_rpc::TaskFindingMutationRequest,
+) -> Result<forge_rpc::Finding, String> {
+    record_client(url)?
+        .task_finding_mutate(request)
+        .await
+        .map_err(record_error("task finding mutate"))
+}
 /// Inspect a Check and bounded Assessment history.
 /// # Errors
 /// Returns endpoint, scope, ownership or pagination errors.

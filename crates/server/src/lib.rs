@@ -1318,6 +1318,16 @@ impl RecordApiServer for Daemon {
             .resolve_task_finding(r.task, r.finding, &r.resolution)
             .map_err(rpc_error)
     }
+    async fn task_finding_mutate(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<forge_rpc::TaskFindingMutationRequest>,
+    ) -> RpcResult<forge_rpc::Finding> {
+        let application = self.record_application(&request.selection, &mut [])?;
+        let r = request.record;
+        application
+            .mutate_task_finding(r.task, r.finding, &r.mutation)
+            .map_err(rpc_error)
+    }
     async fn task_check_list(
         &self,
         request: forge_rpc::SelectedRecordRequest<forge_rpc::TaskCheckListRequest>,
