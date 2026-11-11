@@ -150,6 +150,56 @@ capability-bound Check operations are a separate delivery.
 This Check schema requires a fresh development store: no pre-feature Task backfill,
 legacy database upgrade or no-Check completion fallback is provided.
 
+## Project Check Templates
+
+A Project's operator-managed Check Template adds ordered, required criteria after
+Implementation when a Task opens. Standalone Tasks use their selected Project;
+Spec children use the inherited Project; Wayfinder children use their selected
+Project, not every Project in the Wayfinder scope. Projectless Tasks and Projects
+without a configured template still receive Implementation alone. Every Task Kind
+uses the same rules. Snapshot creation and Task opening commit atomically; concurrent
+replacement/opening observes a whole template, never mixed criteria. Existing Task
+Check IDs, criteria and positions never change when a template is replaced.
+
+```sh
+forge project check-template show personal/api --limit 50 --json
+forge project check-template set personal/api --file criteria.json \
+  --actor operator --message 'Require review and tests' --expected-version 0 --json
+forge project check-template show personal/api --after 1 --limit 50 --json
+```
+
+The file is an ordered JSON array of `{\"name\":\"Review\",\"description\":\"Deliverables
+have been reviewed\"}` objects. Names and descriptions must be nonblank and are
+trimmed before storage. Names must be unique ignoring case and surrounding
+whitespace; `Implementation` is reserved in any case. `[]` clears only the extras,
+never the baseline. Unknown object fields and malformed JSON are rejected.
+
+Read the observed `version` before replacement. An unconfigured template reads as
+version **0**, empty criteria and empty history; its first replacement requires
+`--expected-version 0`. Every successful whole-set replacement (including clearing)
+increments the version. Stale writes return `stale-version`; invalid criteria or
+blank attribution/explanations return `invalid-check-template`. Failed replacements
+leave the current template and history unchanged. Supply nonblank `--actor` and
+exactly one nonblank `--message` or `--message-file`; `--message-file -` reads stdin.
+
+Show returns current `version`, ordered `criteria`, a bounded ascending `history`
+page and `next_cursor`. Each immutable history entry has an opaque numeric `id`,
+`version`, the replacement `criteria`, `actor`, `message` and `created_at_millis`.
+`--limit` accepts 1–100 (default 50); pass `next_cursor` to `--after` to continue.
+Current criteria/version may be newer than the history page. Template configuration
+has its own attributed history and never invents a Task Record Update.
+
+Both commands support text and `--json`, bare or qualified Project selectors and
+normal Workspace selection. Typed operator RPC methods are
+`record_projectCheckTemplateShow` (`project`, `after`, `limit`) and
+`record_projectCheckTemplateSet` (`project`, `replacement`), using the flattened
+Workspace/cwd envelope. Replacement contains `expected_version`, ordered `criteria`,
+`actor` and `message`. Show returns `{version, criteria, history, next_cursor}`;
+set returns `{version, criteria}`. Project ownership is checked in the repository
+and selectors are qualified within the selected Workspace before application work.
+Assignment capabilities have no template mutation operation. These additions
+require fresh development stores; no migration or Task backfill is provided.
+
 ## Workflow readiness
 
 ```sh

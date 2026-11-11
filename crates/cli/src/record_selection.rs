@@ -96,6 +96,8 @@ dispatch_requests! {
     dispatch_record(forge_rpc::DispatchRecordRequest) -> forge_rpc::DispatchRecordResponse;
 }
 requests! {
+    project_check_template_show(forge_rpc::CheckTemplateShowRequest) -> forge_rpc::TemplatePage;
+    project_check_template_set(forge_rpc::CheckTemplateSetRequest) -> forge_rpc::CheckTemplate;
     task_check_list(RecordIdRequest) -> Vec<forge_rpc::TaskCheck>;
     task_check_show(forge_rpc::TaskCheckShowRequest) -> forge_rpc::CheckPage;
     task_check_assess(forge_rpc::TaskCheckAssessRequest) -> forge_rpc::TaskCheck;

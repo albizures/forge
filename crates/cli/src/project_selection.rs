@@ -4,6 +4,7 @@ use super::{
     ProjectSetupHookCommand, RecordCommand, SpecCommand, TaskCommand, WayfinderCommand,
 };
 
+#[allow(clippy::too_many_lines)]
 pub async fn qualify(command: &mut Command, workspace: Option<&str>) -> Result<(), String> {
     let (projects, endpoint): (Vec<&mut String>, Option<&str>) = match command {
         Command::Spec {
@@ -66,6 +67,16 @@ pub async fn qualify(command: &mut Command, workspace: Option<&str>) -> Result<(
                 args.project.iter_mut().collect(),
                 args.server_url.as_deref(),
             ),
+        },
+        Command::Project {
+            command: ProjectCommand::CheckTemplate { command },
+        } => match command {
+            super::check_templates::CheckTemplateCommand::Show(args) => {
+                (vec![&mut args.project], args.server_url.as_deref())
+            }
+            super::check_templates::CheckTemplateCommand::Set(args) => {
+                (vec![&mut args.project], args.server_url.as_deref())
+            }
         },
         Command::Project {
             command: ProjectCommand::SetupHook { command },

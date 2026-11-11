@@ -1250,6 +1250,28 @@ impl WorktreeApiServer for Daemon {
 
 #[async_trait]
 impl RecordApiServer for Daemon {
+    async fn project_check_template_show(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<forge_rpc::CheckTemplateShowRequest>,
+    ) -> RpcResult<forge_rpc::TemplatePage> {
+        let mut r = request.record;
+        let application =
+            self.record_application(&request.selection, std::slice::from_mut(&mut r.project))?;
+        application
+            .show_check_template(&r.project, r.after, r.limit)
+            .map_err(rpc_error)
+    }
+    async fn project_check_template_set(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<forge_rpc::CheckTemplateSetRequest>,
+    ) -> RpcResult<forge_rpc::CheckTemplate> {
+        let mut r = request.record;
+        let application =
+            self.record_application(&request.selection, std::slice::from_mut(&mut r.project))?;
+        application
+            .replace_check_template(&r.project, &r.replacement)
+            .map_err(rpc_error)
+    }
     async fn task_check_list(
         &self,
         request: forge_rpc::SelectedRecordRequest<RecordIdRequest>,

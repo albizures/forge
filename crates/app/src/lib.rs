@@ -9,6 +9,7 @@ use std::{
 
 pub mod agent_profiles;
 pub mod assignment;
+pub mod check_templates;
 pub mod checks;
 mod profile_catalog;
 mod workspaces;
@@ -431,6 +432,35 @@ pub struct ManagedWorktreeInfo {
 
 /// Persistence operations for generic Records.
 pub trait RecordRepository: ProjectRepository {
+    /// Read current Project criteria and bounded attributed replacement history.
+    ///
+    /// # Errors
+    /// Returns scope, pagination, storage or unsupported-operation errors.
+    fn show_check_template(
+        &self,
+        _project: &str,
+        _after: Option<u64>,
+        _limit: u32,
+    ) -> Result<check_templates::TemplatePage, RegistrationError> {
+        Err(RegistrationError::new(
+            "unsupported",
+            "Check Templates are not supported",
+        ))
+    }
+    /// Atomically replace the whole Project template at the observed version.
+    ///
+    /// # Errors
+    /// Returns validation, scope, stale-version, storage or unsupported-operation errors.
+    fn replace_check_template(
+        &self,
+        _project: &str,
+        _input: &check_templates::TemplateReplacement,
+    ) -> Result<check_templates::CheckTemplate, RegistrationError> {
+        Err(RegistrationError::new(
+            "unsupported",
+            "Check Templates are not supported",
+        ))
+    }
     /// Inspect immutable completion criteria for a Task.
     ///
     /// # Errors

@@ -1,6 +1,80 @@
 use super::*;
 use forge_app::checks::{AssessmentInput, Verdict};
 
+#[test]
+fn project_template_replacement_snapshots_future_tasks_only() {
+    use forge_app::check_templates::{CheckCriterion, TemplateReplacement};
+    let repository = super::SqliteProjectRepository::in_memory().unwrap();
+    repository
+        .register(&project("alpha", "/template-alpha"))
+        .unwrap();
+    let open = || {
+        repository
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Task,
+                body: "Deliver".into(),
+                project_slugs: vec!["alpha".into()],
+                task_kind: None,
+                generated_by_ids: vec![],
+            })
+            .unwrap()
+    };
+    let old = open();
+    let initial = repository.show_check_template("alpha", None, 1).unwrap();
+    assert_eq!(initial.version, 0);
+    assert!(initial.criteria.is_empty());
+    let input = TemplateReplacement {
+        expected_version: 0,
+        actor: "operator".into(),
+        message: "Require review".into(),
+        criteria: vec![CheckCriterion {
+            name: " Review ".into(),
+            description: " Reviewed deliverables ".into(),
+        }],
+    };
+    let updated = repository.replace_check_template("alpha", &input).unwrap();
+    assert_eq!(updated.version, 1);
+    let new = open();
+    assert_eq!(repository.list_task_checks(old.id).unwrap().len(), 1);
+    let checks = repository.list_task_checks(new.id).unwrap();
+    assert_eq!(
+        checks.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+        ["Implementation", "Review"]
+    );
+    assert_eq!(checks[1].description, "Reviewed deliverables");
+    assert_eq!(checks[1].position, 1);
+    assert_eq!(
+        repository
+            .replace_check_template("alpha", &input)
+            .unwrap_err()
+            .code,
+        "stale-version"
+    );
+    repository
+        .replace_check_template(
+            "alpha",
+            &TemplateReplacement {
+                expected_version: 1,
+                criteria: vec![],
+                ..input
+            },
+        )
+        .unwrap();
+    assert_eq!(repository.list_task_checks(open().id).unwrap().len(), 1);
+    assert_eq!(repository.list_task_checks(new.id).unwrap(), checks);
+    let page = repository.show_check_template("alpha", None, 1).unwrap();
+    assert_eq!(page.version, 2);
+    assert_eq!(page.history.len(), 1);
+    assert_eq!(page.history[0].actor, "operator");
+    assert_eq!(page.history[0].criteria[0].name, "Review");
+    let next = repository
+        .show_check_template("alpha", page.next_cursor, 1)
+        .unwrap();
+    assert_eq!(next.history.len(), 1);
+    assert!(next.history[0].criteria.is_empty());
+    assert!(next.next_cursor.is_none());
+}
+
 fn task(repository: &dyn RecordRepository) -> Record {
     repository
         .open_typed_record(&NewTypedRecord {

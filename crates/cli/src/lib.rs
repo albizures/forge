@@ -1060,6 +1060,33 @@ pub async fn request_list_records(
         .map_err(record_error("list"))
 }
 
+/// Read a Project Check Template and a bounded replacement-history page.
+///
+/// # Errors
+/// Returns endpoint, Workspace selection, scope or pagination errors.
+pub async fn request_project_check_template_show(
+    url: impl Into<RecordEndpoint>,
+    request: forge_rpc::CheckTemplateShowRequest,
+) -> Result<forge_rpc::TemplatePage, String> {
+    record_client(url)?
+        .project_check_template_show(request)
+        .await
+        .map_err(record_error("project check-template show"))
+}
+/// Replace a Project Check Template at the observed version.
+///
+/// # Errors
+/// Returns endpoint, scope, validation or stale-version errors.
+pub async fn request_project_check_template_set(
+    url: impl Into<RecordEndpoint>,
+    request: forge_rpc::CheckTemplateSetRequest,
+) -> Result<forge_rpc::CheckTemplate, String> {
+    record_client(url)?
+        .project_check_template_set(request)
+        .await
+        .map_err(record_error("project check-template set"))
+}
+
 /// Read immutable Task criteria through a Workspace-selected operator request.
 ///
 /// # Errors

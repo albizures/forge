@@ -7,6 +7,9 @@ pub use assignment::*;
 mod workspaces;
 pub use workspaces::*;
 mod record_selection;
+pub use forge_app::check_templates::{
+    CheckCriterion, CheckTemplate, TemplateChange, TemplatePage, TemplateReplacement,
+};
 pub use forge_app::checks::{Assessment, AssessmentInput, CheckPage, TaskCheck, Verdict};
 pub use record_selection::*;
 
@@ -200,6 +203,16 @@ pub trait RecordApi {
         &self,
         request: SelectedRecordRequest<OpenSpecRequest>,
     ) -> RpcResult<RecordResponse>;
+    #[method(name = "projectCheckTemplateShow")]
+    async fn project_check_template_show(
+        &self,
+        request: SelectedRecordRequest<CheckTemplateShowRequest>,
+    ) -> RpcResult<TemplatePage>;
+    #[method(name = "projectCheckTemplateSet")]
+    async fn project_check_template_set(
+        &self,
+        request: SelectedRecordRequest<CheckTemplateSetRequest>,
+    ) -> RpcResult<CheckTemplate>;
     #[method(name = "taskCheckList")]
     async fn task_check_list(
         &self,
@@ -297,6 +310,17 @@ pub trait RecordApi {
     ) -> RpcResult<()>;
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CheckTemplateShowRequest {
+    pub project: String,
+    pub after: Option<u64>,
+    pub limit: u32,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CheckTemplateSetRequest {
+    pub project: String,
+    pub replacement: TemplateReplacement,
+}
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TaskCheckShowRequest {
     pub task: u64,

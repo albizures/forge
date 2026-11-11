@@ -1,4 +1,5 @@
 mod agent_profiles;
+mod check_templates;
 mod checks;
 mod project_selection;
 mod workspaces;
@@ -123,6 +124,10 @@ enum Command {
 }
 #[derive(Debug, Subcommand)]
 enum ProjectCommand {
+    CheckTemplate {
+        #[command(subcommand)]
+        command: check_templates::CheckTemplateCommand,
+    },
     SetupHook {
         #[command(subcommand)]
         command: ProjectSetupHookCommand,
@@ -850,7 +855,12 @@ async fn run_record(command: RecordCommand, workspace: Option<String>) -> i32 {
 }
 
 async fn project(command: ProjectCommand, workspace: Option<String>) -> i32 {
-    let ProjectCommand::SetupHook { command } = command;
+    let command = match command {
+        ProjectCommand::CheckTemplate { command } => {
+            return check_templates::run(command, workspace).await;
+        }
+        ProjectCommand::SetupHook { command } => command,
+    };
     let (project, hook, server_url, json) = match command {
         ProjectSetupHookCommand::Set(args) => {
             (args.project, Some(args.hook), args.server_url, args.json)

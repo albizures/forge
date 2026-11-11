@@ -18,6 +18,7 @@ use forge_app::{
 };
 use rusqlite::{Connection, ErrorCode, OptionalExtension, params};
 
+mod check_templates;
 mod checks;
 mod record_workspaces;
 mod workspace_dispatch;
@@ -205,6 +206,7 @@ impl SqliteProjectRepository {
             )
             .map_err(storage_error)?;
         checks::schema(&connection)?;
+        check_templates::schema(&connection)?;
         migrate_record_status_schema(&connection)?;
         migrate_record_type_schema(&connection)?;
         migrate_task_kind_schema(&connection)?;
@@ -651,6 +653,21 @@ impl ManagedWorktreeRepository for SqliteProjectRepository {
 }
 
 impl RecordRepository for SqliteProjectRepository {
+    fn show_check_template(
+        &self,
+        project: &str,
+        after: Option<u64>,
+        limit: u32,
+    ) -> Result<forge_app::check_templates::TemplatePage, RegistrationError> {
+        self.template_page(project, after, limit)
+    }
+    fn replace_check_template(
+        &self,
+        project: &str,
+        input: &forge_app::check_templates::TemplateReplacement,
+    ) -> Result<forge_app::check_templates::CheckTemplate, RegistrationError> {
+        self.replace_template(project, input)
+    }
     fn list_task_checks(
         &self,
         task: u64,
@@ -775,7 +792,9 @@ impl RecordRepository for SqliteProjectRepository {
             .connection
             .lock()
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
-        let transaction = connection.transaction().map_err(storage_error)?;
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
         let workspace = record_workspaces::creation_workspace(
             &transaction,
             self.record_workspace.as_deref(),
@@ -790,6 +809,11 @@ impl RecordRepository for SqliteProjectRepository {
         let id = transaction.last_insert_rowid().cast_unsigned();
         if record.record_type == RecordType::Task {
             checks::provision(&transaction, id)?;
+            check_templates::provision(
+                &transaction,
+                id,
+                record.project_slugs.first().map(String::as_str),
+            )?;
         }
         for slug in &record.project_slugs {
             transaction
@@ -817,7 +841,9 @@ impl RecordRepository for SqliteProjectRepository {
             .connection
             .lock()
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
-        let transaction = connection.transaction().map_err(storage_error)?;
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
         self.ensure_record_workspace(&transaction, spec_id)?;
         let workspace = record_workspaces::owner(&transaction, spec_id)?;
         let spec = load_record(&transaction, spec_id)?;
@@ -835,6 +861,11 @@ impl RecordRepository for SqliteProjectRepository {
             .map_err(storage_error)?;
         let task_id = transaction.last_insert_rowid().cast_unsigned();
         checks::provision(&transaction, task_id)?;
+        check_templates::provision(
+            &transaction,
+            task_id,
+            spec.project_slugs.first().map(String::as_str),
+        )?;
         transaction
             .execute(
                 "INSERT INTO record_projects (record_id, project_slug) SELECT ?1, project_slug FROM record_projects WHERE record_id = ?2",
@@ -882,7 +913,9 @@ impl RecordRepository for SqliteProjectRepository {
             .connection
             .lock()
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
-        let transaction = connection.transaction().map_err(storage_error)?;
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
         self.ensure_record_workspace(&transaction, wayfinder_id)?;
         let workspace = record_workspaces::owner(&transaction, wayfinder_id)?;
         let wayfinder = load_record(&transaction, wayfinder_id)?;
@@ -917,6 +950,11 @@ impl RecordRepository for SqliteProjectRepository {
             .map_err(storage_error)?;
         let task_id = transaction.last_insert_rowid().cast_unsigned();
         checks::provision(&transaction, task_id)?;
+        check_templates::provision(
+            &transaction,
+            task_id,
+            project_slugs.first().map(String::as_str),
+        )?;
         for project_slug in project_slugs {
             transaction
                 .execute(
@@ -3833,6 +3871,9 @@ fn storage_error(error: rusqlite::Error) -> RegistrationError {
 mod tests {
     mod check_tests {
         include!("check_tests.rs");
+    }
+    mod check_template_tests {
+        include!("check_template_tests.rs");
     }
     include!("subscription_removal_tests.rs");
     use super::SqliteProjectRepository as Repository;
