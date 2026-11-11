@@ -3911,6 +3911,9 @@ mod tests {
     mod check_invalidation_tests {
         include!("check_invalidation_tests.rs");
     }
+    mod check_completion_tests {
+        include!("check_completion_tests.rs");
+    }
     include!("subscription_removal_tests.rs");
     use super::SqliteProjectRepository as Repository;
     use forge_app::{RegistrationError, WorkspaceRepository};

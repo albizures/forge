@@ -242,9 +242,13 @@ forge project check-template set personal/api --file criteria.json \
 forge project check-template show personal/api --after 1 --limit 50 --json
 ```
 
-The file is an ordered JSON array of `{\"name\":\"Review\",\"description\":\"Deliverables
-have been reviewed\"}` objects. Names and descriptions must be nonblank and are
-trimmed before storage. Names must be unique ignoring case and surrounding
+The file is an ordered JSON array of objects, for example:
+
+```json
+[{"name":"Review","description":"Deliverables have been reviewed"}]
+```
+
+Names and descriptions must be nonblank and are trimmed before storage. Names must be unique ignoring case and surrounding
 whitespace; `Implementation` is reserved in any case. `[]` clears only the extras,
 never the baseline. Unknown object fields and malformed JSON are rejected.
 
