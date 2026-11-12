@@ -1,5 +1,6 @@
 use forge_app::{
-    AgentDispatchRepository, Application, DispatchWorkspace,
+    AgentAdapterError, AgentDispatchAdapter, AgentDispatchAdapterFactory, AgentDispatchContext,
+    AgentDispatchRepository, AgentObservation, AgentProfile, Application, DispatchWorkspace,
     ExecutionMode::{Dispatched, Manual},
     ManagedWorktreeAdapter, ManagedWorktreeRepository, NewTypedRecord, Project, ProjectRepository,
     RecordRepository, RecordStatus, RecordType, RegistrationError, RepositoryInspector,
@@ -70,6 +71,16 @@ fn dirty_implementation_creates_a_durable_hold_without_an_assessment() {
 #[test]
 fn controlled_checks_continue_only_after_retirement_and_survive_restart() {
     run_case("success");
+}
+
+#[test]
+fn interrupted_review_retries_the_same_check_only_after_safe_retirement() {
+    run_case("interrupted");
+}
+
+#[test]
+fn operator_retired_review_recovers_without_fabricating_a_failed_assessment() {
+    run_case("retired-interruption");
 }
 
 #[test]
@@ -338,6 +349,92 @@ fn handback(
     assert!(store.dispatch_hold(task).unwrap().is_none());
 }
 
+// Faults are injected at the provider port, after the public controlled claim.
+struct FaultProvider {
+    inner: Provider,
+    stage: String,
+}
+impl AgentDispatchAdapterFactory for FaultProvider {
+    fn validate_profile(&self, profile: &AgentProfile) -> Result<(), AgentAdapterError> {
+        self.inner.validate_profile(profile)
+    }
+    fn adapter_for(
+        &self,
+        profile: &AgentProfile,
+    ) -> Result<Box<dyn AgentDispatchAdapter>, AgentAdapterError> {
+        Ok(Box::new(FaultAdapter {
+            inner: self.inner.adapter_for(profile)?,
+            stage: self.stage.clone(),
+        }))
+    }
+}
+struct FaultAdapter {
+    inner: Box<dyn AgentDispatchAdapter>,
+    stage: String,
+}
+impl AgentDispatchAdapter for FaultAdapter {
+    fn probe(&self) -> Result<(), AgentAdapterError> {
+        self.inner.probe()
+    }
+    fn verify_workspace(&self, id: &str) -> Result<DispatchWorkspace, AgentAdapterError> {
+        self.inner.verify_workspace(id)
+    }
+    fn provision(
+        &self,
+        context: &AgentDispatchContext,
+        repository: &dyn AgentDispatchRepository,
+    ) -> Result<(), AgentAdapterError> {
+        if self.stage != "fault-before-provision" {
+            assert!(
+                repository
+                    .begin_agent_provision(&context.assignment.id)
+                    .unwrap()
+            );
+        }
+        if matches!(self.stage.as_str(), "fault-launch" | "fault-acknowledged") {
+            assert!(
+                repository
+                    .begin_agent_launch(&context.assignment.id, 100)
+                    .unwrap()
+            );
+            self.inner.provision(context, repository)?;
+        }
+        if self.stage == "fault-acknowledged" {
+            repository
+                .acknowledge_agent_assignment(&context.assignment.id)
+                .unwrap();
+        }
+        Err(AgentAdapterError::Transient(
+            "injected lost provider response".into(),
+        ))
+    }
+    fn observe(&self, _: &AgentDispatchContext) -> Result<AgentObservation, AgentAdapterError> {
+        panic!("absence/observation cannot authorize Check replacement")
+    }
+    fn recover(&self, _: &AgentDispatchContext) -> Result<AgentObservation, AgentAdapterError> {
+        panic!("uncertain Check must not be relaunched")
+    }
+    fn retire(
+        &self,
+        context: &AgentDispatchContext,
+        repository: &dyn AgentDispatchRepository,
+    ) -> Result<(), AgentAdapterError> {
+        self.inner.retire(context, repository)
+    }
+}
+
+#[test]
+fn provisioning_launch_and_acknowledgement_faults_never_authorize_a_second_attempt() {
+    for stage in [
+        "fault-before-provision",
+        "fault-provision",
+        "fault-launch",
+        "fault-acknowledged",
+    ] {
+        run_case(stage);
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 fn run_case(case: &str) {
     let root = std::env::temp_dir().join(format!(
@@ -434,10 +531,20 @@ fn run_case(case: &str) {
             Box::new(SqliteProjectRepository::open(&path).unwrap()),
             Box::new(Checkout(dirty.clone())),
             Box::new(SqliteProjectRepository::open(&path).unwrap()),
-            Box::new(Provider {
-                unavailable: unavailable.clone(),
-                launches: launches.clone(),
-            }),
+            if case.starts_with("fault-") {
+                Box::new(FaultProvider {
+                    inner: Provider {
+                        unavailable: unavailable.clone(),
+                        launches: launches.clone(),
+                    },
+                    stage: case.into(),
+                }) as Box<dyn AgentDispatchAdapterFactory>
+            } else {
+                Box::new(Provider {
+                    unavailable: unavailable.clone(),
+                    launches: launches.clone(),
+                })
+            },
             Box::new(Head(head.clone())),
         )
         .with_workspace_repository(Box::new(SqliteProjectRepository::open(&path).unwrap()))
@@ -506,6 +613,65 @@ fn run_case(case: &str) {
             .execute_task_check_acceptance(task.id)
             .unwrap();
         assert_eq!(launches.lock().unwrap().len(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+        return;
+    }
+    if case.starts_with("fault-") {
+        let (assignment, existing) = app.execute_task_check_acceptance(task.id).unwrap();
+        assert!(!existing);
+        let expected_count = usize::from(matches!(case, "fault-launch" | "fault-acknowledged"));
+        assert_eq!(launches.lock().unwrap().len(), expected_count);
+        for round in 1..=3 {
+            application()
+                .reconcile_agent_dispatch("fault-restart", round * 400_000)
+                .unwrap();
+            let (same, existing) = application()
+                .execute_task_check_acceptance(task.id)
+                .unwrap();
+            assert!(existing);
+            assert_eq!(same.id, assignment.id);
+            assert_eq!(launches.lock().unwrap().len(), expected_count);
+            assert!(
+                app.agent_assignment_info(&assignment.id)
+                    .unwrap()
+                    .capacity_reserved()
+            );
+        }
+        let info = app.agent_assignment_info(&assignment.id).unwrap();
+        assert_eq!(info.launch_intent.is_some(), expected_count == 1);
+        assert_eq!(store.list_agent_assignments(task.id).unwrap().len(), 1);
+        // Revocation still cannot reconcile a launch whose response/identity was lost.
+        application()
+            .retire_agent_assignment(&assignment.id)
+            .unwrap();
+        if case != "fault-before-provision" {
+            assert!(
+                app.agent_assignment_info(&assignment.id)
+                    .unwrap()
+                    .capacity_reserved()
+            );
+            store.resume_dispatch(task.id).unwrap();
+            assert_eq!(
+                application()
+                    .execute_task_check_acceptance(task.id)
+                    .unwrap_err()
+                    .code,
+                "execution-mode-unsafe-ownership"
+            );
+            assert_eq!(
+                app.resolve_unknown_agent_resources(&assignment.id, false, true)
+                    .unwrap_err()
+                    .code,
+                "confirmation-required"
+            );
+        }
+        assert_eq!(launches.lock().unwrap().len(), expected_count);
+        assert!(
+            app.list_record_checks(task.id)
+                .unwrap()
+                .iter()
+                .all(|c| c.latest_assessment.is_none())
+        );
         std::fs::remove_dir_all(root).unwrap();
         return;
     }
@@ -656,6 +822,212 @@ fn run_case(case: &str) {
                     .latest_assessment
                     .is_none()
             );
+        }
+        if case == "retired-interruption" && index == 1 {
+            unavailable.store(true, std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(
+                app.retire_agent_assignment(&assignment.id)
+                    .unwrap_err()
+                    .code,
+                "agent-retirement-failed"
+            );
+            assert!(
+                app.agent_assignment_info(&assignment.id)
+                    .unwrap()
+                    .capacity_reserved()
+            );
+            application()
+                .reconcile_agent_dispatch("retirement-pending", 800_000)
+                .unwrap();
+            assert_eq!(launches.lock().unwrap().len(), 2);
+            unavailable.store(false, std::sync::atomic::Ordering::SeqCst);
+            application()
+                .retire_agent_assignment(&assignment.id)
+                .unwrap();
+            assert!(
+                !app.agent_assignment_info(&assignment.id)
+                    .unwrap()
+                    .capacity_reserved()
+            );
+            assert!(store.dispatch_hold(task.id).unwrap().is_some());
+            application()
+                .reconcile_agent_dispatch("retired-held", 1_200_000)
+                .unwrap();
+            assert_eq!(launches.lock().unwrap().len(), 2);
+            store.resume_dispatch(task.id).unwrap();
+            let (replacement, existing) = application()
+                .execute_task_check_acceptance(task.id)
+                .unwrap();
+            assert!(!existing);
+            let retry = store
+                .assignment_check_attempt(&replacement.id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(retry.check_id, attempt.check_id);
+            assert_eq!(retry.generation, attempt.generation);
+            assert_eq!(retry.evidence, attempt.evidence);
+            assert_eq!(
+                app.list_record_checks(task.id).unwrap()[0].current_verdict,
+                Some(Verdict::Pass)
+            );
+            assert!(
+                app.list_record_checks(task.id).unwrap()[1]
+                    .latest_assessment
+                    .is_none()
+            );
+            assert_eq!(launches.lock().unwrap().len(), 3);
+            assert_eq!(
+                session.submit_outcome(&input).unwrap_err().code,
+                "attempt-closed"
+            );
+            std::fs::remove_dir_all(root).unwrap();
+            return;
+        }
+        if case == "interrupted" && index == 1 {
+            input.verdict = Verdict::Fail;
+            input.disposition = OutcomeDisposition::Interrupted;
+            input.message = "Verification interrupted, no substantive verdict".into();
+            unavailable.store(true, std::sync::atomic::Ordering::SeqCst);
+            let acceptance_barrier = std::sync::Barrier::new(2);
+            let accepted = std::thread::scope(|scope| {
+                let submit = scope.spawn(|| {
+                    let app = application();
+                    let session = app.assignment(&secrets, &assignment.id, "secret").unwrap();
+                    acceptance_barrier.wait();
+                    session.submit_outcome(&input).unwrap()
+                });
+                let continue_request = scope.spawn(|| {
+                    let app = application();
+                    acceptance_barrier.wait();
+                    app.execute_task_check_acceptance(task.id)
+                });
+                let accepted = submit.join().unwrap();
+                match continue_request.join().unwrap() {
+                    Ok((existing, true)) => assert_eq!(existing.id, assignment.id),
+                    Err(error) => assert_eq!(error.code, "agent-retirement-failed"),
+                    other => panic!("unexpected concurrent continuation: {other:?}"),
+                }
+                accepted
+            });
+            assert_eq!(
+                app.record_work_state(task.id).unwrap().generation,
+                attempt.generation
+            );
+            assert_eq!(
+                app.list_record_checks(task.id).unwrap()[0].current_verdict,
+                Some(Verdict::Pass)
+            );
+            assert!(
+                app.list_record_checks(task.id).unwrap()[1]
+                    .latest_assessment
+                    .is_none()
+            );
+            store
+                .add_agent_assignment_resource(&forge_app::NewAgentAssignmentResource {
+                    assignment_id: assignment.id.clone(),
+                    resource_kind: "provider-pane".into(),
+                    resource_id: "interrupted-pane".into(),
+                })
+                .unwrap();
+            unavailable.store(true, std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(
+                application()
+                    .execute_task_check_acceptance(task.id)
+                    .unwrap_err()
+                    .code,
+                "agent-retirement-failed"
+            );
+            assert!(
+                app.agent_assignment_info(&assignment.id)
+                    .unwrap()
+                    .capacity_reserved()
+            );
+            assert_eq!(launches.lock().unwrap().len(), 2);
+            unavailable.store(false, std::sync::atomic::Ordering::SeqCst);
+            application()
+                .reconcile_agent_dispatch("interrupted-restart", 800_000)
+                .unwrap();
+            assert_eq!(launches.lock().unwrap().len(), 2);
+            assert_eq!(
+                application()
+                    .execute_task_check_acceptance(task.id)
+                    .unwrap_err()
+                    .code,
+                "assignment-recovery-blocked"
+            );
+            store
+                .retire_agent_assignment_resource(
+                    &assignment.id,
+                    "provider-pane",
+                    "interrupted-pane",
+                )
+                .unwrap();
+            let barrier = std::sync::Barrier::new(2);
+            let results = std::thread::scope(|scope| {
+                let replay = scope.spawn(|| {
+                    let app = application();
+                    let session = app.assignment(&secrets, &assignment.id, "secret").unwrap();
+                    barrier.wait();
+                    session.submit_outcome(&input).unwrap()
+                });
+                let continuation = scope.spawn(|| {
+                    let app = application();
+                    barrier.wait();
+                    app.execute_task_check_acceptance(task.id).unwrap()
+                });
+                (replay.join().unwrap(), continuation.join().unwrap())
+            });
+            assert_eq!(results.0, accepted);
+            let replacement = results.1.0;
+            let retry = store
+                .assignment_check_attempt(&replacement.id)
+                .unwrap()
+                .unwrap();
+            assert_ne!(replacement.id, assignment.id);
+            assert_eq!(retry.check_id, attempt.check_id);
+            assert_eq!(retry.generation, attempt.generation);
+            assert_eq!(retry.evidence, attempt.evidence);
+            assert_eq!(replacement.profile.revision, pinned.revision);
+            assert_eq!(launches.lock().unwrap().len(), 3);
+            let replay_app = application();
+            let replay = replay_app
+                .assignment(&secrets, &assignment.id, "secret")
+                .unwrap();
+            let mut conflicting = input.clone();
+            conflicting.message = "Conflicting interruption".into();
+            assert_eq!(
+                replay.submit_outcome(&conflicting).unwrap_err().code,
+                "outcome-conflict"
+            );
+            assert_eq!(
+                replay.context().err().unwrap().code,
+                "assignment-capability-denied"
+            );
+            assert!(
+                app.list_record_findings(task.id, None, 100, None)
+                    .unwrap()
+                    .findings
+                    .is_empty()
+            );
+            assert_eq!(
+                app.list_record_checks(task.id).unwrap()[0].current_verdict,
+                Some(Verdict::Pass)
+            );
+            assert!(
+                app.list_record_checks(task.id).unwrap()[1]
+                    .latest_assessment
+                    .is_none()
+            );
+            application()
+                .reconcile_agent_dispatch("retry-live", 1_200_000)
+                .unwrap();
+            assert_eq!(launches.lock().unwrap().len(), 3);
+            assert_eq!(
+                app.execute_task_check_acceptance(task.id).unwrap().0.id,
+                replacement.id
+            );
+            std::fs::remove_dir_all(root).unwrap();
+            return;
         }
         let accepted = session.submit_outcome(&input).unwrap();
         if case == "residual" {

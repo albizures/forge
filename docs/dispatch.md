@@ -109,8 +109,16 @@ revokes the old capability and retains a `check-handoff` resource blocker before
 provider cleanup. Failed or uncertain cleanup retains capacity across restart;
 an adapter's successful response cannot clear other retained resources. Holds,
 dependencies, mode, capacity, worktree safety and provider prerequisites are
-rechecked before the next claim. Failed Implementation and interrupted attempts
-do not currently retry automatically. The final pass retires its agent but leaves the
+rechecked before the next claim. An authenticated interrupted review retries the
+same Check at the same freshness and evidence only after confirmed retirement and
+complete resource reconciliation. It publishes no Assessment or Finding and does not
+invalidate earlier passes. An attempt retired explicitly before submitting a result
+can likewise retry only after its durable operator-retirement marker and all other
+resources are reconciled, and the operator clears the retirement hold. Closure,
+missing acknowledgement, absent provider resources or a lost launch response alone
+never authorize replacement. Failed Implementation does not currently retry
+automatically; durable retry budgets remain a separate rollout prerequisite.
+The final pass retires its agent but leaves the
 Task In Progress; completion remains gated separately. Exact outcome replay
 returns its original result (including after closure/restart when the original
 credential remains available); this replay-only path does not restore closed

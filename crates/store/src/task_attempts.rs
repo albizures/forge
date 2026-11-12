@@ -7,7 +7,7 @@ use forge_app::{
     AgentAssignment, AgentDispatchRepository, DispatchPreflightSelection, RecordStatus, RecordType,
     RegistrationError,
     checks::Verdict,
-    outcomes::{Attempt, Evidence},
+    outcomes::{Attempt, Evidence, OutcomeDisposition, OutcomeInput},
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
@@ -40,9 +40,42 @@ impl SqliteProjectRepository {
             return Ok(false);
         };
         self.ensure_record_workspace(&tx, attempt.record_id)?;
+        // An operator may retire an interrupted agent before it can submit any result.
+        // Require the explicit retirement marker and complete resource reconciliation;
+        // closure or provider absence alone cannot release the attempt's ownership.
+        let safely_retired: bool = tx.query_row(
+            "SELECT closed_at_millis IS NOT NULL AND closure_reason = 'retired' AND EXISTS(SELECT 1 FROM agent_assignment_resources WHERE assignment_id = ?1 AND resource_kind = 'retirement-pending' AND retired_at_millis IS NOT NULL) AND NOT EXISTS(SELECT 1 FROM agent_assignment_resources WHERE assignment_id = ?1 AND retired_at_millis IS NULL) FROM agent_assignments WHERE id = ?1",
+            [id], |r| r.get(0)).map_err(storage_error)?;
+        if safely_retired {
+            tx.execute(
+                "UPDATE record_attempts SET closed = 1 WHERE id = ?1 AND closed = 0",
+                [&attempt.id],
+            )
+            .map_err(storage_error)?;
+            tx.commit().map_err(storage_error)?;
+            return Ok(true);
+        }
         let check = checks::load(&tx, attempt.record_id, attempt.check_id)?;
         let stale = outcomes::state(&tx, attempt.record_id)?.generation != attempt.generation;
+        let outcome: Option<String> = tx
+            .query_row(
+                "SELECT outcome_json FROM record_attempts WHERE id = ?1 AND closed = 1",
+                [&attempt.id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(storage_error)?
+            .flatten();
+        let interrupted = outcome
+            .map(|json| {
+                serde_json::from_str::<OutcomeInput>(&json)
+                    .map(|outcome| outcome.disposition == OutcomeDisposition::Interrupted)
+                    .map_err(|_| error("storage", "invalid accepted attempt outcome"))
+            })
+            .transpose()?
+            .unwrap_or(false);
         if !stale
+            && !interrupted
             && (check.current_verdict != Some(Verdict::Pass)
                 || !check.latest_assessment.as_ref().is_some_and(|a| {
                     a.attempt_id == attempt.id && a.assignment_id.as_deref() == Some(id)

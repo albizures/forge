@@ -37,8 +37,9 @@ impl Application {
         })
     }
 
-    /// Resume enrolled Tasks after a current pass or explicit freshness invalidation.
-    /// Unclaimed Tasks, interrupted attempts and current failed Implementation do not advance.
+    /// Resume enrolled Tasks after a pass, interruption or explicit freshness invalidation.
+    /// Unclaimed Tasks and current failed Implementation do not advance. All replacements
+    /// require confirmed retirement/resource reconciliation; interruption is not handback.
     pub(crate) fn continue_task_check_acceptance(&self) -> Result<(), RegistrationError> {
         let repository = self.dispatch()?;
         for task in repository.list_records(&crate::RecordListFilter {
@@ -120,7 +121,7 @@ impl Application {
 
     /// Launch at most one Check-bound attempt for controlled acceptance testing.
     /// Requires a previously prepared, clean Managed Worktree. Continues only after safe
-    /// retirement of a passing or freshness-invalidated attempt; never completes work.
+    /// retirement of a passing, interrupted or freshness-invalidated attempt; never completes work.
     /// # Errors
     /// Rejects unsupported owners, unsafe resources, unavailable pinned profiles and stale inputs.
     #[allow(clippy::too_many_lines)]
