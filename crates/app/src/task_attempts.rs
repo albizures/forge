@@ -5,8 +5,90 @@ use crate::{
 };
 
 impl Application {
+    /// Resume only Tasks with a durable controlled-acceptance Assignment and current pass.
+    /// Ordinary unclaimed Tasks, interrupted attempts and failed Checks are not enrolled.
+    pub(crate) fn continue_task_check_acceptance(&self) -> Result<(), RegistrationError> {
+        let repository = self.dispatch()?;
+        for task in repository.list_records(&crate::RecordListFilter {
+            project_slug: None,
+            status: Some(crate::RecordStatus::InProgress),
+            record_type: Some(RecordType::Task),
+        })? {
+            if crate::validate_task_dispatch_mode(&task).is_err() {
+                continue;
+            }
+            let Some(latest) = repository
+                .list_agent_assignments(task.id)?
+                .into_iter()
+                .next()
+            else {
+                continue;
+            };
+            let result = (|| {
+                if self.retire_accepted_task_check(&latest)? {
+                    match self.execute_task_check_acceptance(task.id) {
+                        Ok(_) => {}
+                        Err(e) if e.code == "checks-passed" => {}
+                        Err(e) => return Err(e),
+                    }
+                }
+                Ok(())
+            })();
+            if let Err(error) = result {
+                tracing::warn!(
+                    record_id = task.id,
+                    code = error.code,
+                    "controlled Check continuation blocked"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn retire_accepted_task_check(
+        &self,
+        assignment: &AgentAssignment,
+    ) -> Result<bool, RegistrationError> {
+        let repository = self.dispatch()?;
+        if !repository.begin_task_check_handoff(&assignment.id)? {
+            return Ok(false);
+        }
+        let resources = repository.list_agent_assignment_resources(&assignment.id)?;
+        if resources.iter().all(|r| r.retired_at_millis.is_some()) {
+            return Ok(true);
+        }
+        let current = repository.agent_assignment(&assignment.id)?;
+        let context = crate::agent_dispatch_context(repository, &current)?;
+        let adapter = self
+            .adapter_factory()?
+            .adapter_for(&current.profile)
+            .map_err(|e| {
+                RegistrationError::new("agent-retirement-unavailable", format!("{e:?}"))
+            })?;
+        adapter
+            .retire(&context, repository)
+            .map_err(|e| RegistrationError::new("agent-retirement-failed", format!("{e:?}")))?;
+        if repository
+            .list_agent_assignment_resources(&assignment.id)?
+            .iter()
+            .any(|r| r.retired_at_millis.is_none() && r.resource_kind != "check-handoff")
+        {
+            return Err(RegistrationError::new(
+                "assignment-recovery-blocked",
+                "provider retirement left retained resources; reconcile before continuation",
+            ));
+        }
+        repository.retire_agent_assignment_resource(
+            &assignment.id,
+            "check-handoff",
+            "acceptance",
+        )?;
+        Ok(true)
+    }
+
     /// Launch at most one Check-bound attempt for controlled acceptance testing.
-    /// Requires a previously prepared, clean Managed Worktree. Never continues or completes work.
+    /// Requires a previously prepared, clean Managed Worktree. Continues only after safe
+    /// retirement of an accepted passing attempt; never completes work.
     /// # Errors
     /// Rejects unsupported owners, unsafe resources, unavailable pinned profiles and stale inputs.
     #[allow(clippy::too_many_lines)]
@@ -23,6 +105,13 @@ impl Application {
             ));
         }
         crate::validate_task_dispatch_mode(&task)?;
+        if let Some(latest) = repository
+            .list_agent_assignments(record)?
+            .into_iter()
+            .next()
+        {
+            self.retire_accepted_task_check(&latest)?;
+        }
         if let Some(existing) = repository
             .list_agent_assignments(record)?
             .into_iter()

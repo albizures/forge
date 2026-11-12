@@ -1503,6 +1503,13 @@ pub fn reconcile_agent_dispatch<F: AgentDispatchAdapterFactory + ?Sized>(
     }
     let mut reconciled = Vec::new();
     for assignment in repository.list_open_agent_assignments()? {
+        // Controlled Check attempts have their own acceptance/retirement boundary.
+        if repository
+            .assignment_check_attempt(&assignment.id)?
+            .is_some()
+        {
+            continue;
+        }
         // Do not even run provisioning guards: they can mutate retry/hold state.
         // Existing live ownership remains observable and explicitly retireable.
         if assignment.profile.record_type == RecordType::Task
@@ -1864,6 +1871,11 @@ pub trait AgentDispatchRepository: RecordRepository + WorkspaceDispatchRepositor
         _profile_revision: u32,
     ) -> Result<(AgentAssignment, bool), RegistrationError> {
         Err(task_dispatch_unsupported())
+    }
+    /// Atomically revoke a successfully accepted Check Assignment and reserve retirement.
+    /// False means no accepted current pass or launch ownership is still uncertain.
+    fn begin_task_check_handoff(&self, _assignment: &str) -> Result<bool, RegistrationError> {
+        Ok(false)
     }
     /// Immutable Task-specific binding; absent on Grilling and legacy test Assignments.
     fn assignment_check_attempt(
@@ -2861,6 +2873,7 @@ impl Application {
             );
         })?;
         if scan.acquired_lease {
+            self.continue_task_check_acceptance()?;
             self.schedule_agent_dispatch().inspect_err(|error| {
                 tracing::warn!(
                     phase = "schedule-tasks",

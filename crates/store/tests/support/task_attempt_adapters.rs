@@ -59,10 +59,13 @@ impl AgentDispatchAdapterFactory for Provider {
         &self,
         _: &AgentProfile,
     ) -> Result<Box<dyn AgentDispatchAdapter>, AgentAdapterError> {
-        Ok(Box::new(Adapter(self.launches.clone())))
+        Ok(Box::new(Adapter(
+            self.launches.clone(),
+            self.unavailable.clone(),
+        )))
     }
 }
-struct Adapter(Arc<Mutex<Vec<u32>>>);
+struct Adapter(Arc<Mutex<Vec<u32>>>, Arc<AtomicBool>);
 impl AgentDispatchAdapter for Adapter {
     fn probe(&self) -> Result<(), AgentAdapterError> {
         Ok(())
@@ -92,6 +95,9 @@ impl AgentDispatchAdapter for Adapter {
         _: &AgentDispatchContext,
         _: &dyn AgentDispatchRepository,
     ) -> Result<(), AgentAdapterError> {
+        if self.1.load(Ordering::SeqCst) {
+            return Err(AgentAdapterError::Cleanup("retirement uncertain".into()));
+        }
         Ok(())
     }
 }

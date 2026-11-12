@@ -2251,6 +2251,10 @@ impl AgentDispatchRepository for SqliteProjectRepository {
         )
     }
 
+    fn begin_task_check_handoff(&self, assignment: &str) -> Result<bool, RegistrationError> {
+        self.begin_check_handoff(assignment)
+    }
+
     fn assignment_check_attempt(
         &self,
         assignment: &str,

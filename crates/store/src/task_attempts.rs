@@ -27,6 +27,40 @@ pub(super) fn binding(
 }
 
 impl SqliteProjectRepository {
+    /// Reserve capacity before revocation; restart must retry cleanup, never infer retirement.
+    pub(super) fn begin_check_handoff(&self, id: &str) -> Result<bool, RegistrationError> {
+        let mut c = self
+            .connection
+            .lock()
+            .map_err(|_| error("storage", "storage lock poisoned"))?;
+        let tx = c
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        let Some(attempt) = binding(&tx, id)? else {
+            return Ok(false);
+        };
+        self.ensure_record_workspace(&tx, attempt.record_id)?;
+        let check = checks::load(&tx, attempt.record_id, attempt.check_id)?;
+        if check.current_verdict != Some(Verdict::Pass)
+            || !check.latest_assessment.as_ref().is_some_and(|a| {
+                a.attempt_id == attempt.id && a.assignment_id.as_deref() == Some(id)
+            })
+        {
+            return Ok(false);
+        }
+        let uncertain_launch: bool = tx.query_row(
+            "SELECT launch_started_at_millis IS NOT NULL AND NOT EXISTS(SELECT 1 FROM agent_assignment_resources WHERE assignment_id = ?1 AND resource_kind = 'agent-name') FROM agent_assignments WHERE id = ?1",
+            [id], |r| r.get(0)).map_err(storage_error)?;
+        if uncertain_launch {
+            return Ok(false);
+        }
+        // Only the first caller creates the blocker. Replays must not resurrect retired resources.
+        tx.execute("INSERT OR IGNORE INTO agent_assignment_resources(assignment_id, resource_kind, resource_id, created_at_millis) SELECT id, 'check-handoff', 'acceptance', ?2 FROM agent_assignments WHERE id = ?1 AND closed_at_millis IS NULL", params![id, now_millis()?]).map_err(storage_error)?;
+        tx.execute("UPDATE agent_assignments SET closed_at_millis = ?2, closure_reason = 'retired' WHERE id = ?1 AND closed_at_millis IS NULL", params![id, now_millis()?]).map_err(storage_error)?;
+        tx.commit().map_err(storage_error)?;
+        Ok(true)
+    }
+
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     pub(super) fn claim_check_attempt(
         &self,
@@ -83,6 +117,17 @@ impl SqliteProjectRepository {
                 "record-not-ready",
                 "Task must be Open or Forge-managed In Progress",
             ));
+        }
+        if task.status == RecordStatus::InProgress {
+            let managed: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM agent_assignments a JOIN assignment_check_attempts b ON b.assignment_id = a.id WHERE a.record_id = ?1)",
+                [record.cast_signed()], |r| r.get(0)).map_err(storage_error)?;
+            if !managed {
+                return Err(error(
+                    "record-not-ready",
+                    "In Progress continuation requires durable Check-bound Assignment history; lifecycle status is not ownership evidence",
+                ));
+            }
         }
         execution_modes::safe_ownership(&tx, record)?;
         let held: bool = tx

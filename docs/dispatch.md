@@ -30,10 +30,15 @@ For explicit acceptance testing only, `forge dispatcher task-check-acceptance
 <task-id> --workspace <id> --json` executes **one** Check-bound attempt. It requires
 a clean, active, already prepared Managed Worktree, Dispatched mode, a single
 Project, satisfied dependencies, available capacity, no hold and reconciled prior
-ownership/resources. It does not create a worktree, continue automatically, or
-complete the Task. Ordinary `dispatcher dispatch` and automatic scheduling remain
-closed. Ordinary reconciliation also does not provision these Task Assignments;
-repeating acceptance returns an existing Assignment without relaunching it.
+ownership/resources. In Progress continuation additionally requires durable
+Check-bound Assignment history; lifecycle status or missing ownership alone is
+not sufficient. This explicitly enrolls the Task in controlled acceptance
+continuation: after a current passing outcome, daemon reconciliation retires the
+old agent, reconciles its retained resources, then launches the next required
+Check with its pinned profile. It does not create a worktree or complete the Task.
+Ordinary `dispatcher dispatch` and scheduling of unenrolled Tasks remain closed.
+Repeating acceptance returns the existing Assignment without relaunching it while
+no passing outcome is available; after a pass it uses the same retirement gate.
 
 Forge selects the first Check without a current pass and atomically reserves its
 Assignment and attempt. The Check's immutable pinned profile is authoritative,
@@ -66,8 +71,14 @@ actual context identity/generation and a full commit):
 Implementation may report a new output commit in the same Repository. Reviews
 must assess their bound output evidence and must not modify deliverables. Failed
 Implementation remains Implementation. Acceptance records evidence and outcomes,
-not provider retirement or permission for another live attempt. Inspect and safely
-retire/reconcile ownership before another controlled attempt. Exact outcome replay
+not provider retirement or permission for another live attempt. Handoff atomically
+revokes the old capability and retains a `check-handoff` resource blocker before
+provider cleanup. Failed or uncertain cleanup retains capacity across restart;
+an adapter's successful response cannot clear other retained resources. Holds,
+dependencies, mode, capacity, worktree safety and provider prerequisites are
+rechecked before the next claim. Failed or interrupted attempts do not
+currently continue automatically. The final pass retires its agent but leaves the
+Task In Progress; completion remains gated separately. Exact outcome replay
 returns its original result; conflicting, stale and cross-owner submissions have
 no partial effects. Closed capabilities remain revoked.
 
