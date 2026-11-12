@@ -22,7 +22,13 @@ pub(super) fn schema(c: &Connection) -> Result<(), RegistrationError> {
         CREATE TABLE IF NOT EXISTS record_work_invalidations (
         id INTEGER PRIMARY KEY, record_id INTEGER NOT NULL REFERENCES records(id), generation INTEGER NOT NULL,
         actor TEXT NOT NULL, message TEXT NOT NULL, created_at_millis INTEGER NOT NULL);
-        CREATE INDEX IF NOT EXISTS work_invalidations_by_record ON record_work_invalidations(record_id, id);")
+        CREATE INDEX IF NOT EXISTS work_invalidations_by_record ON record_work_invalidations(record_id, id);
+        CREATE TABLE IF NOT EXISTS assignment_check_attempts (
+            assignment_id TEXT PRIMARY KEY REFERENCES agent_assignments(id),
+            attempt_id TEXT NOT NULL UNIQUE REFERENCES record_attempts(id));
+        CREATE TRIGGER IF NOT EXISTS immutable_assignment_check_attempt
+        BEFORE UPDATE ON assignment_check_attempts
+        BEGIN SELECT RAISE(ABORT, 'Assignment Check binding is immutable'); END;")
         .map_err(storage_error)
 }
 fn json_error(e: impl std::fmt::Display) -> RegistrationError {
@@ -255,6 +261,7 @@ impl SqliteProjectRepository {
         &self,
         record: u64,
         input: &OutcomeInput,
+        assignment: Option<&str>,
     ) -> Result<AcceptedOutcome, RegistrationError> {
         let mut c = self
             .connection
@@ -269,6 +276,32 @@ impl SqliteProjectRepository {
         let row: Option<(String, bool, Option<String>, Option<String>)> = tx.query_row("SELECT attempt_json, closed, outcome_json, result_json FROM record_attempts WHERE id = ?1 AND record_id = ?2", params![input.attempt_id, record.cast_signed()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).optional().map_err(storage_error)?;
         let (json, closed, outcome, result) =
             row.ok_or_else(|| error("attempt-not-found", "attempt does not belong to this Task"))?;
+        let bound: Option<String> = tx
+            .query_row(
+                "SELECT assignment_id FROM assignment_check_attempts WHERE attempt_id = ?1",
+                [&input.attempt_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(storage_error)?;
+        if bound.as_deref() != assignment {
+            return Err(error(
+                if assignment.is_none() {
+                    "assignment-outcome-required"
+                } else {
+                    "unauthorized-attempt"
+                },
+                "outcome must use its bound authenticated Assignment",
+            ));
+        }
+        if let Some(assignment) = assignment
+            && input.actor != assignment
+        {
+            return Err(error(
+                "unauthorized-attempt",
+                "outcome actor must be the bound Assignment",
+            ));
+        }
         if let Some(outcome) = outcome {
             let accepted: OutcomeInput = serde_json::from_str(&outcome).map_err(json_error)?;
             if &accepted != input {
@@ -299,12 +332,32 @@ impl SqliteProjectRepository {
                 "attempt is closed without an accepted outcome",
             ));
         }
-        mutable(&tx, record)?;
+        if let Some(assignment) = assignment {
+            let task = load_record(&tx, record)?;
+            forge_app::validate_task_dispatch_mode(&task)?;
+            let active: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM agent_assignments WHERE id = ?1 AND record_id = ?2 AND closed_at_millis IS NULL AND acknowledged_at_millis IS NOT NULL AND EXISTS(SELECT 1 FROM assignment_context_bootstrap b WHERE b.assignment_id = agent_assignments.id))", params![assignment, record.cast_signed()], |r| r.get(0)).map_err(storage_error)?;
+            if !active || task.status != RecordStatus::InProgress {
+                return Err(error(
+                    "assignment-inactive",
+                    "an acknowledged, bootstrapped live Assignment and In Progress Task are required",
+                ));
+            }
+        } else {
+            mutable(&tx, record)?;
+        }
         if load_record(&tx, record)?.body != attempt.body {
             return Err(error("stale-generation", "Task inputs changed"));
         }
         ordered(&tx, record, attempt.check_id)?;
         let check = checks::load(&tx, record, attempt.check_id)?;
+        if assignment.is_some()
+            && !matches!((&attempt.evidence, &input.evidence), (Evidence::Repository { repository: before, .. }, Evidence::Repository { repository: after, .. }) if before == after)
+        {
+            return Err(error(
+                "evidence-mismatch",
+                "dispatched output must identify the bound Repository",
+            ));
+        }
         if check.position > 0
             && (input.evidence != attempt.evidence || work.output.as_ref() != Some(&input.evidence))
         {
@@ -353,7 +406,7 @@ impl SqliteProjectRepository {
             Evidence::Repository { commit, .. } => Some(commit.as_str()),
             Evidence::Artifact { .. } => None,
         };
-        tx.execute("INSERT INTO check_assessments(check_id, verdict, actor, message, created_at_millis, revision, attempt_id, generation, evidence_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)", params![attempt.check_id.cast_signed(), if input.verdict == Verdict::Pass { "pass" } else { "fail" }, input.actor, input.message, now_millis()?, revision, attempt.id, work.generation.cast_signed(), serde_json::to_string(&input.evidence).map_err(json_error)?]).map_err(storage_error)?;
+        tx.execute("INSERT INTO check_assessments(check_id, verdict, actor, message, created_at_millis, revision, attempt_id, generation, evidence_json, assignment_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)", params![attempt.check_id.cast_signed(), if input.verdict == Verdict::Pass { "pass" } else { "fail" }, input.actor, input.message, now_millis()?, revision, attempt.id, work.generation.cast_signed(), serde_json::to_string(&input.evidence).map_err(json_error)?, assignment]).map_err(storage_error)?;
         let assessment_id = tx.last_insert_rowid().cast_unsigned();
         tx.execute(
             "INSERT INTO check_activities(check_id, assessment_id) VALUES (?1, ?2)",
@@ -380,9 +433,10 @@ impl SqliteProjectRepository {
             record,
             RecordUpdateKind::CheckAssessed { assessment_id },
         )?;
-        let findings = super::outcome_findings::apply(&tx, record, &check, assessment_id, input)?;
+        let findings =
+            super::outcome_findings::apply(&tx, record, &check, assessment_id, input, assignment)?;
         if input.disposition == OutcomeDisposition::Handback {
-            invalidate(&tx, record, &input.actor, &input.message, None)?;
+            invalidate(&tx, record, &input.actor, &input.message, assignment)?;
             // Remediation starts from the reviewed deliverable, not a superseded initial input.
             tx.execute(
                 "UPDATE record_work SET input_json = ?2 WHERE record_id = ?1",

@@ -104,6 +104,12 @@ pub trait AgentDispatchApi {
     ) -> RpcResult<AgentDispatchStatusResponse>;
     #[method(name = "reconcile")]
     async fn reconcile(&self) -> RpcResult<AgentDispatchReconcileResponse>;
+    #[method(name = "taskCheckAcceptance")]
+    async fn task_check_acceptance(
+        &self,
+        request: SelectedRecordRequest<DispatchRecordRequest>,
+    ) -> RpcResult<DispatchRecordResponse>;
+
     #[method(name = "dispatchRecord")]
     async fn dispatch_record(
         &self,

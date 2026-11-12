@@ -94,6 +94,7 @@ dispatch_requests! {
     config_unset(forge_rpc::DispatcherConfigUnsetRequest) -> forge_rpc::DispatcherConfigResponse;
     dispatch_status(forge_rpc::AgentDispatchStatusRequest) -> forge_rpc::AgentDispatchStatusResponse;
     dispatch_record(forge_rpc::DispatchRecordRequest) -> forge_rpc::DispatchRecordResponse;
+    task_check_acceptance(forge_rpc::DispatchRecordRequest) -> forge_rpc::DispatchRecordResponse;
 }
 requests! {
     project_check_template_show(forge_rpc::CheckTemplateShowRequest) -> forge_rpc::TemplatePage;

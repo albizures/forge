@@ -14,6 +14,7 @@ pub mod checks;
 pub mod findings;
 pub mod outcomes;
 mod profile_catalog;
+mod task_attempts;
 mod workspaces;
 pub use workspaces::{Workspace, WorkspaceRepository};
 mod workspace_dispatch;
@@ -622,6 +623,20 @@ pub trait RecordRepository: ProjectRepository {
         Err(RegistrationError::new(
             "unsupported",
             "Manual outcomes unavailable",
+        ))
+    }
+    /// Authenticated same-owner outcome acceptance; transport credentials are checked by the application.
+    /// # Errors
+    /// Rejects unbound, cross-owner, stale, unauthorized and conflicting outcomes atomically.
+    fn submit_assignment_outcome(
+        &self,
+        _record: u64,
+        _assignment: &str,
+        _input: &outcomes::OutcomeInput,
+    ) -> Result<outcomes::AcceptedOutcome, RegistrationError> {
+        Err(RegistrationError::new(
+            "assignment-outcome-required",
+            "Check-bound Assignment required",
         ))
     }
     /// Atomically submit an attempt's outcome, with durable exact replay.
@@ -1331,7 +1346,17 @@ pub fn reconcile_agent_assignment<A: AgentDispatchAdapter + ?Sized>(
     adapter: &A,
     assignment: &AgentAssignment,
 ) -> Result<AssignmentReconciliation, RegistrationError> {
-    if assignment.profile.record_type == RecordType::Task
+    reconcile_assignment(repository, adapter, assignment, false)
+}
+
+fn reconcile_assignment<A: AgentDispatchAdapter + ?Sized>(
+    repository: &dyn AgentDispatchRepository,
+    adapter: &A,
+    assignment: &AgentAssignment,
+    controlled_acceptance: bool,
+) -> Result<AssignmentReconciliation, RegistrationError> {
+    if !controlled_acceptance
+        && assignment.profile.record_type == RecordType::Task
         && assignment.state == AgentAssignmentState::Provisioning
     {
         return Err(task_dispatch_unsupported());
@@ -1826,6 +1851,27 @@ pub trait AgentDispatchRepository: RecordRepository + WorkspaceDispatchRepositor
         assignment_id: &str,
         selection: Option<&DispatchPreflightSelection>,
     ) -> Result<(AgentAssignment, bool), RegistrationError>;
+    /// Controlled acceptance only: atomically bind the next Check, pinned profile and input.
+    /// Normal dispatch must not call this entry point while the rollout gate is closed.
+    #[allow(clippy::too_many_arguments)]
+    fn claim_task_check_acceptance(
+        &self,
+        _record: u64,
+        _assignment: &str,
+        _selection: &DispatchPreflightSelection,
+        _evidence: &outcomes::Evidence,
+        _check: u64,
+        _profile_revision: u32,
+    ) -> Result<(AgentAssignment, bool), RegistrationError> {
+        Err(task_dispatch_unsupported())
+    }
+    /// Immutable Task-specific binding; absent on Grilling and legacy test Assignments.
+    fn assignment_check_attempt(
+        &self,
+        _assignment: &str,
+    ) -> Result<Option<outcomes::Attempt>, RegistrationError> {
+        Ok(None)
+    }
     /// Persists successful trusted-context bootstrap independently of source files.
     fn mark_assignment_context_read(&self, _assignment_id: &str) -> Result<(), RegistrationError> {
         Err(RegistrationError::new(

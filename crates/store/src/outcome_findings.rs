@@ -14,6 +14,7 @@ pub(super) fn apply(
     check: &RecordCheck,
     assessment: u64,
     input: &OutcomeInput,
+    assignment: Option<&str>,
 ) -> Result<Vec<Finding>, RegistrationError> {
     let revision = match &input.evidence {
         forge_app::outcomes::Evidence::Repository { commit, .. } => Some(commit.as_str()),
@@ -43,7 +44,7 @@ pub(super) fn apply(
             &finding.message,
             revision,
             None,
-            None,
+            assignment,
         )?;
         changed.push(id);
     }
@@ -81,7 +82,7 @@ pub(super) fn apply(
             &verification.message,
             revision,
             None,
-            None,
+            assignment,
         )?;
         changed.push(finding.id);
     }

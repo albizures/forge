@@ -26,6 +26,7 @@ mod outcome_findings;
 mod outcomes;
 mod record_workspaces;
 mod schema_compatibility;
+mod task_attempts;
 mod workspace_dispatch;
 mod workspaces;
 
@@ -1238,12 +1239,21 @@ impl RecordRepository for SqliteProjectRepository {
     ) -> Result<forge_app::outcomes::Attempt, RegistrationError> {
         self.begin_attempt(record, input)
     }
+    fn submit_assignment_outcome(
+        &self,
+        record: u64,
+        assignment: &str,
+        input: &forge_app::outcomes::OutcomeInput,
+    ) -> Result<forge_app::outcomes::AcceptedOutcome, RegistrationError> {
+        self.submit_outcome(record, input, Some(assignment))
+    }
+
     fn submit_record_outcome(
         &self,
         record: u64,
         input: &forge_app::outcomes::OutcomeInput,
     ) -> Result<forge_app::outcomes::AcceptedOutcome, RegistrationError> {
-        self.submit_outcome(record, input)
+        self.submit_outcome(record, input, None)
     }
     fn invalidate_record_work(
         &self,
@@ -2220,6 +2230,36 @@ impl AgentDispatchRepository for SqliteProjectRepository {
         let profile = load_agent_profile(&transaction, RecordType::Task, revision)?;
         transaction.commit().map_err(storage_error)?;
         Ok(profile)
+    }
+
+    fn claim_task_check_acceptance(
+        &self,
+        record: u64,
+        assignment: &str,
+        selection: &forge_app::DispatchPreflightSelection,
+        evidence: &forge_app::outcomes::Evidence,
+        check: u64,
+        profile_revision: u32,
+    ) -> Result<(AgentAssignment, bool), RegistrationError> {
+        self.claim_check_attempt(
+            record,
+            assignment,
+            selection,
+            evidence,
+            check,
+            profile_revision,
+        )
+    }
+
+    fn assignment_check_attempt(
+        &self,
+        assignment: &str,
+    ) -> Result<Option<forge_app::outcomes::Attempt>, RegistrationError> {
+        let c = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "storage lock poisoned"))?;
+        task_attempts::binding(&c, assignment)
     }
 
     fn create_agent_assignment(

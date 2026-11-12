@@ -279,8 +279,21 @@ fn strict_finding_change<'de, D: serde::Deserializer<'de>>(
     })
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssignmentOutcomeRequest {
+    pub assignment_id: String,
+    pub secret: String,
+    pub outcome: forge_app::outcomes::OutcomeInput,
+}
+
 #[rpc(client, server, namespace = "assignment")]
 pub trait AssignmentApi {
+    #[method(name = "outcomeSubmit")]
+    async fn outcome_submit(
+        &self,
+        request: AssignmentOutcomeRequest,
+    ) -> RpcResult<forge_app::outcomes::AcceptedOutcome>;
     #[method(name = "findingList")]
     async fn finding_list(
         &self,

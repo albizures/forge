@@ -185,7 +185,7 @@ A human-in-the-loop decision Record type that is a leaf child of one Wayfinder. 
 _Avoid_: question, approval
 
 **Agent Assignment**:
-A Forge-owned, durable association between one Record and an externally managed Agent for one work attempt, binding an Agent Profile revision and execution identity. Its Agent authenticates, acknowledges and starts its assigned Task or Grilling before working; the Assignment remains as history after the Agent is removed or replaced.
+A Forge-owned, durable association between one Record and an externally managed Agent for one work attempt, binding an Agent Profile revision and execution identity. A Task Assignment advances exactly one Check and binds an immutable attempt identity, starting freshness generation and input evidence; its profile revision is the revision pinned by that Check. Its Agent authenticates, acknowledges and starts its assigned Task or Grilling before working; the Assignment remains as history after the Agent is removed or replaced.
 _Avoid_: record agent metadata, agent link
 
 **Dispatcher**:

@@ -21,7 +21,55 @@ not cleared by this restriction. Grilling dispatch remains supported.
 
 Task launch procedures below describe the retained, currently disabled machinery;
 configuration/readiness does not authorize Task execution. This restriction must
-remain in place throughout the Manual Check delivery (Spec #643).
+remain in place until both the deterministic safety suite and real-provider smoke
+rollout gates in Spec #644 pass.
+
+### Controlled Check acceptance (not normal dispatch)
+
+For explicit acceptance testing only, `forge dispatcher task-check-acceptance
+<task-id> --workspace <id> --json` executes **one** Check-bound attempt. It requires
+a clean, active, already prepared Managed Worktree, Dispatched mode, a single
+Project, satisfied dependencies, available capacity, no hold and reconciled prior
+ownership/resources. It does not create a worktree, continue automatically, or
+complete the Task. Ordinary `dispatcher dispatch` and automatic scheduling remain
+closed. Ordinary reconciliation also does not provision these Task Assignments;
+repeating acceptance returns an existing Assignment without relaunching it.
+
+Forge selects the first Check without a current pass and atomically reserves its
+Assignment and attempt. The Check's immutable pinned profile is authoritative,
+not the current Workspace Task selection or template. Missing, policy-less or
+unusable pins fail without fallback. Workspace provider configuration and its
+verified exact binding remain required.
+
+The worker uses `forge assignment bootstrap --json`. Its trusted context includes
+`bound.checkAttempt` (attempt id, Check id, starting generation, input evidence and
+Task body), alongside the pinned profile and execution directory. Submit an
+`OutcomeInput` JSON file using `forge assignment outcome --file outcome.json
+--json`; credentials come only from protected Assignment delivery and `actor` is
+replaced with the authenticated Assignment identity. Example file shape (use the
+actual context identity/generation and a full commit):
+
+```json
+{
+  "attempt_id": "<bound.checkAttempt.id>",
+  "generation": 1,
+  "evidence": {"kind": "repository", "repository": "<bound repository>", "commit": "<40 hexadecimal digits>"},
+  "verdict": "pass",
+  "actor": "",
+  "message": "Deliverables verified",
+  "disposition": "complete",
+  "findings": [],
+  "verifications": []
+}
+```
+
+Implementation may report a new output commit in the same Repository. Reviews
+must assess their bound output evidence and must not modify deliverables. Failed
+Implementation remains Implementation. Acceptance records evidence and outcomes,
+not provider retirement or permission for another live attempt. Inspect and safely
+retire/reconcile ownership before another controlled attempt. Exact outcome replay
+returns its original result; conflicting, stale and cross-owner submissions have
+no partial effects. Closed capabilities remain revoked.
 
 ## Configure dispatch
 

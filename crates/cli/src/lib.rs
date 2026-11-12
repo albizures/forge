@@ -475,6 +475,74 @@ pub async fn request_dispatch_record(
         .map_err(|error| format!("could not dispatch Record through Forge daemon: {error}"))
 }
 
+/// Controlled acceptance only; normal Task dispatch remains gated.
+/// # Errors
+/// Returns eligibility, pinned-profile, ownership or provider failures.
+pub async fn request_task_check_acceptance(
+    endpoint: impl Into<RecordEndpoint>,
+    record_id: u64,
+) -> Result<DispatchRecordResponse, String> {
+    record_client(endpoint)?
+        .task_check_acceptance(DispatchRecordRequest { record_id })
+        .await
+        .map_err(|error| format!("controlled Task Check acceptance failed: {error}"))
+}
+
+/// Submit a JSON outcome using protected Assignment delivery; credentials never enter arguments.
+/// # Errors
+/// Returns redacted delivery or outcome validation failures.
+pub async fn assignment_outcome(input: serde_json::Value) -> Result<serde_json::Value, String> {
+    use forge_rpc::AssignmentApiClient;
+    let outcome = serde_json::from_value(input).map_err(|_| "invalid outcome JSON")?;
+    let assignment_id = env::var("FORGE_ASSIGNMENT_ID").map_err(|_| "missing Assignment ID")?;
+    let endpoint =
+        env::var("FORGE_ASSIGNMENT_DAEMON_URL").map_err(|_| "missing Assignment daemon URL")?;
+    let file = env::var_os("FORGE_ASSIGNMENT_CAPABILITY_SECRET_FILE")
+        .ok_or("missing Assignment secret file")?;
+    let secret = read_assignment_secret(file)?;
+    let result = client(&format!("{}/rpc", endpoint.trim_end_matches('/')))
+        .map_err(|_| "invalid Assignment daemon URL")?
+        .outcome_submit(forge_rpc::AssignmentOutcomeRequest {
+            assignment_id,
+            secret,
+            outcome,
+        })
+        .await
+        .map_err(|error| {
+            let category = if let jsonrpsee::core::client::Error::Call(error) = error {
+                error
+                    .data()
+                    .and_then(|data| serde_json::from_str::<String>(data.get()).ok())
+            } else {
+                None
+            };
+            let category = category.as_deref().filter(|code| {
+                matches!(
+                    *code,
+                    "assignment-capability-denied"
+                        | "unauthorized-attempt"
+                        | "attempt-not-found"
+                        | "assignment-inactive"
+                        | "attempt-closed"
+                        | "stale-generation"
+                        | "outcome-conflict"
+                        | "evidence-mismatch"
+                        | "check-order"
+                        | "check-already-passed"
+                        | "invalid-outcome"
+                        | "unresolved-check-findings"
+                        | "unauthorized-verification"
+                        | "stale-version"
+                )
+            });
+            format!(
+                "Assignment outcome rejected{}; reread context and attempt state",
+                category.map_or_else(String::new, |code| format!(": {code}"))
+            )
+        })?;
+    serde_json::to_value(result).map_err(|_| "invalid outcome response".into())
+}
+
 /// Starts the Task bound to an Assignment Capability.
 ///
 /// # Errors

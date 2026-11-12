@@ -246,6 +246,14 @@ impl SqliteProjectRepository {
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(storage_error)?;
         let record = self.check_task(&transaction, task)?;
+        if let Some(assignment) = assignment
+            && super::task_attempts::binding(&transaction, assignment)?.is_some()
+        {
+            return Err(RegistrationError::new(
+                "attempt-required",
+                "Check-bound agents submit outcomes; Forge owns handback invalidation",
+            ));
+        }
         input.validate()?;
         let current = load(&transaction, task, check)?;
         if record.status == RecordStatus::Done {

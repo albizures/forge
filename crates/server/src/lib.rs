@@ -984,6 +984,36 @@ impl AgentDispatchApiServer for Daemon {
         result.map(Into::into).map_err(rpc_error)
     }
 
+    async fn task_check_acceptance(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<DispatchRecordRequest>,
+    ) -> RpcResult<DispatchRecordResponse> {
+        self.record_application(&request.selection, &mut [])?
+            .show_record(request.record.record_id)
+            .map_err(rpc_error)?;
+        let application = self.application.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            application.execute_task_check_acceptance(request.record.record_id)
+        })
+        .await
+        .map_err(|_| {
+            rpc_error(RegistrationError::new(
+                "agent-dispatch-unavailable",
+                "acceptance worker failed",
+            ))
+        })?;
+        result
+            .map(|(assignment, already_assigned)| DispatchRecordResponse {
+                message: format!(
+                    "Controlled Check acceptance for Task {}: {}",
+                    assignment.record_id, assignment.id
+                ),
+                assignment: assignment.into(),
+                already_assigned,
+            })
+            .map_err(rpc_error)
+    }
+
     async fn dispatch_record(
         &self,
         request: forge_rpc::SelectedRecordRequest<DispatchRecordRequest>,
@@ -2387,6 +2417,7 @@ mod tests {
         include!("check_tests.rs");
     }
     include!("assignment_actions_tests.rs");
+    include!("task_check_attempt_tests.rs");
     include!("assignment_finding_tests.rs");
     include!("assignment_finding_security_tests.rs");
     include!("assignment_context_tests.rs");

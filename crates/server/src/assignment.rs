@@ -38,6 +38,14 @@ impl Daemon {
 
 #[async_trait]
 impl AssignmentApiServer for Daemon {
+    async fn outcome_submit(
+        &self,
+        r: forge_rpc::AssignmentOutcomeRequest,
+    ) -> RpcResult<forge_app::outcomes::AcceptedOutcome> {
+        self.assignment_session(&r.assignment_id, &r.secret)?
+            .submit_outcome(&r.outcome)
+            .map_err(rpc_error)
+    }
     async fn finding_list(
         &self,
         r: forge_rpc::AssignmentFindingListRequest,

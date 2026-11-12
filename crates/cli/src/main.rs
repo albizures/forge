@@ -309,6 +309,13 @@ enum AssignmentCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Submit this Task Check attempt's outcome from a JSON file (actor is authenticated).
+    Outcome {
+        #[arg(long)]
+        file: std::path::PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
     /// Complete the assigned Record; Grilling requires conversational confirmation.
     Done(AssignmentDoneArgs),
     /// Comment on the Record bound to this Assignment.
@@ -373,6 +380,8 @@ enum AgentDispatchCommand {
     /// Dispatch an eligible Task or interactive Grilling; return an existing open Assignment.
     /// Readiness, capacity, Dispatch Holds, and recovery safety checks still apply.
     Dispatch(DispatchRecordArgs),
+    /// Controlled acceptance only: execute one Check using an already prepared Managed Worktree.
+    TaskCheckAcceptance(DispatchRecordArgs),
     /// Return an unassigned In Progress Task to Open.
     TaskReopen(DispatchTaskArgs),
     /// Clear an operator-controlled Dispatch Hold.
@@ -1068,6 +1077,31 @@ async fn assignment(command: AssignmentCommand) -> i32 {
     match command {
         AssignmentCommand::Check { command } => assignment_check_commands::run(command).await,
         AssignmentCommand::Finding { command } => assignment_finding_commands::run(command).await,
+        AssignmentCommand::Outcome { file, json } => {
+            let input = std::fs::read(&file)
+                .map_err(|_| "cannot read outcome file".to_string())
+                .and_then(|bytes| {
+                    serde_json::from_slice(&bytes).map_err(|_| "invalid outcome JSON".into())
+                });
+            let result = match input {
+                Ok(input) => forge_cli::assignment_outcome(input).await,
+                Err(e) => Err(e),
+            };
+            match result {
+                Ok(value) => {
+                    if json {
+                        println!("{value}");
+                    } else {
+                        println!("Outcome accepted; Forge controls continuation.");
+                    }
+                    0
+                }
+                Err(e) => {
+                    eprintln!("forge assignment outcome: {e}");
+                    1
+                }
+            }
+        }
         AssignmentCommand::Done(args) => {
             let human = args.confirmation.zip(args.agreed_outcome);
             render_assignment_result(
@@ -1132,6 +1166,7 @@ async fn assignment(command: AssignmentCommand) -> i32 {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn agent_dispatch(command: AgentDispatchCommand, workspace: Option<String>) -> i32 {
     let (result, json) = match command {
         AgentDispatchCommand::AssignmentInfo(args) => {
@@ -1185,6 +1220,15 @@ async fn agent_dispatch(command: AgentDispatchCommand, workspace: Option<String>
         ),
         AgentDispatchCommand::Dispatch(args) => (
             request_dispatch_record(
+                selected_record_endpoint(args.server_url.as_deref(), workspace.as_deref()).await,
+                args.record_id,
+            )
+            .await
+            .map(|value| serde_json::to_value(value).unwrap()),
+            args.json,
+        ),
+        AgentDispatchCommand::TaskCheckAcceptance(args) => (
+            forge_cli::request_task_check_acceptance(
                 selected_record_endpoint(args.server_url.as_deref(), workspace.as_deref()).await,
                 args.record_id,
             )
@@ -1971,6 +2015,15 @@ mod tests {
             vec!["forge", "dispatcher", "assignment-info", "a"],
             vec!["forge", "dispatcher", "assignment-retire", "a"],
             vec!["forge", "dispatcher", "assignment-resolve-unknown", "a"],
+            vec!["forge", "dispatcher", "task-check-acceptance", "42"],
+            vec![
+                "forge",
+                "assignment",
+                "outcome",
+                "--file",
+                "outcome.json",
+                "--json",
+            ],
             vec!["forge", "assignment", "bootstrap"],
             vec!["forge", "assignment", "start"],
         ] {
