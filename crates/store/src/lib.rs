@@ -27,6 +27,7 @@ mod outcomes;
 mod record_workspaces;
 mod schema_compatibility;
 mod task_attempts;
+mod task_progress;
 mod workspace_dispatch;
 mod workspaces;
 
@@ -235,6 +236,7 @@ impl SqliteProjectRepository {
             .map_err(storage_error)?;
         checks::schema(connection)?;
         outcomes::schema(connection)?;
+        task_progress::schema(connection)?;
         findings::schema(connection)?;
         check_templates::schema(connection)?;
         migrate_record_status_schema(connection)?;
@@ -2165,6 +2167,34 @@ impl AgentDispatchRepository for SqliteProjectRepository {
             record_id,
             reason: reason.into(),
         })
+    }
+
+    fn reset_task_remediation(
+        &self,
+        record: u64,
+        actor: &str,
+        message: &str,
+    ) -> Result<forge_app::outcomes::WorkState, RegistrationError> {
+        if actor.trim().is_empty() || message.trim().is_empty() {
+            return Err(RegistrationError::new(
+                "invalid-progress-reset",
+                "operator actor and explanation are required",
+            ));
+        }
+        let mut c = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "storage lock poisoned"))?;
+        let tx = c
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        self.check_task(&tx, record)?;
+        execution_modes::safe_ownership(&tx, record)?;
+        tx.execute("UPDATE task_progress SET cycles = 0, baseline = NULL, baseline_verified = verified, stop_reason = NULL WHERE record_id = ?1", [record.cast_signed()]).map_err(storage_error)?;
+        tx.execute("INSERT INTO task_progress_resets(record_id, actor, message, created_at_millis) VALUES (?1, ?2, ?3, ?4)", params![record.cast_signed(), actor, message, now_millis()?]).map_err(storage_error)?;
+        let state = outcomes::state(&tx, record)?;
+        tx.commit().map_err(storage_error)?;
+        Ok(state)
     }
 
     fn resume_dispatch(&self, record_id: u64) -> Result<(), RegistrationError> {

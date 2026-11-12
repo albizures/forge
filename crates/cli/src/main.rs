@@ -384,6 +384,8 @@ enum AgentDispatchCommand {
     TaskCheckAcceptance(DispatchRecordArgs),
     /// Return an unassigned In Progress Task to Open.
     TaskReopen(DispatchTaskArgs),
+    /// Explicitly reset only remediation limits; does not clear holds, retries or recovery blockers.
+    ResetRemediation(ResetRemediationArgs),
     /// Clear an operator-controlled Dispatch Hold.
     Resume(DispatchTaskArgs),
     /// Inspect persisted Assignment evidence without contacting the provider.
@@ -479,6 +481,16 @@ struct DispatchTaskArgs {
     #[arg(long)]
     json: bool,
 }
+#[derive(Args, Debug)]
+struct ResetRemediationArgs {
+    #[command(flatten)]
+    task: DispatchTaskArgs,
+    #[arg(long)]
+    actor: String,
+    #[arg(long)]
+    message: String,
+}
+
 #[derive(Args, Debug)]
 struct AssignmentRetireArgs {
     assignment_id: String,
@@ -1245,6 +1257,34 @@ async fn agent_dispatch(command: AgentDispatchCommand, workspace: Option<String>
             .map(|value| serde_json::to_value(value).unwrap()),
             args.json,
         ),
+        AgentDispatchCommand::ResetRemediation(args) => {
+            return match forge_cli::request_reset_task_remediation(
+                &resolve_endpoint(args.task.server_url.as_deref()).await,
+                args.task.task_id,
+                &args.actor,
+                &args.message,
+            )
+            .await
+            {
+                Ok(state) => {
+                    if args.task.json {
+                        println!(
+                            "{}",
+                            serde_json::to_string(&state).expect("serializable WorkState")
+                        );
+                    } else {
+                        println!(
+                            "Remediation reset recorded. Holds, interrupted retries and ownership/resource blockers are unchanged; inspect safety state before explicit resume."
+                        );
+                    }
+                    0
+                }
+                Err(error) => {
+                    eprintln!("forge dispatcher reset-remediation: {error}");
+                    1
+                }
+            };
+        }
         AgentDispatchCommand::Resume(args) => return dispatcher_resume(args).await,
         AgentDispatchCommand::AssignmentResolveUnknown(args) => {
             return dispatcher_resolve_unknown(args).await;

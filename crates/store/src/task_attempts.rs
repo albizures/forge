@@ -7,7 +7,7 @@ use forge_app::{
     AgentAssignment, AgentDispatchRepository, DispatchPreflightSelection, RecordStatus, RecordType,
     RegistrationError,
     checks::Verdict,
-    outcomes::{Attempt, Evidence, OutcomeDisposition, OutcomeInput},
+    outcomes::{Attempt, Evidence, OutcomeInput},
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
@@ -47,11 +47,17 @@ impl SqliteProjectRepository {
             "SELECT closed_at_millis IS NOT NULL AND closure_reason = 'retired' AND EXISTS(SELECT 1 FROM agent_assignment_resources WHERE assignment_id = ?1 AND resource_kind = 'retirement-pending' AND retired_at_millis IS NOT NULL) AND NOT EXISTS(SELECT 1 FROM agent_assignment_resources WHERE assignment_id = ?1 AND retired_at_millis IS NULL) FROM agent_assignments WHERE id = ?1",
             [id], |r| r.get(0)).map_err(storage_error)?;
         if safely_retired {
-            tx.execute(
-                "UPDATE record_attempts SET closed = 1 WHERE id = ?1 AND closed = 0",
-                [&attempt.id],
-            )
-            .map_err(storage_error)?;
+            let closed = tx
+                .execute(
+                    "UPDATE record_attempts SET closed = 1 WHERE id = ?1 AND closed = 0",
+                    [&attempt.id],
+                )
+                .map_err(storage_error)?;
+            if closed > 0
+                && outcomes::state(&tx, attempt.record_id)?.generation == attempt.generation
+            {
+                super::task_progress::interrupted(&tx, attempt.record_id, attempt.check_id)?;
+            }
             tx.commit().map_err(storage_error)?;
             return Ok(true);
         }
@@ -66,16 +72,17 @@ impl SqliteProjectRepository {
             .optional()
             .map_err(storage_error)?
             .flatten();
-        let interrupted = outcome
+        let accepted_failure = outcome
+            .as_ref()
             .map(|json| {
-                serde_json::from_str::<OutcomeInput>(&json)
-                    .map(|outcome| outcome.disposition == OutcomeDisposition::Interrupted)
+                serde_json::from_str::<OutcomeInput>(json)
+                    .map(|outcome| outcome.verdict == Verdict::Fail)
                     .map_err(|_| error("storage", "invalid accepted attempt outcome"))
             })
             .transpose()?
             .unwrap_or(false);
         if !stale
-            && !interrupted
+            && !accepted_failure
             && (check.current_verdict != Some(Verdict::Pass)
                 || !check.latest_assessment.as_ref().is_some_and(|a| {
                     a.attempt_id == attempt.id && a.assignment_id.as_deref() == Some(id)
@@ -167,6 +174,7 @@ impl SqliteProjectRepository {
         execution_modes::safe_ownership(&tx, record)?;
         // Explicit hold clearance cannot authorize work with an unowned blocker.
         super::outcome_findings::retain_blocker_hold(&tx, record)?;
+        super::task_progress::retain_hold(&tx, record)?;
         let held: bool = tx
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM dispatch_holds WHERE record_id = ?1)",

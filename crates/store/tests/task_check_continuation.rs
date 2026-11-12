@@ -64,6 +64,315 @@ impl ManagedWorktreeAdapter for Checkout {
 }
 
 #[test]
+fn interrupted_check_stops_after_two_retries_even_after_restart_and_resume() {
+    run_case("retry-budget");
+}
+
+#[allow(clippy::too_many_lines)]
+fn retry_budget(
+    store: &SqliteProjectRepository,
+    root: &std::path::Path,
+    application: &impl Fn() -> Application,
+    task: u64,
+) {
+    let secrets = root.join("secrets");
+    std::fs::create_dir_all(&secrets).unwrap();
+    for index in 0..4 {
+        let app = application();
+        let (assignment, _) = app.execute_task_check_acceptance(task).unwrap();
+        let attempt = store
+            .assignment_check_attempt(&assignment.id)
+            .unwrap()
+            .unwrap();
+        std::fs::write(secrets.join(&assignment.id), "secret").unwrap();
+        let session = app.assignment(&secrets, &assignment.id, "secret").unwrap();
+        session.acknowledge().unwrap();
+        session.start().unwrap();
+        session.context().unwrap();
+        let input = OutcomeInput {
+            attempt_id: attempt.id,
+            generation: attempt.generation,
+            evidence: attempt.evidence,
+            verdict: if index == 0 {
+                Verdict::Pass
+            } else {
+                Verdict::Fail
+            },
+            actor: "ignored".into(),
+            message: "Interrupted verification".into(),
+            disposition: if index == 0 {
+                OutcomeDisposition::Complete
+            } else {
+                OutcomeDisposition::Interrupted
+            },
+            findings: vec![],
+            verifications: vec![],
+        };
+        session.submit_outcome(&input).unwrap();
+        session.submit_outcome(&input).unwrap();
+        application()
+            .reconcile_agent_dispatch("budget-restart", 800_000)
+            .unwrap();
+    }
+    assert!(
+        store
+            .dispatch_hold(task)
+            .unwrap()
+            .unwrap()
+            .reason
+            .contains("two automatic retries")
+    );
+    store.resume_dispatch(task).unwrap();
+    assert_eq!(
+        application()
+            .execute_task_check_acceptance(task)
+            .unwrap_err()
+            .code,
+        "dispatch-held"
+    );
+    assert_eq!(store.list_agent_assignments(task).unwrap().len(), 4);
+    let app = application();
+    let before = app
+        .record_work_state(task)
+        .unwrap()
+        .progress
+        .interrupted_checks;
+    assert_eq!(before[0].interruptions, 3);
+    app.reset_task_remediation(task, "operator", "Investigated remediation only")
+        .unwrap();
+    for (from, to) in [
+        (Dispatched, Manual),
+        (Manual, Dispatched),
+        (Dispatched, Manual),
+    ] {
+        app.set_record_execution_mode(task, from, to, "operator", "Safe mode handoff")
+            .unwrap();
+        assert_eq!(
+            app.record_work_state(task)
+                .unwrap()
+                .progress
+                .interrupted_checks,
+            before
+        );
+    }
+    let checks = app.list_record_checks(task).unwrap();
+    for (index, check) in checks.iter().take(2).enumerate() {
+        let work = app.record_work_state(task).unwrap();
+        let attempt = app
+            .begin_record_attempt(
+                task,
+                &forge_app::outcomes::AttemptInput {
+                    id: format!("manual-recovery-{index}"),
+                    check_id: check.id,
+                    generation: work.generation,
+                    evidence: work.input.unwrap(),
+                    actor: "operator".into(),
+                },
+            )
+            .unwrap();
+        app.submit_record_outcome(
+            task,
+            &OutcomeInput {
+                attempt_id: attempt.id,
+                generation: attempt.generation,
+                evidence: attempt.evidence,
+                verdict: Verdict::Pass,
+                actor: "operator".into(),
+                message: "Verified recovery".into(),
+                disposition: OutcomeDisposition::Complete,
+                findings: vec![],
+                verifications: vec![],
+            },
+        )
+        .unwrap();
+        let state = app.record_work_state(task).unwrap();
+        assert_eq!(
+            state.progress.interrupted_checks[0].interruptions,
+            if index == 0 { 3 } else { 0 }
+        );
+    }
+    assert!(
+        store.dispatch_hold(task).unwrap().is_some(),
+        "success never silently clears a hold"
+    );
+}
+
+#[test]
+fn human_input_requests_hold_without_assessment_or_automatic_completion() {
+    run_case("human-budget");
+}
+
+#[test]
+fn failed_implementation_stops_on_no_progress() {
+    run_case("failed-budget");
+}
+
+#[test]
+fn changing_failed_implementation_still_exhausts_remediation_budget() {
+    run_case("failed-changing-budget");
+}
+
+#[test]
+fn passing_but_unchanged_review_cycle_stops_on_no_progress() {
+    run_case("no-progress-success-budget");
+}
+
+#[test]
+fn review_remediation_is_limited_to_three_cycles() {
+    run_case("remediation-budget");
+}
+
+#[test]
+fn unchanged_review_cycle_stops_on_no_progress() {
+    run_case("no-progress-budget");
+}
+
+#[allow(clippy::too_many_lines)]
+fn remediation_budget(
+    store: &SqliteProjectRepository,
+    root: &std::path::Path,
+    application: &impl Fn() -> Application,
+    head: &Mutex<String>,
+    task: u64,
+    case: &str,
+) {
+    let secrets = root.join("secrets");
+    std::fs::create_dir_all(&secrets).unwrap();
+    let failed = matches!(case, "failed-budget" | "failed-changing-budget");
+    let exhausted = matches!(case, "remediation-budget" | "failed-changing-budget");
+    let count = if failed {
+        if exhausted { 4 } else { 2 }
+    } else if exhausted {
+        12
+    } else {
+        6
+    };
+    for index in 0..count {
+        let app = application();
+        let (assignment, _) = app.execute_task_check_acceptance(task).unwrap();
+        let attempt = store
+            .assignment_check_attempt(&assignment.id)
+            .unwrap()
+            .unwrap();
+        let position = app
+            .list_record_checks(task)
+            .unwrap()
+            .iter()
+            .find(|c| c.id == attempt.check_id)
+            .unwrap()
+            .position;
+        assert_eq!(position, if failed { 0 } else { index % 3 });
+        std::fs::write(secrets.join(&assignment.id), "secret").unwrap();
+        let session = app.assignment(&secrets, &assignment.id, "secret").unwrap();
+        session.acknowledge().unwrap();
+        session.start().unwrap();
+        session.context().unwrap();
+        if exhausted && position == 0 {
+            *head.lock().unwrap() = format!("{:040x}", index + 1);
+        }
+        let mut evidence = attempt.evidence;
+        if let Evidence::Repository { commit, .. } = &mut evidence {
+            commit.clone_from(&head.lock().unwrap());
+        }
+        let input = OutcomeInput {
+            attempt_id: attempt.id,
+            generation: attempt.generation,
+            evidence,
+            verdict: if failed
+                || (position == 2 && !(case == "no-progress-success-budget" && index == 5))
+            {
+                Verdict::Fail
+            } else {
+                Verdict::Pass
+            },
+            actor: "ignored".into(),
+            message: "Cycle result".into(),
+            disposition: if !failed
+                && position == 2
+                && !(case == "no-progress-success-budget" && index == 5)
+            {
+                OutcomeDisposition::Handback
+            } else {
+                OutcomeDisposition::Complete
+            },
+            findings: vec![],
+            verifications: vec![],
+        };
+        session.submit_outcome(&input).unwrap();
+        session.submit_outcome(&input).unwrap();
+        application()
+            .reconcile_agent_dispatch("remediation-restart", 800_000)
+            .unwrap();
+    }
+    let reason = store
+        .dispatch_hold(task)
+        .unwrap()
+        .expect("bounded stop")
+        .reason;
+    assert!(
+        reason.contains(if exhausted {
+            "three remediation cycles"
+        } else {
+            "No progress"
+        }),
+        "{reason}"
+    );
+    store.resume_dispatch(task).unwrap();
+    assert_eq!(
+        application()
+            .execute_task_check_acceptance(task)
+            .unwrap_err()
+            .code,
+        "dispatch-held"
+    );
+    assert_eq!(
+        store.list_agent_assignments(task).unwrap().len(),
+        usize::try_from(count).unwrap()
+    );
+    assert_eq!(
+        application().show_record(task).unwrap().status,
+        RecordStatus::InProgress
+    );
+    let app = application();
+    let before = app.record_work_state(task).unwrap();
+    assert!(before.progress.remediation_cycles > 0);
+    app.set_record_execution_mode(task, Dispatched, Manual, "operator", "Safe handoff")
+        .unwrap();
+    assert_eq!(
+        app.record_work_state(task).unwrap().progress,
+        before.progress
+    );
+    app.set_record_execution_mode(task, Manual, Dispatched, "operator", "Restore dispatch")
+        .unwrap();
+    assert_eq!(
+        app.record_work_state(task).unwrap().progress,
+        before.progress
+    );
+    let before = app.record_work_state(task).unwrap();
+    assert!(app.reset_task_remediation(task, "operator", " ").is_err());
+    let state = app
+        .reset_task_remediation(
+            task,
+            "operator",
+            "Investigated; authorize a fresh remediation budget",
+        )
+        .unwrap();
+    assert_eq!(state.progress.remediation_cycles, 0);
+    assert_eq!(state.generation, before.generation);
+    assert_eq!(state.input, before.input);
+    // Reset is separately recorded and cannot erase even the policy hold.
+    assert!(store.dispatch_hold(task).unwrap().is_some());
+    assert_eq!(state.progress.resets[0].actor, "operator");
+    assert!(
+        state.progress.resets[0]
+            .message
+            .contains("Investigated; authorize")
+    );
+    store.resume_dispatch(task).unwrap();
+    application().execute_task_check_acceptance(task).unwrap();
+}
+
+#[test]
 fn dirty_implementation_creates_a_durable_hold_without_an_assessment() {
     run_case("dirty");
 }
@@ -341,6 +650,14 @@ fn handback(
         .unwrap();
     assert_eq!(finding.finding.state, FindingState::Resolved);
     assert_eq!(finding.finding.verification_check_id, Some(checks[2].id));
+    let progress = restarted.record_work_state(task).unwrap().progress;
+    assert_eq!(
+        progress.remediation_cycles, 1,
+        "successful review does not reset the Task budget"
+    );
+    assert_eq!(progress.verified_resolutions, 1);
+    assert!(progress.baseline.is_none());
+    assert!(progress.stop_reason.is_none());
     assert_eq!(store.list_agent_assignments(task).unwrap().len(), 6);
     assert_eq!(
         restarted.show_record(task).unwrap().status,
@@ -549,6 +866,74 @@ fn run_case(case: &str) {
         )
         .with_workspace_repository(Box::new(SqliteProjectRepository::open(&path).unwrap()))
     };
+    if case == "human-budget" {
+        let app = application();
+        let secrets = root.join("secrets");
+        std::fs::create_dir_all(&secrets).unwrap();
+        let (assignment, _) = app.execute_task_check_acceptance(task.id).unwrap();
+        let attempt = store
+            .assignment_check_attempt(&assignment.id)
+            .unwrap()
+            .unwrap();
+        std::fs::write(secrets.join(&assignment.id), "secret").unwrap();
+        let session = app.assignment(&secrets, &assignment.id, "secret").unwrap();
+        session.acknowledge().unwrap();
+        session.start().unwrap();
+        session.context().unwrap();
+        let input = OutcomeInput {
+            attempt_id: attempt.id,
+            generation: attempt.generation,
+            evidence: attempt.evidence,
+            verdict: Verdict::Fail,
+            actor: "ignored".into(),
+            message: "Need operator credentials decision".into(),
+            disposition: OutcomeDisposition::HumanInput,
+            findings: vec![],
+            verifications: vec![],
+        };
+        session.submit_outcome(&input).unwrap();
+        application()
+            .reconcile_agent_dispatch("human-restart", 800_000)
+            .unwrap();
+        assert!(
+            store
+                .dispatch_hold(task.id)
+                .unwrap()
+                .unwrap()
+                .reason
+                .contains("Need operator credentials decision")
+        );
+        assert!(
+            app.list_record_checks(task.id)
+                .unwrap()
+                .iter()
+                .all(|c| c.latest_assessment.is_none())
+        );
+        assert_eq!(
+            app.show_record(task.id).unwrap().status,
+            RecordStatus::InProgress
+        );
+        assert_eq!(store.list_agent_assignments(task.id).unwrap().len(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+        return;
+    }
+    if matches!(
+        case,
+        "failed-budget"
+            | "remediation-budget"
+            | "no-progress-budget"
+            | "failed-changing-budget"
+            | "no-progress-success-budget"
+    ) {
+        remediation_budget(&store, &root, &application, &head, task.id, case);
+        std::fs::remove_dir_all(root).unwrap();
+        return;
+    }
+    if case == "retry-budget" {
+        retry_budget(&store, &root, &application, task.id);
+        std::fs::remove_dir_all(root).unwrap();
+        return;
+    }
     if matches!(case, "handback" | "same-commit-handback") {
         handback(
             &store,

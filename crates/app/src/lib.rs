@@ -1831,6 +1831,20 @@ pub trait AgentDispatchRepository: RecordRepository + WorkspaceDispatchRepositor
     ) -> Result<DispatchHold, RegistrationError>;
     /// Clears a durable automatic-dispatch block.
     fn resume_dispatch(&self, record_id: u64) -> Result<(), RegistrationError>;
+    /// Record an operator-only remediation reset without clearing any safety hold or retry count.
+    /// # Errors
+    /// Rejects unsupported storage, unsafe ownership or invalid attribution.
+    fn reset_task_remediation(
+        &self,
+        _record: u64,
+        _actor: &str,
+        _message: &str,
+    ) -> Result<outcomes::WorkState, RegistrationError> {
+        Err(RegistrationError::new(
+            "unsupported-contract",
+            "remediation reset is unavailable",
+        ))
+    }
     /// Returns an immutable seeded Agent Profile revision.
     fn agent_profile(
         &self,

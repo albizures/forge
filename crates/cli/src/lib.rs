@@ -579,8 +579,26 @@ pub async fn request_reopen_dispatch_task(
         .map_err(|error| format!("could not reopen Task through Forge daemon: {error}"))
 }
 
-/// Clears a Task's Dispatch Hold.
-///
+/// Explicitly reset remediation policy, retaining all other safety state.
+/// # Errors
+/// Returns endpoint or daemon reset failures.
+pub async fn request_reset_task_remediation(
+    url: &str,
+    task_id: u64,
+    actor: &str,
+    message: &str,
+) -> Result<forge_rpc::WorkState, String> {
+    client(url)?
+        .reset_remediation(forge_rpc::ResetRemediationRequest {
+            id: task_id,
+            actor: actor.into(),
+            message: message.into(),
+        })
+        .await
+        .map_err(|error| format!("could not reset Task remediation through Forge daemon: {error}"))
+}
+
+/// Clear only the operator-controlled Dispatch Hold.
 /// # Errors
 /// Returns endpoint or daemon hold-clearing failures.
 pub async fn request_resume_dispatch_task(url: &str, task_id: u64) -> Result<(), String> {

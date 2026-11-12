@@ -1112,6 +1112,15 @@ impl AgentDispatchApiServer for Daemon {
             .map_err(rpc_error)
     }
 
+    async fn reset_remediation(
+        &self,
+        request: forge_rpc::ResetRemediationRequest,
+    ) -> RpcResult<forge_app::outcomes::WorkState> {
+        self.application
+            .reset_task_remediation(request.id, &request.actor, &request.message)
+            .map_err(rpc_error)
+    }
+
     async fn resume(&self, request: RecordIdRequest) -> RpcResult<()> {
         self.application
             .resume_task_dispatch(request.id)

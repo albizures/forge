@@ -58,6 +58,7 @@ pub(super) fn state(c: &Connection, record: u64) -> Result<WorkState, Registrati
     let (generation, input, output) = row.unwrap_or((1, None, None));
     let latest_invalidation = c.query_row("SELECT generation, actor, message, created_at_millis FROM record_work_invalidations WHERE record_id = ?1 ORDER BY id DESC LIMIT 1", [record.cast_signed()], |r| Ok(WorkInvalidation { generation: r.get::<_, i64>(0)?.cast_unsigned(), actor: r.get(1)?, message: r.get(2)?, created_at_millis: r.get::<_, i64>(3)?.cast_unsigned() })).optional().map_err(storage_error)?;
     Ok(WorkState {
+        progress: super::task_progress::state(c, record)?,
         generation,
         latest_invalidation,
         input: input
@@ -222,6 +223,7 @@ impl SqliteProjectRepository {
         super::execution_modes::safe_ownership(&tx, record)?;
         // Recheck even when every Check passes and no further claim will be made.
         super::outcome_findings::retain_blocker_hold(&tx, record)?;
+        super::task_progress::retain_hold(&tx, record)?;
         let held: bool = tx
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM dispatch_holds WHERE record_id = ?1)",
@@ -475,11 +477,12 @@ impl SqliteProjectRepository {
             ));
         }
         if input.disposition != OutcomeDisposition::Complete
-            && (check.position == 0 || input.verdict != Verdict::Fail)
+            && (input.verdict != Verdict::Fail
+                || (input.disposition == OutcomeDisposition::Handback && check.position == 0))
         {
             return Err(error(
                 "invalid-outcome",
-                "handback/interruption requires a failed review attempt",
+                "non-complete outcomes require Fail; handback requires a review",
             ));
         }
         if check.position > 0
@@ -491,12 +494,29 @@ impl SqliteProjectRepository {
                 "a failed review must explicitly hand back or report interruption",
             ));
         }
-        if input.disposition == OutcomeDisposition::Interrupted {
+        if matches!(
+            input.disposition,
+            OutcomeDisposition::Interrupted | OutcomeDisposition::HumanInput
+        ) {
             if !input.findings.is_empty() || !input.verifications.is_empty() {
                 return Err(error(
                     "invalid-outcome",
                     "interrupted verification cannot publish substantive review effects",
                 ));
+            }
+            if assignment.is_some() {
+                if input.disposition == OutcomeDisposition::HumanInput {
+                    super::task_progress::hold(
+                        &tx,
+                        record,
+                        &format!(
+                            "Human input required: {}. Investigate and explicitly resume dispatch after intervention.",
+                            input.message
+                        ),
+                    )?;
+                } else {
+                    super::task_progress::interrupted(&tx, record, check.id)?;
+                }
             }
             let result = AcceptedOutcome {
                 attempt,
@@ -554,6 +574,22 @@ impl SqliteProjectRepository {
                 ],
             )
             .map_err(storage_error)?;
+        }
+        if input.verdict == Verdict::Pass {
+            super::task_progress::passed(&tx, check.id)?;
+        }
+        if assignment.is_some() {
+            super::task_progress::accepted(&tx, record, &check, input)?;
+            if check.position == 0 && input.verdict == Verdict::Fail {
+                tx.execute(
+                    "UPDATE record_work SET input_json = ?2 WHERE record_id = ?1",
+                    params![
+                        record.cast_signed(),
+                        serde_json::to_string(&input.evidence).map_err(json_error)?
+                    ],
+                )
+                .map_err(storage_error)?;
+            }
         }
         let blocking_findings = super::outcome_findings::retain_blocker_hold(&tx, record)?;
         let result = AcceptedOutcome {

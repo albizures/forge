@@ -141,6 +141,12 @@ pub trait AgentDispatchApi {
     async fn task_reopen(&self, request: RecordIdRequest) -> RpcResult<RecordResponse>;
     #[method(name = "resume")]
     async fn resume(&self, request: RecordIdRequest) -> RpcResult<()>;
+    /// Trusted operator operation, deliberately absent from the Assignment capability API.
+    #[method(name = "resetRemediation")]
+    async fn reset_remediation(
+        &self,
+        request: ResetRemediationRequest,
+    ) -> RpcResult<forge_app::outcomes::WorkState>;
     /// Operator diagnostics on the trusted daemon interface, not a capability-authenticated agent operation.
     #[method(name = "assignmentInfo")]
     async fn assignment_info(
@@ -842,6 +848,13 @@ impl From<forge_app::AgentAssignmentInfo> for AgentAssignmentInfoResponse {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResetRemediationRequest {
+    pub id: u64,
+    pub actor: String,
+    pub message: String,
+}
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AssignmentInfoRequest {

@@ -116,14 +116,65 @@ invalidate earlier passes. An attempt retired explicitly before submitting a res
 can likewise retry only after its durable operator-retirement marker and all other
 resources are reconciled, and the operator clears the retirement hold. Closure,
 missing acknowledgement, absent provider resources or a lost launch response alone
-never authorize replacement. Failed Implementation does not currently retry
-automatically; durable retry budgets remain a separate rollout prerequisite.
+never authorize replacement. Failed Implementation retries only Implementation,
+under the same bounded remediation/no-progress policy as review handback.
 The final pass retires its agent but leaves the
 Task In Progress; completion remains gated separately. Exact outcome replay
 returns its original result (including after closure/restart when the original
 credential remains available); this replay-only path does not restore closed
 Assignment reads or mutation authority. Conflicting, stale and cross-owner submissions have
 no partial effects. Closed capabilities remain revoked.
+
+## Bounded progress and operator intervention
+
+Controlled acceptance permits **two automatic retries per interrupted Check**
+(three interrupted attempts total) and **three remediation cycles per Task run**.
+A Check's successful outcome alone resets its interruption count; success of a
+different Check, restarting, changing modes, redispatching or resetting remediation
+does not. An explicitly retired, current attempt with no outcome consumes the same
+interruption allowance once retirement and every retained resource are reconciled.
+Substantive Implementation failure consumes remediation budget, not review retries.
+
+Each handback/failed Implementation records a cycle baseline. At the next failed
+Implementation, review handback or final passing review, unchanged deliverable
+evidence with no newly verified Finding resolution is **no progress**. Verified
+resolution of an overlooked fix counts even at the same commit. Earlier review
+passes and new Findings alone do not establish progress. Exhaustion/no progress
+retains an operator-cleared Dispatch Hold, never Done. Ordinary `resume` cannot
+bypass an exhausted budget: the next acceptance reestablishes its diagnostic hold.
+Existing safety holds are not overwritten.
+
+Agents may submit `disposition: "human-input"` with `verdict: "fail"` and an
+explanation, without Findings or verifications. This creates a human-input hold
+and no substantive Assessment or handback; retirement/resource gates still apply.
+The operator must intervene and explicitly resume. `interrupted` likewise creates
+no Assessment, Finding or substantive handback.
+
+Inspect counters, the pending baseline, verified-resolution count, stop reason and
+latest 20 recorded resets using `forge record check work <task> --json` (the
+`progress` object in WorkState). All reset audit rows remain durably stored.
+After investigation and safe retirement/resource reconciliation, authorize a new
+remediation budget explicitly:
+
+```sh
+forge dispatcher reset-remediation 42 --actor operator --message 'Investigated; authorize further remediation' --json
+forge dispatcher resume 42
+```
+
+The trusted operator RPC is `agentDispatch.resetRemediation` (`id`, `actor`,
+`message`); it is not an Assignment capability operation. Nonblank attribution is
+required and retained atomically with the reset. Reset clears only remediation
+cycles, pending baseline and no-progress/exhaustion state. It never clears a
+Dispatch Hold, interrupted retry count, Finding, Assessment, evidence, freshness,
+ownership or resource blocker. To recover an exhausted interrupted Check, safely
+hand off to Manual, successfully assess that Check, then explicitly clear the hold
+and safely return to Dispatched. Normal Task dispatch remains disabled pending the
+remaining deterministic, completion and real-provider rollout gates.
+
+Storage revision 7 requires a fresh store; older attempts cannot safely be given
+zero retry/remediation counts. No conversion, inferred backfill or automatic reset
+is provided. Safely retire ownership and reconcile resources before any separate
+operator-directed store replacement.
 
 ## Configure dispatch
 

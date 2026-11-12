@@ -132,6 +132,88 @@ fn retirement_fixture(unknown: bool) -> (std::path::PathBuf, SqliteProjectReposi
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remediation_reset_cli_records_operator_action_without_clearing_safety_state() {
+    let (path, store) = retirement_fixture(true);
+    let task = store.agent_assignment("retire-me").unwrap().record_id;
+    store
+        .hold_dispatch(task, "Unrelated ownership recovery hold")
+        .unwrap();
+    let app = Application::with_agent_dispatch(
+        Box::new(SqliteProjectRepository::open(&path).unwrap()),
+        Box::new(SqliteProjectRepository::open(&path).unwrap()),
+        Box::new(Provider(Arc::new(AtomicBool::new(false)))),
+        Box::new(Inspector),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/rpc", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router(Daemon::new(app)))
+            .await
+            .unwrap();
+    });
+    let run = |message: &str| {
+        Command::new(env!("CARGO_BIN_EXE_forge"))
+            .args([
+                "dispatcher",
+                "reset-remediation",
+                &task.to_string(),
+                "--actor",
+                "operator",
+                "--message",
+                message,
+                "--server-url",
+                &url,
+                "--json",
+            ])
+            .output()
+            .unwrap()
+    };
+    assert!(
+        !run("Inspected").status.success(),
+        "open ownership blocks reset"
+    );
+    store
+        .close_agent_assignment(
+            "retire-me",
+            forge_app::AgentAssignmentClosureReason::Retired,
+        )
+        .unwrap();
+    assert!(
+        !run("Inspected").status.success(),
+        "closed ownership retains unresolved resources"
+    );
+    for r in store.list_agent_assignment_resources("retire-me").unwrap() {
+        store
+            .retire_agent_assignment_resource("retire-me", &r.resource_kind, &r.resource_id)
+            .unwrap();
+    }
+    assert!(!run(" ").status.success());
+    let reset = run("Investigated retained history; allow remediation");
+    assert!(
+        reset.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reset.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&reset.stdout).unwrap();
+    assert_eq!(result["progress"]["resets"][0]["actor"], "operator");
+    assert_eq!(
+        result["progress"]["resets"][0]["message"],
+        "Investigated retained history; allow remediation"
+    );
+    assert_eq!(
+        store.dispatch_hold(task).unwrap().unwrap().reason,
+        "Unrelated ownership recovery hold"
+    );
+    let fresh = SqliteProjectRepository::open(&path)
+        .unwrap()
+        .record_work_state(task)
+        .unwrap();
+    assert_eq!(fresh.progress.resets.len(), 1);
+    server.abort();
+    let _ = std::fs::remove_file(path);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retirement_cli_retries_failed_cleanup_and_reports_remaining_uncertainty() {
     for unknown in [false, true] {
         let (path, store) = retirement_fixture(unknown);

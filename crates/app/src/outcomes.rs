@@ -77,6 +77,8 @@ pub enum OutcomeDisposition {
     Complete,
     Handback,
     Interrupted,
+    /// No substantive verdict; stop for an explicit operator decision.
+    HumanInput,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -104,11 +106,33 @@ pub struct AcceptedOutcome {
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkState {
+    pub progress: TaskProgress,
     pub generation: u64,
     pub input: Option<Evidence>,
     pub output: Option<Evidence>,
     pub latest_invalidation: Option<WorkInvalidation>,
 }
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TaskProgress {
+    pub remediation_cycles: u32,
+    pub baseline: Option<Evidence>,
+    pub verified_resolutions: u64,
+    pub stop_reason: Option<String>,
+    pub interrupted_checks: Vec<CheckRetries>,
+    pub resets: Vec<ProgressReset>,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CheckRetries {
+    pub check_id: u64,
+    pub interruptions: u32,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProgressReset {
+    pub actor: String,
+    pub message: String,
+    pub created_at_millis: u64,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkInvalidation {
     pub generation: u64,
@@ -125,6 +149,18 @@ pub struct WorkInvalidationInput {
     pub message: String,
 }
 impl Application {
+    /// Explicitly reset only remediation policy; retain holds, retries, evidence and ownership.
+    /// # Errors
+    /// Rejects blank attribution, non-Tasks and unsafe ownership.
+    pub fn reset_task_remediation(
+        &self,
+        record: u64,
+        actor: &str,
+        message: &str,
+    ) -> Result<WorkState, RegistrationError> {
+        self.dispatch()?
+            .reset_task_remediation(record, actor, message)
+    }
     /// Inspect freshness and the immutable input/output evidence of a Task.
     /// # Errors
     /// Rejects inaccessible or non-Task owners.

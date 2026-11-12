@@ -830,6 +830,14 @@ Revision 6 adds Record `execution_mode` and attributed `execution-mode-changed`
 updates. Revision-5 stores are incompatible; modes are not inferred from old
 lifecycle or Assignments. Mode changes preserve runtime history/resources and
 never clear holds or counters.
+Revision 7 adds durable `task_retry_counts`, `task_progress` cycle baselines,
+verified-resolution accounting and append-only `task_progress_resets`. Revision-6
+stores are incompatible: historical attempts cannot safely receive empty budgets.
+Outcome acceptance, budget/hold effects and exact-replay persistence commit together;
+claims and evidence reconciliation reestablish exhausted-policy holds after ordinary
+hold clearance. Recorded operator remediation reset requires safe ownership, preserves
+interrupted retries and holds, and exposes its latest 20 audit entries in WorkState.
+See [bounded progress operations](../../docs/dispatch.md#bounded-progress-and-operator-intervention).
 
 Select a fresh store rather than inventing ownership or rewriting version markers.
 Any local reset is a separate operator action: first safely retire ownership and
