@@ -2271,6 +2271,10 @@ impl AgentDispatchRepository for SqliteProjectRepository {
         Ok(profile)
     }
 
+    fn validate_task_check_preparation(&self, record: u64) -> Result<(), RegistrationError> {
+        self.validate_check_preparation(record)
+    }
+
     fn claim_task_check_acceptance(
         &self,
         record: u64,

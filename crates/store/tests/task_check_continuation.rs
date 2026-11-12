@@ -34,11 +34,14 @@ impl ManagedWorktreeAdapter for Checkout {
     fn create(
         &self,
         _: &std::path::Path,
-        _: &std::path::Path,
-        _: &str,
-        _: &str,
+        path: &std::path::Path,
+        branch: &str,
+        base: &str,
     ) -> Result<(), RegistrationError> {
-        unreachable!()
+        assert!(branch.starts_with("feat/forge-"));
+        assert_eq!(base, "a".repeat(40));
+        std::fs::create_dir_all(path).unwrap();
+        Ok(())
     }
     fn remove(&self, _: &std::path::Path, _: bool) -> Result<(), RegistrationError> {
         unreachable!()
@@ -429,6 +432,21 @@ fn safe_mode_handoff_invalidates_passes_without_losing_history() {
 }
 
 #[test]
+fn normal_dispatch_prepares_worktree_only_after_readiness_and_capacity() {
+    run_case("normal-preparation");
+}
+
+#[test]
+fn normal_explicit_dispatch_runs_ordered_checks_to_safe_completion() {
+    run_case("normal-explicit");
+}
+
+#[test]
+fn normal_automatic_dispatch_runs_ordered_checks_to_safe_completion() {
+    run_case("normal-automatic");
+}
+
+#[test]
 fn controlled_checks_continue_only_after_retirement_and_survive_restart() {
     run_case("success");
 }
@@ -512,7 +530,7 @@ fn handback(
     let mut replay = None;
     let mut stale = None;
     for index in 0..6 {
-        let (assignment, _) = app.execute_task_check_acceptance(task).unwrap();
+        let (assignment, _) = app.dispatch_record(task).unwrap();
         let attempt = store
             .assignment_check_attempt(&assignment.id)
             .unwrap()
@@ -957,8 +975,14 @@ fn run_case(case: &str) {
             original_profiles
         );
     }
-    store.reserve_worktree_claim(task.id).unwrap();
-    store.activate_worktree_claim(task.id).unwrap();
+    if case == "normal-preparation" {
+        store
+            .set_task_base_commit(task.id, &"a".repeat(40))
+            .unwrap();
+    } else {
+        store.reserve_worktree_claim(task.id).unwrap();
+        store.activate_worktree_claim(task.id).unwrap();
+    }
     let launches = Arc::new(Mutex::new(Vec::new()));
     let unavailable = Arc::new(AtomicBool::new(false));
     let head = Arc::new(Mutex::new("a".repeat(40)));
@@ -987,6 +1011,73 @@ fn run_case(case: &str) {
         )
         .with_workspace_repository(Box::new(SqliteProjectRepository::open(&path).unwrap()))
     };
+    if case == "normal-preparation" {
+        let app = application();
+        // A failed preflight must not allocate a checkout or an Assignment.
+        unavailable.store(true, Ordering::SeqCst);
+        assert_eq!(
+            app.dispatch_record(task.id).unwrap_err().code,
+            "workspace-dispatch-blocked"
+        );
+        assert!(store.worktree_claim(task.id).unwrap().is_none());
+        unavailable.store(false, Ordering::SeqCst);
+        store
+            .hold_dispatch(task.id, "Operator investigation")
+            .unwrap();
+        assert_eq!(
+            app.dispatch_record(task.id).unwrap_err().code,
+            "dispatch-held"
+        );
+        assert!(store.worktree_claim(task.id).unwrap().is_none());
+        store.resume_dispatch(task.id).unwrap();
+        // Older blocked work must not prevent the next ready Task from launching.
+        let next = app
+            .records_in_workspace("test")
+            .unwrap()
+            .open_typed_record_with_generators(
+                RecordType::Task,
+                "Next ready work",
+                vec!["test/api".into()],
+                vec![],
+            )
+            .unwrap();
+        let waiting = app
+            .records_in_workspace("test")
+            .unwrap()
+            .open_typed_record_with_generators(
+                RecordType::Task,
+                "Capacity wait",
+                vec!["test/api".into()],
+                vec![],
+            )
+            .unwrap();
+        app.relate_records(
+            task.id,
+            next.id,
+            forge_app::RecordRelationshipKind::DependsOn,
+        )
+        .unwrap();
+        assert_eq!(
+            app.dispatch_record(task.id).unwrap_err().code,
+            "record-not-ready"
+        );
+        assert!(store.worktree_claim(task.id).unwrap().is_none());
+        app.reconcile_agent_dispatch("prepare", 0).unwrap();
+        let claimed = store.list_agent_assignments(next.id).unwrap().remove(0);
+        assert_eq!(claimed.profile.revision, pinned.revision);
+        let claim = store.worktree_claim(next.id).unwrap().unwrap();
+        assert!(claim.path.is_dir());
+        // Another ready Task cannot prepare Git resources while capacity is reserved.
+        assert_eq!(
+            app.dispatch_record(waiting.id).unwrap_err().code,
+            "project-capacity"
+        );
+        assert!(store.worktree_claim(waiting.id).unwrap().is_none());
+        assert_eq!(app.dispatch_record(next.id).unwrap(), (claimed, true));
+        assert_eq!(launches.lock().unwrap().len(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+        return;
+    }
     if case == "human-budget" {
         let app = application();
         let secrets = root.join("secrets");
@@ -1077,6 +1168,9 @@ fn run_case(case: &str) {
     }
     let app = application();
     if case == "mode-matrix" {
+        store
+            .hold_dispatch(task.id, "Matrix fixture: do not schedule")
+            .unwrap();
         let scoped = app.records_in_workspace("test").unwrap();
         for (kind, projects, expected) in [
             (RecordType::Task, vec!["test/api".into()], Dispatched),
@@ -1109,7 +1203,10 @@ fn run_case(case: &str) {
                 let error = if expected == Manual {
                     "manual-dispatch-forbidden"
                 } else {
-                    "task-dispatch-unsupported-contract"
+                    store
+                        .hold_dispatch(record.id, "Operator opt-out pending mode change")
+                        .unwrap();
+                    "dispatch-held"
                 };
                 assert_eq!(app.dispatch_record(record.id).unwrap_err().code, error);
                 if expected == Dispatched {
@@ -1275,7 +1372,17 @@ fn run_case(case: &str) {
         std::fs::remove_dir_all(root).unwrap();
         return;
     }
-    let (mut assignment, _) = app.execute_task_check_acceptance(task.id).unwrap();
+    let (mut assignment, _) = if case == "normal-explicit" {
+        app.dispatch_record(task.id).unwrap()
+    } else if case == "normal-automatic" {
+        app.reconcile_agent_dispatch("normal-start", 0).unwrap();
+        (
+            store.list_agent_assignments(task.id).unwrap().remove(0),
+            false,
+        )
+    } else {
+        app.execute_task_check_acceptance(task.id).unwrap()
+    };
     assert_eq!(
         app.start_record(task.id).unwrap_err().code,
         "dispatched-start-forbidden"
@@ -1938,7 +2045,11 @@ fn run_case(case: &str) {
                         scope.spawn(|| {
                             let app = application();
                             barrier.wait();
-                            app.execute_task_check_acceptance(task.id).unwrap()
+                            if case.starts_with("normal-") {
+                                app.dispatch_record(task.id).unwrap()
+                            } else {
+                                app.execute_task_check_acceptance(task.id).unwrap()
+                            }
                         })
                     })
                     .collect();
@@ -1997,7 +2108,11 @@ fn run_case(case: &str) {
     );
     assert_eq!(
         app.dispatch_record(task.id).unwrap_err().code,
-        "task-dispatch-unsupported-contract"
+        if case == "residual" {
+            "dispatch-held"
+        } else {
+            "record-not-ready"
+        }
     );
     if case == "residual" {
         let finding = app

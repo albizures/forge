@@ -3,8 +3,10 @@
 Implementation contract for Spec #614, Tasks #615–621. Operator preview,
 registration and explicit selection are available. The Herdr adapter uses a
 flags-only Pi argument path and protected [Assignment bootstrap and context](assignment-context.md)
-for registered Task and Grilling policies. Dispatch preflight checks selected direct
-inputs and the neighboring Forge CLI before preparing a worktree or allocating provider
+for registered Task and Grilling policies. Task attempts use their immutable
+Check-pinned revisions; Grillings use the Workspace selection. Dispatch preflight
+checks applicable direct inputs and the neighboring Forge CLI before preparing a
+worktree or allocating provider
 resources. Final input validation is repeated before launch.
 
 During #617 the human explicitly chose “use only flags for now”, superseding the
@@ -75,7 +77,12 @@ forge dispatcher profile --kind grilling --workspace development
 
 The Grilling revision must first be independently registered with
 `--record-type grilling`; revision numbers are per Record Type, not interchangeable
-handles. Each Workspace has separate selections. Preview defaults to Task for
+handles. Each Workspace has separate selections. Task selection supplies
+configuration/authoring defaults, not live routing for existing Tasks. Pin the
+registered Task revisions in the Project's Check Template before opening Tasks;
+all retries/remediation retain those copied Check pins despite later selection or
+template changes. A missing/unusable pin blocks without fallback or rebinding;
+restore its prerequisites or safely choose Manual. Preview defaults to Task for
 Forge-owned lifecycle policy; registration requires an explicit Record Type.
 Both require explicit `--workspace`, even from inside a Workspace. Relative
 **document arguments are sent unchanged** to the daemon and resolved from that

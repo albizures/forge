@@ -94,9 +94,10 @@ not rewrite history. Neither mode selection nor a passing outcome clears a hold.
 Manual Tasks reject explicit dispatch with `manual-dispatch-forbidden` and are
 excluded from automatic scheduling. A Dispatched Projectless Task is ineligible
 with `dispatch-requires-project`; Dispatched metadata cannot supply a Project.
-Otherwise eligible Task dispatch still fails with
-`task-dispatch-unsupported-contract`. This release never launches Task agents or
-silently falls back to Manual.
+Eligible Task dispatch now advances immutable ordered Checks with their pinned
+profiles, after the verified rollout gates. See [dispatch operations](dispatch.md)
+for prerequisites, bounded continuation and the separate final completion gate.
+It never silently falls back to Manual.
 
 ## Relationships and lifecycle
 
@@ -235,7 +236,7 @@ at generation 1. No Managed Worktree, Agent Profile or provider launch is needed
 Explicit Manual Execution Mode and confirmed safe ownership/resource state are required
 for Manual attempts and completion. These commands do not retire ownership, reconcile
 resources or clear holds.
-Task dispatch remains fail-closed with `task-dispatch-unsupported-contract`.
+Dispatched Tasks instead use [Check-bound Assignment outcomes](dispatch.md#check-attempts-and-controlled-acceptance), not Manual attempts.
 
 `attempt.json` (use the actual Check ID and observed generation):
 
@@ -580,8 +581,9 @@ prerequisites pass profile preflight. Missing/unusable revisions yield Check-spe
 a Check, rewrites a binding or launches an agent. Restore prerequisites or use
 Manual work; an existing Task cannot repair a binding by rebinding. Template
 snapshots may retain unavailable positive revisions, making such configuration
-inspectable without preventing profile-less Manual work. Task dispatch remains
-prohibited by the interim unsupported-contract guard.
+inspectable without preventing profile-less Manual work. Normal Task dispatch
+requires usable pins and all [dispatch safety gates](dispatch.md); Workspace
+selection is never a replacement for a missing Check pin.
 
 Read the observed `version` before replacement. An unconfigured template reads as
 version **0**, the profile-less Implementation baseline and empty history; its first replacement requires

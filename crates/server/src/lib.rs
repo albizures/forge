@@ -2669,7 +2669,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_dispatch_rejects_tasks_and_never_relaunches_grilling_duplicates() {
+    fn explicit_dispatch_rejects_unusable_task_pins_and_never_relaunches_grilling_duplicates() {
         use forge_app::AgentAssignmentState;
         let (root, store, records) = explicit_dispatch_fixture();
         let database = root.join("store.sqlite");
@@ -2684,7 +2684,7 @@ mod tests {
         );
         assert_eq!(
             app.dispatch_record(records[1].id).unwrap_err().code,
-            "task-dispatch-unsupported-contract"
+            "invalid-check-profile"
         );
         assert!(
             store

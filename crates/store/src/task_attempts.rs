@@ -1,4 +1,4 @@
-//! Controlled Check claims. Assignment, attempt and capacity are reserved in one transaction.
+//! Check claims. Assignment, attempt and capacity are reserved in one transaction.
 use super::{
     SqliteProjectRepository, checks, execution_modes, load_agent_profile, load_record, now_millis,
     outcomes, storage_error, workspace_dispatch,
@@ -27,6 +27,53 @@ pub(super) fn binding(
 }
 
 impl SqliteProjectRepository {
+    /// Read-only preparation gate; the actual claim repeats these checks transactionally.
+    pub(super) fn validate_check_preparation(&self, record: u64) -> Result<(), RegistrationError> {
+        let mut c = self
+            .connection
+            .lock()
+            .map_err(|_| error("storage", "storage lock poisoned"))?;
+        let tx = c.transaction().map_err(storage_error)?;
+        self.ensure_record_workspace(&tx, record)?;
+        let task = load_record(&tx, record)?;
+        forge_app::validate_task_dispatch_mode(&task)?;
+        if task.record_type != RecordType::Task || task.status != RecordStatus::Open {
+            return Err(error(
+                "record-not-ready",
+                "only Open Tasks may prepare a new Managed Worktree",
+            ));
+        }
+        execution_modes::safe_ownership(&tx, record)?;
+        if tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM dispatch_holds WHERE record_id = ?1)",
+                [record.cast_signed()],
+                |r| r.get::<_, bool>(0),
+            )
+            .map_err(storage_error)?
+        {
+            return Err(error(
+                "dispatch-held",
+                "investigate the Dispatch Hold and explicitly resume",
+            ));
+        }
+        if !super::unfinished_prerequisite_ids(&tx, record)?.is_empty() {
+            return Err(error(
+                "record-not-ready",
+                "Task has unresolved prerequisites",
+            ));
+        }
+        let slug = &task.project_slugs[0];
+        let used: i64 = tx.query_row("SELECT COUNT(*) FROM agent_assignments a JOIN record_projects p ON p.record_id = a.record_id WHERE p.project_slug = ?1 AND (a.closed_at_millis IS NULL OR EXISTS(SELECT 1 FROM agent_assignment_resources r WHERE r.assignment_id = a.id AND r.retired_at_millis IS NULL))", [slug], |r| r.get(0)).map_err(storage_error)?;
+        if used >= i64::from(super::effective_limit(&tx, slug)?) {
+            return Err(error(
+                "project-capacity",
+                "Project dispatch capacity is reserved",
+            ));
+        }
+        Ok(())
+    }
+
     /// Serialize the final lifecycle decision with all Forge evidence/ownership mutations.
     #[allow(clippy::too_many_lines)]
     pub(super) fn complete_check_run(

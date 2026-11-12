@@ -1,7 +1,6 @@
 //! Application-owned operations and persistence contracts.
 
 use std::{
-    collections::BTreeSet,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
@@ -1461,7 +1460,7 @@ fn reconcile_assignment<A: AgentDispatchAdapter + ?Sized>(
 fn task_dispatch_unsupported() -> RegistrationError {
     RegistrationError::new(
         "task-dispatch-unsupported-contract",
-        "Task dispatch is disabled: the Check execution contract is not yet supported; no agent was launched. Manual execution is never selected implicitly.",
+        "Task dispatch requires Check-bound execution support; unbound or unsupported Assignments cannot launch. Manual execution is never selected implicitly.",
     )
 }
 
@@ -1517,7 +1516,7 @@ pub fn reconcile_agent_dispatch<F: AgentDispatchAdapterFactory + ?Sized>(
     }
     let mut reconciled = Vec::new();
     for assignment in repository.list_open_agent_assignments()? {
-        // Controlled Check attempts have their own acceptance/retirement boundary.
+        // Check-bound attempts have their own outcome/retirement boundary.
         if repository
             .assignment_check_attempt(&assignment.id)?
             .is_some()
@@ -1531,7 +1530,7 @@ pub fn reconcile_agent_dispatch<F: AgentDispatchAdapterFactory + ?Sized>(
         {
             tracing::warn!(assignment_id = %assignment.id,
                 code = "task-dispatch-unsupported-contract",
-                "Task dispatch is disabled pending the Check execution contract");
+                "Unbound Task Assignment cannot launch; explicitly reconcile historical ownership");
             continue;
         }
         if assignment.state == AgentAssignmentState::Provisioning
@@ -1886,8 +1885,11 @@ pub trait AgentDispatchRepository: RecordRepository + WorkspaceDispatchRepositor
         assignment_id: &str,
         selection: Option<&DispatchPreflightSelection>,
     ) -> Result<(AgentAssignment, bool), RegistrationError>;
-    /// Controlled acceptance only: atomically bind the next Check, pinned profile and input.
-    /// Normal dispatch must not call this entry point while the rollout gate is closed.
+    /// Validate eligibility, dependencies, holds, ownership and capacity before Git preparation.
+    fn validate_task_check_preparation(&self, _record: u64) -> Result<(), RegistrationError> {
+        Err(task_dispatch_unsupported())
+    }
+    /// Atomically bind the next Check, pinned profile and input after all claim gates.
     #[allow(clippy::too_many_arguments)]
     fn claim_task_check_acceptance(
         &self,
@@ -2534,8 +2536,8 @@ impl Application {
             })
     }
 
-    /// Explicitly dispatches an interactive Grilling using its immutable profile.
-    /// Task dispatch fails closed until the Check execution contract is supported.
+    /// Dispatches a Task's next pinned Check or an interactive Grilling.
+    /// Task rollout was verified by Spec #644's deterministic and real-provider gates.
     ///
     /// # Errors
     ///
@@ -2554,7 +2556,53 @@ impl Application {
         }
         if record.record_type == RecordType::Task {
             validate_task_dispatch_mode(&record)?;
-            return Err(task_dispatch_unsupported());
+            if !matches!(record.status, RecordStatus::Open | RecordStatus::InProgress) {
+                return Err(RegistrationError::new(
+                    "record-not-ready",
+                    "Task must be Open or Forge-managed In Progress",
+                ));
+            }
+            if self
+                .managed_worktrees()?
+                .worktree_claim(record_id)?
+                .is_none()
+            {
+                dispatch.validate_task_check_preparation(record_id)?;
+                // No Git side effects until provider configuration and the actual Check pin
+                // are usable. The subsequent transactional claim rechecks mutable gates.
+                self.workspace_dispatch_readiness(&record.workspace_id)?
+                    .require_dispatchable()?;
+                let check = self
+                    .list_record_checks(record_id)?
+                    .into_iter()
+                    .find(|check| check.current_verdict != Some(checks::Verdict::Pass))
+                    .ok_or_else(|| {
+                        RegistrationError::new("checks-passed", "all Checks currently pass")
+                    })?;
+                let profile = check
+                    .profile_revision
+                    .ok_or_else(|| {
+                        RegistrationError::new(
+                            "invalid-check-profile",
+                            "next Check has no pinned profile",
+                        )
+                    })
+                    .and_then(|revision| dispatch.agent_profile(RecordType::Task, revision))
+                    .map_err(|e| RegistrationError::new("invalid-check-profile", e.message))?;
+                if profile.launch_policy.is_none()
+                    || self
+                        .adapter_factory()?
+                        .validate_preflight(&profile)
+                        .is_err()
+                {
+                    return Err(RegistrationError::new(
+                        "invalid-check-profile",
+                        "restore the next Check's pinned profile prerequisites",
+                    ));
+                }
+                self.prepare_dispatch_worktree(record_id)?;
+            }
+            return self.execute_task_check_acceptance(record_id);
         }
         if let Some(assignment) = dispatch
             .list_agent_assignments(record_id)?
@@ -2925,10 +2973,10 @@ impl Application {
         })
     }
 
-    /// Rejects automatic Task dispatch before claiming capacity or preparing Git resources.
+    /// Starts eligible Open Tasks in durable creation order; continuation is handled separately.
     fn schedule_agent_dispatch(&self) -> Result<(), RegistrationError> {
         let dispatch = self.dispatch()?;
-        let projects: BTreeSet<_> = dispatch
+        let mut tasks = dispatch
             .list_records(&RecordListFilter {
                 project_slug: None,
                 status: Some(RecordStatus::Open),
@@ -2946,12 +2994,16 @@ impl Application {
                 record.project_slugs.len() == 1
                     && record.execution_mode == ExecutionMode::Dispatched
             })
-            .map(|record| record.project_slugs[0].clone())
-            .collect();
-        for project_slug in projects {
-            tracing::warn!(project = %project_slug,
-                code = "task-dispatch-unsupported-contract",
-                "Task dispatch is disabled pending the Check execution contract");
+            .collect::<Vec<_>>();
+        tasks.sort_by_key(|task| task.id);
+        for task in tasks {
+            if let Err(error) = self.dispatch_record(task.id) {
+                tracing::warn!(
+                    record_id = task.id,
+                    code = error.code,
+                    "Task dispatch blocked; inspect prerequisites, Check pins, holds and retained resources"
+                );
+            }
         }
         Ok(())
     }

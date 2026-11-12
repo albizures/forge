@@ -1,6 +1,6 @@
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
-async fn check_bound_rpc_context_and_outcome_are_same_owner_and_normal_dispatch_stays_closed() {
+async fn check_bound_rpc_context_outcome_and_normal_dispatch_share_same_owner() {
     use forge_app::{ManagedWorktreeRepository, WorkspaceDispatchRepository, WorkspaceRepository};
     let (fixture, _, _) = assignment_test_daemon_scoped(true);
     let store = SqliteProjectRepository::open(&fixture.database_path).unwrap();
@@ -176,6 +176,19 @@ async fn check_bound_rpc_context_and_outcome_are_same_owner_and_normal_dispatch_
             .get("error")
             .is_some()
     );
+    // Normal typed RPC shares the existing Check-bound ownership without relaunching.
+    let normal = AgentDispatchApiServer::dispatch_record(
+        &daemon,
+        forge_rpc::SelectedRecordRequest {
+            selection: forge_rpc::RecordSelection {
+                workspace: Some("test".into()),
+                ..Default::default()
+            },
+            record: forge_rpc::DispatchRecordRequest { record_id: task.id },
+        },
+    ).await.unwrap();
+    assert!(normal.already_assigned);
+    assert_eq!(normal.assignment.id, "bound-check");
     let accepted =
         assignment_rpc(daemon.clone(), "assignment.outcomeSubmit", request.clone()).await;
     assert_eq!(
@@ -196,24 +209,6 @@ async fn check_bound_rpc_context_and_outcome_are_same_owner_and_normal_dispatch_
             .await
             .get("error")
             .is_some()
-    );
-    // Typed public RPC confirms normal dispatch remains closed even while a bound Assignment exists.
-    let normal = AgentDispatchApiServer::dispatch_record(
-        &daemon,
-        forge_rpc::SelectedRecordRequest {
-            selection: forge_rpc::RecordSelection {
-                workspace: Some("test".into()),
-                ..Default::default()
-            },
-            record: forge_rpc::DispatchRecordRequest { record_id: task.id },
-        },
-    )
-    .await;
-    assert!(
-        normal
-            .unwrap_err()
-            .to_string()
-            .contains("task-dispatch-unsupported-contract")
     );
     assert_eq!(
         store.show_record(task.id).unwrap().status,

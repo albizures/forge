@@ -209,7 +209,7 @@ fn pinned_configuration_survives_template_selection_changes_and_restart_without_
     );
     assert_eq!(
         app.dispatch_record(first.id).unwrap_err().code,
-        "task-dispatch-unsupported-contract"
+        "managed-worktrees-unavailable"
     );
     app.set_record_execution_mode(first.id, Dispatched, Manual, "operator", "Manual work")
         .unwrap();

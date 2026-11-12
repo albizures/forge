@@ -1,4 +1,4 @@
-//! Explicit acceptance execution, deliberately separate from normal dispatch rollout.
+//! Check-bound execution shared by verified normal dispatch and explicit acceptance.
 use crate::{
     AgentAssignment, Application, RecordType, RegistrationError, WorktreeClaimState,
     checks::Verdict, outcomes::Evidence,
@@ -37,7 +37,7 @@ impl Application {
         })
     }
 
-    /// Resume enrolled Tasks under bounded Check policy, or complete current passing work.
+    /// Resume Forge-managed Tasks under bounded Check policy, or complete current passing work.
     /// Unclaimed Tasks do not advance. Replacements and completion require confirmed
     /// retirement/resource reconciliation; interruption is not handback.
     pub(crate) fn continue_task_check_acceptance(&self) -> Result<(), RegistrationError> {
@@ -80,7 +80,7 @@ impl Application {
                 tracing::warn!(
                     record_id = task.id,
                     code = error.code,
-                    "controlled Check continuation blocked"
+                    "Check continuation blocked"
                 );
             }
         }
@@ -128,7 +128,7 @@ impl Application {
         Ok(true)
     }
 
-    /// Launch at most one Check-bound attempt for controlled acceptance testing.
+    /// Launch at most one Check-bound attempt, shared with normal dispatch after rollout.
     /// Requires a previously prepared, clean Managed Worktree. Continues only after safe
     /// retirement of a passing, interrupted or freshness-invalidated attempt. Completion is
     /// a separate reconciliation gate, never a side effect of outcome acceptance.

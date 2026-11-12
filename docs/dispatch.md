@@ -4,27 +4,29 @@ Forge's daemon owns dispatch state, provider resources, and reconciliation.
 The CLI neither opens dispatch storage nor contacts Herdr directly. Herdr is a
 provider adapter: provider state is never proof of Forge Task completion.
 
-## Interim Task dispatch restriction
+## Verified Check-driven Task dispatch
 
-Task dispatch is disabled until the Check execution contract is supported.
-Explicit application/RPC/CLI requests reject Manual Tasks with
+Normal explicit and automatic Task dispatch is enabled following Spec #644's
+retained deterministic verification (#660, renewed after provider fixes in #661)
+and six-attempt real-provider handback/remediation gate (#661 comment 2).
+Before those gates, normal dispatch rejected with
+`task-dispatch-unsupported-contract` and automatic scheduling made no Task claims.
+The acceptance command did not enable dispatch or change Execution Mode. This is
+a source-release gate, not a per-store flag or a claim that an installed daemon
+has been upgraded. Use matched CLI/server builds and verify the deployed Revision.
+Any subsequent implementation/review changes require renewed verification.
+
+Explicit application/RPC/CLI requests still reject Manual Tasks with
 `manual-dispatch-forbidden` and Projectless Dispatched Tasks with
-`dispatch-requires-project`. Otherwise they fail with
-`task-dispatch-unsupported-contract`, including requests for an already assigned
-Task. See [explicit Execution Mode selection](records.md#explicit-execution-mode);
-ordinary operator start never changes a Task's mode. Automatic scheduling never claims Tasks or prepares their worktrees.
-Provisioning Task Assignments are retained unchanged across reconciliation and
-restart: no provider provisioning, launch, retry, or implicit Manual fallback.
-Existing non-provisioning ownership can still be observed, and explicit retirement
-and resource reconciliation remain available. Holds and capacity reservations are
-not cleared by this restriction. Grilling dispatch remains supported.
+`dispatch-requires-project`. Unsupported Record Types cannot execute through mode
+metadata. See [explicit Execution Mode selection](records.md#explicit-execution-mode);
+ordinary operator start never changes a Task's mode. Missing/unusable Check pins,
+provider prerequisites, dependencies, holds, capacity and ownership/resources block
+execution, with no Manual fallback. `task-dispatch-unsupported-contract` remains
+a fail-closed diagnostic for unsupported persistence or unbound provisioning
+Assignments; legacy ownership is not converted into Check-bound execution.
 
-Task launch procedures below describe the retained, currently disabled machinery;
-configuration/readiness does not authorize Task execution. This restriction must
-remain in place until both the deterministic safety suite and real-provider smoke
-rollout gates in Spec #644 pass.
-
-### Controlled Check acceptance (not normal dispatch)
+### Check attempts and controlled acceptance
 
 For explicit acceptance testing only, `forge dispatcher task-check-acceptance
 <task-id> --workspace <id> --json` executes **one** Check-bound attempt. It requires
@@ -32,15 +34,15 @@ a clean, active, already prepared Managed Worktree, Dispatched mode, a single
 Project, satisfied dependencies, available capacity, no hold and reconciled prior
 ownership/resources. In Progress continuation additionally requires durable
 Check-bound Assignment history; lifecycle status or missing ownership alone is
-not sufficient. This explicitly enrolls the Task in controlled acceptance
-continuation: after a current passing outcome or substantive review handback,
-daemon reconciliation retires the
+not sufficient. Normal `dispatcher dispatch <task-id>` uses the same guarded
+Check execution path, preparing a Managed Worktree first if needed for an eligible
+Open Task. Automatic scheduling starts eligible Open Tasks; after a current
+passing outcome or substantive review handback, daemon reconciliation retires the
 old agent, reconciles its retained resources, then launches the next required
 Check with its pinned profile. The explicit command does not create a worktree or
 complete the Task; daemon reconciliation can complete enrolled work only through
 the separate final gate below.
-Ordinary `dispatcher dispatch` and scheduling of unenrolled Tasks remain closed.
-Repeating acceptance returns the existing Assignment without relaunching it while
+Repeating dispatch or acceptance returns the existing Assignment without relaunching it while
 no passing outcome or freshness invalidation is available; both use the same
 retirement gate.
 
@@ -149,7 +151,7 @@ no partial effects. Closed capabilities remain revoked.
 
 ## Bounded progress and operator intervention
 
-Controlled acceptance permits **two automatic retries per interrupted Check**
+Check-driven dispatch permits **two automatic retries per interrupted Check**
 (three interrupted attempts total) and **three remediation cycles per Task run**.
 A Check's successful outcome alone resets its interruption count; success of a
 different Check, restarting, changing modes, redispatching or resetting remediation
@@ -190,8 +192,8 @@ cycles, pending baseline and no-progress/exhaustion state. It never clears a
 Dispatch Hold, interrupted retry count, Finding, Assessment, evidence, freshness,
 ownership or resource blocker. To recover an exhausted interrupted Check, safely
 hand off to Manual, successfully assess that Check, then explicitly clear the hold
-and safely return to Dispatched. Normal Task dispatch remains disabled pending the
-remaining deterministic and real-provider rollout gates.
+and safely return to Dispatched. No resume, redispatch or mode transition silently
+resets the safety budget.
 
 Storage revision 7 requires a fresh store; older attempts cannot safely be given
 zero retry/remediation counts. No conversion, inferred backfill or automatic reset
@@ -231,9 +233,10 @@ Relative socket paths are rejected. Herdr identity is an explicit argument;
 `HERDR_WORKSPACE_ID` is not used. The socket is **daemon-owned**; profile selections
 and Herdr binding are **Workspace-owned**; capacity and setup hooks remain
 **Project-owned**. `config get [key]` reports effective values, ownership and
-default/override provenance without contacting Herdr. The acknowledgement timeout
-belongs to the selected immutable Task profile revision, not an independent
-Workspace setting. `profile [--kind task|grilling]` inspects that Workspace's selected
+default/override provenance without contacting Herdr. The effective acknowledgement
+timeout belongs to the Assignment's immutable profile (the Task Check pin), not an
+independent Workspace setting. Workspace selection/timeout changes never alter
+existing Check pins or Assignments. `profile [--kind task|grilling]` inspects that Workspace's selected
 revision. Profile selections and binding start unset; both selections are required,
 even when dispatching only one Record Type.
 
@@ -272,11 +275,17 @@ The remaining examples assume cwd is inside the intended Forge Workspace; add
 `--workspace <id>` outside it, or use a qualified Project reference where accepted.
 Workspace routing is not authentication or OS/process isolation.
 
-Forge selects the oldest dependency-ready, single-Project Open Task when Project
-capacity is available. It atomically creates a Provisioning Assignment to reserve
-capacity, then prepares `feat/forge-<task-id>` in a Task Managed Worktree. Its
-immutable Base Commit is captured from the Project root's `HEAD` when the
-Task opens.
+Forge scans dependency-ready, single-Project Dispatched Open Tasks in ascending
+Record ID (creation order), skipping blocked candidates rather than starving later
+ready work. Before a new checkout it checks lifecycle, dependencies, holds,
+ownership/resources, capacity, provider readiness and the next Check pin. It then
+prepares `feat/forge-<task-id>` in a Task Managed Worktree, using the immutable Base
+Commit captured from the Project root's `HEAD` when the Task opens. The guarded
+writer transaction rechecks mutable gates and atomically reserves the Check
+attempt, pinned-profile Assignment and capacity before provider launch. Concurrent
+requests cannot create a second live attempt. A race may leave a safely retained
+checkout without an Assignment; preparation never resets or deletes it. Failed
+preparation preserves its claim/evidence and hold for explicit repair.
 
 Each Project defaults to capacity **1**. Set an override from 1 through 1024, or
 explicitly unset it to restore the default. Capacity operations require `--project`:
@@ -294,8 +303,16 @@ revisions. Author, preview and register a `forge-agent.md` as described in
 [Agent Profile policy](agent-profile-policy.md); registration never selects it.
 `task-profile` and `grilling-profile` select revisions independently per Workspace
 and Record Type; unknown revisions are rejected. There is no automatic latest
-selection. Existing Assignments and recovery retain their bound revision and
-provider identity when selections change.
+selection. Workspace Task selection supplies authoring/lifecycle defaults and
+configuration readiness, **not live Task attempt routing**. Configure each Project's
+[Check Template](records.md#project-check-templates) with registered Task profile
+revisions **before opening Tasks**. Every attempt, retry and remediation uses its
+Check's copied revision; template or Workspace changes never rebind existing
+Checks. The default profile-less baseline is usable for Manual work, not dispatch.
+Missing/unusable pins return `invalid-check-profile`; restore prerequisites or
+safely choose Manual, never fallback or rebind. Grilling dispatch uses the selected
+Workspace Grilling revision. Existing Assignments and recovery retain their bound
+revision and provider identity when selections change.
 
 ## Explicit Record dispatch
 

@@ -53,7 +53,7 @@ async fn selected_mode_rpc_uses_configured_profile_validation_without_launching(
     RecordApiServer::execution_mode_set(&daemon, request("one", Dispatched, Manual)).await.unwrap();
     let changed = RecordApiServer::execution_mode_set(&daemon, request("one", Manual, Dispatched)).await.unwrap();
     assert_eq!(changed.execution_mode, Dispatched);
-    assert_eq!(daemon.application.dispatch_record(task.id).unwrap_err().code, "task-dispatch-unsupported-contract");
+    assert_eq!(daemon.application.dispatch_record(task.id).unwrap_err().code, "workspace-dispatch-blocked");
     assert!(store.list_agent_assignments(task.id).unwrap().is_empty());
     assert!(store.worktree_claim(task.id).unwrap().is_none());
 }
@@ -187,7 +187,7 @@ fn verify_source_independent_retirement(kind: RecordType) {
     );
     if kind == RecordType::Task {
         assert_eq!(app.dispatch_record(record.id).unwrap_err().code,
-            "task-dispatch-unsupported-contract");
+            "assignment-recovery-blocked");
     } else {
         assert_eq!(app.dispatch_record(record.id).unwrap().0.id, original.id);
     }

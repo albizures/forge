@@ -1,8 +1,8 @@
 # Complete a Task manually
 
-Task dispatch is intentionally unavailable in this release. Do not remove the
-unsupported-contract guard to run this workflow. Manual work needs neither a
-provider nor a Managed Worktree. Evidence is caller-attested, not fetched or
+Choose Manual Execution Mode explicitly for this workflow; normal Check-driven
+dispatch never falls back to Manual. Manual work needs neither a provider nor a
+Managed Worktree. Evidence is caller-attested, not fetched or
 independently certified by Forge.
 
 ## Prepare

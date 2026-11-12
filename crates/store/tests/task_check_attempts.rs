@@ -268,7 +268,7 @@ fn acceptance_claim_snapshots_first_unpassed_check_and_pinned_profile_atomically
     .with_workspace_repository(Box::new(SqliteProjectRepository::open(&path).unwrap()));
     assert_eq!(
         app.dispatch_record(task.id).unwrap_err().code,
-        "task-dispatch-unsupported-contract"
+        "invalid-check-profile"
     );
     assert_eq!(
         app.execute_task_check_acceptance(task.id).unwrap_err().code,
@@ -358,9 +358,10 @@ fn acceptance_claim_snapshots_first_unpassed_check_and_pinned_profile_atomically
         forge_app::RecordStatus::InProgress
     );
     assert_eq!(
-        app.dispatch_record(task.id).unwrap_err().code,
-        "task-dispatch-unsupported-contract"
+        app.dispatch_record(task.id).unwrap(),
+        (review.clone(), true)
     );
+    assert_eq!(launches.lock().unwrap().len(), 2);
     for (index, revision) in [None, Some(999_999), Some(1)].into_iter().enumerate() {
         store
             .replace_check_template(

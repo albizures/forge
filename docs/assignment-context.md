@@ -63,7 +63,10 @@ Context separates:
 
 - `bound`: Assignment/Record identity, immutable per-Record-Type profile revision,
   provider/kind/model, attempt number, execution directory and provider Workspace
-  identity. These are persisted configuration/ownership facts, **not runtime
+  identity. Task `bound.checkAttempt` binds the immutable attempt/Check identity,
+  starting freshness generation, input evidence and Task body; the Assignment
+  revision is that Check's pin, never a live Workspace Task selection.
+  These are persisted configuration/ownership facts, **not runtime
   attestation**. The execution directory is retained once available by dispatch
   context construction (or the first authenticated context read for an older
   attempt), independently of later Worktree Claim cleanup state.
@@ -143,10 +146,22 @@ forge assignment comment --message 'Progress update' --json
 forge assignment start --json
 ```
 
-To complete a Task, or alternatively a Grilling after the human confirms:
+Task workers submit their bound Check outcome rather than calling Done:
 
 ```sh
-forge assignment done --resolution implemented --json
+forge assignment outcome --file outcome.json --json
+```
+
+Use the actual `bound.checkAttempt` id/generation/input and the clean authorized
+output evidence. See [outcome shape and handback rules](dispatch.md#check-attempts-and-controlled-acceptance).
+Implementation cannot self-verify review Findings. Reviews cannot modify the
+checkout. Final review acceptance leaves In Progress until Forge separately
+reconciles retirement/resources and every completion gate. Exact accepted replay
+is replay-only after closure; closed Assignment reads/new mutations remain revoked.
+
+To complete a Grilling after the human confirms:
+
+```sh
 forge assignment done --resolution agreed --confirmed --confirmation 'Human confirmed in conversation' --agreed-outcome 'Proceed with the agreed approach' --json
 ```
 

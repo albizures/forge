@@ -111,9 +111,13 @@ assuming the command's success means recovery is complete.
 
 After the previous Assignment is closed and all known and uncertain resources
 are safely resolved, review Task state, dependency readiness, Project capacity,
-workspace and worktree health. For an unassigned manual In Progress Task that
-should run again, explicitly use `forge dispatcher task-reopen <task-id>`;
-retirement does not complete or automatically reopen the Task.
+Workspace and worktree health. Forge-managed In Progress Tasks with durable
+Check-bound Assignment history continue without reopening: accepted interruption
+or safely reconciled explicit retirement retries the same Check, within its
+persisted budget, after the hold is explicitly cleared. Manual/unmanaged In
+Progress status or missing ownership alone never authorizes continuation.
+Retirement does not complete or automatically reopen a Task. Use explicit safe
+mode handoff for Manual work; do not invent Check history to resume dispatch.
 
 ```sh
 forge dispatcher resume <task-id>
@@ -125,13 +129,36 @@ forge dispatcher reconcile
 prove agent absence, redeliver a prompt or itself authorize replacement. Its JSON
 `resolves_recovery_blockers: false` and `authorizes_replacement: false` describe
 operation semantics, not a live eligibility verdict. Replacement still requires
-normal dispatch checks, including an eligible Open Task and no unresolved old
-Assignment/resource evidence. `forge dispatcher dispatch <record-id>` applies
+normal dispatch checks, including an eligible Open or Forge-managed In Progress
+Task and no unresolved old Assignment/resource evidence. `forge dispatcher dispatch <record-id>` applies
 the same safety checks: it returns an existing open Assignment rather than
 launching a duplicate and rejects replacement while old resource blockers remain.
 It does not bypass a Dispatch Hold. Grillings require explicit dispatch; they are
 never selected by automatic reconciliation. Inspect the resulting Assignment;
 never create a manual duplicate to work around withheld capacity.
+
+## Check evidence, bounded progress and completion
+
+Inspect `forge record check work <task-id> --json`, current Checks/Assessments and
+Findings alongside Assignment/resource evidence. Dirty/invalid checkouts,
+unexpected commits, stale freshness, unlinked blockers and human-input outcomes
+can retain diagnostic holds. Forge never commits or discards changes to recover.
+Description edits and substantive handback invalidate current passes without
+removing Findings/history; both original reviews rerun after Implementation.
+
+Two automatic retries per interrupted Check and three remediation cycles per Task
+run bound progress across restart, redispatch and mode changes. No progress stops
+earlier. `resume` cannot bypass exhaustion. Only a recorded operator
+`dispatcher reset-remediation <task> --actor <operator> --message <explanation>`
+after safe ownership/resource reconciliation resets remediation budget; it does
+not reset interruption counts or clear holds, Findings or other safety state.
+See [bounded progress](dispatch.md#bounded-progress-and-operator-intervention)
+for interrupted-Check recovery and explicit Manual handoff.
+
+A final pass is not Done. Reconciliation separately requires confirmed retirement,
+all resources reconciled, clean current evidence/freshness, all current passes,
+no blockers/holds and satisfied dependencies. Managed Worktrees/branches remain
+retained after completion; no automatic Git integration or cleanup occurs.
 
 ## Verification and deployment limits
 

@@ -201,7 +201,11 @@ async fn configuration_dispatch_and_recovery_round_trip_without_duplicate_launch
     for json in [true, false] {
         let rejected = run(&ids[2], json);
         assert!(!rejected.status.success());
-        assert!(String::from_utf8_lossy(&rejected.stderr).contains("Check execution contract"));
+        assert!(
+            String::from_utf8_lossy(&rejected.stderr).contains("managed-worktrees-unavailable"),
+            "{}",
+            String::from_utf8_lossy(&rejected.stderr)
+        );
         assert_eq!(store.show_record(task_id).unwrap(), before);
         assert!(store.list_agent_assignments(task_id).unwrap().is_empty());
         assert_eq!(launches.load(Ordering::SeqCst), 0);

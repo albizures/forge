@@ -351,7 +351,9 @@ async fn exercise_launch() {
     .unwrap();
     assert!(!task_output.status.success());
     assert!(
-        String::from_utf8_lossy(&task_output.stderr).contains("task-dispatch-unsupported-contract")
+        String::from_utf8_lossy(&task_output.stderr).contains("invalid-check-profile"),
+        "{}",
+        String::from_utf8_lossy(&task_output.stderr)
     );
     let store = SqliteProjectRepository::open(&db).unwrap();
     assert!(store.list_agent_assignments(task.id).unwrap().is_empty());
