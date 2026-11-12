@@ -26,6 +26,15 @@ pub enum FindingCommand {
     Amend(AmendArgs),
     /// Append a correction or evidence without changing disposition.
     Note(ResolveArgs),
+    /// Assign a review Check to verify an unlinked Finding (once only).
+    AssignVerification(AssignVerificationArgs),
+}
+#[derive(Debug, Args)]
+pub struct AssignVerificationArgs {
+    #[command(flatten)]
+    common: ResolveArgs,
+    #[arg(long)]
+    check: u64,
 }
 #[derive(Debug, Args)]
 pub struct Output {
@@ -154,7 +163,7 @@ async fn mutate(
 }
 pub(super) fn render(f: &Finding) -> String {
     format!(
-        "Finding {} [{:?}] {:?}, blocking {}, version {}\nCheck {:?}, Assessment {:?}\nRaised by {} at {} (Assignment {:?}): {}\nrevision {:?}, dirty {:?}, comparison {:?}\nLatest Activity {} {:?} by {} at {} (Assignment {:?}): {}\nrevision {:?}, dirty {:?}, comparison {:?}\nresponse {:?}, amendment {:?}",
+        "Finding {} [{:?}] {:?}, blocking {}, version {}\nCheck {:?}, Assessment {:?}, Verification Check {:?}\nRaised by {} at {} (Assignment {:?}): {}\nrevision {:?}, dirty {:?}, comparison {:?}\nLatest Activity {} {:?} by {} at {} (Assignment {:?}): {}\nrevision {:?}, dirty {:?}, comparison {:?}\nresponse {:?}, amendment {:?}",
         f.id,
         f.state,
         f.severity,
@@ -162,6 +171,7 @@ pub(super) fn render(f: &Finding) -> String {
         f.version,
         f.check_id,
         f.assessment_id,
+        f.verification_check_id,
         f.raised.actor,
         f.raised.created_at_millis,
         f.raised.assignment_id,
@@ -234,6 +244,7 @@ pub async fn run(command: FindingCommand, workspace: Option<String>) -> i32 {
         | FindingCommand::Note(a) => &a.output,
         FindingCommand::Respond(a) => &a.common.output,
         FindingCommand::Amend(a) => &a.common.output,
+        FindingCommand::AssignVerification(a) => &a.common.output,
     };
     let json = output.json;
     let url = match super::resolve_managed_endpoint(output.server_url.as_deref()).await {
@@ -318,6 +329,14 @@ pub async fn run(command: FindingCommand, workspace: Option<String>) -> i32 {
                         FindingResponse::Rejected
                     },
                 },
+            )
+            .await
+        }
+        FindingCommand::AssignVerification(a) => {
+            mutate(
+                endpoint,
+                a.common,
+                FindingMutation::AssignVerification { check_id: a.check },
             )
             .await
         }

@@ -87,10 +87,10 @@ async fn operators_submit_bound_manual_outcomes_with_evidence_freshness_and_dura
         assert!(!submit("outcome", &invalid).status.success());
     }
     let mut unknown = outcome.clone();
-    unknown["findings"] = serde_json::json!([]);
+    unknown["unbound_verification"] = serde_json::json!([]);
     assert!(
         !submit("outcome", &unknown).status.success(),
-        "unsupported partial outcome fields must not be ignored"
+        "unknown outcome fields must not be ignored"
     );
     // JSON stdin is supported, not only filesystem input.
     let mut child = Command::new(env!("CARGO_BIN_EXE_forge"))

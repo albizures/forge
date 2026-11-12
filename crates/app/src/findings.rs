@@ -29,6 +29,8 @@ pub enum FindingAction {
     Dismiss,
     Reopen,
     Amend,
+    #[serde(rename = "assign-verification")]
+    AssignVerification,
     Note,
 }
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -54,6 +56,10 @@ pub enum FindingMutation {
     Resolve,
     Dismiss,
     Reopen,
+    #[serde(rename = "assign-verification")]
+    AssignVerification {
+        check_id: u64,
+    },
     Amend {
         severity: Option<Severity>,
         blocking: Option<bool>,
@@ -112,6 +118,8 @@ pub struct Finding {
     pub blocking: bool,
     pub check_id: Option<u64>,
     pub assessment_id: Option<u64>,
+    /// Originating Check, or an explicitly assigned review Check for an unlinked Finding.
+    pub verification_check_id: Option<u64>,
     pub state: FindingState,
     pub raised: FindingActivity,
     pub latest_activity: FindingActivity,
@@ -196,9 +204,10 @@ impl Application {
         input.validate()?;
         self.records.raise_record_finding(task, input)
     }
-    /// Resolve an unresolved Finding using an observed version and verification explanation.
+    /// Resolve an unlinked, unowned Finding using an observed version and explanation.
+    /// Linked/assigned Findings require verification by their Check's bound outcome.
     /// # Errors
-    /// Returns validation, scope, stale-version, transition or storage errors.
+    /// Returns validation, scope, stale-version, verification-required, transition or storage errors.
     pub fn resolve_record_finding(
         &self,
         task: u64,

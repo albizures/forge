@@ -32,6 +32,9 @@ pub fn pass(repository: &dyn RecordRepository, record: u64, check: u64) {
                 verdict: Verdict::Pass,
                 actor: "test operator".into(),
                 message: "Fixture deliverables verified".into(),
+                disposition: forge_app::outcomes::OutcomeDisposition::Complete,
+                findings: vec![],
+                verifications: vec![],
             },
         )
         .unwrap();

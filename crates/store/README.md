@@ -561,6 +561,7 @@ cursor-paginated history for Assessments and Invalidations.
 | `blocking` | INTEGER, boolean flag |
 | `check_id` | INTEGER?, FK → `record_checks.id` |
 | `assessment_id` | INTEGER?, FK → `check_assessments.id` |
+| `verification_check_id` | INTEGER?, FK → `record_checks.id` |
 
 `findings_by_record` indexes `(record_id, id)`. Optional Check/Assessment links are
 supporting evidence. Current severity, blocking flag, and links live here; review
@@ -572,7 +573,7 @@ state and version are derived from activity history rather than stored columns.
 | --- | --- |
 | `id` | INTEGER, PK |
 | `finding_id` | INTEGER, FK → `record_findings.id` |
-| `action` | TEXT: `raise`, `resolve`, `respond`, `dismiss`, `reopen`, `amend`, `note` |
+| `action` | TEXT: `raise`, `resolve`, `respond`, `dismiss`, `reopen`, `amend`, `note`, `assign-verification` |
 | `actor` | TEXT |
 | `assignment_id` | TEXT?, attribution only; no FK |
 | `response` | TEXT?: `fixed`, `rejected` |
@@ -583,7 +584,7 @@ state and version are derived from activity history rather than stored columns.
 | `created_at_millis` | INTEGER |
 
 `activities_by_finding` indexes `(finding_id, id)`. History retains repeated
-review cycles. The latest action excluding `note`/`amend` determines disposition:
+review cycles. The latest action excluding `note`/`amend`/`assign-verification` determines disposition:
 `raise`/`reopen` → open, `respond` → awaiting review, `resolve` → resolved,
 `dismiss` → dismissed. Version is the activity count, used for optimistic
 concurrency. Notes and amendments do not change disposition.
@@ -772,6 +773,23 @@ output, close outstanding attempts and invalidate all current Assessments in the
 same transaction. They never delete Findings, old evidence, accepted results,
 Assignments, holds or retained resources.
 
+Revision 5 adds `record_findings.verification_check_id` (nullable FK to
+`record_checks.id`) and the `assign-verification` Finding activity. Linked Findings
+pin their origin Check as verification owner. An operator may explicitly assign a
+same-Task review Check to an unlinked Finding once, retaining origin and disposition.
+Standalone dispositions or removal of blocking cannot bypass that owner. Ownership,
+version and Workspace validation occur within the outcome's transaction.
+
+Accepted outcomes now include Finding/verification effects, post-outcome work state
+and residual blocking Finding IDs. Substantive failed-review handback retains the
+failed Assessment, invalidates all current Assessments and advances freshness in the
+same transaction; remediation input is the reviewed evidence. Interrupted review
+attempts close without an Assessment or substantive effects. Passing reviews cannot
+leave their own blocking Findings unresolved. Residual blockers retain a durable
+Dispatch Hold (`INSERT OR IGNORE`, preserving prior safety diagnostics); resolution
+never implicitly clears it. The serialized accepted result remains unchanged on
+replay, even when the live Findings or freshness later change.
+
 ## Initialization and compatibility
 
 Opening a repository first checks SQLite's `application_id` and `user_version`
@@ -795,8 +813,9 @@ schema revision in `src/schema_compatibility.rs`. Revision 2 is the breaking
 Record-oriented Check/Finding contract, without Task classification metadata.
 Revision 3 adds immutable `record_checks.profile_revision` snapshots and full ordered
 Project templates beginning with Implementation. Revision 4 adds Manual attempts,
-evidence, freshness and durable atomic-outcome replay. Existing revision-2 and
-revision-3 stores are incompatible; no bindings or outcomes are inferred/backfilled.
+evidence, freshness and durable atomic-outcome replay. Revision 5 adds Check-owned
+Finding verification and atomic handback outcomes. Revision-2, revision-3 and
+revision-4 stores are incompatible; no bindings or outcomes are inferred/backfilled.
 
 Select a fresh store rather than inventing ownership or rewriting version markers.
 Any local reset is a separate operator action: first safely retire ownership and

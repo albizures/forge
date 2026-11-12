@@ -63,12 +63,44 @@ pub struct OutcomeInput {
     pub verdict: Verdict,
     pub actor: String,
     pub message: String,
+    #[serde(default)]
+    pub disposition: OutcomeDisposition,
+    #[serde(default)]
+    pub findings: Vec<OutcomeFinding>,
+    #[serde(default)]
+    pub verifications: Vec<FindingVerification>,
+}
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OutcomeDisposition {
+    #[default]
+    Complete,
+    Handback,
+    Interrupted,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutcomeFinding {
+    pub severity: crate::findings::Severity,
+    pub blocking: Option<bool>,
+    pub message: String,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FindingVerification {
+    pub finding_id: u64,
+    pub expected_version: u64,
+    pub message: String,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AcceptedOutcome {
     pub attempt: Attempt,
     pub evidence: Evidence,
     pub check: RecordCheck,
+    pub findings: Vec<crate::findings::Finding>,
+    pub work: WorkState,
+    /// Residual blocking Findings; acceptance never clears an existing Dispatch Hold.
+    pub blocking_findings: Vec<u64>,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkState {

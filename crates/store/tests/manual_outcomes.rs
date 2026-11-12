@@ -67,6 +67,9 @@ impl Database {
                 verdict: Verdict::Pass,
                 actor: "operator".into(),
                 message: "Report complete".into(),
+                disposition: forge_app::outcomes::OutcomeDisposition::Complete,
+                findings: vec![],
+                verifications: vec![],
             },
         )
     }

@@ -46,6 +46,9 @@ pub(super) fn pass_checks(repository: &dyn forge_app::RecordRepository, record: 
                     verdict: Verdict::Pass,
                     actor: "test operator".into(),
                     message: "Fixture deliverables verified".into(),
+                    disposition: forge_app::outcomes::OutcomeDisposition::Complete,
+                    findings: vec![],
+                    verifications: vec![],
                 },
             )
             .unwrap();
@@ -86,6 +89,9 @@ async fn manual_pass(
                 verdict: Verdict::Pass,
                 actor: "operator".into(),
                 message: "Deliverables verified".into(),
+                disposition: forge_app::outcomes::OutcomeDisposition::Complete,
+                findings: vec![],
+                verifications: vec![],
             },
         }))
         .await

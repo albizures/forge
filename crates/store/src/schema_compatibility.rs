@@ -3,9 +3,9 @@ use crate::storage_error;
 use forge_app::RegistrationError;
 use rusqlite::Connection;
 
-// Bump for every incompatible storage contract. Revision 4 adds immutable
-// evidence-bound attempts, work freshness and durable atomic-outcome replay.
-const SCHEMA_REVISION: i64 = 4;
+// Bump for every incompatible storage contract. Revision 5 adds Finding
+// verification ownership and atomic review-handback outcome results.
+const SCHEMA_REVISION: i64 = 5;
 const APPLICATION_ID: i64 = 0x464f_5247; // FORG
 
 pub(super) fn validate(connection: &Connection) -> Result<(), RegistrationError> {

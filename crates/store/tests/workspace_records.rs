@@ -276,6 +276,9 @@ fn every_existing_record_kind_inherits_one_workspace_and_keeps_local_relationshi
                 verdict: forge_app::checks::Verdict::Pass,
                 actor: "operator".into(),
                 message: "Fixture deliverables verified".into(),
+                disposition: forge_app::outcomes::OutcomeDisposition::Complete,
+                findings: vec![],
+                verifications: vec![],
             },
         )
         .unwrap();

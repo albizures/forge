@@ -4,8 +4,8 @@ use super::{
 };
 use forge_app::checks::Verdict;
 use forge_app::outcomes::{
-    AcceptedOutcome, Attempt, AttemptInput, Evidence, OutcomeInput, WorkInvalidation,
-    WorkInvalidationInput, WorkState,
+    AcceptedOutcome, Attempt, AttemptInput, Evidence, OutcomeDisposition, OutcomeInput,
+    WorkInvalidation, WorkInvalidationInput, WorkState,
 };
 use forge_app::{RecordStatus, RecordUpdateKind, RegistrationError};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -251,6 +251,8 @@ impl SqliteProjectRepository {
         tx.commit().map_err(storage_error)?;
         Ok(attempt)
     }
+    // Replay, authorization, Assessment and handback share this acceptance boundary.
+    #[allow(clippy::too_many_lines)]
     pub(super) fn submit_outcome(
         &self,
         record: u64,
@@ -313,6 +315,42 @@ impl SqliteProjectRepository {
                 "review outcome must assess its bound output evidence",
             ));
         }
+        if input.disposition != OutcomeDisposition::Complete
+            && (check.position == 0 || input.verdict != Verdict::Fail)
+        {
+            return Err(error(
+                "invalid-outcome",
+                "handback/interruption requires a failed review attempt",
+            ));
+        }
+        if check.position > 0
+            && input.verdict == Verdict::Fail
+            && input.disposition == OutcomeDisposition::Complete
+        {
+            return Err(error(
+                "invalid-outcome",
+                "a failed review must explicitly hand back or report interruption",
+            ));
+        }
+        if input.disposition == OutcomeDisposition::Interrupted {
+            if !input.findings.is_empty() || !input.verifications.is_empty() {
+                return Err(error(
+                    "invalid-outcome",
+                    "interrupted verification cannot publish substantive review effects",
+                ));
+            }
+            let result = AcceptedOutcome {
+                attempt,
+                evidence: input.evidence.clone(),
+                check,
+                findings: vec![],
+                work,
+                blocking_findings: super::findings::blockers(&tx, record)?,
+            };
+            tx.execute("UPDATE record_attempts SET closed = 1, outcome_json = ?2, result_json = ?3 WHERE id = ?1", params![input.attempt_id, serde_json::to_string(input).map_err(json_error)?, serde_json::to_string(&result).map_err(json_error)?]).map_err(storage_error)?;
+            tx.commit().map_err(storage_error)?;
+            return Ok(result);
+        }
         let revision = match &input.evidence {
             Evidence::Repository { commit, .. } => Some(commit.as_str()),
             Evidence::Artifact { .. } => None,
@@ -344,10 +382,27 @@ impl SqliteProjectRepository {
             record,
             RecordUpdateKind::CheckAssessed { assessment_id },
         )?;
+        let findings = super::outcome_findings::apply(&tx, record, &check, assessment_id, input)?;
+        if input.disposition == OutcomeDisposition::Handback {
+            invalidate(&tx, record, &input.actor, &input.message, None)?;
+            // Remediation starts from the reviewed deliverable, not a superseded initial input.
+            tx.execute(
+                "UPDATE record_work SET input_json = ?2 WHERE record_id = ?1",
+                params![
+                    record.cast_signed(),
+                    serde_json::to_string(&input.evidence).map_err(json_error)?
+                ],
+            )
+            .map_err(storage_error)?;
+        }
+        let blocking_findings = super::outcome_findings::retain_blocker_hold(&tx, record)?;
         let result = AcceptedOutcome {
             attempt,
             evidence: input.evidence.clone(),
             check: checks::load(&tx, record, check.id)?,
+            findings,
+            work: state(&tx, record)?,
+            blocking_findings,
         };
         tx.execute("UPDATE record_attempts SET closed = 1, outcome_json = ?2, result_json = ?3 WHERE id = ?1", params![input.attempt_id, serde_json::to_string(input).map_err(json_error)?, serde_json::to_string(&result).map_err(json_error)?]).map_err(storage_error)?;
         tx.commit().map_err(storage_error)?;

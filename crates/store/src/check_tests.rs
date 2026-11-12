@@ -54,6 +54,9 @@ pub(super) fn attempt(
         verdict: Verdict::Pass,
         actor: "operator".into(),
         message: "Verified deliverables".into(),
+        disposition: forge_app::outcomes::OutcomeDisposition::Complete,
+        findings: vec![],
+        verifications: vec![],
     }
 }
 pub(super) fn assess(repository: &dyn RecordRepository, task: u64, verdict: Verdict) {

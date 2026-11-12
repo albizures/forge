@@ -48,7 +48,7 @@ fn incompatible_unversioned_store_is_rejected_without_modifying_it() {
 
 #[test]
 fn incompatible_schema_revisions_are_rejected_without_modifying_stores() {
-    for revision in [0, 1, 2, 3, 2_000_000_000] {
+    for revision in [0, 1, 2, 3, 4, 2_000_000_000] {
         let database = Database::new();
         let store = SqliteProjectRepository::open(&database.0).unwrap();
         drop(store);
@@ -72,7 +72,7 @@ fn unrelated_database_is_not_adopted_even_with_a_matching_revision_number() {
     let connection = Connection::open(&database.0).unwrap();
     connection
         .execute_batch(
-            "PRAGMA user_version = 2; CREATE TABLE unrelated (body TEXT);
+            "PRAGMA user_version = 5; CREATE TABLE unrelated (body TEXT);
         INSERT INTO unrelated VALUES ('Do not adopt');",
         )
         .unwrap();

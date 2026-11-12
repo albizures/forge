@@ -21,6 +21,7 @@ use rusqlite::{Connection, ErrorCode, OptionalExtension, params};
 mod check_templates;
 mod checks;
 mod findings;
+mod outcome_findings;
 mod outcomes;
 mod record_workspaces;
 mod schema_compatibility;
@@ -3897,6 +3898,9 @@ mod tests {
     }
     mod check_template_tests {
         include!("check_template_tests.rs");
+    }
+    mod review_outcome_tests {
+        include!("review_outcome_tests.rs");
     }
     mod check_invalidation_tests {
         include!("check_invalidation_tests.rs");

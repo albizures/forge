@@ -213,10 +213,44 @@ evidence they bound at attempt start. Repository evidence is also supported:
 `{"kind":"repository","repository":"personal/project","commit":"<full 40-hex SHA>"}`.
 An artifact requires a nonblank URI plus full 64-hex SHA-256; mutable URLs or paths alone
 are insufficient. `--input-file -` reads strict JSON from stdin. Unknown fields are
-rejected, including unsupported partial Finding/handback fields; that atomic extension
-belongs to the next slice.
+rejected, including unknown fields inside Finding and verification entries.
 
-`record check outcome` returns `{attempt, evidence, check}`. Exact replay returns the
+Outcomes may additionally contain `findings` (`severity`, optional `blocking`, `message`),
+`verifications` (`finding_id`, `expected_version`, `message`) and `disposition`
+(`complete` by default, `handback`, or `interrupted`). New Findings inherit the attempt's
+Check, new Assessment, actor and evidence; callers cannot substitute origin IDs.
+A failed review must explicitly choose `handback` or `interrupted`:
+
+- `handback` atomically retains the failed Assessment and Findings, advances freshness,
+  invalidates **every** current Assessment and closes outstanding attempts. Remediation
+  starts from the reviewed deliverable. Implementation and all reviews rerun in their
+  original order with unchanged Check identities and pinned profiles.
+- `interrupted` closes the attempt without an Assessment, Findings, verification or
+  invalidation. It requires a failed review verdict and empty Finding/verification lists;
+  a new attempt can retry that review without rerunning prior passing Checks.
+- Failed Implementation retains its Assessment and explanation, never permits review
+  advancement and cannot request handback/interruption.
+
+Example review-specific fields (alongside the bound outcome fields above):
+
+```json
+{"verdict":"fail","disposition":"handback",
+ "findings":[{"severity":"major","blocking":true,"message":"Correct validation"}]}
+```
+
+On rerun, the owning Check supplies, for example,
+`"verifications":[{"finding_id":2,"expected_version":2,"message":"Fix verified"}]`.
+Implementation may `respond --response fixed` to propose a fix but cannot verify a
+reviewer's Finding. A passing review with its own unresolved blocking Finding rejects
+atomically with `unresolved-check-findings`; no Assessment or other submitted effect
+is accepted. Verification ownership is Check identity, not a claimed actor name.
+
+`record check outcome` returns `{attempt, evidence, check, findings, work, blocking_findings}`.
+`findings` contains changed Finding snapshots; `work` is freshness after acceptance.
+Residual blockers are reported in `blocking_findings` and retain a durable Dispatch
+Hold with a diagnostic. Existing safety holds are neither overwritten nor cleared;
+verification also does not clear the operator-owned hold.
+ Exact replay returns the
 **original** result even after closure, invalidation, Done and restart. Conflicting
 replay returns `outcome-conflict`. Replay never restores historical freshness.
 New stale/unauthorized outcomes cause no Assessment, activity, output or acceptance
@@ -244,12 +278,12 @@ using the same strict flattened selection envelope and Task-only ownership rules
 ## Record Findings (Task review cycles)
 
 Findings retain review issues independently of Check verdicts. Passing a Check
-never closes a Finding. Minor Findings default nonblocking; major and critical
+alone never closes a Finding; an outcome must explicitly include verification. Minor Findings default nonblocking; major and critical
 Findings default blocking. An explicit `--blocking true|false` overrides that
 creation default. Findings have no separate title.
 
 ```sh
-forge record finding raise 44 --severity major --check 1 --assessment 7 \
+forge record finding raise 44 --severity major \
   --actor reviewer --message 'Validation missing' --dirty false --workspace personal --json
 forge record finding list 44 --limit 50 --workspace personal --json
 forge record finding show 44 2 --after 0 --limit 50 --workspace personal --json
@@ -273,7 +307,21 @@ comparison rules as Check evidence. No Git operation is performed.
 Optional `--check` and `--assessment` origins must belong to the same Task.
 An Assessment implies its Check; a conflicting explicit Check fails with
 `invalid-finding-origin`. Invalidated Assessments remain valid historical origins.
-Raised text, evidence and origins are immutable. `resolve` records a verification
+Raised text, evidence and origins are immutable. Linked Findings have
+`verification_check_id` fixed to their originating Check. They reject standalone
+`resolve`, `dismiss` and amendments that remove blocking with `verification-required`;
+only their Check's evidence-bound outcome may verify them. Unlinked Findings initially
+have no verification owner. Assign a review Check explicitly (once only):
+
+```sh
+forge record finding assign-verification 44 2 --check 3 --expected-version 1 \
+  --actor operator --message 'Review 2 owns verification' --workspace personal --json
+```
+
+This is an operator-only mutation. It does not rewrite origins or disposition and
+rejects Implementation, foreign Checks and reassignment. Unresolved unlinked blockers
+cannot be silently skipped; their hold diagnostic calls for an explicit owner and
+verification. For unlinked Findings without an owner, `resolve` records a verification
 explanation and evidence, moving an open or awaiting-review Finding to resolved
 without changing severity or blocking. `dismiss` similarly closes an unresolved
 Finding with a reason. `respond --response fixed|rejected` enters awaiting-review
@@ -330,6 +378,7 @@ Typed operator RPCs (flattened Workspace/cwd envelope):
   - `{ "action": "respond", "response": "fixed" }` (or `rejected`)
   - `{ "action": "resolve" }`, `{ "action": "dismiss" }`, `{ "action": "reopen" }`, `{ "action": "note" }`
   - `{ "action": "amend", "severity": "minor", "blocking": false }` (at least one field)
+  - `{ "action": "assign-verification", "check_id": 3 }` (operator-only, unlinked Finding)
 
 ### Capability-bound Assignment Findings
 

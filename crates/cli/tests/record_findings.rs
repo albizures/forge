@@ -67,8 +67,7 @@ async fn operator_findings_retain_explanations_and_block_completion_over_rpc() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_forge"))
         .args(base)
         .args([
-            "--check",
-            &check,
+            // Unlinked operator Finding: linked reviewer verification is outcome-bound.
             "--message-file",
             "-",
             "--dirty",

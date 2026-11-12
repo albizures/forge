@@ -14,11 +14,12 @@ pub(super) fn schema(c: &Connection) -> Result<(), RegistrationError> {
     c.execute_batch("CREATE TABLE IF NOT EXISTS record_findings (
         id INTEGER PRIMARY KEY NOT NULL, record_id INTEGER NOT NULL REFERENCES records(id),
         severity TEXT NOT NULL CHECK(severity IN ('minor','major','critical')), blocking INTEGER NOT NULL,
-        check_id INTEGER REFERENCES record_checks(id), assessment_id INTEGER REFERENCES check_assessments(id));
+        check_id INTEGER REFERENCES record_checks(id), assessment_id INTEGER REFERENCES check_assessments(id),
+        verification_check_id INTEGER REFERENCES record_checks(id));
         CREATE INDEX IF NOT EXISTS findings_by_record ON record_findings(record_id, id);
         CREATE TABLE IF NOT EXISTS finding_activities (
         id INTEGER PRIMARY KEY NOT NULL, finding_id INTEGER NOT NULL REFERENCES record_findings(id),
-        action TEXT NOT NULL CHECK(action IN ('raise','resolve','respond','dismiss','reopen','amend','note')), actor TEXT NOT NULL, assignment_id TEXT,
+        action TEXT NOT NULL CHECK(action IN ('raise','resolve','respond','dismiss','reopen','amend','note','assign-verification')), actor TEXT NOT NULL, assignment_id TEXT,
         response TEXT CHECK(response IN ('fixed','rejected')), amendment TEXT,
         message TEXT NOT NULL, revision TEXT, dirty INTEGER, created_at_millis INTEGER NOT NULL);
         CREATE INDEX IF NOT EXISTS activities_by_finding ON finding_activities(finding_id, id);").map_err(storage_error)
@@ -45,6 +46,7 @@ fn activity(row: &rusqlite::Row<'_>) -> rusqlite::Result<FindingActivity> {
             "reopen" => FindingAction::Reopen,
             "amend" => FindingAction::Amend,
             "note" => FindingAction::Note,
+            "assign-verification" => FindingAction::AssignVerification,
             _ => return Err(rusqlite::Error::InvalidQuery),
         },
         response: match row.get::<_, Option<String>>(9)?.as_deref() {
@@ -66,7 +68,7 @@ fn activity(row: &rusqlite::Row<'_>) -> rusqlite::Result<FindingActivity> {
         comparison: RevisionComparison::Unknown,
     })
 }
-fn load(
+pub(super) fn load(
     c: &Connection,
     task: u64,
     id: u64,
@@ -101,8 +103,9 @@ fn load(
         blocking,
         check_id: check_id.map(i64::cast_unsigned),
         assessment_id: assessment_id.map(i64::cast_unsigned),
+        verification_check_id: c.query_row("SELECT verification_check_id FROM record_findings WHERE id = ?1", [id.cast_signed()], |r| r.get::<_, Option<i64>>(0)).map_err(storage_error)?.map(i64::cast_unsigned),
         // Notes and amendments retain the latest disposition, even on closed Findings.
-        state: c.query_row("SELECT action FROM finding_activities WHERE finding_id = ?1 AND action NOT IN ('note','amend') ORDER BY id DESC LIMIT 1", [id.cast_signed()], |r| {
+        state: c.query_row("SELECT action FROM finding_activities WHERE finding_id = ?1 AND action NOT IN ('note','amend','assign-verification') ORDER BY id DESC LIMIT 1", [id.cast_signed()], |r| {
             match r.get::<_, String>(0)?.as_str() {
                 "raise" | "reopen" => Ok(FindingState::Open),
                 "respond" => Ok(FindingState::AwaitingReview),
@@ -118,7 +121,7 @@ fn load(
 }
 // Keep attribution/evidence explicit at the single transactional activity/log boundary.
 #[allow(clippy::too_many_arguments)]
-fn append(
+pub(super) fn append(
     c: &Connection,
     task: u64,
     finding: u64,
@@ -135,7 +138,7 @@ fn append(
     Ok(activity_id)
 }
 pub(super) fn blockers(c: &Connection, task: u64) -> Result<Vec<u64>, RegistrationError> {
-    c.prepare("SELECT f.id FROM record_findings f WHERE f.record_id = ?1 AND f.blocking = 1 AND (SELECT a.action FROM finding_activities a WHERE a.finding_id = f.id AND a.action NOT IN ('note','amend') ORDER BY a.id DESC LIMIT 1) NOT IN ('resolve','dismiss') ORDER BY f.id").map_err(storage_error)?.query_map([task.cast_signed()], |r| r.get::<_, i64>(0).map(i64::cast_unsigned)).map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)
+    c.prepare("SELECT f.id FROM record_findings f WHERE f.record_id = ?1 AND f.blocking = 1 AND (SELECT a.action FROM finding_activities a WHERE a.finding_id = f.id AND a.action NOT IN ('note','amend','assign-verification') ORDER BY a.id DESC LIMIT 1) NOT IN ('resolve','dismiss') ORDER BY f.id").map_err(storage_error)?.query_map([task.cast_signed()], |r| r.get::<_, i64>(0).map(i64::cast_unsigned)).map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)
 }
 impl SqliteProjectRepository {
     pub(super) fn raise_finding(
@@ -193,6 +196,11 @@ impl SqliteProjectRepository {
         };
         tx.execute("INSERT INTO record_findings (record_id, severity, blocking, check_id, assessment_id) VALUES (?1, ?2, ?3, ?4, ?5)", params![task.cast_signed(), severity, blocking, check.map(u64::cast_signed), input.assessment_id.map(u64::cast_signed)]).map_err(storage_error)?;
         let id = tx.last_insert_rowid().cast_unsigned();
+        tx.execute(
+            "UPDATE record_findings SET verification_check_id = check_id WHERE id = ?1",
+            [id.cast_signed()],
+        )
+        .map_err(storage_error)?;
         append(
             &tx,
             task,
@@ -205,6 +213,7 @@ impl SqliteProjectRepository {
             assignment,
         )?;
         let finding = load(&tx, task, id, record.project_slugs.into_iter().next())?;
+        super::outcome_findings::retain_blocker_hold(&tx, task)?;
         tx.commit().map_err(storage_error)?;
         Ok(finding)
     }
@@ -224,6 +233,8 @@ impl SqliteProjectRepository {
             None,
         )
     }
+    // Keep version/owner checks and all activity effects in one visible transaction.
+    #[allow(clippy::too_many_lines)]
     pub(super) fn mutate_finding(
         &self,
         task: u64,
@@ -249,6 +260,22 @@ impl SqliteProjectRepository {
                 "Finding version changed; read it again",
             ));
         }
+        if current.verification_check_id.is_some()
+            && matches!(
+                mutation.change,
+                FindingMutation::Resolve
+                    | FindingMutation::Dismiss
+                    | FindingMutation::Amend {
+                        blocking: Some(false),
+                        ..
+                    }
+            )
+        {
+            return Err(RegistrationError::new(
+                "verification-required",
+                "the owning Check must verify this Finding through an evidence-bound outcome",
+            ));
+        }
         let closed = matches!(
             current.state,
             FindingState::Resolved | FindingState::Dismissed
@@ -268,6 +295,31 @@ impl SqliteProjectRepository {
             FindingMutation::Dismiss if !closed => ("dismiss", None, None),
             FindingMutation::Reopen if closed => ("reopen", None, None),
             FindingMutation::Note => ("note", None, None),
+            FindingMutation::AssignVerification { check_id } => {
+                if assignment.is_some()
+                    || current.verification_check_id.is_some()
+                    || current.check_id.is_some()
+                    || record.status == RecordStatus::Done
+                {
+                    return Err(RegistrationError::new(
+                        "invalid-verification-owner",
+                        "only an unlinked Finding without a verification owner can be assigned",
+                    ));
+                }
+                let check = super::checks::load(&tx, task, check_id)?;
+                if check.position == 0 {
+                    return Err(RegistrationError::new(
+                        "invalid-verification-owner",
+                        "Implementation cannot own Finding verification",
+                    ));
+                }
+                tx.execute(
+                    "UPDATE record_findings SET verification_check_id = ?2 WHERE id = ?1",
+                    params![id.cast_signed(), check_id.cast_signed()],
+                )
+                .map_err(storage_error)?;
+                ("assign-verification", None, None)
+            }
             FindingMutation::Amend { severity, blocking } => {
                 let new_severity = severity.unwrap_or(current.severity);
                 let new_blocking = blocking.unwrap_or(current.blocking);
@@ -324,6 +376,7 @@ impl SqliteProjectRepository {
         )
         .map_err(storage_error)?;
         let finding = load(&tx, task, id, project)?;
+        super::outcome_findings::retain_blocker_hold(&tx, task)?;
         tx.commit().map_err(storage_error)?;
         Ok(finding)
     }
