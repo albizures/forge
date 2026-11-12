@@ -1220,6 +1220,11 @@ pub fn reconcile_agent_assignment<A: AgentDispatchAdapter + ?Sized>(
     adapter: &A,
     assignment: &AgentAssignment,
 ) -> Result<AssignmentReconciliation, RegistrationError> {
+    if assignment.profile.record_type == RecordType::Task
+        && assignment.state == AgentAssignmentState::Provisioning
+    {
+        return Err(task_dispatch_unsupported());
+    }
     let context = agent_dispatch_context(repository, assignment)?;
     let observed = match assignment.state {
         AgentAssignmentState::Provisioning => adapter
@@ -1303,6 +1308,13 @@ pub fn reconcile_agent_assignment<A: AgentDispatchAdapter + ?Sized>(
     }
 }
 
+fn task_dispatch_unsupported() -> RegistrationError {
+    RegistrationError::new(
+        "task-dispatch-unsupported-contract",
+        "Task dispatch is disabled: the Check execution contract is not yet supported; no agent was launched. Manual execution is never selected implicitly.",
+    )
+}
+
 fn update_assignment_state<R: AgentDispatchRepository + ?Sized>(
     repository: &R,
     assignment: &AgentAssignment,
@@ -1355,6 +1367,16 @@ pub fn reconcile_agent_dispatch<F: AgentDispatchAdapterFactory + ?Sized>(
     }
     let mut reconciled = Vec::new();
     for assignment in repository.list_open_agent_assignments()? {
+        // Do not even run provisioning guards: they can mutate retry/hold state.
+        // Existing live ownership remains observable and explicitly retireable.
+        if assignment.profile.record_type == RecordType::Task
+            && assignment.state == AgentAssignmentState::Provisioning
+        {
+            tracing::warn!(assignment_id = %assignment.id,
+                code = "task-dispatch-unsupported-contract",
+                "Task dispatch is disabled pending the Check execution contract");
+            continue;
+        }
         if assignment.state == AgentAssignmentState::Provisioning
             && !repository.guard_agent_provisioning(&assignment.id, now_millis)?
         {
@@ -2306,7 +2328,8 @@ impl Application {
             })
     }
 
-    /// Explicitly dispatches a Task or interactive Grilling using its immutable profile.
+    /// Explicitly dispatches an interactive Grilling using its immutable profile.
+    /// Task dispatch fails closed until the Check execution contract is supported.
     ///
     /// # Errors
     ///
@@ -2322,6 +2345,9 @@ impl Application {
                 "unsupported-record-type",
                 "explicit dispatch supports only Tasks and Grillings",
             ));
+        }
+        if record.record_type == RecordType::Task {
+            return Err(task_dispatch_unsupported());
         }
         if let Some(assignment) = dispatch
             .list_agent_assignments(record_id)?
@@ -2339,9 +2365,6 @@ impl Application {
         )?;
         if already_assigned {
             return Ok((assignment, true));
-        }
-        if assignment.profile.record_type == RecordType::Task {
-            self.prepare_dispatch_worktree(record_id)?;
         }
         let adapter = self
             .adapter_factory()?
@@ -2694,9 +2717,7 @@ impl Application {
         })
     }
 
-    /// Claims every currently available Project dispatch slot, then prepares each claimed Task's
-    /// checkout. Claims are persisted before Git is touched, so a crash or preparation failure
-    /// remains visible to the normal reconciliation and recovery path rather than duplicating work.
+    /// Rejects automatic Task dispatch before claiming capacity or preparing Git resources.
     fn schedule_agent_dispatch(&self) -> Result<(), RegistrationError> {
         let dispatch = self.dispatch()?;
         let projects: BTreeSet<_> = dispatch
@@ -2718,25 +2739,9 @@ impl Application {
             .map(|record| record.project_slugs[0].clone())
             .collect();
         for project_slug in projects {
-            let owner = dispatch.project(&project_slug)?.workspace_id;
-            let readiness = self.workspace_dispatch_readiness(&owner)?;
-            if !readiness.dispatchable {
-                continue;
-            }
-            let selection = readiness.preflight_selection()?;
-            while let Some(assignment) = dispatch
-                .claim_next_agent_assignment_checked(&project_slug, &next_dispatch_assignment_id(), &selection)
-                .inspect_err(|error| {
-                    tracing::warn!(operation = "claim-assignment", project = %project_slug, code = error.code, "agent dispatch scheduling failed");
-                })?
-            {
-                // Preparation deliberately happens outside the claim transaction. Its durable
-                // cleanup-required evidence is reconciled on a later bounded scan.
-                if let Err(error) = self.prepare_dispatch_worktree(assignment.record_id) {
-                    tracing::warn!(record_id = assignment.record_id, assignment_id = %assignment.id,
-                        code = error.code, "agent dispatch worktree preparation failed");
-                }
-            }
+            tracing::warn!(project = %project_slug,
+                code = "task-dispatch-unsupported-contract",
+                "Task dispatch is disabled pending the Check execution contract");
         }
         Ok(())
     }

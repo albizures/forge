@@ -4,6 +4,22 @@ Forge's daemon owns dispatch state, provider resources, and reconciliation.
 The CLI neither opens dispatch storage nor contacts Herdr directly. Herdr is a
 provider adapter: provider state is never proof of Forge Task completion.
 
+## Interim Task dispatch restriction
+
+Task dispatch is disabled until the Check execution contract is supported.
+Explicit application/RPC/CLI requests fail with
+`task-dispatch-unsupported-contract`, including requests for an already assigned
+Task. Automatic scheduling never claims Tasks or prepares their worktrees.
+Provisioning Task Assignments are retained unchanged across reconciliation and
+restart: no provider provisioning, launch, retry, or implicit Manual fallback.
+Existing non-provisioning ownership can still be observed, and explicit retirement
+and resource reconciliation remain available. Holds and capacity reservations are
+not cleared by this restriction. Grilling dispatch remains supported.
+
+Task launch procedures below describe the retained, currently disabled machinery;
+configuration/readiness does not authorize Task execution. This restriction must
+remain in place throughout the Manual Check delivery (Spec #643).
+
 ## Configure dispatch
 
 The adapter requires Herdr Socket API protocol **22**, schema version **1**, and

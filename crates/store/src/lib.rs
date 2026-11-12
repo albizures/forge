@@ -5775,6 +5775,17 @@ mod tests {
                     profile_revision: 1,
                 })
                 .unwrap();
+            if kind == RecordType::Task {
+                assert_eq!(
+                    forge_app::reconcile_agent_assignment(&store, &RacingAdapter, &assignment)
+                        .unwrap_err()
+                        .code,
+                    "task-dispatch-unsupported-contract"
+                );
+                assert_eq!(store.agent_assignment("race").unwrap(), assignment);
+                assert!(store.agent_launch_intent("race").unwrap().is_none());
+                continue;
+            }
             assert!(matches!(
                 forge_app::reconcile_agent_assignment(&store, &RacingAdapter, &assignment).unwrap(),
                 forge_app::AssignmentReconciliation::Stale
@@ -5789,6 +5800,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // Covers rejected Tasks and both supported Grilling launch outcomes.
     fn launch_success_and_lost_response_wait_for_acknowledgement() {
         struct LaunchAdapter {
             fail: bool,
@@ -5872,6 +5884,21 @@ mod tests {
                         mcp_servers: vec![],
                     });
             }
+            if kind == RecordType::Task {
+                assert_eq!(
+                    forge_app::reconcile_agent_assignment(
+                        &store,
+                        &LaunchAdapter { fail },
+                        &assignment
+                    )
+                    .unwrap_err()
+                    .code,
+                    "task-dispatch-unsupported-contract"
+                );
+                assert_eq!(store.agent_assignment("launch").unwrap(), assignment);
+                assert!(store.agent_launch_intent("launch").unwrap().is_none());
+                continue;
+            }
             assert!(matches!(
                 forge_app::reconcile_agent_assignment(&store, &LaunchAdapter { fail }, &assignment)
                     .unwrap(),
@@ -5891,7 +5918,7 @@ mod tests {
         store.register(&project("alpha", "/repos/alpha")).unwrap();
         let task = store
             .open_typed_record(&NewTypedRecord {
-                record_type: RecordType::Task,
+                record_type: RecordType::Grilling,
                 task_kind: None,
                 body: "dispatch me".into(),
                 project_slugs: vec!["alpha".into()],
@@ -6487,7 +6514,7 @@ mod tests {
         store.register(&project("alpha", "/repos/alpha")).unwrap();
         let task = store
             .open_typed_record(&NewTypedRecord {
-                record_type: RecordType::Task,
+                record_type: RecordType::Grilling,
                 task_kind: None,
                 body: "restart".into(),
                 project_slugs: vec!["alpha".into()],

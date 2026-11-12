@@ -340,56 +340,16 @@ async fn exercise_launch() {
     })
     .await
     .unwrap();
+    assert!(!task_output.status.success());
     assert!(
-        task_output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&task_output.stderr)
-    );
-    let task_result: Value = serde_json::from_slice(&task_output.stdout).unwrap();
-    assert_eq!(task_result["assignment"]["state"], "working");
-    let task_assignment = task_result["assignment"]["id"].as_str().unwrap();
-    let (task_env, task_cwd) = {
-        let calls = calls.lock().unwrap();
-        let tab = calls.iter().rfind(|c| c["method"] == "tab.create").unwrap();
-        (tab["params"]["env"].clone(), tab["params"]["cwd"].clone())
-    };
-    assert_eq!(task_env["FORGE_ASSIGNMENT_ID"], task_assignment);
-    assert_ne!(task_cwd, workspace.to_str().unwrap());
-    let task_cli = Path::new(task_env["FORGE_ASSIGNMENT_FORGE_CLI"].as_str().unwrap()).to_owned();
-    let task_environment = task_env.as_object().unwrap().clone();
-    let task_bootstrap = tokio::task::spawn_blocking(move || {
-        let mut cmd = Command::new(task_cli);
-        cmd.args(["assignment", "bootstrap", "--json"]);
-        for (key, value) in task_environment {
-            cmd.env(key, value.as_str().unwrap());
-        }
-        cmd.output().unwrap()
-    })
-    .await
-    .unwrap();
-    assert!(
-        task_bootstrap.status.success(),
-        "{}",
-        String::from_utf8_lossy(&task_bootstrap.stderr)
-    );
-    let task_context: Value = serde_json::from_slice(&task_bootstrap.stdout).unwrap();
-    assert_eq!(task_context["behavior"], "FROZEN GRILLING BEHAVIOR");
-    assert_eq!(task_context["context"]["record"]["id"], task.id);
-    assert_eq!(task_context["context"]["record"]["status"], "in_progress");
-    assert_eq!(
-        task_context["context"]["bound"]["executionDirectory"],
-        task_cwd
+        String::from_utf8_lossy(&task_output.stderr).contains("task-dispatch-unsupported-contract")
     );
     let store = SqliteProjectRepository::open(&db).unwrap();
+    assert!(store.list_agent_assignments(task.id).unwrap().is_empty());
     assert!(
-        store
-            .schedule_agent_assignment_retry(
-                task_assignment,
-                forge_app::AgentAssignmentState::Working,
-                u64::MAX / 2,
-                0
-            )
+        forge_app::ManagedWorktreeRepository::worktree_claim(&store, task.id)
             .unwrap()
+            .is_none()
     );
     store
         .select_workspace_profile("test", RecordType::Grilling, Some(1))
@@ -447,7 +407,7 @@ async fn exercise_launch() {
                 .contains("Legacy decision")
         );
     }
-    for record_id in [record.id, task.id, legacy.id] {
+    for record_id in [record.id, legacy.id] {
         let url = format!("http://{address}/rpc");
         let output = tokio::task::spawn_blocking(move || {
             Command::new(env!("CARGO_BIN_EXE_forge"))
@@ -481,7 +441,7 @@ async fn exercise_launch() {
             .iter()
             .filter(|call| call["method"] == "agent.start")
             .count(),
-        3
+        2
     );
     daemon.abort();
     stop.store(true, Ordering::SeqCst);

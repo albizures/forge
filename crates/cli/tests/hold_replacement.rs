@@ -171,7 +171,7 @@ async fn resume_and_restart_do_not_relaunch_and_late_ack_can_work_under_hold() {
         assert!(f.store().dispatch_hold(f.task).unwrap().is_none());
         // Fresh application and fresh SQLite connections simulate restart on each scan.
         f.scan(now);
-        assert!(f.store().dispatch_hold(f.task).unwrap().is_some());
+        assert!(f.store().dispatch_hold(f.task).unwrap().is_none());
     }
     let app = f.app();
     app.acknowledge_assignment("old", "late-ack").unwrap();
@@ -181,7 +181,7 @@ async fn resume_and_restart_do_not_relaunch_and_late_ack_can_work_under_hold() {
             .status,
         RecordStatus::InProgress
     );
-    assert!(f.store().dispatch_hold(f.task).unwrap().is_some());
+    assert!(f.store().dispatch_hold(f.task).unwrap().is_none());
     f.scan(380_000);
     AgentDispatchApiServer::resume(&Daemon::new(f.app()), RecordIdRequest { id: f.task })
         .await

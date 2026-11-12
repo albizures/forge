@@ -2596,7 +2596,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_dispatch_prepares_only_task_worktrees_and_never_relaunches_duplicates() {
+    fn explicit_dispatch_rejects_tasks_and_never_relaunches_grilling_duplicates() {
         use forge_app::AgentAssignmentState;
         let (root, store, records) = explicit_dispatch_fixture();
         let database = root.join("store.sqlite");
@@ -2609,9 +2609,21 @@ mod tests {
             Box::new(RecordingDispatchAdapter(launches.clone())),
             Box::new(TestInspector),
         );
-        let (task_assignment, existing) = app.dispatch_record(records[1].id).unwrap();
-        assert!(!existing);
-        assert_eq!(task_assignment.state, AgentAssignmentState::Provisioning);
+        assert_eq!(
+            app.dispatch_record(records[1].id).unwrap_err().code,
+            "task-dispatch-unsupported-contract"
+        );
+        assert!(
+            store
+                .list_agent_assignments(records[1].id)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            forge_app::ManagedWorktreeRepository::worktree_claim(&store, records[1].id)
+                .unwrap()
+                .is_none()
+        );
         assert!(
             store
                 .list_agent_assignments(records[0].id)
@@ -2647,37 +2659,19 @@ mod tests {
             grilling_assignment.state,
             AgentAssignmentState::Provisioning
         );
-        for (record, expected) in [
-            (records[1].id, task_assignment.id),
-            (records[2].id, grilling_assignment.id.clone()),
-        ] {
-            let (assignment, existing) = app.dispatch_record(record).unwrap();
-            assert!(existing);
-            assert_eq!(assignment.id, expected);
-        }
+        let (assignment, existing) = app.dispatch_record(records[2].id).unwrap();
+        assert!(existing);
+        assert_eq!(assignment.id, grilling_assignment.id);
         let contexts = launches.lock().unwrap();
-        assert_eq!(contexts.len(), 2);
+        assert_eq!(contexts.len(), 1);
+        assert_eq!(contexts[0].agent_workspace.as_ref(), Some(&root));
         assert!(
             contexts[0]
-                .agent_workspace
-                .as_ref()
-                .unwrap()
-                .join(".git")
-                .exists()
-        );
-        assert!(
-            contexts[0]
-                .rendered_initial_prompt
-                .contains("Managed Worktree")
-        );
-        assert_eq!(contexts[1].agent_workspace.as_ref(), Some(&root));
-        assert!(
-            contexts[1]
                 .rendered_initial_prompt
                 .contains(root.join("repo").to_str().unwrap())
         );
         assert!(
-            !contexts[1]
+            !contexts[0]
                 .rendered_initial_prompt
                 .contains("assigned Managed Worktree")
         );

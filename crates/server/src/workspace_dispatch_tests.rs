@@ -620,8 +620,13 @@ fn automatic_scheduling_has_no_global_readiness_or_latest_profile_bypass() {
     }
     app.reconcile_agent_dispatch("scheduler", 1_000).unwrap();
     let assignments = store.list_agent_assignments(records[0].id).unwrap();
-    assert_eq!(assignments.len(), 1);
-    assert_eq!(assignments[0].profile, one_profile);
+    assert!(assignments.is_empty());
+    assert!(
+        forge_app::ManagedWorktreeRepository::worktree_claim(&store, records[0].id)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(store.show_record(records[0].id).unwrap(), records[0]);
     assert!(
         store
             .list_agent_assignments(records[1].id)

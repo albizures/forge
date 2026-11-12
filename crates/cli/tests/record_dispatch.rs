@@ -117,7 +117,7 @@ fn dispatch_fixture() -> (std::path::PathBuf, SqliteProjectRepository, Vec<Strin
     let store = SqliteProjectRepository::open(&db).unwrap();
     support::register_project(&store, "alpha");
     let mut ids = Vec::new();
-    for kind in [RecordType::Grilling, RecordType::Spec] {
+    for kind in [RecordType::Grilling, RecordType::Spec, RecordType::Task] {
         ids.push(
             store
                 .open_typed_record(&NewTypedRecord {
@@ -147,6 +147,13 @@ async fn configuration_dispatch_and_recovery_round_trip_without_duplicate_launch
         Box::new(NoInspector),
     )
     .with_workspace_repository(Box::new(SqliteProjectRepository::open(&db).unwrap()));
+    // Automatic scheduling must not claim a Task even with provider configuration absent.
+    let task_id = ids[2].parse().unwrap();
+    let before = store.show_record(task_id).unwrap();
+    app.reconcile_agent_dispatch("closed-contract", 1).unwrap();
+    assert_eq!(store.show_record(task_id).unwrap(), before);
+    assert!(store.list_agent_assignments(task_id).unwrap().is_empty());
+    assert_eq!(launches.load(Ordering::SeqCst), 0);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/rpc", listener.local_addr().unwrap());
     let server = tokio::spawn(async move {
@@ -192,6 +199,14 @@ async fn configuration_dispatch_and_recovery_round_trip_without_duplicate_launch
         }
         command.output().unwrap()
     };
+    for json in [true, false] {
+        let rejected = run(&ids[2], json);
+        assert!(!rejected.status.success());
+        assert!(String::from_utf8_lossy(&rejected.stderr).contains("Check execution contract"));
+        assert_eq!(store.show_record(task_id).unwrap(), before);
+        assert!(store.list_agent_assignments(task_id).unwrap().is_empty());
+        assert_eq!(launches.load(Ordering::SeqCst), 0);
+    }
     let first = run(&ids[0], true);
     assert!(
         first.status.success(),

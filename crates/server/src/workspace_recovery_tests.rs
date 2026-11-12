@@ -65,6 +65,35 @@ fn claim_attempt(fixture: &Fixture, kind: RecordType) -> forge_app::AgentAssignm
         .0
 }
 
+// Seed already-launched historical ownership through the controlled provider fixture,
+// not through the now-disabled production Task dispatch entry point.
+fn seed_existing_launch(fixture: &Fixture, assignment: &forge_app::AgentAssignment) {
+    let store = fixture.store();
+    let workspace = if assignment.profile.record_type == RecordType::Task {
+        forge_app::ManagedWorktreeRepository::worktree_claim(&store, assignment.record_id)
+            .unwrap().unwrap().path
+    } else {
+        fixture.root.join("one")
+    };
+    let adapter = super::super::ServerAgentDispatchAdapterFactory {
+        herdr: super::super::HerdrAdapterFactory::from_configuration_store(fixture.database.clone()),
+        daemon_url: "http://127.0.0.1:45003/rpc".into(),
+        capability_secret_root: fixture.root.join("assignment-capabilities"),
+        cli_override: Some(std::env::current_exe().unwrap()),
+    };
+    let adapter = forge_app::AgentDispatchAdapterFactory::adapter_for(&adapter, &assignment.profile).unwrap();
+    let _ = adapter.provision(&forge_app::AgentDispatchContext {
+        assignment: assignment.clone(),
+        project_root: fixture.root.join("one"),
+        agent_workspace: Some(workspace),
+        dispatch_workspace: store.assignment_dispatch_workspace(&assignment.id).unwrap(),
+        rendered_initial_prompt: "Historical launch fixture".into(),
+        bootstrap_prompt: None,
+        capability_delivery: None,
+        resources: store.list_agent_assignment_resources(&assignment.id).unwrap(),
+    }, &store);
+}
+
 #[test]
 fn launched_registered_assignment_recovers_and_retires_without_sources() {
     for kind in [RecordType::Task, RecordType::Grilling] {
@@ -79,7 +108,7 @@ fn verify_source_independent_retirement(kind: RecordType) {
     fixture.configure(&app, &provider, "one");
     let (profile, source) = registered_policy(&fixture, kind);
     let original = claim_attempt(&fixture, kind);
-    app.reconcile_agent_dispatch("initial", 1_000).unwrap();
+    seed_existing_launch(&fixture, &original);
     let record = fixture.store().show_record(original.record_id).unwrap();
     let secrets = fixture.root.join("assignment-capabilities");
     let secret = std::fs::read_to_string(secrets.join(&original.id)).unwrap();
@@ -131,7 +160,12 @@ fn verify_source_independent_retirement(kind: RecordType) {
             .unwrap(),
         retained
     );
-    assert_eq!(app.dispatch_record(record.id).unwrap().0.id, original.id);
+    if kind == RecordType::Task {
+        assert_eq!(app.dispatch_record(record.id).unwrap_err().code,
+            "task-dispatch-unsupported-contract");
+    } else {
+        assert_eq!(app.dispatch_record(record.id).unwrap().0.id, original.id);
+    }
     assert_eq!(launch_count(&provider), 1);
 
     app.retire_agent_assignment(&original.id).unwrap();
@@ -215,7 +249,7 @@ fn verify_crash_window(kind: RecordType, window: &str) {
         }
         _ => {
             provider.state.lock().unwrap().lose_launch_response = window.contains("lost");
-            app.reconcile_agent_dispatch("before-crash", 1_000).unwrap();
+            seed_existing_launch(&fixture, &original);
             assert_eq!(launch_count(&provider), 1, "{kind:?}/{window}");
             if window.starts_with("ack") {
                 let root = fixture.root.join("assignment-capabilities");
@@ -247,10 +281,13 @@ fn verify_crash_window(kind: RecordType, window: &str) {
             assert_eq!(recovered.resources, resources, "{window}");
         }
     }
-    let expected = usize::from(matches!(
-        window,
-        "claimed" | "response-lost" | "ack-response-lost" | "response" | "ack-response"
-    ));
+    let expected = usize::from(
+        matches!(window, "response-lost" | "ack-response-lost" | "response" | "ack-response")
+            || (window == "claimed" && kind == RecordType::Grilling)
+    );
+    if kind == RecordType::Task && !window.starts_with("ack") {
+        assert_eq!(app.agent_assignment_info(&original.id).unwrap(), before);
+    }
     assert_eq!(launch_count(&provider), expected, "{kind:?}/{window}");
     assert_eq!(
         provider
@@ -296,7 +333,7 @@ fn late_bootstrap_absence_repair_and_resume_do_not_authorize_replacement() {
     let (_, source) = registered_policy(&fixture, RecordType::Task);
     let original = claim_attempt(&fixture, RecordType::Task);
     provider.state.lock().unwrap().lose_launch_response = true;
-    app.reconcile_agent_dispatch("send-lost", 1_000).unwrap();
+    seed_existing_launch(&fixture, &original);
     let root = fixture.root.join("assignment-capabilities");
     let secret = std::fs::read_to_string(root.join(&original.id)).unwrap();
     std::fs::remove_dir_all(source).unwrap();
