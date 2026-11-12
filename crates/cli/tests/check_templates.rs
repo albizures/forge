@@ -86,7 +86,7 @@ async fn project_templates_round_trip_through_cli_and_typed_rpc_with_workspace_c
     };
     let initial = json(run(&["project", "check-template", "show", "api", "--json"]));
     assert_eq!(initial["version"], 0);
-    assert_eq!(initial["criteria"], serde_json::json!([]));
+    assert_eq!(initial["criteria"][0]["name"], "Implementation");
     let task_before = json(run(&[
         "task",
         "open",
@@ -97,7 +97,7 @@ async fn project_templates_round_trip_through_cli_and_typed_rpc_with_workspace_c
         "--json",
     ]));
     let file = root.path().join("criteria.json");
-    std::fs::write(&file, r#"[{"name":" Review ","description":" Review the deliverables "},{"name":"Tests","description":"Relevant checks pass"}]"#).unwrap();
+    std::fs::write(&file, r#"[{"name":"Implementation","description":"Deliver the work"},{"name":" Review ","description":" Review the deliverables "},{"name":"Tests","description":"Relevant checks pass"}]"#).unwrap();
     let file = file.to_str().unwrap();
     let base = [
         "project",
@@ -139,7 +139,7 @@ async fn project_templates_round_trip_through_cli_and_typed_rpc_with_workspace_c
         .unwrap();
     let template = json(child.wait_with_output().unwrap());
     assert_eq!(template["version"], 1);
-    assert_eq!(template["criteria"][0]["name"], "Review");
+    assert_eq!(template["criteria"][1]["name"], "Review");
     let stale = run(&[base.as_slice(), &["--message", "stale"]].concat());
     assert!(!stale.status.success());
     assert!(String::from_utf8_lossy(&stale.stderr).contains("stale-version"));
@@ -238,7 +238,7 @@ async fn project_templates_round_trip_through_cli_and_typed_rpc_with_workspace_c
                 project: "api".into(),
                 replacement: TemplateReplacement {
                     expected_version: 1,
-                    criteria: vec![],
+                    criteria: forge_app::check_templates::baseline(),
                     actor: "operator".into(),
                     message: "Clear extras".into(),
                 },
@@ -270,7 +270,10 @@ async fn project_templates_round_trip_through_cli_and_typed_rpc_with_workspace_c
         .await
         .unwrap();
     assert_eq!(next.history[0].message, "Clear extras");
-    assert!(next.history[0].criteria.is_empty());
+    assert_eq!(
+        next.history[0].criteria,
+        forge_app::check_templates::baseline()
+    );
     assert!(next.next_cursor.is_none());
     let message = root.path().join("why.txt");
     std::fs::write(&message, "Restore criteria").unwrap();
@@ -294,7 +297,7 @@ async fn project_templates_round_trip_through_cli_and_typed_rpc_with_workspace_c
     );
     std::fs::write(
         file,
-        r#"[{"name":"Implementation","description":"duplicate baseline"}]"#,
+        r#"[{"name":"Implementation","description":"baseline"},{"name":"Implementation","description":"duplicate baseline"}]"#,
     )
     .unwrap();
     assert!(

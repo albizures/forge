@@ -3,9 +3,9 @@ use crate::storage_error;
 use forge_app::RegistrationError;
 use rusqlite::Connection;
 
-// Bump for every incompatible storage contract. Revision 2 uses Record-oriented
-// Checks/Findings and removes Task classification without converting old stores.
-const SCHEMA_REVISION: i64 = 2;
+// Bump for every incompatible storage contract. Revision 3 adds pinned Check
+// profile snapshots and full ordered templates, without converting older stores.
+const SCHEMA_REVISION: i64 = 3;
 const APPLICATION_ID: i64 = 0x464f_5247; // FORG
 
 pub(super) fn validate(connection: &Connection) -> Result<(), RegistrationError> {

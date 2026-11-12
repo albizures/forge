@@ -373,14 +373,17 @@ legacy database upgrade or no-Check completion fallback is provided.
 
 ## Project Check Templates
 
-A Project's operator-managed Check Template adds ordered, required criteria after
-Implementation when a Task opens. Standalone Tasks use their selected Project;
+A Project's operator-managed Check Template contains mandatory Implementation first,
+followed by ordered, required reviews. The whole template is copied when a Task opens. Standalone Tasks use their selected Project;
 Spec children use the inherited Project; Wayfinder children use their selected
 Project, not every Project in the Wayfinder scope. Projectless Tasks and Projects
 without a configured template still receive Implementation alone. All Task deliverables
 use the same rules. Snapshot creation and Task opening commit atomically; concurrent
 replacement/opening observes a whole template, never mixed criteria. Existing Task
-Check IDs, criteria and positions never change when a template is replaced.
+Check IDs, criteria, positions and optional pinned Task Agent Profile revisions never
+change when a template or Workspace profile selection changes. Checks cannot be
+individually added, edited, retired or rebound; Assessment version changes do not
+change their configuration.
 
 ```sh
 forge project check-template show personal/api --limit 50 --json
@@ -392,15 +395,32 @@ forge project check-template show personal/api --after 1 --limit 50 --json
 The file is an ordered JSON array of objects, for example:
 
 ```json
-[{"name":"Review","description":"Deliverables have been reviewed"}]
+[
+  {"name":"Implementation","description":"Deliver the described work","profile_revision":2},
+  {"name":"Review","description":"Deliverables have been reviewed","profile_revision":3}
+]
 ```
 
 Names and descriptions must be nonblank and are trimmed before storage. Names must be unique ignoring case and surrounding
-whitespace; `Implementation` is reserved in any case. `[]` clears only the extras,
-never the baseline. Unknown object fields and malformed JSON are rejected.
+whitespace. The first entry must be named `Implementation`; empty templates,
+missing/reordered baselines, duplicate names and revision zero are rejected.
+To remove reviews, submit Implementation alone. Unknown object fields and malformed
+JSON are rejected. `profile_revision` is optional (or null) for Manual work and pins
+a positive immutable Task Agent Profile revision, not a live Workspace selection.
+Projectless Tasks receive a profile-less Implementation baseline.
+
+The application exposes `validate_record_check_profiles` for later Dispatched
+eligibility gates: every Check must have a pinned registered revision whose
+prerequisites pass profile preflight. Missing/unusable revisions yield Check-specific
+`invalid-check-profile` diagnostics; validation never substitutes a revision, skips
+a Check, rewrites a binding or launches an agent. Restore prerequisites or use
+Manual work; an existing Task cannot repair a binding by rebinding. Template
+snapshots may retain unavailable positive revisions, making such configuration
+inspectable without preventing profile-less Manual work. Task dispatch remains
+prohibited by the interim unsupported-contract guard.
 
 Read the observed `version` before replacement. An unconfigured template reads as
-version **0**, empty criteria and empty history; its first replacement requires
+version **0**, the profile-less Implementation baseline and empty history; its first replacement requires
 `--expected-version 0`. Every successful whole-set replacement (including clearing)
 increments the version. Stale writes return `stale-version`; invalid criteria or
 blank attribution/explanations return `invalid-check-template`. Failed replacements

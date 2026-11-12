@@ -1,4 +1,4 @@
-//! Project-owned additional criteria, copied rather than linked into new Tasks.
+//! Project-owned ordered criteria, copied rather than linked into new Tasks.
 use crate::{Application, RegistrationError};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -8,6 +8,8 @@ use std::collections::HashSet;
 pub struct CheckCriterion {
     pub name: String,
     pub description: String,
+    /// Immutable Task Agent Profile revision; absent for profile-less Manual work.
+    pub profile_revision: Option<u32>,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CheckTemplate {
@@ -37,6 +39,16 @@ pub struct TemplateReplacement {
     pub actor: String,
     pub message: String,
 }
+/// Default required baseline, also used for Projectless Tasks.
+#[must_use]
+pub fn baseline() -> Vec<CheckCriterion> {
+    vec![CheckCriterion {
+        name: "Implementation".into(),
+        description: crate::checks::IMPLEMENTATION_CRITERION.into(),
+        profile_revision: None,
+    }]
+}
+
 impl TemplateReplacement {
     /// Validate and normalize the entire replacement without side effects.
     ///
@@ -49,15 +61,25 @@ impl TemplateReplacement {
                 "actor and explanation must be nonblank",
             ));
         }
+        if self
+            .criteria
+            .first()
+            .is_none_or(|c| c.name.trim() != "Implementation")
+        {
+            return Err(RegistrationError::new(
+                "invalid-check-template",
+                "first criterion must be Implementation",
+            ));
+        }
         let mut names = HashSet::new();
         self.criteria.iter().map(|criterion| {
             let name = criterion.name.trim();
             let description = criterion.description.trim();
             let key = name.to_lowercase();
-            if name.is_empty() || description.is_empty() || key == "implementation" || !names.insert(key) {
-                return Err(RegistrationError::new("invalid-check-template", "criteria require nonblank descriptions and unique nonblank names; Implementation is reserved"));
+            if name.is_empty() || description.is_empty() || criterion.profile_revision == Some(0) || !names.insert(key) {
+                return Err(RegistrationError::new("invalid-check-template", "criteria require nonblank descriptions and unique nonblank names; Implementation must be first"));
             }
-            Ok(CheckCriterion { name: name.into(), description: description.into() })
+            Ok(CheckCriterion { name: name.into(), description: description.into(), profile_revision: criterion.profile_revision })
         }).collect()
     }
 }

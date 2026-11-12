@@ -48,7 +48,7 @@ fn incompatible_unversioned_store_is_rejected_without_modifying_it() {
 
 #[test]
 fn incompatible_schema_revisions_are_rejected_without_modifying_stores() {
-    for revision in [0, 1, 2_000_000_000] {
+    for revision in [0, 1, 2, 2_000_000_000] {
         let database = Database::new();
         let store = SqliteProjectRepository::open(&database.0).unwrap();
         drop(store);

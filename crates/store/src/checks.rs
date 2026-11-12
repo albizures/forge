@@ -1,7 +1,7 @@
 use super::{SqliteProjectRepository, insert_update, load_record, now_millis, storage_error};
 use forge_app::checks::{
-    Assessment, AssessmentInput, CheckActivity, CheckPage, IMPLEMENTATION_CRITERION, Invalidation,
-    InvalidationInput, RecordCheck, RevisionComparison, Verdict,
+    Assessment, AssessmentInput, CheckActivity, CheckPage, Invalidation, InvalidationInput,
+    RecordCheck, RevisionComparison, Verdict,
 };
 use forge_app::{Record, RecordStatus, RecordType, RecordUpdateKind, RegistrationError};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -12,7 +12,8 @@ pub(super) fn schema(connection: &Connection) -> Result<(), RegistrationError> {
             "CREATE TABLE IF NOT EXISTS record_checks (
         id INTEGER PRIMARY KEY NOT NULL, record_id INTEGER NOT NULL REFERENCES records(id),
         name TEXT NOT NULL, description TEXT NOT NULL, position INTEGER NOT NULL,
-        version INTEGER NOT NULL DEFAULT 1, UNIQUE(record_id, position), UNIQUE(record_id, name));
+        version INTEGER NOT NULL DEFAULT 1, profile_revision INTEGER CHECK(profile_revision > 0 AND profile_revision <= 4294967295),
+        UNIQUE(record_id, position), UNIQUE(record_id, name));
         CREATE TABLE IF NOT EXISTS check_assessments (
         id INTEGER PRIMARY KEY NOT NULL, check_id INTEGER NOT NULL REFERENCES record_checks(id),
         verdict TEXT NOT NULL CHECK(verdict IN ('pass','fail')), actor TEXT NOT NULL,
@@ -28,12 +29,6 @@ pub(super) fn schema(connection: &Connection) -> Result<(), RegistrationError> {
         CREATE INDEX IF NOT EXISTS activities_by_check ON check_activities(check_id, id);",
         )
         .map_err(storage_error)
-}
-
-pub(super) fn provision(connection: &Connection, task: u64) -> Result<(), RegistrationError> {
-    connection.execute("INSERT INTO record_checks (record_id, name, description, position) VALUES (?1, 'Implementation', ?2, 0)",
-        params![task.cast_signed(), IMPLEMENTATION_CRITERION]).map_err(storage_error)?;
-    Ok(())
 }
 
 fn assessment(row: &rusqlite::Row<'_>) -> rusqlite::Result<Assessment> {
@@ -74,12 +69,12 @@ fn load(connection: &Connection, task: u64, check: u64) -> Result<RecordCheck, R
         .project_slugs
         .into_iter()
         .next();
-    let mut check = connection.query_row("SELECT id, record_id, name, description, position, version FROM record_checks WHERE record_id = ?1 AND id = ?2",
+    let mut check = connection.query_row("SELECT id, record_id, name, description, position, version, profile_revision FROM record_checks WHERE record_id = ?1 AND id = ?2",
         params![task.cast_signed(), check.cast_signed()], |row| Ok(RecordCheck {
             id: row.get::<_, i64>(0)?.cast_unsigned(), record_id: row.get::<_, i64>(1)?.cast_unsigned(),
             name: row.get(2)?, description: row.get(3)?, position: row.get::<_, i64>(4)?.cast_unsigned(),
             version: row.get::<_, i64>(5)?.cast_unsigned(), latest_assessment: None,
-            project, current_verdict: None,
+            project, current_verdict: None, profile_revision: row.get(6)?,
         })).optional().map_err(storage_error)?.ok_or_else(|| RegistrationError::new("check-not-found", "Check does not belong to this Task"))?;
     check.latest_assessment = connection.query_row(&format!("SELECT {ASSESSMENT_COLUMNS} FROM check_assessments WHERE check_id = ?1 ORDER BY id DESC LIMIT 1"),
         [check.id.cast_signed()], assessment).optional().map_err(storage_error)?;

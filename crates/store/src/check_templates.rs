@@ -39,7 +39,7 @@ fn current(connection: &Connection, project: &str) -> Result<CheckTemplate, Regi
         }),
         None => Ok(CheckTemplate {
             version: 0,
-            criteria: vec![],
+            criteria: forge_app::check_templates::baseline(),
         }),
     }
 }
@@ -51,12 +51,13 @@ pub(super) fn provision(
     task: u64,
     project: Option<&str>,
 ) -> Result<(), RegistrationError> {
-    let Some(project) = project else {
-        return Ok(());
+    let criteria = match project {
+        Some(project) => current(connection, project)?.criteria,
+        None => forge_app::check_templates::baseline(),
     };
-    for (index, criterion) in current(connection, project)?.criteria.iter().enumerate() {
-        connection.execute("INSERT INTO record_checks (record_id, name, description, position) VALUES (?1, ?2, ?3, ?4)",
-            params![task.cast_signed(), criterion.name, criterion.description, i64::try_from(index + 1).map_err(template_storage_error)?]).map_err(storage_error)?;
+    for (index, criterion) in criteria.iter().enumerate() {
+        connection.execute("INSERT INTO record_checks (record_id, name, description, position, profile_revision) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![task.cast_signed(), criterion.name, criterion.description, i64::try_from(index).map_err(template_storage_error)?, criterion.profile_revision]).map_err(storage_error)?;
     }
     Ok(())
 }

@@ -84,12 +84,62 @@ pub struct RecordCheck {
     pub name: String,
     pub description: String,
     pub position: u64,
+    /// Pinned Task Agent Profile revision, never resolved from Workspace selection.
+    pub profile_revision: Option<u32>,
     pub version: u64,
     pub latest_assessment: Option<Assessment>,
     /// Null means pending, including an invalidated latest Assessment.
     pub current_verdict: Option<Verdict>,
     pub project: Option<String>,
 }
+impl Application {
+    /// Validate immutable profile bindings without selecting replacements or launching agents.
+    /// Manual work does not need this gate; future Dispatched eligibility does.
+    ///
+    /// # Errors
+    /// Returns a Check-specific diagnostic for absent, missing or unusable revisions.
+    pub fn validate_record_check_profiles(&self, record: u64) -> Result<(), RegistrationError> {
+        let checks = self.list_record_checks(record)?;
+        if checks.is_empty() {
+            return Err(RegistrationError::new(
+                "invalid-check-profile",
+                "Task has no provisioned Checks",
+            ));
+        }
+        for check in checks {
+            let invalid = |reason: String| {
+                RegistrationError::new(
+                    "invalid-check-profile",
+                    format!("Check {} ({}): {reason}", check.id, check.name),
+                )
+            };
+            let revision = check
+                .profile_revision
+                .ok_or_else(|| invalid("no pinned Agent Profile revision".into()))?;
+            let profile = self
+                .dispatch()
+                .map_err(|error| invalid(error.message))?
+                .agent_profile(crate::RecordType::Task, revision)
+                .map_err(|error| invalid(error.message))?;
+            if profile.launch_policy.is_none() {
+                return Err(invalid(format!(
+                    "revision {revision} has no registered launch policy"
+                )));
+            }
+            let factory = self
+                .adapter_factory
+                .as_ref()
+                .ok_or_else(|| invalid("profile validation unavailable".into()))?;
+            factory.validate_preflight(&profile).map_err(|_| {
+                invalid(format!(
+                    "revision {revision} failed profile preflight; restore its prerequisites"
+                ))
+            })?;
+        }
+        Ok(())
+    }
+}
+
 impl RecordCheck {
     #[must_use]
     pub fn verdict(&self) -> Option<Verdict> {

@@ -3560,10 +3560,15 @@ mod tests {
                     expected_version: 0,
                     actor: "operator".into(),
                     message: "require review".into(),
-                    criteria: vec![CheckCriterion {
-                        name: "Review".into(),
-                        description: "Review deliverables".into(),
-                    }],
+                    criteria: [
+                        forge_app::check_templates::baseline(),
+                        vec![CheckCriterion {
+                            name: "Review".into(),
+                            description: "Review deliverables".into(),
+                            profile_revision: None,
+                        }],
+                    ]
+                    .concat(),
                 },
             )
             .unwrap();

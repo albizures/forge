@@ -538,6 +538,9 @@ configuration and binding triggers. They are not an upgrade path for incompatibl
 stores. Every subsequent breaking storage-contract change must advance the
 schema revision in `src/schema_compatibility.rs`. Revision 2 is the breaking
 Record-oriented Check/Finding contract, without Task classification metadata.
+Revision 3 adds immutable `record_checks.profile_revision` snapshots and full ordered
+Project templates beginning with Implementation. Existing revision-2 stores are
+incompatible; no bindings are inferred or backfilled.
 
 Select a fresh store rather than inventing ownership or rewriting version markers.
 Any local reset is a separate operator action: first safely retire ownership and

@@ -4,16 +4,41 @@ use forge_app::check_templates::{CheckCriterion, TemplateReplacement};
 fn replacement(version: u64, names: &[&str]) -> TemplateReplacement {
     TemplateReplacement {
         expected_version: version,
-        criteria: names
-            .iter()
+        criteria: std::iter::once("Implementation").chain(names.iter().copied())
             .map(|name| CheckCriterion {
-                name: (*name).into(),
+                name: name.into(),
                 description: format!("Establish {name}"),
+                profile_revision: None,
             })
             .collect(),
         actor: "operator".into(),
         message: "Set required criteria".into(),
     }
+}
+
+#[test]
+fn profile_revision_is_snapshotted_including_the_implementation_binding() {
+    let repository = super::SqliteProjectRepository::in_memory().unwrap();
+    repository.register(&project("alpha", "/pinned-template")).unwrap();
+    let input: TemplateReplacement = serde_json::from_value(serde_json::json!({
+        "expected_version": 0, "actor": "operator", "message": "Pin configuration",
+        "criteria": [{"name": "Implementation", "description": "Deliver the work", "profile_revision": 1}]
+    })).unwrap();
+    repository.replace_check_template("alpha", &input).unwrap();
+    let task = repository.open_typed_record(&NewTypedRecord {
+        record_type: RecordType::Task, project_slugs: vec!["alpha".into()],
+        body: "Work".into(), generated_by_ids: vec![],
+    }).unwrap();
+    let checks = serde_json::to_value(repository.list_record_checks(task.id).unwrap()).unwrap();
+    assert_eq!(checks[0]["profile_revision"], 1);
+}
+
+#[test]
+fn templates_require_an_explicit_implementation_baseline() {
+    let repository = super::SqliteProjectRepository::in_memory().unwrap();
+    repository.register(&project("alpha", "/baseline-template")).unwrap();
+    assert_eq!(repository.show_check_template("alpha", None, 10).unwrap().criteria[0].name, "Implementation");
+    assert_eq!(repository.replace_check_template("alpha", &TemplateReplacement { criteria: vec![], ..replacement(0, &[]) }).unwrap_err().code, "invalid-check-template");
 }
 
 #[test]
@@ -60,6 +85,7 @@ fn invalid_template_replacements_are_atomic_and_workspace_confined() {
             criteria: vec![CheckCriterion {
                 name: "Review".into(),
                 description: " ".into(),
+                profile_revision: None,
             }],
             ..replacement(1, &[])
         },
@@ -366,11 +392,12 @@ fn concurrent_template_replacement_and_task_opening_are_coherent_and_restart_dur
         .map(|task| repository.list_record_checks(task.id).unwrap())
         .collect();
     for checks in &snapshots {
-        let extras: Vec<_> = checks[1..]
+        let extras: Vec<_> = checks[..]
             .iter()
             .map(|c| CheckCriterion {
                 name: c.name.clone(),
                 description: c.description.clone(),
+                profile_revision: c.profile_revision,
             })
             .collect();
         assert!(

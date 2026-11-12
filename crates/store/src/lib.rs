@@ -906,7 +906,6 @@ impl RecordRepository for SqliteProjectRepository {
             .map_err(storage_error)?;
         let id = transaction.last_insert_rowid().cast_unsigned();
         if record.record_type == RecordType::Task {
-            checks::provision(&transaction, id)?;
             check_templates::provision(
                 &transaction,
                 id,
@@ -957,7 +956,6 @@ impl RecordRepository for SqliteProjectRepository {
             )
             .map_err(storage_error)?;
         let task_id = transaction.last_insert_rowid().cast_unsigned();
-        checks::provision(&transaction, task_id)?;
         check_templates::provision(
             &transaction,
             task_id,
@@ -1045,7 +1043,6 @@ impl RecordRepository for SqliteProjectRepository {
             )
             .map_err(storage_error)?;
         let task_id = transaction.last_insert_rowid().cast_unsigned();
-        checks::provision(&transaction, task_id)?;
         check_templates::provision(
             &transaction,
             task_id,

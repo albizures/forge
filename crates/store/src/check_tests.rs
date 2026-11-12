@@ -21,15 +21,16 @@ fn project_template_replacement_snapshots_future_tasks_only() {
     let old = open();
     let initial = repository.show_check_template("alpha", None, 1).unwrap();
     assert_eq!(initial.version, 0);
-    assert!(initial.criteria.is_empty());
+    assert_eq!(initial.criteria, forge_app::check_templates::baseline());
     let input = TemplateReplacement {
         expected_version: 0,
         actor: "operator".into(),
         message: "Require review".into(),
-        criteria: vec![CheckCriterion {
+        criteria: [forge_app::check_templates::baseline(), vec![CheckCriterion {
             name: " Review ".into(),
             description: " Reviewed deliverables ".into(),
-        }],
+            profile_revision: None,
+        }]].concat(),
     };
     let updated = repository.replace_check_template("alpha", &input).unwrap();
     assert_eq!(updated.version, 1);
@@ -54,7 +55,7 @@ fn project_template_replacement_snapshots_future_tasks_only() {
             "alpha",
             &TemplateReplacement {
                 expected_version: 1,
-                criteria: vec![],
+                criteria: forge_app::check_templates::baseline(),
                 ..input
             },
         )
@@ -65,12 +66,12 @@ fn project_template_replacement_snapshots_future_tasks_only() {
     assert_eq!(page.version, 2);
     assert_eq!(page.history.len(), 1);
     assert_eq!(page.history[0].actor, "operator");
-    assert_eq!(page.history[0].criteria[0].name, "Review");
+    assert_eq!(page.history[0].criteria[1].name, "Review");
     let next = repository
         .show_check_template("alpha", page.next_cursor, 1)
         .unwrap();
     assert_eq!(next.history.len(), 1);
-    assert!(next.history[0].criteria.is_empty());
+    assert_eq!(next.history[0].criteria, forge_app::check_templates::baseline());
     assert!(next.next_cursor.is_none());
 }
 

@@ -6,7 +6,7 @@ use std::{fmt::Write as _, io::Read};
 pub enum CheckTemplateCommand {
     /// Show current criteria and a bounded ascending replacement history page.
     Show(ShowArgs),
-    /// Replace the ordered criteria for future Tasks (an empty array clears extras).
+    /// Replace future Task criteria, starting with the mandatory Implementation entry.
     Set(SetArgs),
 }
 #[derive(Debug, Args)]
@@ -87,7 +87,11 @@ pub async fn run(command: CheckTemplateCommand, workspace: Option<String>) -> i3
                         change.message
                     );
                     for criterion in &change.criteria {
-                        let _ = write!(text, "\n  {}: {}", criterion.name, criterion.description);
+                        let _ = write!(
+                            text,
+                            "\n  {}: {} (profile revision: {:?})",
+                            criterion.name, criterion.description, criterion.profile_revision
+                        );
                     }
                 }
                 if let Some(cursor) = page.next_cursor {
@@ -144,7 +148,11 @@ pub async fn run(command: CheckTemplateCommand, workspace: Option<String>) -> i3
 fn render_template(version: u64, criteria: &[forge_rpc::CheckCriterion]) -> String {
     let mut text = format!("Check Template version {version} (Implementation is always required)");
     for criterion in criteria {
-        let _ = write!(text, "\n{}: {}", criterion.name, criterion.description);
+        let _ = write!(
+            text,
+            "\n{}: {} (profile revision: {:?})",
+            criterion.name, criterion.description, criterion.profile_revision
+        );
     }
     text
 }
