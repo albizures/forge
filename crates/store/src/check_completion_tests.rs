@@ -2,6 +2,24 @@ use super::*;
 use forge_app::checks::{InvalidationInput, Verdict};
 
 #[test]
+fn completion_rechecks_dependencies_added_after_start_without_publishing_done() {
+    let repository = SqliteProjectRepository::in_memory().unwrap();
+    let task = check_tests::task(&repository);
+    repository.start_record(task.id).unwrap();
+    check_tests::assess(&repository, task.id, Verdict::Pass);
+    let prerequisite = check_tests::task(&repository);
+    repository.relate_records(task.id, prerequisite.id, RecordRelationshipKind::DependsOn).unwrap();
+    let before = repository.list_record_updates(task.id).unwrap();
+    assert_eq!(repository.done_record(task.id, None).unwrap_err().code, "dependencies-not-done");
+    assert_eq!(repository.list_record_updates(task.id).unwrap(), before);
+    assert_eq!(repository.show_record(task.id).unwrap().status, RecordStatus::InProgress);
+    repository.start_record(prerequisite.id).unwrap();
+    check_tests::assess(&repository, prerequisite.id, Verdict::Pass);
+    repository.done_record(prerequisite.id, None).unwrap();
+    assert_eq!(repository.done_record(task.id, Some("Verified")).unwrap().status, RecordStatus::Done);
+}
+
+#[test]
 fn completion_racing_body_edit_or_invalidation_never_commits_a_nonpassing_done_task() {
     use std::sync::{Arc, Barrier};
     // Independent connections exercise SQLite transactions, not the per-repository mutex.

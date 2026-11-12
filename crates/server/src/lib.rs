@@ -3553,6 +3553,12 @@ mod tests {
         store
             .start_owned_record(other, "target-assignment")
             .unwrap();
+        store
+            .close_agent_assignment(
+                "target-assignment",
+                forge_app::AgentAssignmentClosureReason::Retired,
+            )
+            .unwrap();
         store.done_record(other, None).unwrap();
         session.acknowledge().unwrap();
         session.start().unwrap();
@@ -3648,9 +3654,7 @@ mod tests {
         );
         let error = session.done(None, None).unwrap_err();
         assert_eq!(error, store.done_record(task.id, None).unwrap_err());
-        for check in &checks {
-            assert!(error.message.contains(&check.id.to_string()));
-        }
+        assert_eq!(error.code, "dispatched-completion-forbidden");
         let input = forge_app::checks::AssessmentInput {
             actor: "ignored".into(),
             expected_version: 1,
@@ -3721,7 +3725,7 @@ mod tests {
         );
         assert_eq!(
             session.done(None, None).unwrap_err().code,
-            "checks-not-passed"
+            "dispatched-completion-forbidden"
         );
         let grilling = store
             .open_typed_record(&NewTypedRecord {
@@ -4165,6 +4169,12 @@ mod tests {
             .start_owned_record(other_task, "target-assignment")
             .unwrap();
         check_tests::pass_checks(&store, other_task);
+        store
+            .close_agent_assignment(
+                "target-assignment",
+                forge_app::AgentAssignmentClosureReason::Retired,
+            )
+            .unwrap();
         store.done_record(other_task, Some("done")).unwrap();
         assert!(
             AgentDispatchApiServer::assignment_task_start(

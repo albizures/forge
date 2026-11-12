@@ -243,6 +243,7 @@ fn assignment_finding_security_done_and_completion_gates_match_operator() {
         )
         .unwrap();
     store.start_owned_record(prerequisite, "target-assignment").unwrap();
+    store.close_agent_assignment("target-assignment", forge_app::AgentAssignmentClosureReason::Retired).unwrap();
     store.done_record(prerequisite, Some("verified")).unwrap();
     session.acknowledge().unwrap();
     session.start().unwrap();
@@ -264,22 +265,22 @@ fn assignment_finding_security_done_and_completion_gates_match_operator() {
     session
         .finding_mutate(critical.id, &change(2, FindingMutation::Resolve))
         .unwrap();
-    session.done(Some("done"), None).unwrap();
+    assert_eq!(session.done(Some("done"), None).unwrap_err().code, "execution-mode-unsafe-ownership");
+    store.close_agent_assignment(&assignment, forge_app::AgentAssignmentClosureReason::Retired).unwrap();
+    store.done_record(owner, Some("Human verified completion")).unwrap();
+    assert_eq!(session.finding_raise(&raise).unwrap_err().code, "assignment-capability-denied");
+    assert_eq!(store.raise_record_finding(owner, &raise).unwrap_err().code, "record-done");
     assert_eq!(
-        session.finding_raise(&raise).unwrap_err().code,
-        "record-done"
-    );
-    assert_eq!(
-        session
-            .finding_mutate(critical.id, &change(3, FindingMutation::Reopen))
+        store
+            .mutate_record_finding(owner, critical.id, &change(3, FindingMutation::Reopen))
             .unwrap_err()
             .code,
         "record-done"
     );
     assert_eq!(
-        session
-            .finding_mutate(
-                minor.id,
+        store
+            .mutate_record_finding(
+                owner, minor.id,
                 &change(
                     minor.version,
                     FindingMutation::Amend {
@@ -292,16 +293,16 @@ fn assignment_finding_security_done_and_completion_gates_match_operator() {
             .code,
         "record-done"
     );
-    let closed = session
-        .finding_mutate(minor.id, &change(minor.version, FindingMutation::Dismiss))
+    let closed = store
+        .mutate_record_finding(owner, minor.id, &change(minor.version, FindingMutation::Dismiss))
         .unwrap();
     assert_eq!(closed.state, FindingState::Dismissed);
-    let reopened = session
-        .finding_mutate(minor.id, &change(closed.version, FindingMutation::Reopen))
+    let reopened = store
+        .mutate_record_finding(owner, minor.id, &change(closed.version, FindingMutation::Reopen))
         .unwrap();
-    let responded = session
-        .finding_mutate(
-            minor.id,
+    let responded = store
+        .mutate_record_finding(
+            owner, minor.id,
             &change(
                 reopened.version,
                 FindingMutation::Respond {
@@ -310,14 +311,14 @@ fn assignment_finding_security_done_and_completion_gates_match_operator() {
             ),
         )
         .unwrap();
-    let resolved = session
-        .finding_mutate(
-            minor.id,
+    let resolved = store
+        .mutate_record_finding(
+            owner, minor.id,
             &change(responded.version, FindingMutation::Resolve),
         )
         .unwrap();
-    session
-        .finding_mutate(minor.id, &change(resolved.version, FindingMutation::Note))
+    store
+        .mutate_record_finding(owner, minor.id, &change(resolved.version, FindingMutation::Note))
         .unwrap();
     assert_eq!(
         store.show_record(owner).unwrap().status,
@@ -337,12 +338,6 @@ fn assignment_finding_security_done_and_completion_gates_match_operator() {
         "assignment-capability-denied"
     );
     std::fs::write(root.join(&assignment), "actual-secret").unwrap();
-    store
-        .close_agent_assignment(
-            &assignment,
-            forge_app::AgentAssignmentClosureReason::Retired,
-        )
-        .unwrap();
     assert_eq!(
         session
             .finding_show(minor.id, None, 1, None)

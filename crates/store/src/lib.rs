@@ -1353,7 +1353,28 @@ impl RecordRepository for SqliteProjectRepository {
             return record_or_transition_error(&transaction, id);
         }
         if current.record_type == RecordType::Task {
+            let unfinished = unfinished_prerequisite_ids(&transaction, id)?;
+            if !unfinished.is_empty() {
+                return Err(dependencies_not_done_error(&unfinished));
+            }
+            if current.execution_mode != forge_app::ExecutionMode::Manual {
+                return Err(RegistrationError::new(
+                    "dispatched-completion-forbidden",
+                    "Task completion requires an explicit human request in Manual Execution Mode; autonomous Task completion is unsupported",
+                ));
+            }
             checks::gate(&transaction, id)?;
+            execution_modes::safe_ownership(&transaction, id)?;
+            let open: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM record_attempts WHERE record_id = ?1 AND closed = 0)",
+                [id.cast_signed()], |row| row.get(0),
+            ).map_err(storage_error)?;
+            if open {
+                return Err(RegistrationError::new(
+                    "attempt-active",
+                    "close or invalidate the current attempt before completing Manual work",
+                ));
+            }
         }
         let updated = transaction.execute("UPDATE records SET status = 'done', completion_resolution = ?1 WHERE id = ?2 AND status = 'in_progress'", params![completion_resolution, id.cast_signed()]).map_err(storage_error)?;
         if updated == 0 {
@@ -6644,15 +6665,25 @@ mod tests {
         );
         assignment_add_comment(&store, "attempt", "cap-1", "comment-2", task.id, "finished")
             .unwrap();
-        assignment_complete_task(
-            &store,
-            "attempt",
-            "cap-1",
-            "done-1",
-            task.id,
-            Some("complete"),
-        )
-        .unwrap();
+        assert_eq!(
+            assignment_complete_task(
+                &store,
+                "attempt",
+                "cap-1",
+                "done-1",
+                task.id,
+                Some("complete"),
+            )
+            .unwrap_err()
+            .code,
+            "execution-mode-unsafe-ownership"
+        );
+        store
+            .close_agent_assignment("attempt", forge_app::AgentAssignmentClosureReason::Retired)
+            .unwrap();
+        store
+            .done_record(task.id, Some("Human verified completion"))
+            .unwrap();
         let audit = store
             .list_assignment_authorization_audits("attempt")
             .unwrap();

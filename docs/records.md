@@ -156,12 +156,18 @@ forge record check show 44 1 --compare-revision aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   --workspace personal --json
 ```
 
-All Checks must have a latest `pass` Assessment before either `record done` or
-`assignment done` may complete a Task. Pending and failed criteria block completion;
+A human explicitly completes Manual work with `record done`. All immutable Checks
+must have a current, evidence-bound `pass` Assessment in their fixed order.
+Pending and failed criteria block completion;
 `checks-not-passed` reports every blocked Check ID together with unresolved blocking
-Finding IDs. Finding-only failures use `completion-blocked`. Existing lifecycle and child
-constraints still apply. Completion never fabricates an Assessment. Assessments
-and invalidations are frozen once the Task is Done (`record-done`). Other Record
+Finding IDs. Finding-only failures use `completion-blocked`; the durable Dispatch Hold
+is retained, never implicitly cleared. Completion rechecks that direct prerequisites
+and children are Done, requires In Progress status and Manual mode, and rejects active or
+uncertain Assignment ownership, unreconciled retained resources and open attempts.
+Idle or absent Assignments are not proof of safe retirement. Dispatched Tasks reject
+completion with `dispatched-completion-forbidden`; historical Assignment credentials
+cannot bypass these gates or authorize autonomous completion. Completion never
+fabricates an Assessment. Assessments and invalidations are frozen once the Task is Done (`record-done`). Other Record
 Types are unchanged.
 
 Each immutable Assessment retains its numeric ID, verdict, actor, explanation,
@@ -224,9 +230,9 @@ supported way to create Assessments.
 
 Start the Task explicitly, then inspect `record check work <record>`. Freshness starts
 at generation 1. No Managed Worktree, Agent Profile or provider launch is needed.
-Execution Mode and full ownership/completion gates are delivered by the subsequent
-mode/completion slices; existing open Assignment ownership already rejects new Manual
-attempts. These commands do not retire ownership, reconcile resources or clear holds.
+Explicit Manual Execution Mode and confirmed safe ownership/resource state are required
+for Manual attempts and completion. These commands do not retire ownership, reconcile
+resources or clear holds.
 Task dispatch remains fail-closed with `task-dispatch-unsupported-contract`.
 
 `attempt.json` (use the actual Check ID and observed generation):
@@ -395,7 +401,7 @@ ownership is `finding-not-found`; unavailable Workspace records retain existing
 non-disclosure behavior. Blank attribution/explanation is `invalid-finding`,
 malformed evidence `invalid-revision`, and invalid pagination `invalid-page`.
 
-Both operator and Assignment Task completion transactionally enforce all Check
+Explicit Manual Task completion transactionally enforces all Check
 and unresolved blocking Finding gates, reporting all blocker IDs together.
 Awaiting-review remains unresolved, including rejected responses. Nonblocking
 Findings do not block Done. Completion adds no Finding/Assessment activity.
@@ -449,8 +455,9 @@ Grilling Assignments cannot operate on Task Findings.
 
 Every operation revalidates delivery and durable Assignment validity. Closed
 Assignments and revoked/replaced secret files fail `assignment-capability-denied`.
-Permitted post-Done review still requires valid existing authorization; it never
-revives capabilities or reverses Task completion. There is no template mutation,
+Task completion requires retirement/reconciliation first, so historical Assignment
+credentials do not permit post-Done review. Operator review never revives capabilities
+or reverses Task completion. There is no template mutation,
 identity registration, or execution orchestration through these commands.
 
 The same explanation, evidence, observed-version, lifecycle, pagination and atomic
@@ -460,7 +467,8 @@ state and bounded history. Each activity retains authenticated Assignment ID as
 `actor` and a separate `assignment_id` linking immutable profile/execution
 provenance. Operator activities keep `assignment_id: null`, even if actor text
 matches an Assignment ID. Neither route requires distinct reviewer identities.
-Both completion routes use the same transactional Check/Finding gates.
+Assignment completion cannot bypass Manual mode, Check/Finding or ownership gates;
+a human completes the Task after confirmed retirement and resource reconciliation.
 
 Typed RPC requests contain `assignmentId` and `secret` (no Debug implementation),
 with no Workspace/cwd envelope or caller Task/actor override:

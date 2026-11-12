@@ -55,6 +55,7 @@ async fn production_assignment_routes_authenticate_and_reject_spoofed_fields() {
     let store = SqliteProjectRepository::open(&fixture.database_path).unwrap();
     check_tests::pass_checks(&store, neighbor);
     store.start_owned_record(neighbor, "target-assignment").unwrap();
+    store.close_agent_assignment("target-assignment", forge_app::AgentAssignmentClosureReason::Retired).unwrap();
     store.done_record(neighbor, Some("satisfied")).unwrap();
     let owner = store.agent_assignment(&assignment).unwrap().record_id;
     let legacy_own = assignment_rpc(daemon.clone(), "agentDispatch.taskStart", serde_json::json!({"assignment_id":assignment,"capability_id":assignment,"correlation_id":"actual-secret","task_id":owner})).await;
@@ -427,6 +428,7 @@ fn authenticated_actions_require_acknowledgement_and_normal_lifecycle_validation
     let store = SqliteProjectRepository::open(&fixture.database_path).unwrap();
     check_tests::pass_checks(&store, prerequisite);
     store.start_owned_record(prerequisite, "target-assignment").unwrap();
+    store.close_agent_assignment("target-assignment", forge_app::AgentAssignmentClosureReason::Retired).unwrap();
     store.done_record(prerequisite, Some("satisfied")).unwrap();
     assert_eq!(
         session.start().unwrap().status,
@@ -512,7 +514,9 @@ fn authenticated_actions_require_acknowledgement_and_normal_lifecycle_validation
             },
         )
         .unwrap();
-    session.done(Some("implemented"), None).unwrap();
+    assert_eq!(session.done(Some("implemented"), None).unwrap_err().code, "execution-mode-unsafe-ownership");
+    store.close_agent_assignment(&assignment, forge_app::AgentAssignmentClosureReason::Retired).unwrap();
+    store.done_record(owner, Some("Human verified completion")).unwrap();
     assert!(session.start().is_err());
     std::fs::remove_dir_all(root).unwrap();
 }

@@ -271,6 +271,9 @@ async fn checks_round_trip_over_typed_rpc_and_preserve_workspace_bounds() {
             .is_err()
     );
     let passed = manual_pass(&client, task.id, check.id, 2, "rpc-second").await;
+    assert_eq!(client.show(selected(RecordIdRequest { id: task.id })).await.unwrap().status, "in_progress");
+    let unauthorized = client.done(SelectedRecordRequest::selected("missing", DoneRecordRequest { id: task.id, completion_resolution: None })).await;
+    assert!(unauthorized.is_err());
     client
         .done(selected(DoneRecordRequest {
             id: task.id,
@@ -291,6 +294,42 @@ async fn checks_round_trip_over_typed_rpc_and_preserve_workspace_bounds() {
         .unwrap_err();
     assert!(frozen.to_string().contains("record-done"));
     server.abort();
+}
+
+#[tokio::test]
+async fn selected_rpc_completion_rechecks_dependencies_and_safe_ownership() {
+    let (fixture, _, _) = assignment_test_daemon();
+    let store = SqliteProjectRepository::open(&fixture.database_path).unwrap();
+    let task = store.open_typed_record(&NewTypedRecord {
+        record_type: RecordType::Task, body: "Complete explicitly".into(),
+        project_slugs: vec!["alpha".into()], generated_by_ids: vec![],
+    }).unwrap();
+    pass_checks(&store, task.id);
+    let prerequisite = store.in_record_workspace("test").unwrap().open_typed_record(&NewTypedRecord {
+        record_type: RecordType::Task, body: "Late prerequisite".into(),
+        project_slugs: vec![], generated_by_ids: vec![],
+    }).unwrap();
+    store.relate_records(task.id, prerequisite.id, forge_app::RecordRelationshipKind::DependsOn).unwrap();
+    let daemon = Daemon::new(Application::new(
+        Box::new(SqliteProjectRepository::open(&fixture.database_path).unwrap()),
+        Box::new(TestInspector),
+    ).with_workspace_repository(Box::new(SqliteProjectRepository::open(&fixture.database_path).unwrap())));
+    let request = serde_json::json!({"workspace":"test", "id":task.id});
+    let before = store.list_record_updates(task.id).unwrap();
+    let blocked = assignment_rpc(daemon.clone(), "record.done", request.clone()).await;
+    assert_eq!(blocked["error"]["data"], "dependencies-not-done", "{blocked}");
+    assert_eq!(store.list_record_updates(task.id).unwrap(), before);
+    pass_checks(&store, prerequisite.id);
+    store.done_record(prerequisite.id, None).unwrap();
+    store.create_agent_assignment(&NewAgentAssignment { id: "completion-rpc".into(), record_id: task.id, project_slug: "alpha".into(), profile_revision: 1 }).unwrap();
+    let blocked = assignment_rpc(daemon.clone(), "record.done", request.clone()).await;
+    assert_eq!(blocked["error"]["data"], "execution-mode-unsafe-ownership", "{blocked}");
+    store.close_agent_assignment("completion-rpc", forge_app::AgentAssignmentClosureReason::Retired).unwrap();
+    let wrong_scope = assignment_rpc(daemon.clone(), "record.done", serde_json::json!({"workspace":"missing", "id":task.id})).await;
+    assert!(wrong_scope.get("error").is_some());
+    assert_eq!(store.show_record(task.id).unwrap().status, forge_app::RecordStatus::InProgress);
+    let done = assignment_rpc(daemon, "record.done", request).await;
+    assert_eq!(done["result"]["status"], "done", "{done}");
 }
 
 #[tokio::test]

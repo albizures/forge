@@ -203,10 +203,11 @@ async fn verify_context_completion(daemon: &Daemon, kind: RecordType) {
         done["human"] = serde_json::json!({"confirmed":true, "confirmation":"Human explicitly confirmed", "agreedOutcome":"Use flags"});
     }
     let completed = assignment_rpc(daemon.clone(), "assignment.done", done).await;
-    assert_eq!(
-        completed["result"]["record"]["status"], "done",
-        "{completed}"
-    );
+    if kind == RecordType::Task {
+        assert_eq!(completed["error"]["data"], "execution-mode-unsafe-ownership", "{completed}");
+    } else {
+        assert_eq!(completed["result"]["record"]["status"], "done", "{completed}");
+    }
 }
 
 #[tokio::test]

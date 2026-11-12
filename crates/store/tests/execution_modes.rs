@@ -278,6 +278,148 @@ fn active_uncertain_and_retained_assignment_state_prevents_policy_handoff_until_
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
+fn manual_completion_requires_confirmed_retirement_and_resource_reconciliation() {
+    let f = Fixture::new();
+    let s = &f.store;
+    let task = f.open(RecordType::Task, true);
+    change(s, task.id, ExecutionMode::Dispatched, ExecutionMode::Manual).unwrap();
+    s.start_record(task.id).unwrap();
+    let check = s.list_record_checks(task.id).unwrap().remove(0);
+    let evidence = Evidence::Artifact {
+        uri: "urn:complete:report".into(),
+        sha256: "a".repeat(64),
+    };
+    s.begin_record_attempt(
+        task.id,
+        &AttemptInput {
+            id: "complete".into(),
+            check_id: check.id,
+            generation: 1,
+            evidence: evidence.clone(),
+            actor: "operator".into(),
+        },
+    )
+    .unwrap();
+    s.submit_record_outcome(
+        task.id,
+        &OutcomeInput {
+            attempt_id: "complete".into(),
+            generation: 1,
+            evidence,
+            verdict: Verdict::Pass,
+            actor: "operator".into(),
+            message: "Verified report".into(),
+            disposition: OutcomeDisposition::Complete,
+            findings: vec![],
+            verifications: vec![],
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        s.show_record(task.id).unwrap().status,
+        RecordStatus::InProgress
+    );
+    s.create_agent_assignment(&NewAgentAssignment {
+        id: "completion-owner".into(),
+        record_id: task.id,
+        project_slug: "test/api".into(),
+        profile_revision: 1,
+    })
+    .unwrap();
+    let blocked = || {
+        let before = s.list_record_updates(task.id).unwrap();
+        assert_eq!(
+            s.done_record(task.id, None).unwrap_err().code,
+            "execution-mode-unsafe-ownership"
+        );
+        assert_eq!(s.list_record_updates(task.id).unwrap(), before);
+        assert_eq!(
+            s.show_record(task.id).unwrap().status,
+            RecordStatus::InProgress
+        );
+    };
+    for state in [
+        AgentAssignmentState::Provisioning,
+        AgentAssignmentState::Working,
+        AgentAssignmentState::Idle,
+        AgentAssignmentState::Blocked,
+        AgentAssignmentState::Unknown,
+    ] {
+        let current = s.agent_assignment("completion-owner").unwrap();
+        if current.state != state {
+            s.compare_and_set_agent_assignment_state("completion-owner", current.state, state)
+                .unwrap();
+        }
+        blocked();
+    }
+    s.close_agent_assignment("completion-owner", AgentAssignmentClosureReason::Lost)
+        .unwrap();
+    blocked();
+    let reopened = SqliteProjectRepository::open(&f.root.join("store.sqlite")).unwrap();
+    assert_eq!(
+        reopened.done_record(task.id, None).unwrap_err().code,
+        "execution-mode-unsafe-ownership"
+    );
+    s.add_agent_assignment_resource(&NewAgentAssignmentResource {
+        assignment_id: "completion-owner".into(),
+        resource_kind: "agent".into(),
+        resource_id: "retained".into(),
+    })
+    .unwrap();
+    s.resolve_unknown_agent_resources("completion-owner")
+        .unwrap();
+    blocked();
+    s.retire_agent_assignment_resource("completion-owner", "agent", "retained")
+        .unwrap();
+    s.hold_dispatch(task.id, "Retain operator safety diagnostic")
+        .unwrap();
+    let assignment = s.agent_assignment("completion-owner").unwrap();
+    let resources = s
+        .list_agent_assignment_resources("completion-owner")
+        .unwrap();
+    let checks = s.list_record_checks(task.id).unwrap();
+    assert_eq!(
+        s.done_record(task.id, Some("Verified manually"))
+            .unwrap()
+            .status,
+        RecordStatus::Done
+    );
+    assert_eq!(s.agent_assignment("completion-owner").unwrap(), assignment);
+    assert_eq!(
+        s.list_agent_assignment_resources("completion-owner")
+            .unwrap(),
+        resources
+    );
+    assert_eq!(s.list_record_checks(task.id).unwrap(), checks);
+    assert_eq!(
+        s.dispatch_hold(task.id).unwrap().unwrap().reason,
+        "Retain operator safety diagnostic"
+    );
+}
+
+#[test]
+fn dispatched_task_cannot_complete_through_operator_done() {
+    let f = Fixture::new();
+    let task = f.open(RecordType::Task, true);
+    f.store
+        .create_agent_assignment(&NewAgentAssignment {
+            id: "historical".into(),
+            record_id: task.id,
+            project_slug: "test/api".into(),
+            profile_revision: 1,
+        })
+        .unwrap();
+    f.store.start_owned_record(task.id, "historical").unwrap();
+    let before = f.store.list_record_updates(task.id).unwrap();
+    assert_eq!(
+        f.store.done_record(task.id, None).unwrap_err().code,
+        "dispatched-completion-forbidden"
+    );
+    assert_eq!(f.store.list_record_updates(task.id).unwrap(), before);
+}
+
+#[test]
 fn confirmed_retirement_without_resources_allows_explicit_manual_policy() {
     let f = Fixture::new();
     let task = f.open(RecordType::Task, true);

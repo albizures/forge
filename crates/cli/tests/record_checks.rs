@@ -1,4 +1,4 @@
-use forge_app::{Application, WorkspaceRepository};
+use forge_app::{Application, RecordRepository, WorkspaceRepository};
 use forge_server::{Daemon, GitInspector, router};
 use forge_store::SqliteProjectRepository;
 use std::{
@@ -155,6 +155,75 @@ async fn operators_submit_bound_manual_outcomes_with_evidence_freshness_and_dura
     outcome2["attempt_id"] = "manual-2".into();
     outcome2["generation"] = 2.into();
     json(submit("outcome", &outcome2));
+    assert_eq!(
+        json(run(&["record", "show", &task, "--json"]))["status"],
+        "in_progress"
+    );
+    let repository = SqliteProjectRepository::open(&database)
+        .unwrap()
+        .in_record_workspace("test")
+        .unwrap();
+    let prerequisite = repository
+        .open_typed_record(&forge_app::NewTypedRecord {
+            record_type: forge_app::RecordType::Task,
+            body: "Late prerequisite".into(),
+            project_slugs: vec![],
+            generated_by_ids: vec![],
+        })
+        .unwrap();
+    repository
+        .relate_records(
+            task.parse().unwrap(),
+            prerequisite.id,
+            forge_app::RecordRelationshipKind::DependsOn,
+        )
+        .unwrap();
+    let blocked = run(&["record", "done", &task]);
+    assert!(!blocked.status.success());
+    assert!(String::from_utf8_lossy(&blocked.stderr).contains("dependencies-not-done"));
+    repository.start_record(prerequisite.id).unwrap();
+    let prerequisite_check = repository
+        .list_record_checks(prerequisite.id)
+        .unwrap()
+        .remove(0);
+    let prerequisite_evidence = forge_app::outcomes::Evidence::Artifact {
+        uri: "urn:prerequisite:report".into(),
+        sha256: "b".repeat(64),
+    };
+    repository
+        .begin_record_attempt(
+            prerequisite.id,
+            &forge_app::outcomes::AttemptInput {
+                id: "prerequisite".into(),
+                check_id: prerequisite_check.id,
+                generation: 1,
+                evidence: prerequisite_evidence.clone(),
+                actor: "operator".into(),
+            },
+        )
+        .unwrap();
+    repository
+        .submit_record_outcome(
+            prerequisite.id,
+            &forge_app::outcomes::OutcomeInput {
+                attempt_id: "prerequisite".into(),
+                generation: 1,
+                evidence: prerequisite_evidence,
+                verdict: forge_app::checks::Verdict::Pass,
+                actor: "operator".into(),
+                message: "Verified dependency".into(),
+                disposition: forge_app::outcomes::OutcomeDisposition::Complete,
+                findings: vec![],
+                verifications: vec![],
+            },
+        )
+        .unwrap();
+    repository.done_record(prerequisite.id, None).unwrap();
+    assert!(
+        !run(&["record", "done", &task, "--workspace", "missing"])
+            .status
+            .success()
+    );
     json(run(&["record", "done", &task, "--json"]));
     assert_eq!(
         json(submit("outcome", &outcome)),
