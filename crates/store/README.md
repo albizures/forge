@@ -791,9 +791,13 @@ and residual blocking Finding IDs. Substantive failed-review handback retains th
 failed Assessment, invalidates all current Assessments and advances freshness in the
 same transaction; remediation input is the reviewed evidence. Interrupted review
 attempts close without an Assessment or substantive effects. Passing reviews cannot
-leave their own blocking Findings unresolved. Residual blockers retain a durable
-Dispatch Hold (`INSERT OR IGNORE`, preserving prior safety diagnostics); resolution
-never implicitly clears it. The serialized accepted result remains unchanged on
+leave their own blocking Findings unresolved. In Dispatched mode, owned blocking
+Findings permit remediation and review continuation; unlinked blockers or blockers
+remaining when all Checks pass retain a durable Dispatch Hold. Claim-time validation
+recreates an unlinked-blocker hold even after explicit clearance, until an operator
+assigns a review verification owner. Manual outcomes retain a hold for any residual
+blocker. Holds use `INSERT OR IGNORE`, preserving prior safety diagnostics; resolution
+never implicitly clears them. The serialized accepted result remains unchanged on
 replay, even when the live Findings or freshness later change.
 
 ## Initialization and compatibility

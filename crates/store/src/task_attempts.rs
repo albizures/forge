@@ -132,6 +132,8 @@ impl SqliteProjectRepository {
             }
         }
         execution_modes::safe_ownership(&tx, record)?;
+        // Explicit hold clearance cannot authorize work with an unowned blocker.
+        super::outcome_findings::retain_blocker_hold(&tx, record)?;
         let held: bool = tx
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM dispatch_holds WHERE record_id = ?1)",
@@ -140,6 +142,8 @@ impl SqliteProjectRepository {
             )
             .map_err(storage_error)?;
         if held {
+            // Retain any diagnostic created by the Finding gate, without claiming an attempt.
+            tx.commit().map_err(storage_error)?;
             return Err(error(
                 "dispatch-held",
                 "investigate the Dispatch Hold and explicitly resume",

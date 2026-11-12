@@ -33,12 +33,14 @@ Project, satisfied dependencies, available capacity, no hold and reconciled prio
 ownership/resources. In Progress continuation additionally requires durable
 Check-bound Assignment history; lifecycle status or missing ownership alone is
 not sufficient. This explicitly enrolls the Task in controlled acceptance
-continuation: after a current passing outcome, daemon reconciliation retires the
+continuation: after a current passing outcome or substantive review handback,
+daemon reconciliation retires the
 old agent, reconciles its retained resources, then launches the next required
 Check with its pinned profile. It does not create a worktree or complete the Task.
 Ordinary `dispatcher dispatch` and scheduling of unenrolled Tasks remain closed.
 Repeating acceptance returns the existing Assignment without relaunching it while
-no passing outcome is available; after a pass it uses the same retirement gate.
+no passing outcome or freshness invalidation is available; both use the same
+retirement gate.
 
 Forge selects the first Check without a current pass and atomically reserves its
 Assignment and attempt. The Check's immutable pinned profile is authoritative,
@@ -83,6 +85,23 @@ Description edits also advance freshness, even at the same commit; replacement
 returns to Implementation only after old ownership/resources are safely retired.
 Historical Assessments and Findings remain, but invalidated passes never revive.
 A false output commit claim is rejected without publishing an Assessment.
+
+A failed substantive review submits `"disposition": "handback"` with its Findings.
+Acceptance atomically records the failure and Findings, invalidates Implementation
+and every review, and advances freshness even if the commit is unchanged. After
+safe retirement, remediation starts at the reviewed commit and reruns all original
+Checks in order, with their unchanged pinned profiles. Implementation may propose
+fixes but cannot verify reviewer Findings; each originating Check verifies its own.
+A passing review that leaves its own blocking Findings unresolved is rejected
+without partial effects.
+
+Reviewer-owned blockers allow remediation and review continuation without creating
+a new hold. Unlinked blocking Findings stop continuation: explicitly assign a
+same-Task review verification owner and clear the diagnostic hold. Merely clearing
+the hold without assigning an owner cannot authorize another attempt. If every
+Check passes but blockers remain, acceptance retains a diagnostic hold, never Done.
+Existing holds are never automatically cleared, including after verified resolution.
+Manual outcome execution retains its explicit operator-clearance policy.
 
 Failed Implementation remains Implementation. Acceptance records evidence and outcomes,
 not provider retirement or permission for another live attempt. Handoff atomically

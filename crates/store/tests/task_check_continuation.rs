@@ -87,6 +87,257 @@ fn external_commit_after_acceptance_cannot_launch_a_review() {
     run_case("external-commit");
 }
 
+#[test]
+fn unlinked_blocker_requires_an_explicit_review_owner_even_after_hold_clearance() {
+    run_case("unlinked");
+}
+
+#[test]
+fn all_passing_checks_with_a_residual_blocker_are_held_not_completed() {
+    run_case("residual");
+}
+
+#[test]
+fn review_handback_remediates_and_reruns_both_original_checks() {
+    run_case("handback");
+}
+
+#[test]
+fn review_handback_can_verify_an_overlooked_fix_at_the_same_commit() {
+    run_case("same-commit-handback");
+}
+
+#[allow(clippy::too_many_lines)]
+fn handback(
+    store: &SqliteProjectRepository,
+    path: &std::path::Path,
+    application: &impl Fn() -> Application,
+    head: &Mutex<String>,
+    unavailable: &AtomicBool,
+    change_commit: bool,
+) {
+    use forge_app::{
+        findings::{FindingState, Severity},
+        outcomes::{FindingVerification, OutcomeFinding},
+    };
+    let app = application();
+    let task = store
+        .list_records(&forge_app::RecordListFilter {
+            project_slug: None,
+            status: None,
+            record_type: Some(RecordType::Task),
+        })
+        .unwrap()[0]
+        .id;
+    let checks = app.list_record_checks(task).unwrap();
+    let secrets = path.parent().unwrap().join("secrets");
+    std::fs::create_dir_all(&secrets).unwrap();
+    let mut finding = None;
+    let mut replay = None;
+    let mut stale = None;
+    for index in 0..6 {
+        let (assignment, _) = app.execute_task_check_acceptance(task).unwrap();
+        let attempt = store
+            .assignment_check_attempt(&assignment.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(attempt.check_id, checks[index % 3].id);
+        assert_eq!(
+            Some(assignment.profile.revision),
+            checks[index % 3].profile_revision
+        );
+        assert_eq!(attempt.generation, if index < 3 { 1 } else { 2 });
+        std::fs::write(secrets.join(&assignment.id), "secret").unwrap();
+        let session = app.assignment(&secrets, &assignment.id, "secret").unwrap();
+        session.acknowledge().unwrap();
+        session.start().unwrap();
+        session.context().unwrap();
+        if index == 3 && change_commit {
+            *head.lock().unwrap() = "b".repeat(40);
+        }
+        let mut evidence = attempt.evidence.clone();
+        if let Evidence::Repository { commit, .. } = &mut evidence {
+            commit.clone_from(&head.lock().unwrap());
+        }
+        let mut input = OutcomeInput {
+            attempt_id: attempt.id.clone(),
+            generation: attempt.generation,
+            evidence,
+            verdict: Verdict::Pass,
+            actor: "ignored".into(),
+            message: "Assessed deliverable".into(),
+            disposition: OutcomeDisposition::Complete,
+            findings: vec![],
+            verifications: vec![],
+        };
+        if index == 1 {
+            stale = Some((assignment.id.clone(), input.clone()));
+        }
+        if index == 2 {
+            input.verdict = Verdict::Fail;
+            input.disposition = OutcomeDisposition::Handback;
+            input.findings.push(OutcomeFinding {
+                severity: Severity::Major,
+                blocking: Some(true),
+                message: "Report omits required result".into(),
+            });
+            // Fail after Assessment, Finding and invalidation writes, before acceptance commits.
+            let fault = rusqlite::Connection::open(path).unwrap();
+            fault.execute_batch("CREATE TRIGGER reject_outcome BEFORE UPDATE OF result_json ON record_attempts WHEN NEW.result_json IS NOT NULL BEGIN SELECT RAISE(ABORT, 'injected acceptance failure'); END;").unwrap();
+            let before = app.list_record_checks(task).unwrap();
+            let updates = store.list_record_updates(task).unwrap();
+            assert!(session.submit_outcome(&input).is_err());
+            assert_eq!(app.list_record_checks(task).unwrap(), before);
+            assert_eq!(store.list_record_updates(task).unwrap(), updates);
+            assert!(
+                app.list_record_findings(task, None, 100, None)
+                    .unwrap()
+                    .findings
+                    .is_empty()
+            );
+            assert_eq!(app.record_work_state(task).unwrap().generation, 1);
+            assert!(store.dispatch_hold(task).unwrap().is_none());
+            fault.execute_batch("DROP TRIGGER reject_outcome").unwrap();
+        }
+        if index == 3 || index == 5 {
+            let raised: &forge_app::findings::Finding = finding.as_ref().unwrap();
+            input.verifications.push(FindingVerification {
+                finding_id: raised.id,
+                expected_version: raised.version,
+                message: "Verified against current deliverable".into(),
+            });
+            if index == 3 {
+                let before = store.list_record_updates(task).unwrap();
+                assert_eq!(
+                    session.submit_outcome(&input).unwrap_err().code,
+                    "unauthorized-verification"
+                );
+                assert_eq!(store.list_record_updates(task).unwrap(), before);
+                input.verifications.clear();
+            } else {
+                let mut unresolved = input.clone();
+                unresolved.verifications.clear();
+                let before = store.list_record_updates(task).unwrap();
+                assert_eq!(
+                    session.submit_outcome(&unresolved).unwrap_err().code,
+                    "unresolved-check-findings"
+                );
+                assert_eq!(store.list_record_updates(task).unwrap(), before);
+                assert!(
+                    app.list_record_checks(task).unwrap()[2]
+                        .current_verdict
+                        .is_none()
+                );
+            }
+        }
+        let accepted = session.submit_outcome(&input).unwrap();
+        assert_eq!(session.submit_outcome(&input).unwrap(), accepted);
+        if index == 2 {
+            finding = Some(accepted.findings[0].clone());
+            replay = Some((assignment.id.clone(), input.clone(), accepted.clone()));
+            assert_eq!(accepted.work.generation, 2);
+            assert!(
+                app.list_record_checks(task)
+                    .unwrap()
+                    .iter()
+                    .all(|c| c.current_verdict.is_none())
+            );
+            assert!(
+                app.list_record_checks(task).unwrap().iter().all(|c| c
+                    .latest_assessment
+                    .as_ref()
+                    .unwrap()
+                    .invalidation
+                    .is_some())
+            );
+            // Linked reviewer Findings must allow remediation without operator clearance.
+            assert!(store.dispatch_hold(task).unwrap().is_none());
+            let (old_id, old) = stale.as_ref().unwrap();
+            let old_session = app.assignment(&secrets, old_id, "secret").unwrap();
+            let mut late = old.clone();
+            late.message = "Late changed submission".into();
+            assert!(old_session.submit_outcome(&late).is_err());
+            // Handback is accepted, but cleanup failure still reserves ownership/capacity.
+            unavailable.store(true, std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(
+                application()
+                    .execute_task_check_acceptance(task)
+                    .unwrap_err()
+                    .code,
+                "agent-retirement-failed"
+            );
+            assert!(
+                app.agent_assignment_info(&assignment.id)
+                    .unwrap()
+                    .capacity_reserved()
+            );
+            assert!(
+                store
+                    .list_agent_assignments(task)
+                    .unwrap()
+                    .iter()
+                    .all(|a| a.closed_at_millis.is_some())
+            );
+            unavailable.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+        // New connections reconcile retirement and start the next original Check.
+        application()
+            .reconcile_agent_dispatch("handback", (index as u64 + 1) * 400_000)
+            .unwrap();
+        assert!(
+            store
+                .agent_assignment(&assignment.id)
+                .unwrap()
+                .closed_at_millis
+                .is_some()
+        );
+        assert!(
+            store
+                .list_agent_assignment_resources(&assignment.id)
+                .unwrap()
+                .iter()
+                .all(|r| r.retired_at_millis.is_some())
+        );
+    }
+    let (id, input, accepted) = replay.unwrap();
+    let restarted = application();
+    assert_eq!(
+        restarted
+            .assignment(&secrets, &id, "secret")
+            .unwrap()
+            .submit_outcome(&input)
+            .unwrap(),
+        accepted
+    );
+    let after = restarted.list_record_checks(task).unwrap();
+    assert!(
+        after
+            .iter()
+            .all(|c| c.current_verdict == Some(Verdict::Pass))
+    );
+    assert_eq!(
+        after
+            .iter()
+            .map(|c| (c.id, c.profile_revision))
+            .collect::<Vec<_>>(),
+        checks
+            .iter()
+            .map(|c| (c.id, c.profile_revision))
+            .collect::<Vec<_>>()
+    );
+    let finding = restarted
+        .show_record_finding(task, finding.unwrap().id, None, 100, None)
+        .unwrap();
+    assert_eq!(finding.finding.state, FindingState::Resolved);
+    assert_eq!(finding.finding.verification_check_id, Some(checks[2].id));
+    assert_eq!(store.list_agent_assignments(task).unwrap().len(), 6);
+    assert_eq!(
+        restarted.show_record(task).unwrap().status,
+        RecordStatus::InProgress
+    );
+    assert!(store.dispatch_hold(task).unwrap().is_none());
+}
+
 #[allow(clippy::too_many_lines)]
 fn run_case(case: &str) {
     let root = std::env::temp_dir().join(format!(
@@ -191,7 +442,73 @@ fn run_case(case: &str) {
         )
         .with_workspace_repository(Box::new(SqliteProjectRepository::open(&path).unwrap()))
     };
+    if matches!(case, "handback" | "same-commit-handback") {
+        handback(
+            &store,
+            &path,
+            &application,
+            &head,
+            &unavailable,
+            case == "handback",
+        );
+        std::fs::remove_dir_all(root).unwrap();
+        return;
+    }
     let app = application();
+    if case == "unlinked" {
+        use forge_app::findings::{
+            FindingMutation, FindingMutationInput, FindingRaiseInput, FindingResolveInput, Severity,
+        };
+        let raised = app
+            .raise_record_finding(
+                task.id,
+                &FindingRaiseInput {
+                    severity: Severity::Major,
+                    blocking: Some(true),
+                    check_id: None,
+                    assessment_id: None,
+                    actor: "operator".into(),
+                    message: "Needs a verification owner".into(),
+                    revision: None,
+                    dirty: None,
+                },
+            )
+            .unwrap();
+        assert!(store.dispatch_hold(task.id).unwrap().is_some());
+        store.resume_dispatch(task.id).unwrap();
+        assert_eq!(
+            app.execute_task_check_acceptance(task.id).unwrap_err().code,
+            "dispatch-held"
+        );
+        assert!(store.dispatch_hold(task.id).unwrap().is_some());
+        assert!(launches.lock().unwrap().is_empty());
+        let checks = app.list_record_checks(task.id).unwrap();
+        app.mutate_record_finding(
+            task.id,
+            raised.id,
+            &FindingMutationInput {
+                change: FindingMutation::AssignVerification {
+                    check_id: checks[2].id,
+                },
+                explanation: FindingResolveInput {
+                    expected_version: raised.version,
+                    actor: "operator".into(),
+                    message: "Review 2 owns verification".into(),
+                    revision: None,
+                    dirty: None,
+                },
+            },
+        )
+        .unwrap();
+        assert!(store.dispatch_hold(task.id).unwrap().is_some());
+        store.resume_dispatch(task.id).unwrap();
+        application()
+            .execute_task_check_acceptance(task.id)
+            .unwrap();
+        assert_eq!(launches.lock().unwrap().len(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+        return;
+    }
     let (mut assignment, _) = app.execute_task_check_acceptance(task.id).unwrap();
     assert_eq!(
         app.start_record(task.id).unwrap_err().code,
@@ -225,7 +542,7 @@ fn run_case(case: &str) {
         if let Evidence::Repository { commit, .. } = &mut output {
             *commit = "b".repeat(40);
         }
-        let input = OutcomeInput {
+        let mut input = OutcomeInput {
             attempt_id: assignment.id.clone(),
             generation: attempt.generation,
             evidence: output,
@@ -236,6 +553,13 @@ fn run_case(case: &str) {
             findings: vec![],
             verifications: vec![],
         };
+        if index == 0 && case == "residual" {
+            input.findings.push(forge_app::outcomes::OutcomeFinding {
+                severity: forge_app::findings::Severity::Major,
+                blocking: Some(true),
+                message: "Implementation-owned residual blocker".into(),
+            });
+        }
         if index == 0 && case == "dirty" {
             dirty.store(true, std::sync::atomic::Ordering::SeqCst);
             assert_eq!(
@@ -334,6 +658,9 @@ fn run_case(case: &str) {
             );
         }
         let accepted = session.submit_outcome(&input).unwrap();
+        if case == "residual" {
+            assert_eq!(store.dispatch_hold(task.id).unwrap().is_some(), index == 2);
+        }
         if index == 0 && case == "external-commit" {
             *head.lock().unwrap() = "c".repeat(40);
             assert_eq!(session.submit_outcome(&input).unwrap(), accepted);
@@ -498,12 +825,45 @@ fn run_case(case: &str) {
     );
     assert_eq!(
         app.execute_task_check_acceptance(task.id).unwrap_err().code,
-        "checks-passed"
+        if case == "residual" {
+            "dispatch-held"
+        } else {
+            "checks-passed"
+        }
     );
     assert_eq!(
         app.dispatch_record(task.id).unwrap_err().code,
         "task-dispatch-unsupported-contract"
     );
+    if case == "residual" {
+        let finding = app
+            .list_record_findings(task.id, None, 100, None)
+            .unwrap()
+            .findings
+            .remove(0);
+        let hold = store.dispatch_hold(task.id).unwrap().unwrap();
+        assert!(hold.reason.contains(&finding.id.to_string()));
+        store.resume_dispatch(task.id).unwrap();
+        assert_eq!(
+            application()
+                .execute_task_check_acceptance(task.id)
+                .unwrap_err()
+                .code,
+            "dispatch-held"
+        );
+        assert!(store.dispatch_hold(task.id).unwrap().is_some());
+        application()
+            .reconcile_agent_dispatch("residual", 2_000_000)
+            .unwrap();
+        assert_eq!(
+            app.show_record(task.id).unwrap().status,
+            RecordStatus::InProgress
+        );
+        assert!(store.dispatch_hold(task.id).unwrap().is_some());
+        assert_eq!(launches.lock().unwrap().len(), 3);
+        std::fs::remove_dir_all(root).unwrap();
+        return;
+    }
     // In Progress alone is not durable Forge-managed ownership evidence.
     let unmanaged = store
         .open_typed_record(&NewTypedRecord {

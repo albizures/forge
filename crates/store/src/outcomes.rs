@@ -220,6 +220,8 @@ impl SqliteProjectRepository {
             return Ok(());
         }
         super::execution_modes::safe_ownership(&tx, record)?;
+        // Recheck even when every Check passes and no further claim will be made.
+        super::outcome_findings::retain_blocker_hold(&tx, record)?;
         let held: bool = tx
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM dispatch_holds WHERE record_id = ?1)",
@@ -228,6 +230,7 @@ impl SqliteProjectRepository {
             )
             .map_err(storage_error)?;
         if held {
+            tx.commit().map_err(storage_error)?;
             return Err(error(
                 "dispatch-held",
                 "investigate the Dispatch Hold and explicitly resume",

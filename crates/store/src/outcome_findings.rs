@@ -109,16 +109,49 @@ pub(super) fn retain_blocker_hold(
     record: u64,
 ) -> Result<Vec<u64>, RegistrationError> {
     let blockers = findings::blockers(c, record)?;
-    if !blockers.is_empty() {
-        let reason = format!(
-            "Unresolved blocking Findings {blockers:?}; assign a verification owner to unlinked Findings and obtain Check verification before completion. Explicit operator clearance is required after remediation."
-        );
-        // Never replace or clear a prior ownership/resource safety diagnostic.
-        c.execute(
-            "INSERT OR IGNORE INTO dispatch_holds(record_id, reason) VALUES (?1, ?2)",
-            params![record.cast_signed(), reason],
-        )
-        .map_err(storage_error)?;
+    if blockers.is_empty() {
+        return Ok(blockers);
     }
+    // In Dispatched mode, owned Findings are work for their original reviews, not
+    // an operator stop. Unlinked blockers and residual blockers after every pass
+    // still require intervention. Manual execution retains its explicit-clearance policy.
+    let task = super::load_record(c, record)?;
+    if task.execution_mode == forge_app::ExecutionMode::Dispatched {
+        let mut unlinked = false;
+        for id in &blockers {
+            if findings::load(c, record, *id, task.project_slugs.first().cloned())?
+                .verification_check_id
+                .is_none()
+            {
+                unlinked = true;
+                break;
+            }
+        }
+        if !unlinked {
+            let mut statement = c
+                .prepare("SELECT id FROM record_checks WHERE record_id = ?1")
+                .map_err(storage_error)?;
+            let ids = statement
+                .query_map([record.cast_signed()], |row| row.get::<_, i64>(0))
+                .map_err(storage_error)?;
+            for id in ids {
+                if super::checks::load(c, record, id.map_err(storage_error)?.cast_unsigned())?
+                    .current_verdict
+                    != Some(Verdict::Pass)
+                {
+                    return Ok(blockers);
+                }
+            }
+        }
+    }
+    let reason = format!(
+        "Unresolved blocking Findings {blockers:?}; assign a verification owner to unlinked Findings and obtain Check verification before completion. Explicit operator clearance is required after remediation."
+    );
+    // Never replace or clear a prior ownership/resource safety diagnostic.
+    c.execute(
+        "INSERT OR IGNORE INTO dispatch_holds(record_id, reason) VALUES (?1, ?2)",
+        params![record.cast_signed(), reason],
+    )
+    .map_err(storage_error)?;
     Ok(blockers)
 }
