@@ -2154,6 +2154,14 @@ mod tests {
                 "commands.md",
                 include_str!("../../../skills/forge/commands.md"),
             ),
+            (
+                "spec/define.md",
+                include_str!("../../../skills/spec/define.md"),
+            ),
+            (
+                "spec/to-tasks.md",
+                include_str!("../../../skills/spec/to-tasks.md"),
+            ),
         ];
         let mut covered = std::collections::HashSet::new();
         for (name, document) in documents {
