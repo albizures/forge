@@ -478,6 +478,11 @@ fn review_handback_can_verify_an_overlooked_fix_at_the_same_commit() {
     run_case("same-commit-handback");
 }
 
+#[test]
+fn handback_keeps_three_distinct_check_profiles_despite_template_and_workspace_drift() {
+    run_case("profile-drift-handback");
+}
+
 #[allow(clippy::too_many_lines)]
 fn handback(
     store: &SqliteProjectRepository,
@@ -879,6 +884,37 @@ fn run_case(case: &str) {
             },
         )
         .unwrap();
+    let original_profiles = if case == "profile-drift-handback" {
+        let review_one = store
+            .register_agent_profile("test", RecordType::Task, &policy)
+            .unwrap();
+        let review_two = store
+            .register_agent_profile("test", RecordType::Task, &policy)
+            .unwrap();
+        let profiles = [pinned.revision, review_one.revision, review_two.revision];
+        store
+            .replace_check_template(
+                "test/api",
+                &TemplateReplacement {
+                    expected_version: 1,
+                    actor: "operator".into(),
+                    message: "Distinct Implementation and review profiles".into(),
+                    criteria: ["Implementation", "Standards", "Spec review"]
+                        .into_iter()
+                        .zip(profiles)
+                        .map(|(name, revision)| CheckCriterion {
+                            name: name.into(),
+                            description: name.into(),
+                            profile_revision: Some(revision),
+                        })
+                        .collect(),
+                },
+            )
+            .unwrap();
+        profiles
+    } else {
+        [pinned.revision; 3]
+    };
     let task = store
         .open_typed_record(&NewTypedRecord {
             record_type: RecordType::Task,
@@ -887,6 +923,40 @@ fn run_case(case: &str) {
             generated_by_ids: vec![],
         })
         .unwrap();
+    if case == "profile-drift-handback" {
+        let replacement = store
+            .register_agent_profile("test", RecordType::Task, &policy)
+            .unwrap();
+        store
+            .select_workspace_profile("test", RecordType::Task, Some(replacement.revision))
+            .unwrap();
+        store
+            .replace_check_template(
+                "test/api",
+                &TemplateReplacement {
+                    expected_version: 2,
+                    actor: "operator".into(),
+                    message: "Only future Tasks use replacement profiles".into(),
+                    criteria: ["Implementation", "Standards", "Spec review"]
+                        .map(|name| CheckCriterion {
+                            name: name.into(),
+                            description: name.into(),
+                            profile_revision: Some(replacement.revision),
+                        })
+                        .into(),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .list_record_checks(task.id)
+                .unwrap()
+                .iter()
+                .map(|check| check.profile_revision.unwrap())
+                .collect::<Vec<_>>(),
+            original_profiles
+        );
+    }
     store.reserve_worktree_claim(task.id).unwrap();
     store.activate_worktree_claim(task.id).unwrap();
     let launches = Arc::new(Mutex::new(Vec::new()));
@@ -985,14 +1055,22 @@ fn run_case(case: &str) {
         std::fs::remove_dir_all(root).unwrap();
         return;
     }
-    if matches!(case, "handback" | "same-commit-handback") {
+    if matches!(
+        case,
+        "handback" | "same-commit-handback" | "profile-drift-handback"
+    ) {
         handback(
             &store,
             &path,
             &application,
             &head,
             &unavailable,
-            case == "handback",
+            case != "same-commit-handback",
+        );
+        assert_eq!(
+            *launches.lock().unwrap(),
+            original_profiles.repeat(2),
+            "each original Check uses its own pinned revision on both cycles"
         );
         std::fs::remove_dir_all(root).unwrap();
         return;
