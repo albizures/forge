@@ -1,22 +1,94 @@
 use forge_app::{
     AgentDispatchRepository, Application, DispatchWorkspace,
     ExecutionMode::{Dispatched, Manual},
-    ManagedWorktreeRepository, NewTypedRecord, Project, ProjectRepository, RecordRepository,
-    RecordStatus, RecordType, WorkspaceDispatchRepository, WorkspaceRepository,
+    ManagedWorktreeAdapter, ManagedWorktreeRepository, NewTypedRecord, Project, ProjectRepository,
+    RecordRepository, RecordStatus, RecordType, RegistrationError, RepositoryInspector,
+    WorkspaceDispatchRepository, WorkspaceRepository, WorktreeSafetyAssessment,
     agent_profiles::ResourceCatalog,
     check_templates::{CheckCriterion, TemplateReplacement},
     checks::Verdict,
-    outcomes::{OutcomeDisposition, OutcomeInput},
+    outcomes::{Evidence, OutcomeDisposition, OutcomeInput},
 };
 use forge_store::SqliteProjectRepository;
 use std::sync::{Arc, Mutex, atomic::AtomicBool};
 #[path = "support/task_attempt_adapters.rs"]
 mod adapters;
-use adapters::{Local, Provider};
+use adapters::Provider;
+
+struct Head(Arc<Mutex<String>>);
+impl RepositoryInspector for Head {
+    fn inspect(&self, _: &std::path::Path) -> Result<Project, RegistrationError> {
+        unreachable!()
+    }
+    fn head_commit(&self, _: &std::path::Path) -> Result<String, RegistrationError> {
+        Ok(self.0.lock().unwrap().clone())
+    }
+}
+
+struct Checkout(Arc<AtomicBool>);
+impl ManagedWorktreeAdapter for Checkout {
+    fn create(
+        &self,
+        _: &std::path::Path,
+        _: &std::path::Path,
+        _: &str,
+        _: &str,
+    ) -> Result<(), RegistrationError> {
+        unreachable!()
+    }
+    fn remove(&self, _: &std::path::Path, _: bool) -> Result<(), RegistrationError> {
+        unreachable!()
+    }
+    fn assess(&self, path: &std::path::Path) -> WorktreeSafetyAssessment {
+        let mut assessment = adapters::Local.assess(path);
+        if self.0.load(std::sync::atomic::Ordering::SeqCst) {
+            assessment.facts.push("dirty".into());
+            assessment.removable = false;
+        } else {
+            assessment.facts.extend(["clean".into(), "ahead:1".into()]);
+        }
+        assessment
+    }
+    fn run_setup_hook(
+        &self,
+        _: &std::path::Path,
+        _: &str,
+        _: &str,
+        _: u64,
+        _: &str,
+        _: &str,
+    ) -> Result<(), RegistrationError> {
+        unreachable!()
+    }
+}
 
 #[test]
-#[allow(clippy::too_many_lines)]
+fn dirty_implementation_creates_a_durable_hold_without_an_assessment() {
+    run_case("dirty");
+}
+
+#[test]
 fn controlled_checks_continue_only_after_retirement_and_survive_restart() {
+    run_case("success");
+}
+
+#[test]
+fn review_mutation_is_held_and_invalidates_historical_passes() {
+    run_case("review-mutation");
+}
+
+#[test]
+fn description_edit_retires_before_same_commit_fresh_implementation() {
+    run_case("description-edit");
+}
+
+#[test]
+fn external_commit_after_acceptance_cannot_launch_a_review() {
+    run_case("external-commit");
+}
+
+#[allow(clippy::too_many_lines)]
+fn run_case(case: &str) {
     let root = std::env::temp_dir().join(format!(
         "forge-continuation-{}-{}",
         std::process::id(),
@@ -103,17 +175,19 @@ fn controlled_checks_continue_only_after_retirement_and_survive_restart() {
     store.activate_worktree_claim(task.id).unwrap();
     let launches = Arc::new(Mutex::new(Vec::new()));
     let unavailable = Arc::new(AtomicBool::new(false));
+    let head = Arc::new(Mutex::new("a".repeat(40)));
+    let dirty = Arc::new(AtomicBool::new(false));
     let application = || {
         Application::with_managed_worktrees_and_agent_dispatch(
             Box::new(SqliteProjectRepository::open(&path).unwrap()),
             Box::new(SqliteProjectRepository::open(&path).unwrap()),
-            Box::new(Local),
+            Box::new(Checkout(dirty.clone())),
             Box::new(SqliteProjectRepository::open(&path).unwrap()),
             Box::new(Provider {
                 unavailable: unavailable.clone(),
                 launches: launches.clone(),
             }),
-            Box::new(Local),
+            Box::new(Head(head.clone())),
         )
         .with_workspace_repository(Box::new(SqliteProjectRepository::open(&path).unwrap()))
     };
@@ -139,10 +213,22 @@ fn controlled_checks_continue_only_after_retirement_and_survive_restart() {
         session.acknowledge().unwrap();
         session.start().unwrap();
         session.context().unwrap();
+        if index == 0 {
+            // Authorized Implementation output B is not external drift from input A.
+            *head.lock().unwrap() = "b".repeat(40);
+        } else {
+            assert!(
+                matches!(&attempt.evidence, Evidence::Repository { commit, .. } if commit == &"b".repeat(40))
+            );
+        }
+        let mut output = attempt.evidence.clone();
+        if let Evidence::Repository { commit, .. } = &mut output {
+            *commit = "b".repeat(40);
+        }
         let input = OutcomeInput {
             attempt_id: assignment.id.clone(),
             generation: attempt.generation,
-            evidence: attempt.evidence,
+            evidence: output,
             verdict: Verdict::Pass,
             actor: "ignored".into(),
             message: "Passed".into(),
@@ -150,7 +236,145 @@ fn controlled_checks_continue_only_after_retirement_and_survive_restart() {
             findings: vec![],
             verifications: vec![],
         };
-        session.submit_outcome(&input).unwrap();
+        if index == 0 && case == "dirty" {
+            dirty.store(true, std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(
+                session.submit_outcome(&input).unwrap_err().code,
+                "evidence-drift"
+            );
+            assert!(store.dispatch_hold(task.id).unwrap().is_some());
+            assert!(
+                app.list_record_checks(task.id).unwrap()[0]
+                    .latest_assessment
+                    .is_none()
+            );
+            application()
+                .reconcile_agent_dispatch("dirty", 400_000)
+                .unwrap();
+            assert_eq!(launches.lock().unwrap().len(), 1);
+            assert!(store.dispatch_hold(task.id).unwrap().is_some());
+            assert!(dirty.load(std::sync::atomic::Ordering::SeqCst));
+            std::fs::remove_dir_all(root).unwrap();
+            return;
+        }
+        if index == 1 && matches!(case, "review-mutation" | "description-edit") {
+            if case == "review-mutation" {
+                *head.lock().unwrap() = "c".repeat(40);
+                assert_eq!(
+                    session.submit_outcome(&input).unwrap_err().code,
+                    "evidence-drift"
+                );
+                assert!(store.dispatch_hold(task.id).unwrap().is_some());
+            } else {
+                app.edit_record(task.id, "Changed requirements").unwrap();
+            }
+            assert_eq!(
+                session.submit_outcome(&input).unwrap_err().code,
+                "stale-generation"
+            );
+            let work = app.record_work_state(task.id).unwrap();
+            assert_eq!(work.generation, attempt.generation + 1);
+            assert!(
+                app.list_record_checks(task.id)
+                    .unwrap()
+                    .iter()
+                    .all(|c| c.current_verdict.is_none())
+            );
+            assert!(
+                app.list_record_checks(task.id).unwrap()[0]
+                    .latest_assessment
+                    .is_some()
+            );
+            unavailable.store(true, std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(
+                application()
+                    .execute_task_check_acceptance(task.id)
+                    .unwrap_err()
+                    .code,
+                "agent-retirement-failed"
+            );
+            assert_eq!(launches.lock().unwrap().len(), 2);
+            unavailable.store(false, std::sync::atomic::Ordering::SeqCst);
+            application()
+                .reconcile_agent_dispatch("freshness", 800_000)
+                .unwrap();
+            if case == "review-mutation" {
+                assert!(store.dispatch_hold(task.id).unwrap().is_some());
+                assert_eq!(launches.lock().unwrap().len(), 2);
+                store.resume_dispatch(task.id).unwrap();
+            }
+            let (replacement, _) = application()
+                .execute_task_check_acceptance(task.id)
+                .unwrap();
+            let fresh = store
+                .assignment_check_attempt(&replacement.id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(fresh.check_id, checks[0].id);
+            assert_eq!(fresh.generation, attempt.generation + 1);
+            assert_eq!(replacement.profile.revision, pinned.revision);
+            assert!(
+                matches!(fresh.evidence, Evidence::Repository { commit, .. } if commit == head.lock().unwrap().as_str())
+            );
+            std::fs::remove_dir_all(root).unwrap();
+            return;
+        }
+        if index == 0 {
+            let mut false_output = input.clone();
+            false_output.evidence = attempt.evidence.clone();
+            assert_eq!(
+                session.submit_outcome(&false_output).unwrap_err().code,
+                "evidence-mismatch"
+            );
+            assert!(store.dispatch_hold(task.id).unwrap().is_none());
+            assert!(
+                app.list_record_checks(task.id).unwrap()[0]
+                    .latest_assessment
+                    .is_none()
+            );
+        }
+        let accepted = session.submit_outcome(&input).unwrap();
+        if index == 0 && case == "external-commit" {
+            *head.lock().unwrap() = "c".repeat(40);
+            assert_eq!(session.submit_outcome(&input).unwrap(), accepted);
+            assert_eq!(
+                application()
+                    .execute_task_check_acceptance(task.id)
+                    .unwrap_err()
+                    .code,
+                "evidence-drift"
+            );
+            assert_eq!(launches.lock().unwrap().len(), 1);
+            assert!(store.dispatch_hold(task.id).unwrap().is_some());
+            assert_eq!(
+                app.record_work_state(task.id).unwrap().generation,
+                attempt.generation + 1
+            );
+            assert!(
+                app.list_record_checks(task.id)
+                    .unwrap()
+                    .iter()
+                    .all(|c| c.current_verdict.is_none())
+            );
+            assert_eq!(session.submit_outcome(&input).unwrap(), accepted);
+            assert_eq!(
+                session.context().err().unwrap().code,
+                "assignment-capability-denied"
+            );
+            let restarted = application();
+            let replay = restarted
+                .assignment(&secrets, &assignment.id, "secret")
+                .unwrap();
+            assert_eq!(replay.submit_outcome(&input).unwrap(), accepted);
+            let mut conflicting = input.clone();
+            conflicting.message = "Different result".into();
+            assert_eq!(
+                replay.submit_outcome(&conflicting).unwrap_err().code,
+                "outcome-conflict"
+            );
+            std::fs::remove_dir_all(root).unwrap();
+            return;
+        }
         assert!(
             store
                 .agent_assignment(&assignment.id)

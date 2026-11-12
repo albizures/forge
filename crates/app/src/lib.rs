@@ -633,10 +633,24 @@ pub trait RecordRepository: ProjectRepository {
         _record: u64,
         _assignment: &str,
         _input: &outcomes::OutcomeInput,
+        _observed: &Result<outcomes::Evidence, RegistrationError>,
     ) -> Result<outcomes::AcceptedOutcome, RegistrationError> {
         Err(RegistrationError::new(
             "assignment-outcome-required",
             "Check-bound Assignment required",
+        ))
+    }
+    /// Reconcile observed deliverables only after ownership and resources are safe.
+    /// # Errors
+    /// Holds and invalidates unexpected evidence; never modifies the checkout.
+    fn reconcile_task_evidence(
+        &self,
+        _record: u64,
+        _observed: &Result<outcomes::Evidence, RegistrationError>,
+    ) -> Result<(), RegistrationError> {
+        Err(RegistrationError::new(
+            "unsupported",
+            "evidence reconciliation unavailable",
         ))
     }
     /// Atomically submit an attempt's outcome, with durable exact replay.

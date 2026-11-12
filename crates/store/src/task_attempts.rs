@@ -41,10 +41,12 @@ impl SqliteProjectRepository {
         };
         self.ensure_record_workspace(&tx, attempt.record_id)?;
         let check = checks::load(&tx, attempt.record_id, attempt.check_id)?;
-        if check.current_verdict != Some(Verdict::Pass)
-            || !check.latest_assessment.as_ref().is_some_and(|a| {
-                a.attempt_id == attempt.id && a.assignment_id.as_deref() == Some(id)
-            })
+        let stale = outcomes::state(&tx, attempt.record_id)?.generation != attempt.generation;
+        if !stale
+            && (check.current_verdict != Some(Verdict::Pass)
+                || !check.latest_assessment.as_ref().is_some_and(|a| {
+                    a.attempt_id == attempt.id && a.assignment_id.as_deref() == Some(id)
+                }))
         {
             return Ok(false);
         }

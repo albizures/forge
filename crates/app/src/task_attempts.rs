@@ -5,8 +5,40 @@ use crate::{
 };
 
 impl Application {
-    /// Resume only Tasks with a durable controlled-acceptance Assignment and current pass.
-    /// Ordinary unclaimed Tasks, interrupted attempts and failed Checks are not enrolled.
+    /// Observe, but never repair, a dispatched Task's deliverables.
+    pub(crate) fn observe_task_evidence(&self, record: u64) -> Result<Evidence, RegistrationError> {
+        let info = self.managed_worktree_info(record)?;
+        if info.claim.state != WorktreeClaimState::Active
+            || info
+                .safety
+                .facts
+                .iter()
+                .chain(&info.safety.blockers)
+                .any(|fact| {
+                    matches!(
+                        fact.as_str(),
+                        "dirty" | "checkout-missing" | "git-metadata-invalid"
+                    )
+                })
+        {
+            return Err(RegistrationError::new(
+                "managed-worktree-invalid",
+                format!(
+                    "expected a clean active Managed Worktree; observed {}; investigate and explicitly resume",
+                    info.safety.facts.join(", ")
+                ),
+            ));
+        }
+        let task = self.dispatch()?.show_record(record)?;
+        let project = self.dispatch()?.project(&task.project_slugs[0])?;
+        Ok(Evidence::Repository {
+            repository: project.project_root.display().to_string(),
+            commit: self.inspector.head_commit(&info.claim.path)?,
+        })
+    }
+
+    /// Resume enrolled Tasks after a current pass or explicit freshness invalidation.
+    /// Unclaimed Tasks, interrupted attempts and current failed Implementation do not advance.
     pub(crate) fn continue_task_check_acceptance(&self) -> Result<(), RegistrationError> {
         let repository = self.dispatch()?;
         for task in repository.list_records(&crate::RecordListFilter {
@@ -88,7 +120,7 @@ impl Application {
 
     /// Launch at most one Check-bound attempt for controlled acceptance testing.
     /// Requires a previously prepared, clean Managed Worktree. Continues only after safe
-    /// retirement of an accepted passing attempt; never completes work.
+    /// retirement of a passing or freshness-invalidated attempt; never completes work.
     /// # Errors
     /// Rejects unsupported owners, unsafe resources, unavailable pinned profiles and stale inputs.
     #[allow(clippy::too_many_lines)]
@@ -125,6 +157,9 @@ impl Application {
             }
             return Ok((existing, true));
         }
+        let observed = self.observe_task_evidence(record);
+        self.records.reconcile_task_evidence(record, &observed)?;
+        let evidence = observed?;
         let check = self
             .list_record_checks(record)?
             .into_iter()
@@ -182,25 +217,6 @@ impl Application {
             grilling_revision: grilling_profile.revision,
             provider_generation: configuration.provider_generation,
             binding_id: binding.id.clone(),
-        };
-        let info = self.managed_worktree_info(record)?;
-        if info.claim.state != WorktreeClaimState::Active
-            || info.safety.facts.iter().any(|f| {
-                matches!(
-                    f.as_str(),
-                    "dirty" | "checkout-missing" | "git-metadata-invalid"
-                )
-            })
-        {
-            return Err(RegistrationError::new(
-                "managed-worktree-invalid",
-                "controlled acceptance requires a clean active Managed Worktree",
-            ));
-        }
-        let project = repository.project(&task.project_slugs[0])?;
-        let evidence = Evidence::Repository {
-            repository: project.project_root.display().to_string(),
-            commit: self.inspector.head_commit(&info.claim.path)?,
         };
         // Probe the pinned adapter, never replace its revision with a live Workspace selection.
         let adapter = factory.adapter_for(&profile).map_err(|_| {

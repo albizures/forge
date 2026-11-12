@@ -34,7 +34,7 @@ impl Application {
             id,
             secret,
         };
-        session.authenticate()?;
+        session.authenticate_identity(true)?;
         Ok(session)
     }
 }
@@ -169,13 +169,14 @@ impl AuthenticatedAssignment<'_> {
         &self,
         input: &crate::outcomes::OutcomeInput,
     ) -> Result<crate::outcomes::AcceptedOutcome, RegistrationError> {
-        let assignment = self.authenticate()?;
+        let assignment = self.authenticate_identity(true)?;
         let mut input = input.clone();
         input.actor.clone_from(&assignment.id);
         self.application.records.submit_assignment_outcome(
             assignment.record_id,
             &assignment.id,
             &input,
+            &self.application.observe_task_evidence(assignment.record_id),
         )
     }
 
@@ -658,6 +659,13 @@ impl AuthenticatedAssignment<'_> {
         }
     }
     fn authenticate(&self) -> Result<AgentAssignment, RegistrationError> {
+        self.authenticate_identity(false)
+    }
+
+    fn authenticate_identity(
+        &self,
+        allow_check_replay: bool,
+    ) -> Result<AgentAssignment, RegistrationError> {
         if self.id.is_empty()
             || !self
                 .id
@@ -688,7 +696,13 @@ impl AuthenticatedAssignment<'_> {
             .dispatch()?
             .show_record(assignment.record_id)
             .map_err(|_| denied())?;
-        if assignment.closed_at_millis.is_some()
+        let closed_replay = allow_check_replay
+            && self
+                .application
+                .dispatch()?
+                .assignment_check_attempt(&assignment.id)?
+                .is_some();
+        if (assignment.closed_at_millis.is_some() && !closed_replay)
             || !matches!(
                 record.record_type,
                 crate::RecordType::Task | crate::RecordType::Grilling

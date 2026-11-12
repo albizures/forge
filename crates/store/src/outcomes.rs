@@ -137,7 +137,7 @@ pub(super) fn invalidate(
     if before.generation >= i64::MAX.cast_unsigned() {
         return Err(error("generation-exhausted", "work freshness is exhausted"));
     }
-    c.execute("INSERT INTO record_work(record_id, generation) VALUES (?1, 2) ON CONFLICT(record_id) DO UPDATE SET generation = generation + 1, output_json = NULL", [record.cast_signed()]).map_err(storage_error)?;
+    c.execute("INSERT INTO record_work(record_id, generation) VALUES (?1, 2) ON CONFLICT(record_id) DO UPDATE SET generation = generation + 1, input_json = COALESCE(output_json, input_json), output_json = NULL", [record.cast_signed()]).map_err(storage_error)?;
     c.execute(
         "UPDATE record_attempts SET closed = 1 WHERE record_id = ?1 AND closed = 0",
         [record.cast_signed()],
@@ -165,7 +165,89 @@ pub(super) fn invalidate(
     c.execute("INSERT INTO record_work_invalidations(record_id, generation, actor, message, created_at_millis) VALUES (?1, ?2, ?3, ?4, ?5)", params![record.cast_signed(), (before.generation + 1).cast_signed(), actor, message, now_millis()?]).map_err(storage_error)?;
     Ok(())
 }
+/// Preserve checkout drift as a durable safety stop, never as a successful outcome.
+fn hold_evidence(
+    c: &Connection,
+    record: u64,
+    observed: &Result<Evidence, RegistrationError>,
+) -> Result<(), RegistrationError> {
+    let detail = match observed {
+        Ok(Evidence::Repository { commit, .. }) => format!("unexpected commit {commit}"),
+        Ok(Evidence::Artifact { .. }) => "unexpected non-Repository evidence".into(),
+        Err(e) => format!("{}: {}", e.code, e.message),
+    };
+    let message = format!(
+        "Unexpected Managed Worktree evidence ({detail}); investigate deliverables and explicitly resume dispatch. Forge has not committed or discarded changes."
+    );
+    invalidate(c, record, "forge", &message, None)?;
+    if let Ok(evidence) = observed {
+        c.execute(
+            "UPDATE record_work SET input_json = ?2 WHERE record_id = ?1",
+            params![
+                record.cast_signed(),
+                serde_json::to_string(evidence).map_err(json_error)?
+            ],
+        )
+        .map_err(storage_error)?;
+    }
+    c.execute(
+        "INSERT OR IGNORE INTO dispatch_holds(record_id, reason) VALUES (?1, ?2)",
+        params![record.cast_signed(), message],
+    )
+    .map_err(storage_error)?;
+    Ok(())
+}
+
 impl SqliteProjectRepository {
+    pub(super) fn reconcile_evidence(
+        &self,
+        record: u64,
+        observed: &Result<Evidence, RegistrationError>,
+    ) -> Result<(), RegistrationError> {
+        let mut c = self
+            .connection
+            .lock()
+            .map_err(|_| error("storage", "storage lock poisoned"))?;
+        let tx = c
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        let task = self.check_task(&tx, record)?;
+        forge_app::validate_task_dispatch_mode(&task)?;
+        // A concurrent claim may already own the Task. Its immutable input wins;
+        // do not mistake its authorized Implementation edits for external drift.
+        let active: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM agent_assignments WHERE record_id = ?1 AND closed_at_millis IS NULL)", [record.cast_signed()], |r| r.get(0)).map_err(storage_error)?;
+        if active {
+            return Ok(());
+        }
+        super::execution_modes::safe_ownership(&tx, record)?;
+        let held: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM dispatch_holds WHERE record_id = ?1)",
+                [record.cast_signed()],
+                |r| r.get(0),
+            )
+            .map_err(storage_error)?;
+        if held {
+            return Err(error(
+                "dispatch-held",
+                "investigate the Dispatch Hold and explicitly resume",
+            ));
+        }
+        let work = state(&tx, record)?;
+        let expected = work.output.as_ref().or(work.input.as_ref());
+        if !observed
+            .as_ref()
+            .is_ok_and(|e| expected.is_none_or(|expected| expected == e))
+        {
+            hold_evidence(&tx, record, observed)?;
+            tx.commit().map_err(storage_error)?;
+            return Err(error(
+                "evidence-drift",
+                "unexpected worktree evidence; investigate the durable Dispatch Hold",
+            ));
+        }
+        Ok(())
+    }
     pub(super) fn work_state(&self, record: u64) -> Result<WorkState, RegistrationError> {
         let mut c = self
             .connection
@@ -262,6 +344,7 @@ impl SqliteProjectRepository {
         record: u64,
         input: &OutcomeInput,
         assignment: Option<&str>,
+        observed: Option<&Result<Evidence, RegistrationError>>,
     ) -> Result<AcceptedOutcome, RegistrationError> {
         let mut c = self
             .connection
@@ -357,6 +440,28 @@ impl SqliteProjectRepository {
                 "evidence-mismatch",
                 "dispatched output must identify the bound Repository",
             ));
+        }
+        if assignment.is_some() {
+            let observed = observed.ok_or_else(|| {
+                error("evidence-required", "trusted worktree observation required")
+            })?;
+            if !observed
+                .as_ref()
+                .is_ok_and(|e| check.position == 0 || e == &attempt.evidence)
+            {
+                hold_evidence(&tx, record, observed)?;
+                tx.commit().map_err(storage_error)?;
+                return Err(error(
+                    "evidence-drift",
+                    "outcome does not match a clean Managed Worktree; investigate the durable Dispatch Hold",
+                ));
+            }
+            if !observed.as_ref().is_ok_and(|e| e == &input.evidence) {
+                return Err(error(
+                    "evidence-mismatch",
+                    "outcome must identify the observed clean output commit",
+                ));
+            }
         }
         if check.position > 0
             && (input.evidence != attempt.evidence || work.output.as_ref() != Some(&input.evidence))

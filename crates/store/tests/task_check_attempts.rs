@@ -199,13 +199,18 @@ fn acceptance_claim_snapshots_first_unpassed_check_and_pinned_profile_atomically
     );
     assert_eq!(
         store
-            .submit_assignment_outcome(task.id, "other", &outcome)
+            .submit_assignment_outcome(task.id, "other", &outcome, &Ok(outcome.evidence.clone()))
             .unwrap_err()
             .code,
         "unauthorized-attempt"
     );
     let accepted = store
-        .submit_assignment_outcome(task.id, "attempt-1", &outcome)
+        .submit_assignment_outcome(
+            task.id,
+            "attempt-1",
+            &outcome,
+            &Ok(outcome.evidence.clone()),
+        )
         .unwrap();
     assert_eq!(
         accepted.check.current_verdict,
@@ -213,7 +218,12 @@ fn acceptance_claim_snapshots_first_unpassed_check_and_pinned_profile_atomically
     );
     assert_eq!(
         store
-            .submit_assignment_outcome(task.id, "attempt-1", &outcome)
+            .submit_assignment_outcome(
+                task.id,
+                "attempt-1",
+                &outcome,
+                &Ok(outcome.evidence.clone())
+            )
             .unwrap(),
         accepted
     );
@@ -375,6 +385,8 @@ fn acceptance_claim_snapshots_first_unpassed_check_and_pinned_profile_atomically
                 generated_by_ids: vec![],
             })
             .unwrap();
+        store.reserve_worktree_claim(invalid.id).unwrap();
+        store.activate_worktree_claim(invalid.id).unwrap();
         assert_eq!(
             app.execute_task_check_acceptance(invalid.id)
                 .unwrap_err()

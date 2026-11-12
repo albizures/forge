@@ -1244,8 +1244,17 @@ impl RecordRepository for SqliteProjectRepository {
         record: u64,
         assignment: &str,
         input: &forge_app::outcomes::OutcomeInput,
+        observed: &Result<forge_app::outcomes::Evidence, RegistrationError>,
     ) -> Result<forge_app::outcomes::AcceptedOutcome, RegistrationError> {
-        self.submit_outcome(record, input, Some(assignment))
+        self.submit_outcome(record, input, Some(assignment), Some(observed))
+    }
+
+    fn reconcile_task_evidence(
+        &self,
+        record: u64,
+        observed: &Result<forge_app::outcomes::Evidence, RegistrationError>,
+    ) -> Result<(), RegistrationError> {
+        self.reconcile_evidence(record, observed)
     }
 
     fn submit_record_outcome(
@@ -1253,7 +1262,7 @@ impl RecordRepository for SqliteProjectRepository {
         record: u64,
         input: &forge_app::outcomes::OutcomeInput,
     ) -> Result<forge_app::outcomes::AcceptedOutcome, RegistrationError> {
-        self.submit_outcome(record, input, None)
+        self.submit_outcome(record, input, None, None)
     }
     fn invalidate_record_work(
         &self,

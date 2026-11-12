@@ -69,17 +69,33 @@ actual context identity/generation and a full commit):
 ```
 
 Implementation may report a new output commit in the same Repository. Reviews
-must assess their bound output evidence and must not modify deliverables. Failed
-Implementation remains Implementation. Acceptance records evidence and outcomes,
+must assess their bound output evidence and must not modify deliverables. Forge
+observes the actual clean checkout at outcome acceptance and again after retirement
+before selecting another Check. Implementation input A and authorized output B
+remain distinct; every review binds B. A clean checkout may be ahead of its
+upstream: removal safety is not the same as evidence freshness.
+
+Dirty/missing/invalid checkouts or unexpected review/handoff commits invalidate
+current Assessments and outstanding attempts, advance freshness, and retain a
+diagnostic Dispatch Hold. No changes are committed, discarded, reset or cleaned.
+Investigate the retained checkout and explicitly resume dispatch after repair.
+Description edits also advance freshness, even at the same commit; replacement
+returns to Implementation only after old ownership/resources are safely retired.
+Historical Assessments and Findings remain, but invalidated passes never revive.
+A false output commit claim is rejected without publishing an Assessment.
+
+Failed Implementation remains Implementation. Acceptance records evidence and outcomes,
 not provider retirement or permission for another live attempt. Handoff atomically
 revokes the old capability and retains a `check-handoff` resource blocker before
 provider cleanup. Failed or uncertain cleanup retains capacity across restart;
 an adapter's successful response cannot clear other retained resources. Holds,
 dependencies, mode, capacity, worktree safety and provider prerequisites are
-rechecked before the next claim. Failed or interrupted attempts do not
-currently continue automatically. The final pass retires its agent but leaves the
+rechecked before the next claim. Failed Implementation and interrupted attempts
+do not currently retry automatically. The final pass retires its agent but leaves the
 Task In Progress; completion remains gated separately. Exact outcome replay
-returns its original result; conflicting, stale and cross-owner submissions have
+returns its original result (including after closure/restart when the original
+credential remains available); this replay-only path does not restore closed
+Assignment reads or mutation authority. Conflicting, stale and cross-owner submissions have
 no partial effects. Closed capabilities remain revoked.
 
 ## Configure dispatch

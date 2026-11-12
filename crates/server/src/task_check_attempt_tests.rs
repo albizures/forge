@@ -78,11 +78,16 @@ async fn check_bound_rpc_context_and_outcome_are_same_owner_and_normal_dispatch_
         })
         .unwrap();
     let check = store.list_record_checks(task.id).unwrap().remove(0);
-    store.reserve_worktree_claim(task.id).unwrap();
+    let checkout = store.reserve_worktree_claim(task.id).unwrap();
+    let repository = workspace.root.join("alpha");
+    std::fs::create_dir_all(&repository).unwrap();
+    super::git(&repository, &["init"]).unwrap();
+    super::git(&repository, &["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "Input"]).unwrap();
+    super::git(&repository, &["worktree", "add", "-b", "task-check", checkout.path.to_str().unwrap()]).unwrap();
     store.activate_worktree_claim(task.id).unwrap();
     let evidence = forge_app::outcomes::Evidence::Repository {
         repository: workspace.root.join("alpha").display().to_string(),
-        commit: "a".repeat(40),
+        commit: super::git(&checkout.path, &["rev-parse", "HEAD"]).unwrap(),
     };
     store
         .claim_task_check_acceptance(
@@ -102,8 +107,10 @@ async fn check_bound_rpc_context_and_outcome_are_same_owner_and_normal_dispatch_
     let root = fixture.database_path.with_extension("assignment-secrets");
     std::fs::write(root.join("bound-check"), "check-secret").unwrap();
     let mut daemon = Daemon::new(
-        Application::with_agent_dispatch(
+        Application::with_managed_worktrees_and_agent_dispatch(
             Box::new(SqliteProjectRepository::open(&fixture.database_path).unwrap()),
+            Box::new(SqliteProjectRepository::open(&fixture.database_path).unwrap()),
+            Box::new(super::GitWorktreeAdapter),
             Box::new(SqliteProjectRepository::open(&fixture.database_path).unwrap()),
             Box::new(super::ServerAgentDispatchAdapterFactory {
                 herdr: super::HerdrAdapterFactory::from_configuration_store(
@@ -113,7 +120,7 @@ async fn check_bound_rpc_context_and_outcome_are_same_owner_and_normal_dispatch_
                 capability_secret_root: root.clone(),
                 cli_override: None,
             }),
-            Box::new(TestInspector),
+            Box::new(super::GitInspector),
         )
         .with_workspace_repository(Box::new(
             SqliteProjectRepository::open(&fixture.database_path).unwrap(),
@@ -126,10 +133,19 @@ async fn check_bound_rpc_context_and_outcome_are_same_owner_and_normal_dispatch_
         boot["result"]["context"]["bound"]["checkAttempt"]["check_id"], check.id,
         "{boot}"
     );
+    // Implementation may commit clean output B rather than re-report input A.
+    std::fs::write(checkout.path.join("deliverable.txt"), "Implemented\n").unwrap();
+    super::git(&checkout.path, &["add", "deliverable.txt"]).unwrap();
+    super::git(&checkout.path, &["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "Output"]).unwrap();
+    let output = forge_app::outcomes::Evidence::Repository {
+        repository: repository.display().to_string(),
+        commit: super::git(&checkout.path, &["rev-parse", "HEAD"]).unwrap(),
+    };
+    assert_ne!(evidence, output);
     let outcome = forge_app::outcomes::OutcomeInput {
         attempt_id: "bound-check".into(),
         generation: 1,
-        evidence,
+        evidence: output,
         verdict: forge_app::checks::Verdict::Pass,
         actor: "spoofed".into(),
         message: "Delivered".into(),
