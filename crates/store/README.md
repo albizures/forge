@@ -11,6 +11,11 @@ by migrations—not just the initial `CREATE TABLE` statements.
 - [`src/workspaces.rs`](src/workspaces.rs): Workspace ownership and Project identity.
 - [`src/record_workspaces.rs`](src/record_workspaces.rs): Record ownership,
   cross-Workspace guards, and update-history migration.
+- [`src/checks.rs`](src/checks.rs): Task Checks, Assessments, Invalidations,
+  activity history, and completion gating.
+- [`src/findings.rs`](src/findings.rs): Task Findings and retained review cycles.
+- [`src/check_templates.rs`](src/check_templates.rs): Project Check Templates,
+  replacement history, and Task provisioning.
 - [`src/workspace_dispatch.rs`](src/workspace_dispatch.rs): Workspace dispatch
   configuration, provider generations, and Assignment binding.
 
@@ -38,7 +43,7 @@ is documented separately in [Records](../../docs/records.md),
 
 ## Entity Relationship Diagrams
 
-These three views include **every column of all 23 tables** after fresh-store
+These four views include **every column of all 31 tables** after fresh-store
 initialization. Each table has one full definition; boxes without attributes are
 references to a table defined in another view, not incomplete definitions.
 
@@ -99,6 +104,8 @@ erDiagram
         INTEGER related_record_id FK "NULL"
         INTEGER comment_id "NULL; no FK; survives comment deletion"
         TEXT relationship_kind "NULL"
+        INTEGER assessment_id "NULL; no FK"
+        INTEGER finding_activity_id "NULL; no FK"
     }
     record_comments {
         INTEGER id PK
@@ -279,6 +286,99 @@ erDiagram
     agent_profiles o|--o{ workspace_dispatch_configuration : grilling_profile
 ```
 
+### 4. Checks, Assessments, Findings, and Templates
+
+`records` and `projects` refer to view 1. Attribution through `assignment_id`
+is retained text, not an FK to `agent_assignments`. Record update pointers to
+Assessments and Finding activities also have no FKs.
+
+```mermaid
+erDiagram
+    record_checks {
+        INTEGER id PK
+        INTEGER record_id FK "Unique with position; unique with name"
+        TEXT name
+        TEXT description
+        INTEGER position
+        INTEGER version
+    }
+    check_assessments {
+        INTEGER id PK
+        INTEGER check_id FK
+        TEXT verdict
+        TEXT actor
+        TEXT message
+        INTEGER created_at_millis
+        TEXT revision "NULL"
+        INTEGER dirty "NULL"
+        TEXT assignment_id "NULL; no FK"
+    }
+    check_invalidations {
+        INTEGER id PK
+        INTEGER assessment_id FK,UK
+        TEXT actor
+        TEXT message
+        INTEGER created_at_millis
+        TEXT revision "NULL"
+        INTEGER dirty "NULL"
+        TEXT assignment_id "NULL; no FK"
+    }
+    check_activities {
+        INTEGER id PK
+        INTEGER check_id FK
+        INTEGER assessment_id FK
+        INTEGER invalidation_id FK "NULL"
+    }
+    record_findings {
+        INTEGER id PK
+        INTEGER record_id FK
+        TEXT severity
+        INTEGER blocking
+        INTEGER check_id FK "NULL"
+        INTEGER assessment_id FK "NULL"
+    }
+    finding_activities {
+        INTEGER id PK
+        INTEGER finding_id FK
+        TEXT action
+        TEXT actor
+        TEXT assignment_id "NULL; no FK"
+        TEXT response "NULL"
+        TEXT amendment "NULL; JSON"
+        TEXT message
+        TEXT revision "NULL"
+        INTEGER dirty "NULL"
+        INTEGER created_at_millis
+    }
+    project_check_templates {
+        TEXT project_slug PK,FK
+        INTEGER version
+        TEXT criteria_json
+    }
+    project_check_template_changes {
+        INTEGER id PK
+        TEXT project_slug FK "Unique with version"
+        INTEGER version
+        TEXT criteria_json
+        TEXT actor
+        TEXT message
+        INTEGER created_at_millis
+    }
+
+    records ||--o{ record_checks : record_id
+    records ||--o{ record_findings : record_id
+    record_checks ||--o{ check_assessments : check_id
+    check_assessments ||--o| check_invalidations : assessment_id
+    record_checks ||--o{ check_activities : check_id
+    check_assessments ||--o{ check_activities : assessment_id
+    check_invalidations o|--o{ check_activities : invalidation_id
+    record_checks o|--o{ record_findings : check_id
+    check_assessments o|--o{ record_findings : assessment_id
+    record_findings ||--o{ finding_activities : finding_id
+    projects ||--o| project_check_templates : project_slug
+    projects ||--o{ project_check_template_changes : project_slug
+```
+
 ## Workspaces and Projects
 
 ### `workspaces`
@@ -366,13 +466,17 @@ repository/application rules rather than SQL checks.
 | `id` | INTEGER, PK |
 | `record_id` | INTEGER, FK → `records.id` |
 | `created_at_millis` | INTEGER |
-| `kind` | TEXT: `created`, `body-edited`, `status-transition`, `relationship-added`, `relationship-removed`, `comment-added`, `comment-deleted` |
+| `kind` | TEXT: `created`, `body-edited`, `status-transition`, `relationship-added`, `relationship-removed`, `comment-added`, `comment-deleted`, `check-assessed`, `check-invalidated`, `finding-activity` |
 | `from_status`, `to_status` | TEXT? |
 | `related_record_id` | INTEGER?, FK → `records.id` |
 | `comment_id` | INTEGER?, deliberately no FK |
 | `relationship_kind` | TEXT?: `parent-child`, `depends-on`, `generated-by`, `initiative` |
+| `assessment_id` | INTEGER?, deliberately no FK; used by `check-assessed` and `check-invalidated` |
+| `finding_activity_id` | INTEGER?, deliberately no FK; used by `finding-activity` |
 
-Stores durable update history. A comment reference can survive deletion of the
+Stores durable update history. Check invalidation updates point to the Assessment,
+not the Invalidation. Check/Finding mutations and their update entries are written
+in the same transaction. A comment reference can survive deletion of the
 comment itself. Status fields have no SQL enum check.
 
 ### `record_comments`
@@ -382,6 +486,126 @@ comment itself. Status fields have no SQL enum check.
 - `created_at_millis INTEGER`.
 - `author TEXT?`.
 - `body TEXT`.
+
+## Checks, Assessments, Findings, and Templates
+
+These are Task-owned persistence objects, not Record types. Their IDs use
+independent table-local SQLite rowid sequences. Task ownership, linked evidence
+belonging to the same Task, and mutation permissions are repository/application
+rules, not composite foreign keys or SQL type checks.
+
+### `record_checks`
+
+| Column | Type / constraint |
+| --- | --- |
+| `id` | INTEGER, PK |
+| `record_id` | INTEGER, FK → `records.id` |
+| `name`, `description` | TEXT |
+| `position` | INTEGER |
+| `version` | INTEGER, default `1` |
+
+Both `(record_id, position)` and `(record_id, name)` are UNIQUE. Task creation
+provisions the built-in `Implementation` Check at position 0, then copies any
+selected Project Template criteria at positions 1 onward in the same transaction.
+Checks retain their copied criteria; later Template replacement is not retroactive.
+
+### `check_assessments`
+
+| Column | Type / constraint |
+| --- | --- |
+| `id` | INTEGER, PK |
+| `check_id` | INTEGER, FK → `record_checks.id` |
+| `verdict` | TEXT: `pass`, `fail` |
+| `actor`, `message` | TEXT |
+| `created_at_millis` | INTEGER |
+| `revision` | TEXT? |
+| `dirty` | INTEGER?, boolean evidence |
+| `assignment_id` | TEXT?, attribution only; no FK |
+
+`assessments_by_check` indexes `(check_id, id)`. The latest Assessment by ID
+supplies the Check's verdict; no Assessment means pending. Revision/dirty fields
+are captured evidence, not a stored freshness verdict.
+
+### `check_invalidations`
+
+| Column | Type / constraint |
+| --- | --- |
+| `id` | INTEGER, PK |
+| `assessment_id` | INTEGER, UNIQUE, FK → `check_assessments.id` |
+| `actor`, `message` | TEXT |
+| `created_at_millis` | INTEGER |
+| `revision` | TEXT? |
+| `dirty` | INTEGER?, boolean evidence |
+| `assignment_id` | TEXT?, attribution only; no FK |
+
+Invalidation preserves the original Assessment. An invalidated latest Assessment
+makes the Check pending; it does not restore an older passing Assessment.
+
+### `check_activities`
+
+- `id INTEGER`, PK.
+- `check_id INTEGER`, FK → `record_checks.id`.
+- `assessment_id INTEGER`, FK → `check_assessments.id`.
+- `invalidation_id INTEGER?`, FK → `check_invalidations.id`.
+
+`activities_by_check` indexes `(check_id, id)`. This supplies one ordered,
+cursor-paginated history for Assessments and Invalidations.
+
+### `record_findings`
+
+| Column | Type / constraint |
+| --- | --- |
+| `id` | INTEGER, PK |
+| `record_id` | INTEGER, FK → `records.id` |
+| `severity` | TEXT: `minor`, `major`, `critical` |
+| `blocking` | INTEGER, boolean flag |
+| `check_id` | INTEGER?, FK → `record_checks.id` |
+| `assessment_id` | INTEGER?, FK → `check_assessments.id` |
+
+`findings_by_record` indexes `(record_id, id)`. Optional Check/Assessment links are
+supporting evidence. Current severity, blocking flag, and links live here; review
+state and version are derived from activity history rather than stored columns.
+
+### `finding_activities`
+
+| Column | Type / constraint |
+| --- | --- |
+| `id` | INTEGER, PK |
+| `finding_id` | INTEGER, FK → `record_findings.id` |
+| `action` | TEXT: `raise`, `resolve`, `respond`, `dismiss`, `reopen`, `amend`, `note` |
+| `actor` | TEXT |
+| `assignment_id` | TEXT?, attribution only; no FK |
+| `response` | TEXT?: `fixed`, `rejected` |
+| `amendment` | TEXT?, serialized amendment JSON |
+| `message` | TEXT |
+| `revision` | TEXT? |
+| `dirty` | INTEGER?, boolean evidence |
+| `created_at_millis` | INTEGER |
+
+`activities_by_finding` indexes `(finding_id, id)`. History retains repeated
+review cycles. The latest action excluding `note`/`amend` determines disposition:
+`raise`/`reopen` → open, `respond` → awaiting review, `resolve` → resolved,
+`dismiss` → dismissed. Version is the activity count, used for optimistic
+concurrency. Notes and amendments do not change disposition.
+
+Task completion requires every Check's latest, noninvalidated Assessment to pass
+and no blocking Finding to remain open or awaiting review. Missing Checks are
+not a bypass. Repository transactions enforce these gates alongside completion.
+Repository rules reject raising Findings on Done Tasks, amending their Findings,
+or reopening their blocking Findings.
+
+### Project Check Templates
+
+| Table | Columns and keys |
+| --- | --- |
+| `project_check_templates` | `project_slug TEXT` PK/FK → `projects.slug`, `version INTEGER`, `criteria_json TEXT` |
+| `project_check_template_changes` | `id INTEGER` PK, `project_slug TEXT` FK → `projects.slug`, `version INTEGER`, `criteria_json TEXT`, `actor TEXT`, `message TEXT`, `created_at_millis INTEGER`; UNIQUE `(project_slug, version)` |
+
+`template_changes_by_project` indexes `(project_slug, id)`. Criteria JSON is an
+ordered array of name/description objects. No current row means version 0 and
+an empty Template. Replacement checks the expected version, increments it, and
+writes current state plus retained history atomically. Criterion validation and
+version rules are application-enforced, not SQL CHECK constraints.
 
 ## Agent profiles and Assignments
 

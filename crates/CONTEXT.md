@@ -132,6 +132,10 @@ _Avoid_: category, label
 An opaque positive numeric identity that uniquely references a Record across Forge interfaces.
 _Avoid_: record slug, record name
 
+**Execution Mode**:
+A Record-level policy distinguishing Dispatched execution through Forge-owned Agent Assignments from Manual execution without dispatch. It is independent of Record Type, Record Status and Agent Profile; Dispatched mode does not itself make a Record eligible for automatic execution.
+_Avoid_: task mode, dispatch status, ownership inferred from lifecycle
+
 **Spec**:
 A Record type that defines planned work for exactly one Project and may parent Tasks.
 _Avoid_: specification, issue
@@ -141,15 +145,15 @@ A leaf Record type that represents a unit of work with exactly one Project when 
 _Avoid_: subtask, to-do
 
 **Check Template**:
-An operator-managed, Project-configured set of additional completion criteria copied into each new Task as immutable Checks alongside its mandatory Implementation Check. Changes to the template affect future Tasks, not Checks already created.
+An operator-managed, Project-configured ordered set of completion criteria and optional pinned Agent Profile revisions, containing a mandatory Implementation entry followed by optional review entries. Its entries are copied into immutable Checks when a Task is created; template changes affect future Tasks only.
 _Avoid_: live checklist, check runner configuration
 
 **Check**:
-An immutable named completion criterion automatically provided to a Task, either as its mandatory Implementation Check or from its Check Template, with a stable identity and description; every Check is required for completion. It describes what must be established, not how to execute verification, and cannot be individually added, edited, or retired on a Task.
+An immutable named Task completion criterion with a stable identity, description, order and optional pinned Agent Profile revision, copied from a Check Template or provided as the mandatory baseline for a Projectless Task. Every Check is required for completion; its profile supplies agent configuration for every dispatched attempt, while Manual execution permits profile-less Checks, and Checks cannot be individually added, edited, or retired on a Task.
 _Avoid_: executable check, check runner
 
 **Implementation Check**:
-The mandatory baseline Check on every Task, including Projectless Tasks, establishing that the work and deliverables described by the Task are complete. It applies to all Task Kinds, not only work that produces code.
+The mandatory baseline Check on every Task, including Projectless Tasks, establishing that the work and deliverables described by the Task are complete. It applies to all Tasks, not only work that produces code.
 _Avoid_: coding check, implementation progress
 
 **Assessment**:
@@ -159,10 +163,6 @@ _Avoid_: check result, mutable verdict
 **Finding**:
 A structured issue belonging to one Task, optionally linked to a Check and its originating Assessment, with append-only activity. Its severity is distinct from whether it blocks Task completion.
 _Avoid_: review comment, response entity
-
-**Task Kind**:
-An optional immutable semantic classification of a Task: Research, Prototype, or Review. It does not alter the Task lifecycle, dependency behavior, or branch-output handling.
-_Avoid_: task type, profile
 
 **Initiative**:
 A Workspace-owned coordination Record with zero or more Projects in its Project Scope. Specs and Wayfinders may belong to one Initiative without becoming its children.
@@ -205,7 +205,7 @@ The bounded Forge information an Agent Assignment may read, combining its bound 
 _Avoid_: project visibility, record graph access, execution snapshot
 
 **Agent Profile**:
-An immutable, revisioned Forge-owned configuration for a Record Type that combines registered agent launch policy and behavioral instructions with Forge-owned lifecycle policy. Forge Workspaces explicitly select Task and Grilling revisions; each Agent Assignment retains its bound revision, freezing configuration and behavior rather than the complete runtime or resource filesystem.
+An immutable, revisioned Forge-owned configuration for a Record Type containing agent launch policy and behavioral instructions, subordinate to Forge-owned execution and lifecycle rules. Task Checks pin their revisions through Check Templates, while Forge Workspaces select Grilling revisions; each Agent Assignment retains its bound revision, freezing configuration and behavior rather than the complete runtime or resource filesystem.
 _Avoid_: agent configuration, mutable profile, record profile
 
 **Agent Workspace**:
@@ -256,7 +256,7 @@ A Record’s lifecycle state: Open, In Progress, or Done. A Record opens as Open
 _Avoid_: state
 
 **Manual In Progress Task**:
-An In Progress Task without an Agent Assignment. It is outside automatic dispatch and must be explicitly reopened before becoming eligible for dispatch.
+An In Progress Task whose Execution Mode is Manual, rather than a Task inferred to be manual from the absence of an Agent Assignment. It remains outside dispatch unless its Execution Mode is explicitly changed subject to safe ownership and resource handoff.
 _Avoid_: unassigned active task
 
 **Record Metadata**:
