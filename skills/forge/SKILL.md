@@ -32,7 +32,7 @@ Select the Forge Workspace explicitly with `--workspace` or infer it from canoni
 - Grilling: human-in-the-loop leaf child of a Wayfinder; inherits its Project Scope unless a non-empty subset is selected. A Projectless parent supplies empty scope.
 - Generic Record: explicit Project Scope, including deliberately empty scope.
 
-Use the Record Body for Markdown work content. Creation supports `--body -` for stdin; titles are not separate flags. Task Kind is optional `research`, `prototype`, or `review`; ordinary implementation Tasks need no kind. Scope, typed parent membership, and Task Kind are fixed when opened.
+Use the Record Body for Markdown work content, including research, prototype, and review deliverables. Creation supports `--body -` for stdin; titles are not separate flags. Scope and typed parent membership are fixed when opened.
 
 ## Operate records
 

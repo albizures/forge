@@ -103,9 +103,10 @@ pub struct FindingActivity {
     pub comparison: RevisionComparison,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Finding {
     pub id: u64,
-    pub task_id: u64,
+    pub record_id: u64,
     pub version: u64,
     pub severity: Severity,
     pub blocking: bool,
@@ -187,42 +188,42 @@ impl Application {
     /// Raise a Task-owned Finding atomically with its first activity and Record Update.
     /// # Errors
     /// Returns validation, scope, origin, frozen-state or storage errors.
-    pub fn raise_task_finding(
+    pub fn raise_record_finding(
         &self,
         task: u64,
         input: &FindingRaiseInput,
     ) -> Result<Finding, RegistrationError> {
         input.validate()?;
-        self.records.raise_task_finding(task, input)
+        self.records.raise_record_finding(task, input)
     }
     /// Resolve an unresolved Finding using an observed version and verification explanation.
     /// # Errors
     /// Returns validation, scope, stale-version, transition or storage errors.
-    pub fn resolve_task_finding(
+    pub fn resolve_record_finding(
         &self,
         task: u64,
         finding: u64,
         input: &FindingResolveInput,
     ) -> Result<Finding, RegistrationError> {
         input.validate()?;
-        self.records.resolve_task_finding(task, finding, input)
+        self.records.resolve_record_finding(task, finding, input)
     }
     /// Append a version-checked review action and its Record Update atomically.
     /// # Errors
     /// Returns validation, scope, stale-version, transition, frozen-state or storage errors.
-    pub fn mutate_task_finding(
+    pub fn mutate_record_finding(
         &self,
         task: u64,
         finding: u64,
         input: &FindingMutationInput,
     ) -> Result<Finding, RegistrationError> {
         input.validate()?;
-        self.records.mutate_task_finding(task, finding, input)
+        self.records.mutate_record_finding(task, finding, input)
     }
     /// List a bounded ID-ordered page with evidence comparisons in the Task Project context.
     /// # Errors
     /// Returns validation, scope, pagination or storage errors.
-    pub fn list_task_findings(
+    pub fn list_record_findings(
         &self,
         task: u64,
         after: Option<u64>,
@@ -230,7 +231,7 @@ impl Application {
         revision: Option<&str>,
     ) -> Result<FindingList, RegistrationError> {
         validate_revision(revision)?;
-        let mut page = self.records.list_task_findings(task, after, limit)?;
+        let mut page = self.records.list_record_findings(task, after, limit)?;
         for finding in &mut page.findings {
             compare_finding(finding, revision);
         }
@@ -239,7 +240,7 @@ impl Application {
     /// Inspect a Finding and a bounded activity page, retaining its immutable raised explanation.
     /// # Errors
     /// Returns validation, scope, ownership, pagination or storage errors.
-    pub fn show_task_finding(
+    pub fn show_record_finding(
         &self,
         task: u64,
         finding: u64,
@@ -250,7 +251,7 @@ impl Application {
         validate_revision(revision)?;
         let mut page = self
             .records
-            .show_task_finding(task, finding, after, limit)?;
+            .show_record_finding(task, finding, after, limit)?;
         let context = page.finding.project.is_some();
         compare_finding(&mut page.finding, revision);
         for activity in &mut page.activities {

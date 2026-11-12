@@ -404,12 +404,12 @@ async fn record_commands_and_rpc_are_confined_by_explicit_or_client_cwd_selectio
         &one,
     ));
     json(run(&["record", "start", &task_id, "--json"], &one));
-    let checks = json(run(&["task", "check", "list", &task_id, "--json"], &one));
-    rejected(run(&["task", "check", "list", &task_id, "--json"], &two));
+    let checks = json(run(&["record", "check", "list", &task_id, "--json"], &one));
+    rejected(run(&["record", "check", "list", &task_id, "--json"], &two));
     for check in checks.as_array().unwrap() {
         rejected(run(
             &[
-                "task",
+                "record",
                 "check",
                 "show",
                 &task_id,
@@ -420,7 +420,7 @@ async fn record_commands_and_rpc_are_confined_by_explicit_or_client_cwd_selectio
         ));
         rejected(run(
             &[
-                "task",
+                "record",
                 "check",
                 "assess",
                 &task_id,
@@ -439,7 +439,7 @@ async fn record_commands_and_rpc_are_confined_by_explicit_or_client_cwd_selectio
         ));
         json(run(
             &[
-                "task",
+                "record",
                 "check",
                 "assess",
                 &task_id,

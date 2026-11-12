@@ -11,7 +11,7 @@ pub use forge_app::check_templates::{
     CheckCriterion, CheckTemplate, TemplateChange, TemplatePage, TemplateReplacement,
 };
 pub use forge_app::checks::{
-    Assessment, AssessmentInput, CheckPage, InvalidationInput, TaskCheck, Verdict,
+    Assessment, AssessmentInput, CheckPage, InvalidationInput, RecordCheck, Verdict,
 };
 pub use forge_app::findings::{
     Finding, FindingActivity, FindingAmendment, FindingList, FindingMutation, FindingMutationInput,
@@ -22,7 +22,7 @@ pub use record_selection::*;
 use forge_app::{
     AgentDispatchProjectStatus, AgentDispatchReconcileResult, AgentDispatchStatus, AgentProfile,
     ApplicationStatus, ManagedWorktreeInfo, Project, Record, RecordComment, RecordRelationshipKind,
-    RecordStatus, RecordUpdate, RecordUpdateKind, RegistrationError, TaskKind, WorktreeClaimState,
+    RecordStatus, RecordUpdate, RecordUpdateKind, RegistrationError, WorktreeClaimState,
 };
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
 use serde::{Deserialize, Serialize};
@@ -219,51 +219,51 @@ pub trait RecordApi {
         &self,
         request: SelectedRecordRequest<CheckTemplateSetRequest>,
     ) -> RpcResult<CheckTemplate>;
-    #[method(name = "taskFindingList")]
-    async fn task_finding_list(
+    #[method(name = "recordFindingList")]
+    async fn record_finding_list(
         &self,
-        request: SelectedRecordRequest<TaskFindingListRequest>,
+        request: SelectedRecordRequest<RecordFindingListRequest>,
     ) -> RpcResult<FindingList>;
-    #[method(name = "taskFindingShow")]
-    async fn task_finding_show(
+    #[method(name = "recordFindingShow")]
+    async fn record_finding_show(
         &self,
-        request: SelectedRecordRequest<TaskFindingShowRequest>,
+        request: SelectedRecordRequest<RecordFindingShowRequest>,
     ) -> RpcResult<FindingPage>;
-    #[method(name = "taskFindingRaise")]
-    async fn task_finding_raise(
+    #[method(name = "recordFindingRaise")]
+    async fn record_finding_raise(
         &self,
-        request: SelectedRecordRequest<TaskFindingRaiseRequest>,
+        request: SelectedRecordRequest<RecordFindingRaiseRequest>,
     ) -> RpcResult<Finding>;
-    #[method(name = "taskFindingResolve")]
-    async fn task_finding_resolve(
+    #[method(name = "recordFindingResolve")]
+    async fn record_finding_resolve(
         &self,
-        request: SelectedRecordRequest<TaskFindingResolveRequest>,
+        request: SelectedRecordRequest<RecordFindingResolveRequest>,
     ) -> RpcResult<Finding>;
-    #[method(name = "taskFindingMutate")]
-    async fn task_finding_mutate(
+    #[method(name = "recordFindingMutate")]
+    async fn record_finding_mutate(
         &self,
-        request: SelectedRecordRequest<TaskFindingMutationRequest>,
+        request: SelectedRecordRequest<RecordFindingMutationRequest>,
     ) -> RpcResult<Finding>;
-    #[method(name = "taskCheckList")]
-    async fn task_check_list(
+    #[method(name = "recordCheckList")]
+    async fn record_check_list(
         &self,
-        request: SelectedRecordRequest<TaskCheckListRequest>,
-    ) -> RpcResult<Vec<forge_app::checks::TaskCheck>>;
-    #[method(name = "taskCheckShow")]
-    async fn task_check_show(
+        request: SelectedRecordRequest<RecordCheckListRequest>,
+    ) -> RpcResult<Vec<forge_app::checks::RecordCheck>>;
+    #[method(name = "recordCheckShow")]
+    async fn record_check_show(
         &self,
-        request: SelectedRecordRequest<TaskCheckShowRequest>,
+        request: SelectedRecordRequest<RecordCheckShowRequest>,
     ) -> RpcResult<forge_app::checks::CheckPage>;
-    #[method(name = "taskCheckAssess")]
-    async fn task_check_assess(
+    #[method(name = "recordCheckAssess")]
+    async fn record_check_assess(
         &self,
-        request: SelectedRecordRequest<TaskCheckAssessRequest>,
-    ) -> RpcResult<forge_app::checks::TaskCheck>;
-    #[method(name = "taskCheckInvalidate")]
-    async fn task_check_invalidate(
+        request: SelectedRecordRequest<RecordCheckAssessRequest>,
+    ) -> RpcResult<forge_app::checks::RecordCheck>;
+    #[method(name = "recordCheckInvalidate")]
+    async fn record_check_invalidate(
         &self,
-        request: SelectedRecordRequest<TaskCheckInvalidateRequest>,
-    ) -> RpcResult<TaskCheck>;
+        request: SelectedRecordRequest<RecordCheckInvalidateRequest>,
+    ) -> RpcResult<RecordCheck>;
     #[method(name = "openTask")]
     async fn open_task(
         &self,
@@ -358,59 +358,68 @@ pub struct CheckTemplateSetRequest {
     pub replacement: TemplateReplacement,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct TaskFindingListRequest {
-    pub task: u64,
+#[serde(deny_unknown_fields)]
+pub struct RecordFindingListRequest {
+    pub record: u64,
     pub after: Option<u64>,
     pub limit: u32,
     pub compare_revision: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct TaskFindingShowRequest {
-    pub task: u64,
+#[serde(deny_unknown_fields)]
+pub struct RecordFindingShowRequest {
+    pub record: u64,
     pub finding: u64,
     pub after: Option<u64>,
     pub limit: u32,
     pub compare_revision: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct TaskFindingRaiseRequest {
-    pub task: u64,
+#[serde(deny_unknown_fields)]
+pub struct RecordFindingRaiseRequest {
+    pub record: u64,
     pub finding: FindingRaiseInput,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct TaskFindingResolveRequest {
-    pub task: u64,
+#[serde(deny_unknown_fields)]
+pub struct RecordFindingResolveRequest {
+    pub record: u64,
     pub finding: u64,
     pub resolution: FindingResolveInput,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct TaskFindingMutationRequest {
-    pub task: u64,
+#[serde(deny_unknown_fields)]
+pub struct RecordFindingMutationRequest {
+    pub record: u64,
     pub finding: u64,
     pub mutation: FindingMutationInput,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct TaskCheckListRequest {
-    pub task: u64,
+#[serde(deny_unknown_fields)]
+pub struct RecordCheckListRequest {
+    pub record: u64,
     pub compare_revision: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct TaskCheckInvalidateRequest {
-    pub task: u64,
+#[serde(deny_unknown_fields)]
+pub struct RecordCheckInvalidateRequest {
+    pub record: u64,
     pub check: u64,
     pub invalidation: InvalidationInput,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct TaskCheckShowRequest {
+#[serde(deny_unknown_fields)]
+pub struct RecordCheckShowRequest {
     pub compare_revision: Option<String>,
-    pub task: u64,
+    pub record: u64,
     pub check: u64,
     pub after: Option<u64>,
     pub limit: u32,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct TaskCheckAssessRequest {
-    pub task: u64,
+#[serde(deny_unknown_fields)]
+pub struct RecordCheckAssessRequest {
+    pub record: u64,
     pub check: u64,
     pub assessment: forge_app::checks::AssessmentInput,
 }
@@ -944,6 +953,7 @@ impl From<Project> for RegisterProjectResponse {
 
 /// Opens a Record. An empty `project_slugs` explicitly represents no Projects.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct OpenRecordRequest {
     pub body: String,
     pub project_scope: ProjectScopeRequest,
@@ -951,6 +961,7 @@ pub struct OpenRecordRequest {
 }
 /// Opens a Spec with its required single-Project scope.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct OpenSpecRequest {
     pub body: String,
     pub project_slug: String,
@@ -958,6 +969,7 @@ pub struct OpenSpecRequest {
 }
 /// Opens a Wayfinder with zero or more Projects in its selected Workspace.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct OpenWayfinderRequest {
     pub body: String,
     pub project_scope: ProjectScopeRequest,
@@ -965,31 +977,32 @@ pub struct OpenWayfinderRequest {
 }
 /// Opens a standalone Task with an optional single-Project scope.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct OpenTaskRequest {
     pub body: String,
     pub project_slug: Option<String>,
-    pub task_kind: Option<String>,
     pub generated_by_ids: Vec<u64>,
 }
 /// Opens a Task under a Spec, inheriting its scope atomically.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct OpenTaskUnderSpecRequest {
     pub body: String,
     pub spec_id: u64,
-    pub task_kind: Option<String>,
     pub generated_by_ids: Vec<u64>,
 }
 /// Opens a Task under a Wayfinder with an optional selected Project.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct OpenTaskUnderWayfinderRequest {
     pub body: String,
     pub wayfinder_id: u64,
     pub project_slug: Option<String>,
-    pub task_kind: Option<String>,
     pub generated_by_ids: Vec<u64>,
 }
 /// Opens a Grilling under a Wayfinder, inheriting its scope unless a subset is selected.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct OpenGrillingUnderWayfinderRequest {
     pub body: String,
     pub wayfinder_id: u64,
@@ -1023,11 +1036,11 @@ pub struct ReadyRecordsResponse {
 
 /// Optional Record discovery filters. Both filters combine with AND.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ListRecordsRequest {
     pub project_slug: Option<String>,
     pub status: Option<String>,
     pub record_type: Option<String>,
-    pub task_kind: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ListRecordsResponse {
@@ -1173,15 +1186,6 @@ fn record_relationship_kind_name(kind: RecordRelationshipKind) -> String {
     .into()
 }
 
-fn task_kind_name(task_kind: TaskKind) -> String {
-    match task_kind {
-        TaskKind::Research => "research",
-        TaskKind::Prototype => "prototype",
-        TaskKind::Review => "review",
-    }
-    .into()
-}
-
 fn record_type_name(record_type: forge_app::RecordType) -> String {
     match record_type {
         forge_app::RecordType::Generic => "generic",
@@ -1227,13 +1231,13 @@ pub struct RecordRelationshipResponse {
     pub child_id: u64,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct RecordResponse {
     /// Current Check summaries on Task inspection; no history is embedded.
-    pub checks: Option<Vec<TaskCheck>>,
+    pub checks: Option<Vec<RecordCheck>>,
     pub workspace_id: String,
     pub id: u64,
     pub record_type: String,
-    pub task_kind: Option<String>,
     pub body: String,
     pub project_scope: ProjectScopeRequest,
     pub status: String,
@@ -1247,7 +1251,6 @@ impl From<Record> for RecordResponse {
             workspace_id: record.workspace_id,
             id: record.id,
             record_type: record_type_name(record.record_type),
-            task_kind: record.task_kind.map(task_kind_name),
             body: record.body,
             project_scope: ProjectScopeRequest {
                 project_slugs: record.project_slugs,

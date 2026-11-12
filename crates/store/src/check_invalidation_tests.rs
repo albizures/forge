@@ -42,7 +42,6 @@ fn task(repository: &dyn RecordRepository, projects: Vec<String>) -> Record {
             record_type: RecordType::Task,
             body: "Deliver work".into(),
             project_slugs: projects,
-            task_kind: None,
             generated_by_ids: vec![],
         })
         .unwrap()
@@ -57,7 +56,7 @@ fn assessment(version: u64, verdict: Verdict) -> AssessmentInput {
         dirty: Some(false),
     }
 }
-fn invalidation(check: &forge_app::checks::TaskCheck) -> InvalidationInput {
+fn invalidation(check: &forge_app::checks::RecordCheck) -> InvalidationInput {
     InvalidationInput {
         expected_version: check.version,
         assessment_id: check.latest_assessment.as_ref().unwrap().id,
@@ -76,12 +75,12 @@ fn invalidation_is_pending_without_fallback_and_retains_bounded_durable_activity
     let repository = SqliteProjectRepository::open(&path).unwrap();
     let task = task(&repository, vec![]);
     repository.start_record(task.id).unwrap();
-    let check = repository.list_task_checks(task.id).unwrap().remove(0);
+    let check = repository.list_record_checks(task.id).unwrap().remove(0);
     let passed = repository
-        .assess_task_check(task.id, check.id, &assessment(1, Verdict::Pass))
+        .assess_record_check(task.id, check.id, &assessment(1, Verdict::Pass))
         .unwrap();
     let failed = repository
-        .assess_task_check(task.id, check.id, &assessment(2, Verdict::Fail))
+        .assess_record_check(task.id, check.id, &assessment(2, Verdict::Fail))
         .unwrap();
     let before = repository.list_record_updates(task.id).unwrap();
     let historical = InvalidationInput {
@@ -90,21 +89,21 @@ fn invalidation_is_pending_without_fallback_and_retains_bounded_durable_activity
     };
     assert_eq!(
         repository
-            .invalidate_task_check(task.id, check.id, &historical)
+            .invalidate_record_check(task.id, check.id, &historical)
             .unwrap_err()
             .code,
         "invalid-transition"
     );
     assert_eq!(
         repository
-            .invalidate_task_check(task.id, check.id, &invalidation(&passed))
+            .invalidate_record_check(task.id, check.id, &invalidation(&passed))
             .unwrap_err()
             .code,
         "stale-version"
     );
     assert_eq!(repository.list_record_updates(task.id).unwrap(), before);
     let pending = repository
-        .invalidate_task_check(task.id, check.id, &invalidation(&failed))
+        .invalidate_record_check(task.id, check.id, &invalidation(&failed))
         .unwrap();
     assert_eq!(pending.version, 4);
     assert_eq!(pending.current_verdict, None);
@@ -126,7 +125,7 @@ fn invalidation_is_pending_without_fallback_and_retains_bounded_durable_activity
     let updates = repository.list_record_updates(task.id).unwrap();
     assert_eq!(
         repository
-            .invalidate_task_check(task.id, check.id, &repeated)
+            .invalidate_record_check(task.id, check.id, &repeated)
             .unwrap_err()
             .code,
         "invalid-transition"
@@ -137,7 +136,7 @@ fn invalidation_is_pending_without_fallback_and_retains_bounded_durable_activity
     );
     assert_eq!(
         repository
-            .show_task_check(task.id, check.id, Some(u64::MAX), 1)
+            .show_record_check(task.id, check.id, Some(u64::MAX), 1)
             .unwrap_err()
             .code,
         "invalid-page"
@@ -145,7 +144,7 @@ fn invalidation_is_pending_without_fallback_and_retains_bounded_durable_activity
     for limit in [0, 101] {
         assert_eq!(
             repository
-                .show_task_check(task.id, check.id, None, limit)
+                .show_record_check(task.id, check.id, None, limit)
                 .unwrap_err()
                 .code,
             "invalid-page"
@@ -157,7 +156,7 @@ fn invalidation_is_pending_without_fallback_and_retains_bounded_durable_activity
     let mut invalidations = vec![];
     loop {
         let page = repository
-            .show_task_check(task.id, check.id, cursor, 1)
+            .show_record_check(task.id, check.id, cursor, 1)
             .unwrap();
         assert_eq!(page.activities.len(), 1);
         activity_ids.push(page.activities[0].id);
@@ -177,7 +176,7 @@ fn invalidation_is_pending_without_fallback_and_retains_bounded_durable_activity
     assert_eq!(invalidations, [latest.invalidation.clone().unwrap()]);
     assert!(
         repository
-            .show_task_check(task.id, check.id, Some(*activity_ids.last().unwrap()), 1)
+            .show_record_check(task.id, check.id, Some(*activity_ids.last().unwrap()), 1)
             .unwrap()
             .activities
             .is_empty()
@@ -185,11 +184,11 @@ fn invalidation_is_pending_without_fallback_and_retains_bounded_durable_activity
     drop(repository);
     let repository = SqliteProjectRepository::open(&path).unwrap();
     assert_eq!(
-        repository.list_task_checks(task.id).unwrap().as_slice(),
+        repository.list_record_checks(task.id).unwrap().as_slice(),
         std::slice::from_ref(&pending)
     );
     let passed = repository
-        .assess_task_check(
+        .assess_record_check(
             task.id,
             check.id,
             &assessment(pending.version, Verdict::Pass),
@@ -199,14 +198,14 @@ fn invalidation_is_pending_without_fallback_and_retains_bounded_durable_activity
     repository.done_record(task.id, None).unwrap();
     assert_eq!(
         repository
-            .invalidate_task_check(task.id, check.id, &invalidation(&passed))
+            .invalidate_record_check(task.id, check.id, &invalidation(&passed))
             .unwrap_err()
             .code,
         "record-done"
     );
     assert_eq!(
         repository
-            .assess_task_check(
+            .assess_record_check(
                 task.id,
                 check.id,
                 &assessment(passed.version, Verdict::Fail)
@@ -229,13 +228,13 @@ fn invalidation_validation_workspace_and_update_failure_are_atomic() {
         .unwrap();
     let repository = store.in_record_workspace("test").unwrap();
     let task = task(&repository, vec![]);
-    let check = repository.list_task_checks(task.id).unwrap().remove(0);
+    let check = repository.list_record_checks(task.id).unwrap().remove(0);
     let passed = repository
-        .assess_task_check(task.id, check.id, &assessment(check.version, Verdict::Pass))
+        .assess_record_check(task.id, check.id, &assessment(check.version, Verdict::Pass))
         .unwrap();
     let input = invalidation(&passed);
     let before = repository
-        .show_task_check(task.id, check.id, None, 100)
+        .show_record_check(task.id, check.id, None, 100)
         .unwrap();
     let updates = repository.list_record_updates(task.id).unwrap();
     for invalid in [
@@ -258,14 +257,14 @@ fn invalidation_validation_workspace_and_update_failure_are_atomic() {
     ] {
         assert!(
             repository
-                .invalidate_task_check(task.id, check.id, &invalid)
+                .invalidate_record_check(task.id, check.id, &invalid)
                 .is_err()
         );
     }
     let other = self::task(&repository, vec![]);
     assert_eq!(
         repository
-            .invalidate_task_check(other.id, check.id, &input)
+            .invalidate_record_check(other.id, check.id, &input)
             .unwrap_err()
             .code,
         "check-not-found"
@@ -276,21 +275,21 @@ fn invalidation_validation_workspace_and_update_failure_are_atomic() {
     let foreign = repository.records_in_workspace("foreign").unwrap();
     assert!(
         foreign
-            .invalidate_task_check(task.id, check.id, &input)
+            .invalidate_record_check(task.id, check.id, &input)
             .is_err()
     );
     let fault = Connection::open(&path).unwrap();
     fault.execute_batch("CREATE TRIGGER reject_invalidation BEFORE INSERT ON record_updates WHEN NEW.kind = 'check-invalidated' BEGIN SELECT RAISE(ABORT, 'injected update failure'); END;").unwrap();
     assert_eq!(
         repository
-            .invalidate_task_check(task.id, check.id, &input)
+            .invalidate_record_check(task.id, check.id, &input)
             .unwrap_err()
             .code,
         "storage"
     );
     assert_eq!(
         repository
-            .show_task_check(task.id, check.id, None, 100)
+            .show_record_check(task.id, check.id, None, 100)
             .unwrap(),
         before
     );
@@ -299,7 +298,7 @@ fn invalidation_validation_workspace_and_update_failure_are_atomic() {
         .execute_batch("DROP TRIGGER reject_invalidation")
         .unwrap();
     repository
-        .invalidate_task_check(task.id, check.id, &input)
+        .invalidate_record_check(task.id, check.id, &input)
         .unwrap();
 }
 
@@ -310,9 +309,9 @@ fn invalidation_racing_new_assessment_has_one_observed_version_winner() {
     let path = directory.path().join("checks.sqlite");
     let repository = SqliteProjectRepository::open(&path).unwrap();
     let task = task(&repository, vec![]);
-    let check = repository.list_task_checks(task.id).unwrap().remove(0);
+    let check = repository.list_record_checks(task.id).unwrap().remove(0);
     let passed = repository
-        .assess_task_check(task.id, check.id, &assessment(1, Verdict::Pass))
+        .assess_record_check(task.id, check.id, &assessment(1, Verdict::Pass))
         .unwrap();
     let barrier = Arc::new(Barrier::new(2));
     let handles = (0..2)
@@ -323,9 +322,9 @@ fn invalidation_racing_new_assessment_has_one_observed_version_winner() {
             std::thread::spawn(move || {
                 barrier.wait();
                 if operation == 0 {
-                    repository.invalidate_task_check(task.id, check.id, &input)
+                    repository.invalidate_record_check(task.id, check.id, &input)
                 } else {
-                    repository.assess_task_check(task.id, check.id, &assessment(2, Verdict::Fail))
+                    repository.assess_record_check(task.id, check.id, &assessment(2, Verdict::Fail))
                 }
             })
         })
@@ -340,7 +339,7 @@ fn invalidation_racing_new_assessment_has_one_observed_version_winner() {
         "stale-version"
     );
     let page = repository
-        .show_task_check(task.id, check.id, None, 100)
+        .show_record_check(task.id, check.id, None, 100)
         .unwrap();
     assert_eq!(page.check.version, 3);
     assert_eq!(page.activities.len(), 2);
@@ -355,12 +354,12 @@ fn application_comparison_is_explicit_contextual_and_never_changes_authority() {
     let project_task = task(&repository, vec!["alpha".into()]);
     let projectless = task(&repository, vec![]);
     for task in [&project_task, &projectless] {
-        let check = repository.list_task_checks(task.id).unwrap().remove(0);
+        let check = repository.list_record_checks(task.id).unwrap().remove(0);
         let passed = repository
-            .assess_task_check(task.id, check.id, &assessment(1, Verdict::Pass))
+            .assess_record_check(task.id, check.id, &assessment(1, Verdict::Pass))
             .unwrap();
         repository
-            .invalidate_task_check(task.id, check.id, &invalidation(&passed))
+            .invalidate_record_check(task.id, check.id, &invalidation(&passed))
             .unwrap();
     }
     let app = Application::new(Box::new(repository), Box::new(FakeInspector));
@@ -369,7 +368,7 @@ fn application_comparison_is_explicit_contextual_and_never_changes_authority() {
         (&projectless, RevisionComparison::Unknown),
     ] {
         let checks = app
-            .compare_task_checks(task.id, Some(&"A".repeat(40)))
+            .compare_record_checks(task.id, Some(&"A".repeat(40)))
             .unwrap();
         let check = &checks[0];
         assert_eq!(check.current_verdict, None);
@@ -378,7 +377,7 @@ fn application_comparison_is_explicit_contextual_and_never_changes_authority() {
         assert_eq!(latest.dirty, Some(false));
         assert_eq!(latest.invalidation.as_ref().unwrap().dirty, None);
         let page = app
-            .compare_task_check(task.id, check.id, None, 100, Some(&"b".repeat(40)))
+            .compare_record_check(task.id, check.id, None, 100, Some(&"b".repeat(40)))
             .unwrap();
         assert_eq!(
             page.assessments[0].comparison,
@@ -393,7 +392,7 @@ fn application_comparison_is_explicit_contextual_and_never_changes_authority() {
             expected
         );
         assert_eq!(
-            app.list_task_checks(task.id).unwrap()[0]
+            app.list_record_checks(task.id).unwrap()[0]
                 .latest_assessment
                 .as_ref()
                 .unwrap()
@@ -402,19 +401,19 @@ fn application_comparison_is_explicit_contextual_and_never_changes_authority() {
         );
     }
     assert_eq!(
-        app.compare_task_checks(project_task.id, Some("short"))
+        app.compare_record_checks(project_task.id, Some("short"))
             .unwrap_err()
             .code,
         "invalid-revision"
     );
-    let check = app.list_task_checks(project_task.id).unwrap().remove(0);
+    let check = app.list_record_checks(project_task.id).unwrap().remove(0);
     let mut input = assessment(check.version, Verdict::Pass);
     input.revision = None;
     input.dirty = None;
-    app.assess_task_check(project_task.id, check.id, &input)
+    app.assess_record_check(project_task.id, check.id, &input)
         .unwrap();
     let check = app
-        .compare_task_checks(project_task.id, Some(&"a".repeat(40)))
+        .compare_record_checks(project_task.id, Some(&"a".repeat(40)))
         .unwrap()
         .remove(0);
     assert_eq!(check.current_verdict, Some(Verdict::Pass));

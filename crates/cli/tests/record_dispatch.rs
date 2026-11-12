@@ -122,7 +122,6 @@ fn dispatch_fixture() -> (std::path::PathBuf, SqliteProjectRepository, Vec<Strin
             store
                 .open_typed_record(&NewTypedRecord {
                     record_type: kind,
-                    task_kind: None,
                     body: "work".into(),
                     project_slugs: vec!["alpha".into()],
                     generated_by_ids: vec![],

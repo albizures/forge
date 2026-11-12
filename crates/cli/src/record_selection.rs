@@ -98,15 +98,15 @@ dispatch_requests! {
 requests! {
     project_check_template_show(forge_rpc::CheckTemplateShowRequest) -> forge_rpc::TemplatePage;
     project_check_template_set(forge_rpc::CheckTemplateSetRequest) -> forge_rpc::CheckTemplate;
-    task_finding_list(forge_rpc::TaskFindingListRequest) -> forge_rpc::FindingList;
-    task_finding_show(forge_rpc::TaskFindingShowRequest) -> forge_rpc::FindingPage;
-    task_finding_raise(forge_rpc::TaskFindingRaiseRequest) -> forge_rpc::Finding;
-    task_finding_resolve(forge_rpc::TaskFindingResolveRequest) -> forge_rpc::Finding;
-    task_finding_mutate(forge_rpc::TaskFindingMutationRequest) -> forge_rpc::Finding;
-    task_check_list(forge_rpc::TaskCheckListRequest) -> Vec<forge_rpc::TaskCheck>;
-    task_check_invalidate(forge_rpc::TaskCheckInvalidateRequest) -> forge_rpc::TaskCheck;
-    task_check_show(forge_rpc::TaskCheckShowRequest) -> forge_rpc::CheckPage;
-    task_check_assess(forge_rpc::TaskCheckAssessRequest) -> forge_rpc::TaskCheck;
+    record_finding_list(forge_rpc::RecordFindingListRequest) -> forge_rpc::FindingList;
+    record_finding_show(forge_rpc::RecordFindingShowRequest) -> forge_rpc::FindingPage;
+    record_finding_raise(forge_rpc::RecordFindingRaiseRequest) -> forge_rpc::Finding;
+    record_finding_resolve(forge_rpc::RecordFindingResolveRequest) -> forge_rpc::Finding;
+    record_finding_mutate(forge_rpc::RecordFindingMutationRequest) -> forge_rpc::Finding;
+    record_check_list(forge_rpc::RecordCheckListRequest) -> Vec<forge_rpc::RecordCheck>;
+    record_check_invalidate(forge_rpc::RecordCheckInvalidateRequest) -> forge_rpc::RecordCheck;
+    record_check_show(forge_rpc::RecordCheckShowRequest) -> forge_rpc::CheckPage;
+    record_check_assess(forge_rpc::RecordCheckAssessRequest) -> forge_rpc::RecordCheck;
     open_initiative(OpenRecordRequest) -> RecordResponse;
     ready(ReadyRecordsRequest) -> ReadyRecordsResponse;
     open(OpenRecordRequest) -> RecordResponse;

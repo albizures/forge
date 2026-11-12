@@ -1,8 +1,8 @@
 use clap::{Args, Subcommand};
 use forge_rpc::{
     Finding, FindingMutation, FindingMutationInput, FindingRaiseInput, FindingResolveInput,
-    FindingResponse, Severity, TaskFindingListRequest, TaskFindingMutationRequest,
-    TaskFindingRaiseRequest, TaskFindingResolveRequest, TaskFindingShowRequest,
+    FindingResponse, RecordFindingListRequest, RecordFindingMutationRequest,
+    RecordFindingRaiseRequest, RecordFindingResolveRequest, RecordFindingShowRequest, Severity,
 };
 use std::fmt::Write as _;
 
@@ -45,7 +45,7 @@ pub struct Page {
 }
 #[derive(Debug, Args)]
 pub struct ListArgs {
-    task: u64,
+    record: u64,
     #[command(flatten)]
     page: Page,
     #[command(flatten)]
@@ -53,7 +53,7 @@ pub struct ListArgs {
 }
 #[derive(Debug, Args)]
 pub struct ShowArgs {
-    task: u64,
+    record: u64,
     finding: u64,
     #[command(flatten)]
     page: Page,
@@ -76,7 +76,7 @@ pub struct Explanation {
 }
 #[derive(Debug, Args)]
 pub struct RaiseArgs {
-    task: u64,
+    record: u64,
     #[arg(long, value_parser = ["minor", "major", "critical"])]
     severity: String,
     #[arg(long, action = clap::ArgAction::Set)]
@@ -92,7 +92,7 @@ pub struct RaiseArgs {
 }
 #[derive(Debug, Args)]
 pub struct ResolveArgs {
-    task: u64,
+    record: u64,
     finding: u64,
     #[arg(long)]
     expected_version: u64,
@@ -132,10 +132,10 @@ async fn mutate(
 ) -> Result<(serde_json::Value, String), String> {
     let message =
         super::checks::explanation(args.explanation.message, args.explanation.message_file)?;
-    forge_cli::request_task_finding_mutate(
+    forge_cli::request_record_finding_mutate(
         endpoint,
-        TaskFindingMutationRequest {
-            task: args.task,
+        RecordFindingMutationRequest {
+            record: args.record,
             finding: args.finding,
             mutation: FindingMutationInput {
                 change,
@@ -239,16 +239,16 @@ pub async fn run(command: FindingCommand, workspace: Option<String>) -> i32 {
     let url = match super::resolve_managed_endpoint(output.server_url.as_deref()).await {
         Ok(url) => url,
         Err(error) => {
-            eprintln!("forge task finding: {error}");
+            eprintln!("forge record finding: {error}");
             return 1;
         }
     };
     let endpoint = (url.as_str(), workspace.as_deref());
     let result = match command {
-        FindingCommand::List(a) => forge_cli::request_task_finding_list(
+        FindingCommand::List(a) => forge_cli::request_record_finding_list(
             endpoint,
-            TaskFindingListRequest {
-                task: a.task,
+            RecordFindingListRequest {
+                record: a.record,
                 after: a.page.after,
                 limit: a.page.limit,
                 compare_revision: a.page.compare_revision,
@@ -262,10 +262,10 @@ pub async fn run(command: FindingCommand, workspace: Option<String>) -> i32 {
                 text,
             )
         }),
-        FindingCommand::Show(a) => forge_cli::request_task_finding_show(
+        FindingCommand::Show(a) => forge_cli::request_record_finding_show(
             endpoint,
-            TaskFindingShowRequest {
-                task: a.task,
+            RecordFindingShowRequest {
+                record: a.record,
                 finding: a.finding,
                 after: a.page.after,
                 limit: a.page.limit,
@@ -283,10 +283,10 @@ pub async fn run(command: FindingCommand, workspace: Option<String>) -> i32 {
         FindingCommand::Raise(a) => {
             match super::checks::explanation(a.explanation.message, a.explanation.message_file) {
                 Err(error) => Err(error),
-                Ok(message) => forge_cli::request_task_finding_raise(
+                Ok(message) => forge_cli::request_record_finding_raise(
                     endpoint,
-                    TaskFindingRaiseRequest {
-                        task: a.task,
+                    RecordFindingRaiseRequest {
+                        record: a.record,
                         finding: FindingRaiseInput {
                             severity: match a.severity.as_str() {
                                 "minor" => Severity::Minor,
@@ -338,10 +338,10 @@ pub async fn run(command: FindingCommand, workspace: Option<String>) -> i32 {
         FindingCommand::Resolve(a) => {
             match super::checks::explanation(a.explanation.message, a.explanation.message_file) {
                 Err(error) => Err(error),
-                Ok(message) => forge_cli::request_task_finding_resolve(
+                Ok(message) => forge_cli::request_record_finding_resolve(
                     endpoint,
-                    TaskFindingResolveRequest {
-                        task: a.task,
+                    RecordFindingResolveRequest {
+                        record: a.record,
                         finding: a.finding,
                         resolution: FindingResolveInput {
                             expected_version: a.expected_version,
@@ -367,7 +367,7 @@ pub async fn run(command: FindingCommand, workspace: Option<String>) -> i32 {
             0
         }
         Err(error) => {
-            eprintln!("forge task finding: {error}");
+            eprintln!("forge record finding: {error}");
             1
         }
     }

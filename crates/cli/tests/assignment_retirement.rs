@@ -98,7 +98,6 @@ fn retirement_fixture(unknown: bool) -> (std::path::PathBuf, SqliteProjectReposi
     let task = store
         .open_typed_record(&NewTypedRecord {
             record_type: RecordType::Task,
-            task_kind: None,
             body: "PRIVATE PROMPT".into(),
             project_slugs: vec!["alpha".into()],
             generated_by_ids: vec![],

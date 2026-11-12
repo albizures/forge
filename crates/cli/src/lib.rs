@@ -956,14 +956,13 @@ pub async fn request_open_task(
     url: impl Into<RecordEndpoint>,
     body: &str,
     project_slug: Option<String>,
-    task_kind: Option<String>,
     generated_by_ids: Vec<u64>,
 ) -> Result<RecordResponse, String> {
     record_client(url)?
         .open_task(OpenTaskRequest {
             body: body.into(),
             project_slug,
-            task_kind,
+
             generated_by_ids,
         })
         .await
@@ -979,14 +978,13 @@ pub async fn request_open_task_under_spec(
     url: impl Into<RecordEndpoint>,
     body: &str,
     spec_id: u64,
-    task_kind: Option<String>,
     generated_by_ids: Vec<u64>,
 ) -> Result<RecordResponse, String> {
     record_client(url)?
         .open_task_under_spec(OpenTaskUnderSpecRequest {
             body: body.into(),
             spec_id,
-            task_kind,
+
             generated_by_ids,
         })
         .await
@@ -1003,7 +1001,6 @@ pub async fn request_open_task_under_wayfinder(
     body: &str,
     wayfinder_id: u64,
     project_slug: Option<String>,
-    task_kind: Option<String>,
     generated_by_ids: Vec<u64>,
 ) -> Result<RecordResponse, String> {
     record_client(url)?
@@ -1011,7 +1008,7 @@ pub async fn request_open_task_under_wayfinder(
             body: body.into(),
             wayfinder_id,
             project_slug,
-            task_kind,
+
             generated_by_ids,
         })
         .await
@@ -1051,14 +1048,12 @@ pub async fn request_list_records(
     project_slug: Option<String>,
     status: Option<String>,
     record_type: Option<String>,
-    task_kind: Option<String>,
 ) -> Result<ListRecordsResponse, String> {
     record_client(url)?
         .list(ListRecordsRequest {
             project_slug,
             status,
             record_type,
-            task_kind,
         })
         .await
         .map_err(record_error("list"))
@@ -1095,128 +1090,128 @@ pub async fn request_project_check_template_set(
 ///
 /// # Errors
 /// Returns endpoint, Workspace selection, or daemon validation errors.
-pub async fn request_task_check_list(
+pub async fn request_record_check_list(
     url: impl Into<RecordEndpoint>,
-    task: u64,
-) -> Result<Vec<forge_rpc::TaskCheck>, String> {
-    request_task_check_list_compared(url, task, None).await
+    record: u64,
+) -> Result<Vec<forge_rpc::RecordCheck>, String> {
+    request_record_check_list_compared(url, record, None).await
 }
 /// List Checks with an optional caller-reported comparison revision.
 ///
 /// # Errors
 /// Returns endpoint, scope or revision validation errors.
-pub async fn request_task_check_list_compared(
+pub async fn request_record_check_list_compared(
     url: impl Into<RecordEndpoint>,
-    task: u64,
+    record: u64,
     compare_revision: Option<String>,
-) -> Result<Vec<forge_rpc::TaskCheck>, String> {
+) -> Result<Vec<forge_rpc::RecordCheck>, String> {
     record_client(url)?
-        .task_check_list(forge_rpc::TaskCheckListRequest {
-            task,
+        .record_check_list(forge_rpc::RecordCheckListRequest {
+            record,
             compare_revision,
         })
         .await
-        .map_err(record_error("task check list"))
+        .map_err(record_error("record check list"))
 }
 /// List a bounded page of Task-owned Findings.
 ///
 /// # Errors
 /// Returns endpoint, scope, Record type or pagination errors.
-pub async fn request_task_finding_list(
+pub async fn request_record_finding_list(
     url: impl Into<RecordEndpoint>,
-    request: forge_rpc::TaskFindingListRequest,
+    request: forge_rpc::RecordFindingListRequest,
 ) -> Result<forge_rpc::FindingList, String> {
     record_client(url)?
-        .task_finding_list(request)
+        .record_finding_list(request)
         .await
-        .map_err(record_error("task finding list"))
+        .map_err(record_error("record finding list"))
 }
 /// Inspect a Finding and bounded activity page.
 /// # Errors
 /// Returns endpoint, scope, ownership or pagination errors.
-pub async fn request_task_finding_show(
+pub async fn request_record_finding_show(
     url: impl Into<RecordEndpoint>,
-    request: forge_rpc::TaskFindingShowRequest,
+    request: forge_rpc::RecordFindingShowRequest,
 ) -> Result<forge_rpc::FindingPage, String> {
     record_client(url)?
-        .task_finding_show(request)
+        .record_finding_show(request)
         .await
-        .map_err(record_error("task finding show"))
+        .map_err(record_error("record finding show"))
 }
 /// Raise an attributed Finding.
 /// # Errors
 /// Returns endpoint, scope, validation, origin or frozen-state errors.
-pub async fn request_task_finding_raise(
+pub async fn request_record_finding_raise(
     url: impl Into<RecordEndpoint>,
-    request: forge_rpc::TaskFindingRaiseRequest,
+    request: forge_rpc::RecordFindingRaiseRequest,
 ) -> Result<forge_rpc::Finding, String> {
     record_client(url)?
-        .task_finding_raise(request)
+        .record_finding_raise(request)
         .await
-        .map_err(record_error("task finding raise"))
+        .map_err(record_error("record finding raise"))
 }
 /// Resolve a Finding at its observed version.
 /// # Errors
 /// Returns endpoint, validation, ownership, stale-version or transition errors.
-pub async fn request_task_finding_resolve(
+pub async fn request_record_finding_resolve(
     url: impl Into<RecordEndpoint>,
-    request: forge_rpc::TaskFindingResolveRequest,
+    request: forge_rpc::RecordFindingResolveRequest,
 ) -> Result<forge_rpc::Finding, String> {
     record_client(url)?
-        .task_finding_resolve(request)
+        .record_finding_resolve(request)
         .await
-        .map_err(record_error("task finding resolve"))
+        .map_err(record_error("record finding resolve"))
 }
 /// Append a version-checked Finding review action.
 /// # Errors
 /// Returns endpoint, scope, validation, stale-version, transition or frozen-state errors.
-pub async fn request_task_finding_mutate(
+pub async fn request_record_finding_mutate(
     url: impl Into<RecordEndpoint>,
-    request: forge_rpc::TaskFindingMutationRequest,
+    request: forge_rpc::RecordFindingMutationRequest,
 ) -> Result<forge_rpc::Finding, String> {
     record_client(url)?
-        .task_finding_mutate(request)
+        .record_finding_mutate(request)
         .await
-        .map_err(record_error("task finding mutate"))
+        .map_err(record_error("record finding mutate"))
 }
 /// Inspect a Check and bounded Assessment history.
 /// # Errors
 /// Returns endpoint, scope, ownership or pagination errors.
-pub async fn request_task_check_show(
+pub async fn request_record_check_show(
     url: impl Into<RecordEndpoint>,
-    request: forge_rpc::TaskCheckShowRequest,
+    request: forge_rpc::RecordCheckShowRequest,
 ) -> Result<forge_rpc::CheckPage, String> {
     record_client(url)?
-        .task_check_show(request)
+        .record_check_show(request)
         .await
-        .map_err(record_error("task check show"))
+        .map_err(record_error("record check show"))
 }
 /// Append an attributed Assessment using the observed Check version.
 ///
 /// # Errors
 /// Returns endpoint, validation, stale-version, frozen-Task, or scope errors.
-pub async fn request_task_check_assess(
+pub async fn request_record_check_assess(
     url: impl Into<RecordEndpoint>,
-    request: forge_rpc::TaskCheckAssessRequest,
-) -> Result<forge_rpc::TaskCheck, String> {
+    request: forge_rpc::RecordCheckAssessRequest,
+) -> Result<forge_rpc::RecordCheck, String> {
     record_client(url)?
-        .task_check_assess(request)
+        .record_check_assess(request)
         .await
-        .map_err(record_error("task check assess"))
+        .map_err(record_error("record check assess"))
 }
 
 /// Invalidate the latest active Assessment at an observed version.
 ///
 /// # Errors
 /// Returns endpoint, validation, scope, transition or stale version errors.
-pub async fn request_task_check_invalidate(
+pub async fn request_record_check_invalidate(
     url: impl Into<RecordEndpoint>,
-    request: forge_rpc::TaskCheckInvalidateRequest,
-) -> Result<forge_rpc::TaskCheck, String> {
+    request: forge_rpc::RecordCheckInvalidateRequest,
+) -> Result<forge_rpc::RecordCheck, String> {
     record_client(url)?
-        .task_check_invalidate(request)
+        .record_check_invalidate(request)
         .await
-        .map_err(record_error("task check invalidate"))
+        .map_err(record_error("record check invalidate"))
 }
 
 /// Requests a Record lifecycle operation through the daemon.
@@ -1602,26 +1597,25 @@ mod tests {
             "Scoped Child Task",
             wayfinder.id,
             None,
-            None,
             vec![],
         )
         .await
         .unwrap();
         assert_eq!(wayfinder_task.project_scope, wayfinder.project_scope);
 
-        let standalone = request_open_task(&url, "Standalone Task", None, None, vec![])
+        let standalone = request_open_task(&url, "Standalone Task", None, vec![])
             .await
             .unwrap();
         assert_eq!(standalone.record_type, "task");
         assert!(standalone.project_scope.project_slugs.is_empty());
-        let child = request_open_task_under_spec(&url, "Child Task", spec.id, None, vec![])
+        let child = request_open_task_under_spec(&url, "Child Task", spec.id, vec![])
             .await
             .unwrap();
         assert_eq!(child.record_type, "task");
         assert_eq!(child.project_scope, spec.project_scope);
         assert_eq!(child.relationships[0].parent_id, spec.id);
 
-        let listed = request_list_records(&url, None, None, Some("task".into()), None)
+        let listed = request_list_records(&url, None, None, Some("task".into()))
             .await
             .unwrap();
         assert_eq!(listed.records.len(), 3);
@@ -1645,7 +1639,6 @@ mod tests {
                 workspace_id: "test".into(),
                 id: 4,
                 record_type: "generic".into(),
-                task_kind: None,
                 body: "body".into(),
                 project_scope: ProjectScopeRequest {
                     project_slugs: vec![],
@@ -1687,7 +1680,6 @@ mod tests {
                 workspace_id: "test".into(),
                 id: 4,
                 record_type: "generic".into(),
-                task_kind: None,
                 body: "body".into(),
                 project_scope: ProjectScopeRequest {
                     project_slugs: vec![]

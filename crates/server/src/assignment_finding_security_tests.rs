@@ -19,7 +19,7 @@ async fn assignment_finding_rpc_confines_reads_origins_and_all_mutations() {
         revision: None,
         dirty: None,
     };
-    let finding = store.raise_task_finding(owner, &input).unwrap();
+    let finding = store.raise_record_finding(owner, &input).unwrap();
     let foreign_root = fixture.database_path.with_extension("foreign-root");
     std::fs::create_dir_all(&foreign_root).unwrap();
     store
@@ -29,18 +29,17 @@ async fn assignment_finding_rpc_confines_reads_origins_and_all_mutations() {
     let foreign_task = foreign_store
         .open_typed_record(&NewTypedRecord {
             record_type: RecordType::Task,
-            task_kind: None,
             body: "Foreign Task".into(),
             project_slugs: vec![],
             generated_by_ids: vec![],
         })
         .unwrap();
     let foreign_finding = foreign_store
-        .raise_task_finding(foreign_task.id, &input)
+        .raise_record_finding(foreign_task.id, &input)
         .unwrap();
-    let foreign_check = foreign_store.list_task_checks(foreign_task.id).unwrap()[0].id;
+    let foreign_check = foreign_store.list_record_checks(foreign_task.id).unwrap()[0].id;
     let foreign_assessment = foreign_store
-        .assess_task_check(
+        .assess_record_check(
             foreign_task.id,
             foreign_check,
             &forge_app::checks::AssessmentInput {
@@ -131,7 +130,7 @@ async fn assignment_finding_rpc_confines_reads_origins_and_all_mutations() {
     }
     assert_eq!(
         store
-            .list_task_findings(owner, None, 100)
+            .list_record_findings(owner, None, 100)
             .unwrap()
             .findings
             .len(),
@@ -139,7 +138,7 @@ async fn assignment_finding_rpc_confines_reads_origins_and_all_mutations() {
     );
     assert_eq!(
         store
-            .show_task_finding(owner, finding.id, None, 100)
+            .show_record_finding(owner, finding.id, None, 100)
             .unwrap()
             .activities
             .len(),

@@ -48,7 +48,6 @@ fn claim_attempt(fixture: &Fixture, kind: RecordType) -> forge_app::AgentAssignm
     let record = store
         .open_typed_record(&NewTypedRecord {
             record_type: kind,
-            task_kind: None,
             body: "Restart regression".into(),
             project_slugs: vec!["one/api".into()],
             generated_by_ids: vec![],

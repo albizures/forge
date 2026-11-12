@@ -252,7 +252,6 @@ impl Fixture {
         self.store()
             .open_typed_record(&NewTypedRecord {
                 record_type: RecordType::Grilling,
-                task_kind: None,
                 body: "decision".into(),
                 project_slugs: vec![format!("{workspace}/api")],
                 generated_by_ids: vec![],
@@ -462,7 +461,6 @@ fn registered_profile_blocker_is_durable_redacted_and_clears_on_input_repair() {
         .store()
         .open_typed_record(&NewTypedRecord {
             record_type: RecordType::Task,
-            task_kind: None,
             body: "task".into(),
             project_slugs: vec!["one/api".into()],
             generated_by_ids: vec![],
@@ -609,7 +607,6 @@ fn automatic_scheduling_has_no_global_readiness_or_latest_profile_bypass() {
         let task = store
             .open_typed_record(&NewTypedRecord {
                 record_type: RecordType::Task,
-                task_kind: None,
                 body: "implement".into(),
                 project_slugs: vec![format!("{workspace}/api")],
                 generated_by_ids: vec![],
@@ -740,7 +737,6 @@ fn workspace_launch_context_and_recovery_stay_with_the_original_owner_after_rest
     let two = store
         .open_typed_record(&NewTypedRecord {
             record_type: RecordType::Grilling,
-            task_kind: None,
             body: "multi-project decision".into(),
             project_slugs: vec!["two/api".into(), "two/web".into()],
             generated_by_ids: vec![],
@@ -750,7 +746,6 @@ fn workspace_launch_context_and_recovery_stay_with_the_original_owner_after_rest
     let web = store
         .open_typed_record(&NewTypedRecord {
             record_type: RecordType::Grilling,
-            task_kind: None,
             body: "web decision".into(),
             project_slugs: vec!["two/web".into()],
             generated_by_ids: vec![],
@@ -890,7 +885,6 @@ fn workspace_launch_context_and_recovery_stay_with_the_original_owner_after_rest
     let task = store
         .open_typed_record(&NewTypedRecord {
             record_type: RecordType::Task,
-            task_kind: None,
             body: "web implementation".into(),
             project_slugs: vec!["two/web".into()],
             generated_by_ids: vec![],

@@ -38,7 +38,6 @@ fn claim_context_fixture(
     let own = store
         .open_typed_record(&NewTypedRecord {
             record_type: kind,
-            task_kind: None,
             body: "Assigned title\nAssigned body".into(),
             project_slugs: if kind == RecordType::Task {
                 vec!["alpha".into()]

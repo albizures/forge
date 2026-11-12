@@ -42,9 +42,9 @@ async fn operator_findings_retain_explanations_and_block_completion_over_rpc() {
     };
     let task = json(run(&["task", "open", "--body", "Deliver work", "--json"]))["id"].to_string();
     json(run(&["record", "start", &task, "--json"]));
-    let check = json(run(&["task", "check", "list", &task, "--json"]))[0]["id"].to_string();
+    let check = json(run(&["record", "check", "list", &task, "--json"]))[0]["id"].to_string();
     let base = [
-        "task",
+        "record",
         "finding",
         "raise",
         &task,
@@ -98,7 +98,7 @@ async fn operator_findings_retain_explanations_and_block_completion_over_rpc() {
     let error = String::from_utf8_lossy(&blocked.stderr);
     assert!(error.contains("Check IDs:") && error.contains("Finding IDs:"));
     json(run(&[
-        "task",
+        "record",
         "check",
         "assess",
         &task,
@@ -115,11 +115,11 @@ async fn operator_findings_retain_explanations_and_block_completion_over_rpc() {
     ]));
     assert!(!run(&["record", "done", &task]).status.success());
     let list = json(run(&[
-        "task", "finding", "list", &task, "--limit", "1", "--json",
+        "record", "finding", "list", &task, "--limit", "1", "--json",
     ]));
     assert_eq!(list["findings"][0], raised);
     let resolve = [
-        "task",
+        "record",
         "finding",
         "resolve",
         &task,
@@ -149,12 +149,12 @@ async fn operator_findings_retain_explanations_and_block_completion_over_rpc() {
     let stale = run(&[resolve.as_slice(), &["--message", "Stale"]].concat());
     assert!(String::from_utf8_lossy(&stale.stderr).contains("stale-version"));
     let page = json(run(&[
-        "task", "finding", "show", &task, &id, "--limit", "1", "--json",
+        "record", "finding", "show", &task, &id, "--limit", "1", "--json",
     ]));
     assert_eq!(page["activities"].as_array().unwrap().len(), 1);
     let cursor = page["next_cursor"].to_string();
     let next = json(run(&[
-        "task",
+        "record",
         "finding",
         "show",
         &task,
@@ -173,7 +173,7 @@ async fn operator_findings_retain_explanations_and_block_completion_over_rpc() {
     );
     // Projectless evidence comparison stays unknown, even for identical SHAs.
     assert_eq!(next["activities"][0]["comparison"], "unknown");
-    let text = run(&["task", "finding", "show", &task, &id]);
+    let text = run(&["record", "finding", "show", &task, &id]);
     let text = String::from_utf8_lossy(&text.stdout);
     assert!(
         text.contains("Input validation missing")
@@ -184,7 +184,7 @@ async fn operator_findings_retain_explanations_and_block_completion_over_rpc() {
     let change = |action: &str, version: &str, extra: &[&str]| {
         run(&[
             &[
-                "task",
+                "record",
                 "finding",
                 action,
                 &task,
@@ -245,16 +245,16 @@ async fn operator_findings_retain_explanations_and_block_completion_over_rpc() {
         json(change("respond", "11", &["--response", "rejected"]))["state"],
         "awaiting-review"
     );
-    let page = json(run(&["task", "finding", "show", &task, &id, "--json"]));
+    let page = json(run(&["record", "finding", "show", &task, &id, "--json"]));
     assert_eq!(page["finding"]["raised"], raised["raised"]);
     assert_eq!(page["activities"].as_array().unwrap().len(), 12);
-    let text = run(&["task", "finding", "show", &task, &id]);
+    let text = run(&["record", "finding", "show", &task, &id]);
     let text = String::from_utf8_lossy(&text.stdout);
     assert!(text.contains("Rejected") && text.contains("old_severity: Critical"));
     let frozen = run(&[base.as_slice(), &["--message", "Too late"]].concat());
     assert!(String::from_utf8_lossy(&frozen.stderr).contains("record-done"));
     assert!(
-        !run(&["--workspace", "missing", "task", "finding", "list", &task])
+        !run(&["--workspace", "missing", "record", "finding", "list", &task])
             .status
             .success()
     );

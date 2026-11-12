@@ -85,14 +85,6 @@ pub enum RecordType {
     Initiative,
 }
 
-/// Optional immutable metadata that classifies a Task without changing its workflow semantics.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TaskKind {
-    Research,
-    Prototype,
-    Review,
-}
-
 /// A unit of work whose immutable type governs its scope and hierarchy.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Record {
@@ -102,8 +94,6 @@ pub struct Record {
     pub id: u64,
     /// Immutable type selected at opening.
     pub record_type: RecordType,
-    /// Optional immutable metadata, populated only for Tasks.
-    pub task_kind: Option<TaskKind>,
     /// Required Markdown content, separate from its structured metadata.
     pub body: String,
     /// Immutable, lexically ordered Project Scope selected at opening.
@@ -129,7 +119,6 @@ pub struct NewRecord {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NewTypedRecord {
     pub record_type: RecordType,
-    pub task_kind: Option<TaskKind>,
     pub body: String,
     pub project_slugs: Vec<String>,
     /// Records which caused this Record to be opened.
@@ -142,7 +131,6 @@ pub struct RecordListFilter {
     pub project_slug: Option<String>,
     pub status: Option<RecordStatus>,
     pub record_type: Option<RecordType>,
-    pub task_kind: Option<TaskKind>,
 }
 
 /// Opaque stable identity assigned to a Forge-authored Record Update.
@@ -471,7 +459,7 @@ pub trait RecordRepository: ProjectRepository {
     /// Raise a Finding and its immutable origin activity atomically.
     /// # Errors
     /// Returns validation, scope, origin, frozen-state or storage errors.
-    fn raise_task_finding(
+    fn raise_record_finding(
         &self,
         _task: u64,
         _input: &findings::FindingRaiseInput,
@@ -484,7 +472,7 @@ pub trait RecordRepository: ProjectRepository {
     /// Resolve an unresolved Finding at the observed version.
     /// # Errors
     /// Returns validation, scope, stale-version, transition or storage errors.
-    fn resolve_task_finding(
+    fn resolve_record_finding(
         &self,
         _task: u64,
         _finding: u64,
@@ -498,7 +486,7 @@ pub trait RecordRepository: ProjectRepository {
     /// Append a version-checked Finding review action atomically.
     /// # Errors
     /// Returns validation, scope, stale-version, transition, frozen-state or storage errors.
-    fn mutate_task_finding(
+    fn mutate_record_finding(
         &self,
         _task: u64,
         _finding: u64,
@@ -541,7 +529,7 @@ pub trait RecordRepository: ProjectRepository {
     /// List a bounded page ordered by Finding ID.
     /// # Errors
     /// Returns scope, type, pagination or storage errors.
-    fn list_task_findings(
+    fn list_record_findings(
         &self,
         _task: u64,
         _after: Option<u64>,
@@ -555,7 +543,7 @@ pub trait RecordRepository: ProjectRepository {
     /// Inspect a Finding and bounded activity history.
     /// # Errors
     /// Returns scope, type, ownership, pagination or storage errors.
-    fn show_task_finding(
+    fn show_record_finding(
         &self,
         _task: u64,
         _finding: u64,
@@ -570,7 +558,10 @@ pub trait RecordRepository: ProjectRepository {
     /// Inspect immutable completion criteria for a Task.
     /// # Errors
     /// Returns scope, Record type or storage errors.
-    fn list_task_checks(&self, _task: u64) -> Result<Vec<checks::TaskCheck>, RegistrationError> {
+    fn list_record_checks(
+        &self,
+        _task: u64,
+    ) -> Result<Vec<checks::RecordCheck>, RegistrationError> {
         Err(RegistrationError::new(
             "checks-unavailable",
             "Task Checks are unavailable",
@@ -580,7 +571,7 @@ pub trait RecordRepository: ProjectRepository {
     ///
     /// # Errors
     /// Returns scope, Check ownership, pagination, or storage errors.
-    fn show_task_check(
+    fn show_record_check(
         &self,
         _task: u64,
         _check: u64,
@@ -596,12 +587,12 @@ pub trait RecordRepository: ProjectRepository {
     ///
     /// # Errors
     /// Rejects invalid input, stale versions, Done Tasks, or inaccessible Checks.
-    fn assess_task_check(
+    fn assess_record_check(
         &self,
         _task: u64,
         _check: u64,
         _input: &checks::AssessmentInput,
-    ) -> Result<checks::TaskCheck, RegistrationError> {
+    ) -> Result<checks::RecordCheck, RegistrationError> {
         Err(RegistrationError::new(
             "checks-unavailable",
             "Task Checks are unavailable",
@@ -617,7 +608,7 @@ pub trait RecordRepository: ProjectRepository {
         _check: u64,
         _input: &checks::AssessmentInput,
         _assignment: &str,
-    ) -> Result<checks::TaskCheck, RegistrationError> {
+    ) -> Result<checks::RecordCheck, RegistrationError> {
         Err(RegistrationError::new(
             "checks-unavailable",
             "Assignment Checks are unavailable",
@@ -633,7 +624,7 @@ pub trait RecordRepository: ProjectRepository {
         _check: u64,
         _input: &checks::InvalidationInput,
         _assignment: &str,
-    ) -> Result<checks::TaskCheck, RegistrationError> {
+    ) -> Result<checks::RecordCheck, RegistrationError> {
         Err(RegistrationError::new(
             "checks-unavailable",
             "Assignment Checks are unavailable",
@@ -643,12 +634,12 @@ pub trait RecordRepository: ProjectRepository {
     ///
     /// # Errors
     /// Returns validation, scope, stale version, transition or storage errors.
-    fn invalidate_task_check(
+    fn invalidate_record_check(
         &self,
         _task: u64,
         _check: u64,
         _input: &checks::InvalidationInput,
-    ) -> Result<checks::TaskCheck, RegistrationError> {
+    ) -> Result<checks::RecordCheck, RegistrationError> {
         Err(RegistrationError::new(
             "checks-unavailable",
             "Check invalidation is unavailable",
@@ -714,7 +705,6 @@ pub trait RecordRepository: ProjectRepository {
         &self,
         body: &str,
         spec_id: u64,
-        task_kind: Option<TaskKind>,
         generated_by_ids: Vec<u64>,
     ) -> Result<Record, RegistrationError>;
     /// Opens a Task beneath a Wayfinder, selecting one Project from its scope.
@@ -727,7 +717,6 @@ pub trait RecordRepository: ProjectRepository {
         body: &str,
         wayfinder_id: u64,
         project_slug: Option<String>,
-        task_kind: Option<TaskKind>,
         generated_by_ids: Vec<u64>,
     ) -> Result<Record, RegistrationError>;
     /// Opens a Grilling beneath a Wayfinder, inheriting or selecting its Project Scope.
@@ -2725,7 +2714,6 @@ impl Application {
                 project_slug: None,
                 status: Some(RecordStatus::Open),
                 record_type: Some(RecordType::Task),
-                task_kind: None,
             })
             .inspect_err(|error| {
                 tracing::warn!(
@@ -3152,7 +3140,7 @@ impl Application {
     ///
     /// Returns a user-facing error for a blank body or storage failure.
     pub fn open_spec(&self, body: &str, project_slug: String) -> Result<Record, RegistrationError> {
-        self.open_typed_record(RecordType::Spec, body, vec![project_slug], None)
+        self.open_typed_record(RecordType::Spec, body, vec![project_slug])
     }
 
     /// Opens a Wayfinder with immutable Project Scope, possibly Projectless within a selected Workspace.
@@ -3172,7 +3160,7 @@ impl Application {
                 "Wayfinder Project Scope must not contain duplicate Project slugs",
             ));
         }
-        self.open_typed_record(RecordType::Wayfinder, body, project_slugs, None)
+        self.open_typed_record(RecordType::Wayfinder, body, project_slugs)
     }
 
     /// Opens a standalone Task with zero or one Project Scope.
@@ -3184,14 +3172,8 @@ impl Application {
         &self,
         body: &str,
         project_slug: Option<String>,
-        task_kind: Option<TaskKind>,
     ) -> Result<Record, RegistrationError> {
-        self.open_typed_record(
-            RecordType::Task,
-            body,
-            project_slug.into_iter().collect(),
-            task_kind,
-        )
+        self.open_typed_record(RecordType::Task, body, project_slug.into_iter().collect())
     }
 
     /// Opens a Task under `spec_id`, inheriting its scope and membership atomically.
@@ -3203,7 +3185,6 @@ impl Application {
         &self,
         body: &str,
         spec_id: u64,
-        task_kind: Option<TaskKind>,
         generated_by_ids: Vec<u64>,
     ) -> Result<Record, RegistrationError> {
         Self::require_body(body)?;
@@ -3211,7 +3192,7 @@ impl Application {
         let base_commit = self.task_base_commit_for_scope(&spec.project_slugs)?;
         let task = self
             .records
-            .open_task_under_spec(body, spec_id, task_kind, generated_by_ids)?;
+            .open_task_under_spec(body, spec_id, generated_by_ids)?;
         if let Some(base_commit) = base_commit {
             self.records.set_task_base_commit(task.id, &base_commit)?;
         }
@@ -3228,7 +3209,6 @@ impl Application {
         body: &str,
         wayfinder_id: u64,
         project_slug: Option<String>,
-        task_kind: Option<TaskKind>,
         generated_by_ids: Vec<u64>,
     ) -> Result<Record, RegistrationError> {
         Self::require_body(body)?;
@@ -3241,7 +3221,6 @@ impl Application {
             body,
             wayfinder_id,
             project_slug,
-            task_kind,
             generated_by_ids,
         )?;
         if let Some(base_commit) = base_commit {
@@ -3281,13 +3260,11 @@ impl Application {
         project_slug: Option<String>,
         status: Option<RecordStatus>,
         record_type: Option<RecordType>,
-        task_kind: Option<TaskKind>,
     ) -> Result<Vec<Record>, RegistrationError> {
         self.records.list_records(&RecordListFilter {
             project_slug,
             status,
             record_type,
-            task_kind,
         })
     }
 
@@ -3386,9 +3363,8 @@ impl Application {
         record_type: RecordType,
         body: &str,
         project_slugs: Vec<String>,
-        task_kind: Option<TaskKind>,
     ) -> Result<Record, RegistrationError> {
-        self.open_typed_record_with_generators(record_type, body, project_slugs, task_kind, vec![])
+        self.open_typed_record_with_generators(record_type, body, project_slugs, vec![])
     }
 
     /// Opens a typed Record and atomically records its provenance.
@@ -3403,7 +3379,6 @@ impl Application {
         record_type: RecordType,
         body: &str,
         project_slugs: Vec<String>,
-        task_kind: Option<TaskKind>,
         generated_by_ids: Vec<u64>,
     ) -> Result<Record, RegistrationError> {
         Self::require_body(body)?;
@@ -3412,7 +3387,6 @@ impl Application {
             .transpose()?;
         let record = self.records.open_typed_record(&NewTypedRecord {
             record_type,
-            task_kind,
             body: body.to_owned(),
             project_slugs,
             generated_by_ids,
@@ -3578,7 +3552,6 @@ mod tests {
                 workspace_id: "test".into(),
                 id: (records.len() + 1) as u64,
                 record_type: RecordType::Generic,
-                task_kind: None,
                 body: record.body.clone(),
                 project_slugs: record.project_slugs.clone(),
                 status: RecordStatus::Open,
@@ -3594,7 +3567,6 @@ mod tests {
                 workspace_id: "test".into(),
                 id: (records.len() + 1) as u64,
                 record_type: record.record_type,
-                task_kind: record.task_kind,
                 body: record.body.clone(),
                 project_slugs: record.project_slugs.clone(),
                 status: RecordStatus::Open,
@@ -3616,7 +3588,7 @@ mod tests {
             &self,
             body: &str,
             spec_id: u64,
-            task_kind: Option<TaskKind>,
+
             _generated_by_ids: Vec<u64>,
         ) -> Result<Record, RegistrationError> {
             let spec = self.show_record(spec_id)?;
@@ -3638,7 +3610,6 @@ mod tests {
             let task = Record {
                 id: task_id,
                 record_type: RecordType::Task,
-                task_kind,
                 body: body.to_owned(),
                 project_slugs: spec.project_slugs,
                 workspace_id: spec.workspace_id,
@@ -3659,7 +3630,7 @@ mod tests {
             body: &str,
             wayfinder_id: u64,
             project_slug: Option<String>,
-            task_kind: Option<TaskKind>,
+
             _generated_by_ids: Vec<u64>,
         ) -> Result<Record, RegistrationError> {
             let wayfinder = self.show_record(wayfinder_id)?;
@@ -3697,7 +3668,6 @@ mod tests {
             let task = Record {
                 id: task_id,
                 record_type: RecordType::Task,
-                task_kind,
                 body: body.to_owned(),
                 project_slugs: vec![project_slug],
                 workspace_id: wayfinder.workspace_id,
@@ -3763,7 +3733,6 @@ mod tests {
                 workspace_id: wayfinder.workspace_id,
                 id: grilling_id,
                 record_type: RecordType::Grilling,
-                task_kind: None,
                 body: body.to_owned(),
                 project_slugs,
                 status: RecordStatus::Open,
@@ -4314,7 +4283,6 @@ mod tests {
                 workspace_id: "test".into(),
                 id: 7,
                 record_type: RecordType::Task,
-                task_kind: None,
                 body: "task".into(),
                 project_slugs: vec!["alpha".into()],
                 status: RecordStatus::Open,
@@ -4327,7 +4295,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatcher_preparation_derives_and_retains_the_task_checkout() {
+    fn dispatcher_preparation_derives_and_retains_the_record_checkout() {
         let adapter = TestWorktreeAdapter {
             calls: Mutex::new(vec![]),
             create_fails: false,
@@ -4373,7 +4341,6 @@ mod tests {
             workspace_id: "test".into(),
             id: 7,
             record_type: RecordType::Task,
-            task_kind: None,
             body: "task".into(),
             project_slugs: vec!["alpha".into()],
             status: RecordStatus::Open,
@@ -4418,7 +4385,7 @@ mod tests {
             .open_wayfinder("wayfinder", vec!["alpha".into()])
             .unwrap();
         let wayfinder_task = app
-            .open_task_under_wayfinder("wayfinder child", wayfinder.id, None, None, vec![])
+            .open_task_under_wayfinder("wayfinder child", wayfinder.id, None, vec![])
             .unwrap();
         assert_eq!(wayfinder_task.project_slugs, ["alpha"]);
         let multi_wayfinder = app
@@ -4426,7 +4393,7 @@ mod tests {
             .unwrap();
         assert_eq!(multi_wayfinder.project_slugs, ["alpha", "beta"]);
         assert_eq!(
-            app.open_task_under_wayfinder("missing", multi_wayfinder.id, None, None, vec![])
+            app.open_task_under_wayfinder("missing", multi_wayfinder.id, None, vec![])
                 .unwrap_err()
                 .code,
             "missing-project"
@@ -4436,7 +4403,6 @@ mod tests {
                 "outside",
                 multi_wayfinder.id,
                 Some("gamma".into()),
-                None,
                 vec![]
             )
             .unwrap_err()
@@ -4444,17 +4410,15 @@ mod tests {
             "scope-mismatch"
         );
 
-        let standalone = app.open_task("standalone", None, None).unwrap();
+        let standalone = app.open_task("standalone", None).unwrap();
         assert_eq!(standalone.record_type, RecordType::Task);
         assert!(standalone.project_slugs.is_empty());
-        let task = app
-            .open_task_under_spec("child", spec.id, None, vec![])
-            .unwrap();
+        let task = app.open_task_under_spec("child", spec.id, vec![]).unwrap();
         assert_eq!(task.record_type, RecordType::Task);
         assert_eq!(task.project_slugs, ["alpha"]);
         assert_eq!(task.relationships[0].parent_id, spec.id);
         assert_eq!(
-            app.open_task_under_spec("invalid", standalone.id, None, vec![])
+            app.open_task_under_spec("invalid", standalone.id, vec![])
                 .unwrap_err()
                 .code,
             "invalid-parent-type"
@@ -4482,8 +4446,8 @@ mod tests {
     #[test]
     fn application_rejects_starts_with_unfinished_direct_prerequisites() {
         let app = application();
-        let blocked = app.open_task("blocked", None, None).unwrap();
-        let prerequisite = app.open_task("prerequisite", None, None).unwrap();
+        let blocked = app.open_task("blocked", None).unwrap();
+        let prerequisite = app.open_task("prerequisite", None).unwrap();
         app.relate_records(
             blocked.id,
             prerequisite.id,
@@ -4514,7 +4478,7 @@ mod tests {
         app.start_record(beta.id).unwrap();
 
         assert_eq!(
-            app.list_records(Some("alpha".into()), None, None, None)
+            app.list_records(Some("alpha".into()), None, None)
                 .unwrap()
                 .into_iter()
                 .map(|record| record.id)
@@ -4522,7 +4486,7 @@ mod tests {
             vec![beta.id, alpha.id]
         );
         assert_eq!(
-            app.list_records(None, Some(RecordStatus::Open), None, None)
+            app.list_records(None, Some(RecordStatus::Open), None)
                 .unwrap()
                 .into_iter()
                 .map(|record| record.id)
@@ -4648,7 +4612,6 @@ mod tests {
                 workspace_id: "test".into(),
                 id: 1,
                 record_type: RecordType::Generic,
-                task_kind: None,
                 body: "body".into(),
                 project_slugs: vec!["alpha".into(), "zeta".into()],
                 status: RecordStatus::Open,

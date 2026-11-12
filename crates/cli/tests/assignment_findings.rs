@@ -8,7 +8,7 @@ fn finding() -> serde_json::Value {
     let activity = serde_json::json!({"id":9,"finding_id":3,"action":"raise","response":null,
         "amendment":null,"actor":"assigned","assignment_id":"assigned","message":"Review issue",
         "revision":null,"dirty":false,"created_at_millis":123,"comparison":"unknown"});
-    serde_json::json!({"id":3,"task_id":7,"version":2,"severity":"minor","blocking":false,
+    serde_json::json!({"id":3,"record_id":7,"version":2,"severity":"minor","blocking":false,
         "check_id":null,"assessment_id":null,"state":"open","raised":activity,
         "latest_activity":activity,"project":null})
 }

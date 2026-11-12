@@ -14,7 +14,6 @@ fn task(repository: &dyn RecordRepository) -> Record {
             record_type: RecordType::Task,
             body: "Deliver reviewed work".into(),
             project_slugs: vec![],
-            task_kind: None,
             generated_by_ids: vec![],
         })
         .unwrap()
@@ -46,16 +45,16 @@ fn blocking_findings_combine_with_checks_and_only_verified_resolution_unblocks()
     let task = task(&repository);
     repository.start_record(task.id).unwrap();
     let major = repository
-        .raise_task_finding(task.id, &raise(Severity::Major))
+        .raise_record_finding(task.id, &raise(Severity::Major))
         .unwrap();
     let critical = repository
-        .raise_task_finding(task.id, &raise(Severity::Critical))
+        .raise_record_finding(task.id, &raise(Severity::Critical))
         .unwrap();
     let minor = repository
-        .raise_task_finding(task.id, &raise(Severity::Minor))
+        .raise_record_finding(task.id, &raise(Severity::Minor))
         .unwrap();
     assert!(major.blocking && critical.blocking && !minor.blocking);
-    let check = repository.list_task_checks(task.id).unwrap().remove(0);
+    let check = repository.list_record_checks(task.id).unwrap().remove(0);
     let error = repository.done_record(task.id, None).unwrap_err();
     assert!(
         error
@@ -70,7 +69,7 @@ fn blocking_findings_combine_with_checks_and_only_verified_resolution_unblocks()
     check_tests::assess(&repository, task.id, Verdict::Pass);
     assert_eq!(
         repository
-            .show_task_finding(task.id, major.id, None, 10)
+            .show_record_finding(task.id, major.id, None, 10)
             .unwrap()
             .finding
             .state,
@@ -82,7 +81,7 @@ fn blocking_findings_combine_with_checks_and_only_verified_resolution_unblocks()
     );
     for finding in [major, critical] {
         let resolved = repository
-            .resolve_task_finding(task.id, finding.id, &resolve(1))
+            .resolve_record_finding(task.id, finding.id, &resolve(1))
             .unwrap();
         assert_eq!(resolved.state, FindingState::Resolved);
         assert_eq!(resolved.version, 2);
@@ -90,26 +89,26 @@ fn blocking_findings_combine_with_checks_and_only_verified_resolution_unblocks()
         let before = repository.list_record_updates(task.id).unwrap();
         assert_eq!(
             repository
-                .resolve_task_finding(task.id, finding.id, &resolve(1))
+                .resolve_record_finding(task.id, finding.id, &resolve(1))
                 .unwrap_err()
                 .code,
             "stale-version"
         );
         assert_eq!(
             repository
-                .resolve_task_finding(task.id, finding.id, &resolve(2))
+                .resolve_record_finding(task.id, finding.id, &resolve(2))
                 .unwrap_err()
                 .code,
             "invalid-transition"
         );
         assert_eq!(repository.list_record_updates(task.id).unwrap(), before);
         let page = repository
-            .show_task_finding(task.id, finding.id, None, 1)
+            .show_record_finding(task.id, finding.id, None, 1)
             .unwrap();
         assert_eq!(page.activities.len(), 1);
         assert_eq!(page.activities[0], finding.raised);
         let next = repository
-            .show_task_finding(task.id, finding.id, page.next_cursor, 1)
+            .show_record_finding(task.id, finding.id, page.next_cursor, 1)
             .unwrap();
         assert_eq!(next.activities[0], resolved.latest_activity);
         assert!(next.next_cursor.is_none());
@@ -126,14 +125,14 @@ fn blocking_findings_combine_with_checks_and_only_verified_resolution_unblocks()
     );
     assert_eq!(
         repository
-            .raise_task_finding(task.id, &raise(Severity::Minor))
+            .raise_record_finding(task.id, &raise(Severity::Minor))
             .unwrap_err()
             .code,
         "record-done"
     );
     assert_eq!(
         repository
-            .resolve_task_finding(task.id, minor.id, &resolve(1))
+            .resolve_record_finding(task.id, minor.id, &resolve(1))
             .unwrap()
             .state,
         FindingState::Resolved
@@ -145,10 +144,10 @@ fn origins_are_same_task_and_invalidated_assessments_remain_historical_origins()
     let first = task(&repository);
     let second = task(&repository);
     check_tests::assess(&repository, first.id, Verdict::Fail);
-    let check = repository.list_task_checks(first.id).unwrap().remove(0);
+    let check = repository.list_record_checks(first.id).unwrap().remove(0);
     let assessment = check.latest_assessment.unwrap();
     repository
-        .invalidate_task_check(
+        .invalidate_record_check(
             first.id,
             check.id,
             &InvalidationInput {
@@ -165,10 +164,10 @@ fn origins_are_same_task_and_invalidated_assessments_remain_historical_origins()
         assessment_id: Some(assessment.id),
         ..raise(Severity::Minor)
     };
-    let finding = repository.raise_task_finding(first.id, &input).unwrap();
+    let finding = repository.raise_record_finding(first.id, &input).unwrap();
     assert_eq!(finding.check_id, Some(check.id));
     assert_eq!(finding.assessment_id, Some(assessment.id));
-    let other_check = repository.list_task_checks(second.id).unwrap().remove(0).id;
+    let other_check = repository.list_record_checks(second.id).unwrap().remove(0).id;
     let before = repository.list_record_updates(first.id).unwrap();
     for input in [
         FindingRaiseInput {
@@ -189,39 +188,39 @@ fn origins_are_same_task_and_invalidated_assessments_remain_historical_origins()
             ..input.clone()
         },
     ] {
-        assert!(repository.raise_task_finding(first.id, &input).is_err());
+        assert!(repository.raise_record_finding(first.id, &input).is_err());
     }
     assert_eq!(repository.list_record_updates(first.id).unwrap(), before);
     assert_eq!(
         repository
-            .raise_task_finding(second.id, &input)
+            .raise_record_finding(second.id, &input)
             .unwrap_err()
             .code,
         "invalid-finding-origin"
     );
     assert_eq!(
         repository
-            .show_task_finding(second.id, finding.id, None, 10)
+            .show_record_finding(second.id, finding.id, None, 10)
             .unwrap_err()
             .code,
         "finding-not-found"
     );
     assert_eq!(
         repository
-            .list_task_findings(first.id, None, 0)
+            .list_record_findings(first.id, None, 0)
             .unwrap_err()
             .code,
         "invalid-page"
     );
     assert_eq!(
         repository
-            .list_task_findings(first.id, Some(u64::MAX), 10)
+            .list_record_findings(first.id, Some(u64::MAX), 10)
             .unwrap_err()
             .code,
         "invalid-page"
     );
     let explicit = repository
-        .raise_task_finding(
+        .raise_record_finding(
             first.id,
             &FindingRaiseInput {
                 blocking: Some(false),
@@ -230,10 +229,10 @@ fn origins_are_same_task_and_invalidated_assessments_remain_historical_origins()
         )
         .unwrap();
     assert!(!explicit.blocking);
-    let page = repository.list_task_findings(first.id, None, 1).unwrap();
+    let page = repository.list_record_findings(first.id, None, 1).unwrap();
     assert_eq!(page.findings, [finding]);
     let next = repository
-        .list_task_findings(first.id, page.next_cursor, 1)
+        .list_record_findings(first.id, page.next_cursor, 1)
         .unwrap();
     assert_eq!(next.findings, [explicit]);
     assert!(next.next_cursor.is_none());
@@ -246,14 +245,14 @@ fn finding_and_record_update_roll_back_together() {
     repository.connection.lock().unwrap().execute_batch("CREATE TRIGGER fail_finding_log BEFORE INSERT ON record_updates WHEN NEW.kind = 'finding-activity' BEGIN SELECT RAISE(ABORT, 'injected log failure'); END;").unwrap();
     assert_eq!(
         repository
-            .raise_task_finding(task.id, &raise(Severity::Major))
+            .raise_record_finding(task.id, &raise(Severity::Major))
             .unwrap_err()
             .code,
         "storage"
     );
     assert!(
         repository
-            .list_task_findings(task.id, None, 10)
+            .list_record_findings(task.id, None, 10)
             .unwrap()
             .findings
             .is_empty()
@@ -266,16 +265,16 @@ fn finding_and_record_update_roll_back_together() {
         .execute_batch("DROP TRIGGER fail_finding_log")
         .unwrap();
     let finding = repository
-        .raise_task_finding(task.id, &raise(Severity::Major))
+        .raise_record_finding(task.id, &raise(Severity::Major))
         .unwrap();
     repository.connection.lock().unwrap().execute_batch("CREATE TRIGGER fail_finding_log BEFORE INSERT ON record_updates WHEN NEW.kind = 'finding-activity' BEGIN SELECT RAISE(ABORT, 'injected log failure'); END;").unwrap();
     assert!(
         repository
-            .resolve_task_finding(task.id, finding.id, &resolve(1))
+            .resolve_record_finding(task.id, finding.id, &resolve(1))
             .is_err()
     );
     let page = repository
-        .show_task_finding(task.id, finding.id, None, 10)
+        .show_record_finding(task.id, finding.id, None, 10)
         .unwrap();
     assert_eq!(page.finding, finding);
     assert_eq!(page.activities.len(), 1);
@@ -305,7 +304,7 @@ fn completion_racing_blocker_creation_never_commits_a_blocked_done_task() {
         });
         let mutation = std::thread::spawn(move || {
             barrier.wait();
-            other.raise_task_finding(task.id, &raise(Severity::Critical))
+            other.raise_record_finding(task.id, &raise(Severity::Critical))
         });
         let completion = completion.join().unwrap();
         let mutation = mutation.join().unwrap();
@@ -314,7 +313,7 @@ fn completion_racing_blocker_creation_never_commits_a_blocked_done_task() {
             assert_eq!(error.code, "record-done");
         }
         let repository = Repository::open(&path).unwrap();
-        let findings = repository.list_task_findings(task.id, None, 10).unwrap();
+        let findings = repository.list_record_findings(task.id, None, 10).unwrap();
         assert_eq!(findings.findings.len(), usize::from(mutation.is_ok()));
         if mutation.is_ok() {
             assert_eq!(
@@ -357,28 +356,27 @@ fn findings_survive_restart_and_application_compares_evidence_without_git() {
             record_type: RecordType::Task,
             body: "Review evidence".into(),
             project_slugs: vec!["alpha".into()],
-            task_kind: None,
             generated_by_ids: vec![],
         })
         .unwrap();
     let finding = repository
-        .raise_task_finding(task.id, &raise(Severity::Major))
+        .raise_record_finding(task.id, &raise(Severity::Major))
         .unwrap();
     let resolved = repository
-        .resolve_task_finding(task.id, finding.id, &resolve(1))
+        .resolve_record_finding(task.id, finding.id, &resolve(1))
         .unwrap();
     drop(repository);
     let repository = Repository::open(&path).unwrap();
     assert_eq!(
         repository
-            .show_task_finding(task.id, finding.id, None, 10)
+            .show_record_finding(task.id, finding.id, None, 10)
             .unwrap()
             .finding,
         resolved
     );
     let app = Application::new(Box::new(repository), Box::new(NoGit));
     let page = app
-        .show_task_finding(task.id, finding.id, None, 10, Some(&"a".repeat(40)))
+        .show_record_finding(task.id, finding.id, None, 10, Some(&"a".repeat(40)))
         .unwrap();
     assert_eq!(page.finding.raised.comparison, RevisionComparison::Matching);
     assert_eq!(
@@ -387,13 +385,13 @@ fn findings_survive_restart_and_application_compares_evidence_without_git() {
     );
     assert_eq!(page.activities[0].comparison, RevisionComparison::Matching);
     assert_eq!(
-        app.list_task_findings(task.id, None, 10, None)
+        app.list_record_findings(task.id, None, 10, None)
             .unwrap()
             .findings[0],
         resolved
     );
     assert_eq!(
-        app.show_task_finding(task.id, finding.id, None, 10, Some("bad"))
+        app.show_record_finding(task.id, finding.id, None, 10, Some("bad"))
             .unwrap_err()
             .code,
         "invalid-revision"
@@ -407,25 +405,25 @@ fn findings_survive_restart_and_application_compares_evidence_without_git() {
         .unwrap();
     let other = repository.in_record_workspace("other").unwrap();
     let before = repository.list_record_updates(task.id).unwrap();
-    assert!(other.list_task_findings(task.id, None, 10).is_err());
+    assert!(other.list_record_findings(task.id, None, 10).is_err());
     assert!(
         other
-            .show_task_finding(task.id, finding.id, None, 10)
+            .show_record_finding(task.id, finding.id, None, 10)
             .is_err()
     );
     assert!(
         other
-            .raise_task_finding(task.id, &raise(Severity::Minor))
+            .raise_record_finding(task.id, &raise(Severity::Minor))
             .is_err()
     );
     assert!(
         other
-            .resolve_task_finding(task.id, finding.id, &resolve(2))
+            .resolve_record_finding(task.id, finding.id, &resolve(2))
             .is_err()
     );
     assert!(
         other
-            .mutate_task_finding(
+            .mutate_record_finding(
                 task.id,
                 finding.id,
                 &forge_app::findings::FindingMutationInput {
@@ -456,7 +454,7 @@ fn concurrent_resolutions_retain_one_activity_and_reject_the_stale_writer() {
     let repository = Repository::open(&path).unwrap();
     let task = task(&repository);
     let finding = repository
-        .raise_task_finding(task.id, &raise(Severity::Major))
+        .raise_record_finding(task.id, &raise(Severity::Major))
         .unwrap();
     let before = repository.list_record_updates(task.id).unwrap().len();
     let other = Repository::open(&path).unwrap();
@@ -464,18 +462,18 @@ fn concurrent_resolutions_retain_one_activity_and_reject_the_stale_writer() {
     let b = barrier.clone();
     let a = std::thread::spawn(move || {
         b.wait();
-        repository.resolve_task_finding(task.id, finding.id, &resolve(1))
+        repository.resolve_record_finding(task.id, finding.id, &resolve(1))
     });
     let b = std::thread::spawn(move || {
         barrier.wait();
-        other.resolve_task_finding(task.id, finding.id, &resolve(1))
+        other.resolve_record_finding(task.id, finding.id, &resolve(1))
     });
     let (a, b) = (a.join().unwrap(), b.join().unwrap());
     assert_ne!(a.is_ok(), b.is_ok());
     assert_eq!(a.err().or_else(|| b.err()).unwrap().code, "stale-version");
     let repository = Repository::open(&path).unwrap();
     let page = repository
-        .show_task_finding(task.id, finding.id, None, 100)
+        .show_record_finding(task.id, finding.id, None, 100)
         .unwrap();
     assert_eq!(page.activities.len(), 2);
     assert_eq!(page.finding.version, 2);

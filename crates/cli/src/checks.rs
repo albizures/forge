@@ -1,6 +1,6 @@
 use clap::{Args, Subcommand};
 use forge_rpc::{
-    AssessmentInput, TaskCheck, TaskCheckAssessRequest, TaskCheckShowRequest, Verdict,
+    AssessmentInput, RecordCheck, RecordCheckAssessRequest, RecordCheckShowRequest, Verdict,
 };
 use std::{fmt::Write as _, io::Read};
 
@@ -17,7 +17,7 @@ pub enum CheckCommand {
 }
 #[derive(Debug, Args)]
 pub struct ListArgs {
-    task: u64,
+    record: u64,
     #[arg(long)]
     compare_revision: Option<String>,
     #[arg(long)]
@@ -27,7 +27,7 @@ pub struct ListArgs {
 }
 #[derive(Debug, Args)]
 pub struct ShowArgs {
-    task: u64,
+    record: u64,
     #[arg(long)]
     compare_revision: Option<String>,
     check: u64,
@@ -43,7 +43,7 @@ pub struct ShowArgs {
 #[derive(Debug, Args)]
 #[command(group(clap::ArgGroup::new("message_source").required(true).args(["message", "message_file"])))]
 pub struct AssessArgs {
-    task: u64,
+    record: u64,
     check: u64,
     #[arg(long, value_parser = ["pass", "fail"])]
     verdict: String,
@@ -68,7 +68,7 @@ pub struct AssessArgs {
 #[derive(Debug, Args)]
 #[command(group(clap::ArgGroup::new("message_source").required(true).args(["message", "message_file"])))]
 pub struct InvalidateArgs {
-    task: u64,
+    record: u64,
     check: u64,
     #[arg(long)]
     assessment: u64,
@@ -116,7 +116,7 @@ pub async fn run(command: CheckCommand, workspace: Option<String>) -> i32 {
     let url = match super::resolve_managed_endpoint(url.as_deref()).await {
         Ok(url) => url,
         Err(error) => {
-            eprintln!("forge task check: {error}");
+            eprintln!("forge record check: {error}");
             return 1;
         }
     };
@@ -124,10 +124,10 @@ pub async fn run(command: CheckCommand, workspace: Option<String>) -> i32 {
     let result = match command {
         CheckCommand::Invalidate(a) => match explanation(a.message, a.message_file) {
             Err(error) => Err(error),
-            Ok(message) => forge_cli::request_task_check_invalidate(
+            Ok(message) => forge_cli::request_record_check_invalidate(
                 endpoint,
-                forge_rpc::TaskCheckInvalidateRequest {
-                    task: a.task,
+                forge_rpc::RecordCheckInvalidateRequest {
+                    record: a.record,
                     check: a.check,
                     invalidation: forge_rpc::InvalidationInput {
                         expected_version: a.expected_version,
@@ -149,7 +149,7 @@ pub async fn run(command: CheckCommand, workspace: Option<String>) -> i32 {
             }),
         },
         CheckCommand::List(a) => {
-            forge_cli::request_task_check_list_compared(endpoint, a.task, a.compare_revision)
+            forge_cli::request_record_check_list_compared(endpoint, a.record, a.compare_revision)
                 .await
                 .map(|checks| {
                     let text = checks
@@ -163,11 +163,11 @@ pub async fn run(command: CheckCommand, workspace: Option<String>) -> i32 {
                     )
                 })
         }
-        CheckCommand::Show(a) => forge_cli::request_task_check_show(
+        CheckCommand::Show(a) => forge_cli::request_record_check_show(
             endpoint,
-            TaskCheckShowRequest {
+            RecordCheckShowRequest {
                 compare_revision: a.compare_revision,
-                task: a.task,
+                record: a.record,
                 check: a.check,
                 after: a.after,
                 limit: a.limit,
@@ -185,10 +185,10 @@ pub async fn run(command: CheckCommand, workspace: Option<String>) -> i32 {
             let message = explanation(a.message, a.message_file);
             match message {
                 Err(error) => Err(error),
-                Ok(message) => forge_cli::request_task_check_assess(
+                Ok(message) => forge_cli::request_record_check_assess(
                     endpoint,
-                    TaskCheckAssessRequest {
-                        task: a.task,
+                    RecordCheckAssessRequest {
+                        record: a.record,
                         check: a.check,
                         assessment: AssessmentInput {
                             expected_version: a.expected_version,
@@ -225,7 +225,7 @@ pub async fn run(command: CheckCommand, workspace: Option<String>) -> i32 {
             0
         }
         Err(error) => {
-            eprintln!("forge task check: {error}");
+            eprintln!("forge record check: {error}");
             1
         }
     }
@@ -275,7 +275,7 @@ pub(super) fn render_page(page: &forge_rpc::CheckPage) -> String {
     text
 }
 
-pub(super) fn render_check(check: &TaskCheck) -> String {
+pub(super) fn render_check(check: &RecordCheck) -> String {
     let verdict = match check.verdict() {
         None => "pending",
         Some(Verdict::Pass) => "pass",

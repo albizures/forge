@@ -125,5 +125,8 @@ verification, rollback readiness, or production migration/recovery safety. A
 deployment owner must apply the release policy rather than silently waive gates.
 
 Before opening an existing database with upgraded binaries, back it up under the
-normal operational policy. Migrations run automatically. Preserve recovery
-facts and do not manually rewrite SQLite to bypass ownership or capacity checks.
+normal operational policy. Incompatible stores fail with `fresh-store-required`
+before initialization; there is no automatic conversion or reset. Safely retire
+ownership and reconcile retained resources before any separate operator reset.
+Preserve recovery facts and never rewrite SQLite markers to bypass compatibility,
+ownership, or capacity checks.

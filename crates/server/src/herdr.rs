@@ -1019,7 +1019,6 @@ mod tests {
         let task = store
             .open_typed_record(&NewTypedRecord {
                 record_type: RecordType::Task,
-                task_kind: None,
                 body: "task".into(),
                 project_slugs: vec!["alpha".into()],
                 generated_by_ids: vec![],
@@ -1132,7 +1131,6 @@ mod tests {
         let task = repository
             .open_typed_record(&NewTypedRecord {
                 record_type,
-                task_kind: None,
                 body: "private full instructions".into(),
                 project_slugs: vec!["project".into()],
                 generated_by_ids: vec![],
@@ -1638,7 +1636,6 @@ mod tests {
         let record = repository
             .open_typed_record(&NewTypedRecord {
                 record_type: RecordType::Task,
-                task_kind: None,
                 body: "dispatch task".into(),
                 project_slugs: vec!["project".into()],
                 generated_by_ids: vec![],

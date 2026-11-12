@@ -111,7 +111,6 @@ fn same_local_slugs_do_not_share_dispatch_capacity_and_consumption_survives_reop
             store
                 .open_typed_record(&NewTypedRecord {
                     record_type: RecordType::Task,
-                    task_kind: None,
                     body: "work".into(),
                     project_slugs: vec![reference.into()],
                     generated_by_ids: vec![],
@@ -239,8 +238,8 @@ fn unowned_development_projects_are_rejected_instead_of_silently_adopted() {
     let error = SqliteProjectRepository::open(&database)
         .err()
         .expect("an unowned Project must not be adopted");
-    assert_eq!(error.code, "project-workspace-required");
-    assert!(error.message.contains("new store"));
+    assert_eq!(error.code, "fresh-store-required");
+    assert!(error.message.contains("fresh store"));
 }
 
 fn repository(path: &Path) {

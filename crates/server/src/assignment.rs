@@ -94,7 +94,7 @@ impl AssignmentApiServer for Daemon {
     async fn check_list(
         &self,
         r: forge_rpc::AssignmentCheckListRequest,
-    ) -> RpcResult<Vec<forge_rpc::TaskCheck>> {
+    ) -> RpcResult<Vec<forge_rpc::RecordCheck>> {
         self.assignment_session(&r.assignment_id, &r.secret)?
             .check_list(r.compare_revision.as_deref())
             .map_err(rpc_error)
@@ -110,7 +110,7 @@ impl AssignmentApiServer for Daemon {
     async fn check_assess(
         &self,
         r: forge_rpc::AssignmentCheckAssessRequest,
-    ) -> RpcResult<forge_rpc::TaskCheck> {
+    ) -> RpcResult<forge_rpc::RecordCheck> {
         self.assignment_session(&r.assignment_id, &r.secret)?
             .check_assess(
                 r.check,
@@ -128,7 +128,7 @@ impl AssignmentApiServer for Daemon {
     async fn check_invalidate(
         &self,
         r: forge_rpc::AssignmentCheckInvalidateRequest,
-    ) -> RpcResult<forge_rpc::TaskCheck> {
+    ) -> RpcResult<forge_rpc::RecordCheck> {
         self.assignment_session(&r.assignment_id, &r.secret)?
             .check_invalidate(
                 r.check,

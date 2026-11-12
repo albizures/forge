@@ -36,7 +36,7 @@ Record Type and Project Scope. Creation accepts `--body -` for stdin.
 forge record open --body 'Cross-project investigation' --project api --project web
 forge record open --body 'Workspace research' --no-projects --workspace personal
 forge spec open --body 'Deliver the capability' --project api
-forge task open --body 'Projectless research' --kind research --workspace personal
+forge task open --body 'Projectless research' --workspace personal
 forge task under-spec --body 'Implement the capability' --spec 42 --workspace personal
 forge initiative open --body 'Coordinate delivery' --project api --project web
 forge wayfinder open --body 'Discover the route' --workspace personal
@@ -52,7 +52,7 @@ forge grilling open --body 'Choose the route' --wayfinder 43 --workspace persona
   when there is only one). A Projectless Wayfinder's Task remains Projectless.
 - Grillings inherit the Wayfinder's entire scope or select a nonempty subset;
   Projectless Wayfinder children inherit empty scope.
-- Task Kind is optional `research`, `prototype`, or `review`.
+- Describe research, prototype, and review deliverables in the Task body; they are not separate execution categories.
 
 ## Relationships and lifecycle
 
@@ -92,24 +92,24 @@ retained rather than deleted. Comments are immutable; `record updates` is the
 Forge-authored Update Log. Assignment recovery retains its separate, conservative
 [reopen and retirement rules](assignment-recovery.md).
 
-## Task Checks and Assessments
+## Record Checks and Assessments (Tasks only)
 
 Every new Task receives an immutable, required **Implementation** Check in the
 same transaction as opening the Task. Its criterion is “The work and deliverables
-described by this Task are complete.” This applies to all Task Kinds, parentage
-paths and Projectless Tasks; Research/Review/Prototype Tasks need not produce code.
+described by this Task are complete.” This applies to all deliverables, parentage
+paths and Projectless Tasks; research, review, and prototype work need not produce code.
 Check IDs, names, descriptions and ordering cannot be edited or removed.
 
 ```sh
-forge task check list 44 --workspace personal --json
-forge task check show 44 1 --limit 50 --workspace personal --json
-forge task check assess 44 1 --verdict pass --expected-version 1 \
+forge record check list 44 --workspace personal --json
+forge record check show 44 1 --limit 50 --workspace personal --json
+forge record check assess 44 1 --verdict pass --expected-version 1 \
   --actor reviewer --message 'Deliverables verified' --workspace personal --json
-forge task check assess 44 1 --verdict fail --expected-version 2 \
+forge record check assess 44 1 --verdict fail --expected-version 2 \
   --actor reviewer --message-file explanation.md --workspace personal
-forge task check invalidate 44 1 --assessment 7 --expected-version 3 \
+forge record check invalidate 44 1 --assessment 7 --expected-version 3 \
   --actor reviewer --message 'Evidence withdrawn' --workspace personal --json
-forge task check show 44 1 --compare-revision aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+forge record check show 44 1 --compare-revision aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
   --workspace personal --json
 ```
 
@@ -167,10 +167,10 @@ selection/confinement as Record commands. Check JSON includes `current_verdict`
 `latest_assessment` (which may be invalidated). `record show` for Tasks embeds
 current `checks` summaries, never history; its text output labels pending Checks.
 
-Typed operator RPC additions are `record_taskCheckList` (`task`, optional `compare_revision`),
-`record_taskCheckShow` (`task`, `check`, `after`, `limit`, optional `compare_revision`),
-`record_taskCheckAssess` (`task`, `check`, `assessment`) and
-`record_taskCheckInvalidate` (`task`, `check`, `invalidation`). Each uses the flattened
+Typed operator RPC additions are `record_recordCheckList` (`record`, optional `compare_revision`),
+`record_recordCheckShow` (`record`, `check`, `after`, `limit`, optional `compare_revision`),
+`record_recordCheckAssess` (`record`, `check`, `assessment`) and
+`record_recordCheckInvalidate` (`record`, `check`, `invalidation`). Each uses the flattened
 Workspace/cwd selection envelope. Assessment input contains `expected_version`,
 `verdict`, `actor`, `message`, optional `revision` and optional `dirty`. Responses
 are respectively a Check array, `{check, assessments, activities, next_cursor}`, and
@@ -180,7 +180,7 @@ fields. Invalid attribution/evidence, wrong Record
 type or Check ownership, stale versions, frozen Tasks and completion blockers have
 distinct error categories. Assignment completion shares these gates.
 
-## Task Findings (review cycles)
+## Record Findings (Task review cycles)
 
 Findings retain review issues independently of Check verdicts. Passing a Check
 never closes a Finding. Minor Findings default nonblocking; major and critical
@@ -188,19 +188,19 @@ Findings default blocking. An explicit `--blocking true|false` overrides that
 creation default. Findings have no separate title.
 
 ```sh
-forge task finding raise 44 --severity major --check 1 --assessment 7 \
+forge record finding raise 44 --severity major --check 1 --assessment 7 \
   --actor reviewer --message 'Validation missing' --dirty false --workspace personal --json
-forge task finding list 44 --limit 50 --workspace personal --json
-forge task finding show 44 2 --after 0 --limit 50 --workspace personal --json
-forge task finding respond 44 2 --response fixed --expected-version 1 \
+forge record finding list 44 --limit 50 --workspace personal --json
+forge record finding show 44 2 --after 0 --limit 50 --workspace personal --json
+forge record finding respond 44 2 --response fixed --expected-version 1 \
   --actor implementer --message 'Corrected validation' --revision aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-forge task finding resolve 44 2 --expected-version 2 --actor reviewer \
+forge record finding resolve 44 2 --expected-version 2 --actor reviewer \
   --message-file verification.md --workspace personal --json
-forge task finding reopen 44 2 --expected-version 3 --actor reviewer --message 'Still reproducible'
-forge task finding dismiss 44 2 --expected-version 4 --actor reviewer --message 'Not applicable'
-forge task finding amend 44 2 --severity minor --blocking false --expected-version 5 \
+forge record finding reopen 44 2 --expected-version 3 --actor reviewer --message 'Still reproducible'
+forge record finding dismiss 44 2 --expected-version 4 --actor reviewer --message 'Not applicable'
+forge record finding amend 44 2 --severity minor --blocking false --expected-version 5 \
   --actor reviewer --message 'Impact clarified'
-forge task finding note 44 2 --expected-version 6 --actor reviewer --message-file correction.md
+forge record finding note 44 2 --expected-version 6 --actor reviewer --message-file correction.md
 ```
 
 All mutations require nonblank `--actor` and exactly one nonblank explanation
@@ -256,14 +256,14 @@ and blocker mutations serialize transactionally; failed operations leave no
 partial activities, amendments or Record Updates.
 
 Typed operator RPCs (flattened Workspace/cwd envelope):
-- `record_taskFindingList`: `task`, `after`, `limit`, `compare_revision` → Finding list page.
-- `record_taskFindingShow`: `task`, `finding`, `after`, `limit`, `compare_revision` → Finding/activity page.
-- `record_taskFindingRaise`: `task`, `finding` containing `severity`, optional `blocking`,
+- `record_recordFindingList`: `record`, `after`, `limit`, `compare_revision` → Finding list page.
+- `record_recordFindingShow`: `record`, `finding`, `after`, `limit`, `compare_revision` → Finding/activity page.
+- `record_recordFindingRaise`: `record`, `finding` containing `severity`, optional `blocking`,
   `check_id`, `assessment_id`, plus `actor`, `message`, `revision`, `dirty` → Finding.
-- `record_taskFindingResolve`: `task`, `finding` ID, `resolution` containing mandatory
+- `record_recordFindingResolve`: `record`, `finding` ID, `resolution` containing mandatory
   `expected_version`, `actor`, `message`, optional `revision`, `dirty` → Finding.
 
-- `record_taskFindingMutate`: `task`, `finding` ID, `mutation` containing mandatory
+- `record_recordFindingMutate`: `record`, `finding` ID, `mutation` containing mandatory
   `expected_version`, `actor`, `message`, optional `revision`, `dirty`, plus a typed
   `change` object → Finding. `change` is one of:
   - `{ "action": "respond", "response": "fixed" }` (or `rejected`)
@@ -377,8 +377,8 @@ A Project's operator-managed Check Template adds ordered, required criteria afte
 Implementation when a Task opens. Standalone Tasks use their selected Project;
 Spec children use the inherited Project; Wayfinder children use their selected
 Project, not every Project in the Wayfinder scope. Projectless Tasks and Projects
-without a configured template still receive Implementation alone. Every Task Kind
-uses the same rules. Snapshot creation and Task opening commit atomically; concurrent
+without a configured template still receive Implementation alone. All Task deliverables
+use the same rules. Snapshot creation and Task opening commit atomically; concurrent
 replacement/opening observes a whole template, never mixed criteria. Existing Task
 Check IDs, criteria and positions never change when a template is replaced.
 
@@ -462,6 +462,15 @@ request routing. SQLite constraints protect immutable ownership and prevent
 cross-Workspace scope/relationship insertion. Retained Records, including
 Projectless Records and Initiatives, prevent Workspace removal.
 
-Owned development schemas can evolve while preserving IDs, ownership, Task Kind,
-scopes and logs. Pre-Workspace development stores with unowned Records are rejected
-with an actionable new-store diagnostic; legacy-data import is unsupported.
+Only fresh stores and restart of the current marked schema revision are supported.
+Unversioned or incompatible stores fail with `fresh-store-required` before schema
+initialization, without conversion, deletion, or reset. Ordinary restart preserves
+ownership, scopes, logs, Checks, Assessments, and Findings. A reset is a separate
+operator action requiring safe ownership retirement and resource reconciliation.
+
+The supported contract uses `RecordCheck`, `record_checks` and `record_findings`,
+with `record_id` ownership. Operator methods and requests use Record-prefixed names
+and a `record` selector; old method names and owner selectors have no aliases.
+Record creation and discovery reject obsolete classification inputs rather than
+ignoring them. Generic naming does not expand ownership beyond Tasks or relax
+same-owner linkage and selected-Workspace authorization.

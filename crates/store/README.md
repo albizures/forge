@@ -33,8 +33,8 @@ is documented separately in [Records](../../docs/records.md),
   numbered separately per Workspace.
 - Foreign keys use SQLite's default delete behavior unless stated otherwise.
   Most references do **not** cascade.
-- Some older, supported schemas have weaker column-level constraints than a fresh
-  database. Triggers and repository validation also enforce invariants.
+- Only the current marked schema revision is supported. Triggers and repository
+  validation also enforce invariants; incompatible stores require a fresh store.
 
 ## Entity Relationship Diagrams
 
@@ -44,7 +44,7 @@ references to a table defined in another view, not incomplete definitions.
 
 - Attribute comments beginning with `NULL` mark nullable columns. All other
   attributes are nonnullable in a fresh store (including SQLite integer primary
-  keys). Supported older schemas can have weaker constraints; see below.
+  keys). Incompatible older schemas are rejected; see below.
 - `PK` marks primary-key membership; multiple `PK` attributes form one composite
   key. `FK` marks foreign-key membership. `UK` marks a single-column unique key;
   composite and partial unique indexes are annotated separately.
@@ -73,7 +73,6 @@ erDiagram
     records {
         INTEGER id PK
         TEXT record_type
-        TEXT task_kind "NULL"
         TEXT workspace_id FK
         TEXT body
         TEXT status
@@ -319,14 +318,13 @@ updates to `slug`, `registered_folder`, `workspace_id`, or `local_slug`.
 | --- | --- |
 | `id` | INTEGER, PK |
 | `record_type` | TEXT: `generic`, `spec`, `task`, `wayfinder`, `grilling`, `initiative` |
-| `task_kind` | TEXT?: `research`, `prototype`, `review` |
 | `workspace_id` | TEXT, FK → `workspaces.id`, ON DELETE RESTRICT |
 | `body` | TEXT |
 | `status` | TEXT: `open`, `in_progress`, `done` |
 | `completion_resolution` | TEXT? |
 
 `workspace_records` indexes `(workspace_id, id)`. Triggers require ownership on
-insert and prevent Workspace changes. Task Kind applicability, lifecycle rules,
+insert and prevent Workspace changes. Type applicability, lifecycle rules,
 and completion semantics are enforced by repository/application code.
 
 ### `record_projects`
@@ -519,29 +517,31 @@ Comparing it with `verified_generation` invalidates stale Workspace verification
 
 Records profile preflight blockers per Workspace and dispatchable type.
 
-## Initialization and migrations
+## Initialization and compatibility
 
-Opening a repository applies schema changes; it is not a read-only operation.
-There is no numbered migration directory or schema-version table. Initialization
-uses `CREATE ... IF NOT EXISTS`, column inspection with `PRAGMA table_info`,
-and inspection of stored SQL to decide whether to add columns or rebuild tables.
+Opening a repository first checks SQLite's `application_id` and `user_version`
+inside an immediate transaction, before any schema or data initialization.
+An empty, unmarked database can be initialized. An existing database must carry
+Forge's application marker and the current schema revision. Unversioned,
+foreign, or differently versioned stores fail with `fresh-store-required`
+without conversion, deletion, reset, or initialization writes.
 
-The order is: base tables → Record/relationship/update migrations → Assignment,
-profile, audit, and worktree migrations → profile seeds → Workspace ownership →
-Record ownership → Workspace dispatch configuration and binding triggers.
+Initialization and compatibility stamping commit together. Concurrent first
+opens serialize through SQLite's write lock. Ordinary restart retains existing
+Records, history, Assignments, resources, and safety state.
 
-Important compatibility behavior:
+The initialization helpers still build the current schema in this order:
+base tables → Check, Finding, and Template tables → Record/relationship/update
+initialization → Assignment, profile, audit, and worktree initialization →
+profile seeds → Workspace ownership → Record ownership → Workspace dispatch
+configuration and binding triggers. They are not an upgrade path for incompatible
+stores. Every subsequent breaking storage-contract change must advance the
+schema revision in `src/schema_compatibility.rs`. Revision 2 is the breaking
+Record-oriented Check/Finding contract, without Task classification metadata.
 
-- Pre-Workspace Projects or Records without ownership are rejected; legacy import
-  is unsupported. Select a new store rather than inventing ownership in SQLite.
-- Owned development schemas can evolve while retaining durable facts, but exact
-  physical DDL may differ from a newly initialized store.
-- Removed update-subscription tables (`record_update_subscription_targets`,
-  `record_update_subscription_filters`, `record_update_subscriptions`) and the
-  `record_updates_global_replay` index are dropped during initialization.
-  Subscription-related authorization audits are removed by the audit migration.
-- Back up existing stores before opening them with upgraded binaries. Do not
-  manually rewrite state to bypass ownership, capacity, or cleanup checks.
+Select a fresh store rather than inventing ownership or rewriting version markers.
+Any local reset is a separate operator action: first safely retire ownership and
+reconcile retained resources. Opening a store never performs that reset.
 
 ## Inspecting an existing database safely
 

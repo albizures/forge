@@ -5,7 +5,7 @@ use std::{
 };
 
 fn check() -> serde_json::Value {
-    serde_json::json!({"id":3,"task_id":7,"name":"Implementation","description":"Deliver work",
+    serde_json::json!({"id":3,"record_id":7,"name":"Implementation","description":"Deliver work",
         "position":0,"version":2,"latest_assessment":{"id":4,"check_id":3,"verdict":"pass",
         "actor":"assigned","assignment_id":"assigned","message":"verified","created_at_millis":123,
         "revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","dirty":false,"invalidation":null,"comparison":"matching"},

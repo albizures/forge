@@ -126,15 +126,11 @@ async fn fixed_layout_selection_and_lifecycle_survive_reopen_without_dispatch_co
     app.register_workspace_project("one", &nested, "tools")
         .unwrap();
     app.register_workspace_project("two", &two, "api").unwrap();
-    let task = app
-        .open_task("root Task", Some("one/api".into()), None)
-        .unwrap();
+    let task = app.open_task("root Task", Some("one/api".into())).unwrap();
     let nested_task = app
-        .open_task("nested Task", Some("one/tools".into()), None)
+        .open_task("nested Task", Some("one/tools".into()))
         .unwrap();
-    let other = app
-        .open_task("same slug", Some("two/api".into()), None)
-        .unwrap();
+    let other = app.open_task("same slug", Some("two/api".into())).unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}/rpc", listener.local_addr().unwrap());
     let server = tokio::spawn(async move {
@@ -332,9 +328,9 @@ async fn fixed_layout_selection_and_lifecycle_survive_reopen_without_dispatch_co
     assert!(!nested_path.exists());
     // Completion retains the Claim, and a new application can inspect/remove it.
     store.start_record(task.id).unwrap();
-    for check in store.list_task_checks(task.id).unwrap() {
+    for check in store.list_record_checks(task.id).unwrap() {
         store
-            .assess_task_check(
+            .assess_record_check(
                 task.id,
                 check.id,
                 &forge_app::checks::AssessmentInput {
@@ -358,7 +354,7 @@ async fn fixed_layout_selection_and_lifecycle_survive_reopen_without_dispatch_co
     assert!(!root_path.exists());
     assert!(other_path.exists());
     let invalid_task = reopened
-        .open_task("invalid metadata", Some("one/tools".into()), None)
+        .open_task("invalid metadata", Some("one/tools".into()))
         .unwrap();
     let invalid = reopened.prepare_dispatch_worktree(invalid_task.id).unwrap();
     std::fs::remove_file(invalid.path.join(".git")).unwrap();
@@ -382,7 +378,7 @@ async fn fixed_layout_selection_and_lifecycle_survive_reopen_without_dispatch_co
         .unwrap();
     // Adoption uses the same Workspace-rooted path and deterministic branch/base evidence.
     let recovery = reopened
-        .open_task("recover", Some("one/tools".into()), None)
+        .open_task("recover", Some("one/tools".into()))
         .unwrap();
     let recovery_path = one.join(format!(".forge/worktrees/tools/{}", recovery.id));
     git(
@@ -413,10 +409,10 @@ async fn fixed_layout_selection_and_lifecycle_survive_reopen_without_dispatch_co
     reopened.remove_managed_worktree(recovery.id, true).unwrap();
     // Failed hooks retain cleanup evidence. Doctor repairs only the selected owner.
     let failed_one = reopened
-        .open_task("failed hook", Some("one/api".into()), None)
+        .open_task("failed hook", Some("one/api".into()))
         .unwrap();
     let failed_two = reopened
-        .open_task("failed hook", Some("two/api".into()), None)
+        .open_task("failed hook", Some("two/api".into()))
         .unwrap();
     store
         .set_project_setup_hook("one/api", Some("exit 9"))
@@ -462,7 +458,7 @@ fn assignment_and_retained_resource_guards_precede_even_forced_git_cleanup() {
     let app = application(&database);
     app.register_workspace_project("one", &root, "api").unwrap();
     let task = app
-        .open_task("retained by agent", Some("one/api".into()), None)
+        .open_task("retained by agent", Some("one/api".into()))
         .unwrap();
     let claim = app.prepare_dispatch_worktree(task.id).unwrap();
     store
@@ -545,7 +541,7 @@ fn symlink_redirection_is_rejected_before_git_effects_and_during_recovery_or_rem
     .enumerate()
     {
         let task = app
-            .open_task("unsafe placement", Some("one/api".into()), None)
+            .open_task("unsafe placement", Some("one/api".into()))
             .unwrap();
         let relative = component.replace("RECORD", &task.id.to_string());
         let link = root.join(relative);
@@ -575,9 +571,7 @@ fn symlink_redirection_is_rejected_before_git_effects_and_during_recovery_or_rem
         assert!(store.worktree_claim(task.id).unwrap().is_none());
         std::fs::remove_file(link).unwrap();
     }
-    let task = app
-        .open_task("retained", Some("one/api".into()), None)
-        .unwrap();
+    let task = app.open_task("retained", Some("one/api".into())).unwrap();
     let claim = app.prepare_dispatch_worktree(task.id).unwrap();
     let moved = outside.join("retained");
     std::fs::rename(&claim.path, &moved).unwrap();

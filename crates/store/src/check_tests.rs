@@ -14,7 +14,6 @@ fn project_template_replacement_snapshots_future_tasks_only() {
                 record_type: RecordType::Task,
                 body: "Deliver".into(),
                 project_slugs: vec!["alpha".into()],
-                task_kind: None,
                 generated_by_ids: vec![],
             })
             .unwrap()
@@ -35,8 +34,8 @@ fn project_template_replacement_snapshots_future_tasks_only() {
     let updated = repository.replace_check_template("alpha", &input).unwrap();
     assert_eq!(updated.version, 1);
     let new = open();
-    assert_eq!(repository.list_task_checks(old.id).unwrap().len(), 1);
-    let checks = repository.list_task_checks(new.id).unwrap();
+    assert_eq!(repository.list_record_checks(old.id).unwrap().len(), 1);
+    let checks = repository.list_record_checks(new.id).unwrap();
     assert_eq!(
         checks.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
         ["Implementation", "Review"]
@@ -60,8 +59,8 @@ fn project_template_replacement_snapshots_future_tasks_only() {
             },
         )
         .unwrap();
-    assert_eq!(repository.list_task_checks(open().id).unwrap().len(), 1);
-    assert_eq!(repository.list_task_checks(new.id).unwrap(), checks);
+    assert_eq!(repository.list_record_checks(open().id).unwrap().len(), 1);
+    assert_eq!(repository.list_record_checks(new.id).unwrap(), checks);
     let page = repository.show_check_template("alpha", None, 1).unwrap();
     assert_eq!(page.version, 2);
     assert_eq!(page.history.len(), 1);
@@ -81,16 +80,15 @@ fn task(repository: &dyn RecordRepository) -> Record {
             record_type: RecordType::Task,
             body: "Deliver the work".into(),
             project_slugs: vec![],
-            task_kind: None,
             generated_by_ids: vec![],
         })
         .unwrap()
 }
 
 pub(super) fn assess(repository: &dyn RecordRepository, task: u64, verdict: Verdict) {
-    let check = repository.list_task_checks(task).unwrap().remove(0);
+    let check = repository.list_record_checks(task).unwrap().remove(0);
     repository
-        .assess_task_check(
+        .assess_record_check(
             task,
             check.id,
             &AssessmentInput {
@@ -109,7 +107,7 @@ pub(super) fn assess(repository: &dyn RecordRepository, task: u64, verdict: Verd
 fn implementation_check_gates_task_completion_and_latest_assessment_wins() {
     let repository = super::SqliteProjectRepository::in_memory().unwrap();
     let task = task(&repository);
-    let checks = repository.list_task_checks(task.id).unwrap();
+    let checks = repository.list_record_checks(task.id).unwrap();
     assert_eq!(checks.len(), 1);
     assert_eq!(checks[0].name, "Implementation");
     assert_eq!(
@@ -132,10 +130,10 @@ fn implementation_check_gates_task_completion_and_latest_assessment_wins() {
         repository.done_record(task.id, None).unwrap().status,
         RecordStatus::Done
     );
-    let check = repository.list_task_checks(task.id).unwrap().remove(0);
+    let check = repository.list_record_checks(task.id).unwrap().remove(0);
     assert_eq!(
         repository
-            .assess_task_check(
+            .assess_record_check(
                 task.id,
                 check.id,
                 &AssessmentInput {
@@ -166,7 +164,7 @@ fn assessments_survive_restart_and_stale_or_invalid_writes_leave_no_history() {
     ));
     let repository = super::SqliteProjectRepository::open(&path).unwrap();
     let task = task(&repository);
-    let check = repository.list_task_checks(task.id).unwrap().remove(0);
+    let check = repository.list_record_checks(task.id).unwrap().remove(0);
     let input = AssessmentInput {
         expected_version: check.version,
         verdict: Verdict::Pass,
@@ -176,18 +174,18 @@ fn assessments_survive_restart_and_stale_or_invalid_writes_leave_no_history() {
         dirty: Some(true),
     };
     let passed = repository
-        .assess_task_check(task.id, check.id, &input)
+        .assess_record_check(task.id, check.id, &input)
         .unwrap();
     drop(repository);
     let repository = super::SqliteProjectRepository::open(&path).unwrap();
     assert_eq!(
-        repository.list_task_checks(task.id).unwrap(),
+        repository.list_record_checks(task.id).unwrap(),
         vec![passed.clone()]
     );
     let updates = repository.list_record_updates(task.id).unwrap();
     assert_eq!(
         repository
-            .assess_task_check(task.id, check.id, &input)
+            .assess_record_check(task.id, check.id, &input)
             .unwrap_err()
             .code,
         "stale-version"
@@ -211,7 +209,7 @@ fn assessments_survive_restart_and_stale_or_invalid_writes_leave_no_history() {
     ] {
         assert!(
             repository
-                .assess_task_check(task.id, check.id, &invalid)
+                .assess_record_check(task.id, check.id, &invalid)
                 .is_err()
         );
     }
@@ -220,7 +218,7 @@ fn assessments_survive_restart_and_stale_or_invalid_writes_leave_no_history() {
     fault.execute_batch("CREATE TRIGGER reject_assessment_update BEFORE INSERT ON record_updates WHEN NEW.kind = 'check-assessed' BEGIN SELECT RAISE(ABORT, 'injected update failure'); END;").unwrap();
     assert!(
         repository
-            .assess_task_check(
+            .assess_record_check(
                 task.id,
                 check.id,
                 &AssessmentInput {
@@ -232,7 +230,7 @@ fn assessments_survive_restart_and_stale_or_invalid_writes_leave_no_history() {
     );
     assert_eq!(repository.list_record_updates(task.id).unwrap(), updates);
     let unchanged = repository
-        .show_task_check(task.id, check.id, None, 100)
+        .show_record_check(task.id, check.id, None, 100)
         .unwrap();
     assert_eq!(unchanged.check, passed);
     assert_eq!(unchanged.assessments.len(), 1);
@@ -240,7 +238,7 @@ fn assessments_survive_restart_and_stale_or_invalid_writes_leave_no_history() {
         .execute_batch("DROP TRIGGER reject_assessment_update;")
         .unwrap();
     let failed = repository
-        .assess_task_check(
+        .assess_record_check(
             task.id,
             check.id,
             &AssessmentInput {
@@ -253,23 +251,23 @@ fn assessments_survive_restart_and_stale_or_invalid_writes_leave_no_history() {
         )
         .unwrap();
     let page = repository
-        .show_task_check(task.id, check.id, None, 1)
+        .show_record_check(task.id, check.id, None, 1)
         .unwrap();
     assert_eq!(page.check, failed);
     assert_eq!(page.assessments, vec![passed.latest_assessment.unwrap()]);
     let next = repository
-        .show_task_check(task.id, check.id, page.next_cursor, 1)
+        .show_record_check(task.id, check.id, page.next_cursor, 1)
         .unwrap();
     assert_eq!(next.assessments, vec![failed.latest_assessment.unwrap()]);
     assert_eq!(next.next_cursor, None);
     assert!(
         repository
-            .show_task_check(task.id, check.id, None, 0)
+            .show_record_check(task.id, check.id, None, 0)
             .is_err()
     );
     assert!(
         repository
-            .show_task_check(task.id, check.id, None, 101)
+            .show_record_check(task.id, check.id, None, 101)
             .is_err()
     );
     drop(repository);
@@ -288,7 +286,7 @@ fn concurrent_assessments_require_the_same_observed_version_to_have_one_winner()
     ));
     let repository = super::SqliteProjectRepository::open(&path).unwrap();
     let task = task(&repository);
-    let check = repository.list_task_checks(task.id).unwrap().remove(0);
+    let check = repository.list_record_checks(task.id).unwrap().remove(0);
     let contender = super::SqliteProjectRepository::open(&path).unwrap();
     let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
     let threads = [repository, contender]
@@ -305,7 +303,7 @@ fn concurrent_assessments_require_the_same_observed_version_to_have_one_winner()
             };
             std::thread::spawn(move || {
                 barrier.wait();
-                repository.assess_task_check(task.id, check.id, &input)
+                repository.assess_record_check(task.id, check.id, &input)
             })
         })
         .collect::<Vec<_>>();
@@ -320,7 +318,7 @@ fn concurrent_assessments_require_the_same_observed_version_to_have_one_winner()
     );
     let repository = super::SqliteProjectRepository::open(&path).unwrap();
     let page = repository
-        .show_task_check(task.id, check.id, None, 100)
+        .show_record_check(task.id, check.id, None, 100)
         .unwrap();
     assert_eq!(page.assessments.len(), 1);
     assert_eq!(page.check.version, check.version + 1);
@@ -340,7 +338,6 @@ fn every_task_opening_path_provisions_criteria_and_failed_opening_rolls_back() {
             record_type: RecordType::Spec,
             body: "Spec".into(),
             project_slugs: vec!["checks".into()],
-            task_kind: None,
             generated_by_ids: vec![],
         })
         .unwrap();
@@ -349,49 +346,42 @@ fn every_task_opening_path_provisions_criteria_and_failed_opening_rolls_back() {
             record_type: RecordType::Wayfinder,
             body: "Map".into(),
             project_slugs: vec![],
-            task_kind: None,
             generated_by_ids: vec![],
         })
         .unwrap();
-    for kind in [
-        None,
-        Some(TaskKind::Research),
-        Some(TaskKind::Review),
-        Some(TaskKind::Prototype),
-    ] {
+    for body in ["Implement a feature", "Research an API", "Review work", "Build a prototype"] {
         let standalone = repository
             .open_typed_record(&NewTypedRecord {
                 record_type: RecordType::Task,
-                body: "Standalone".into(),
+                body: body.into(),
                 project_slugs: vec![],
-                task_kind: kind,
                 generated_by_ids: vec![],
             })
             .unwrap();
         let child = repository
-            .open_task_under_spec("Spec child", spec.id, kind, vec![])
+            .open_task_under_spec(body, spec.id, vec![])
             .unwrap();
         let map_child = repository
-            .open_task_under_wayfinder("Map child", wayfinder.id, None, kind, vec![])
+            .open_task_under_wayfinder(body, wayfinder.id, None, vec![])
             .unwrap();
         for task in [standalone, child, map_child] {
-            let checks = repository.list_task_checks(task.id).unwrap();
+            let checks = repository.list_record_checks(task.id).unwrap();
             assert_eq!(checks.len(), 1);
-            assert_eq!(checks[0].task_id, task.id);
+            assert_eq!(checks[0].record_id, task.id);
             assert_eq!(checks[0].position, 0);
             assert_eq!(checks[0].latest_assessment, None);
         }
     }
     assert_eq!(
-        repository.list_task_checks(spec.id).unwrap_err().code,
+        repository.list_record_checks(spec.id).unwrap_err().code,
         "invalid-record-type"
     );
     let first = task(&repository);
     let other = task(&repository);
-    let first_check = repository.list_task_checks(first.id).unwrap().remove(0);
+    let first_check = repository.list_record_checks(first.id).unwrap().remove(0);
     assert_eq!(
         repository
-            .show_task_check(other.id, first_check.id, None, 50)
+            .show_record_check(other.id, first_check.id, None, 50)
             .unwrap_err()
             .code,
         "check-not-found"
@@ -400,12 +390,12 @@ fn every_task_opening_path_provisions_criteria_and_failed_opening_rolls_back() {
         project_slug: None,
         status: None,
         record_type: None,
-        task_kind: None,
+
     };
     let before = repository.list_records(&filter).unwrap();
     assert!(
         repository
-            .open_task_under_spec("Invalid generator", spec.id, None, vec![999_999])
+            .open_task_under_spec("Invalid generator", spec.id, vec![999_999])
             .is_err()
     );
     assert_eq!(repository.list_records(&filter).unwrap(), before);
@@ -417,15 +407,15 @@ fn every_task_opening_path_provisions_criteria_and_failed_opening_rolls_back() {
     let local = store.records_in_workspace("one").unwrap();
     let foreign = store.records_in_workspace("two").unwrap();
     let task = task(local.as_ref());
-    let check = local.list_task_checks(task.id).unwrap().remove(0);
+    let check = local.list_record_checks(task.id).unwrap().remove(0);
     assert_eq!(
-        foreign.list_task_checks(task.id).unwrap_err().code,
+        foreign.list_record_checks(task.id).unwrap_err().code,
         "cross-workspace-record"
     );
-    assert!(foreign.show_task_check(task.id, check.id, None, 1).is_err());
+    assert!(foreign.show_record_check(task.id, check.id, None, 1).is_err());
     assert!(
         foreign
-            .assess_task_check(
+            .assess_record_check(
                 task.id,
                 check.id,
                 &AssessmentInput {
@@ -439,5 +429,5 @@ fn every_task_opening_path_provisions_criteria_and_failed_opening_rolls_back() {
             )
             .is_err()
     );
-    assert_eq!(local.list_task_checks(task.id).unwrap(), vec![check]);
+    assert_eq!(local.list_record_checks(task.id).unwrap(), vec![check]);
 }

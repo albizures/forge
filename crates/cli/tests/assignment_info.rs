@@ -33,7 +33,6 @@ fn inspection_application() -> Application {
     let task = store
         .open_typed_record(&NewTypedRecord {
             record_type: RecordType::Task,
-            task_kind: None,
             body: "PRIVATE TASK PROMPT".into(),
             project_slugs: vec!["alpha".into()],
             generated_by_ids: vec![],

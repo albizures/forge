@@ -274,7 +274,6 @@ impl Fixture {
         let record = store
             .open_typed_record(&NewTypedRecord {
                 record_type: RecordType::Task,
-                task_kind: None,
                 body: "work".into(),
                 project_slugs: vec![reference.clone()],
                 generated_by_ids: vec![],

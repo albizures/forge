@@ -134,7 +134,7 @@ fn invalid_template_replacements_are_atomic_and_workspace_confined() {
 
 #[test]
 #[allow(clippy::too_many_lines)]
-fn templates_snapshot_every_task_path_kind_and_selected_project_without_affecting_updates() {
+fn templates_snapshot_all_task_deliverables_paths_and_selected_projects_without_affecting_updates() {
     let repository = super::SqliteProjectRepository::in_memory().unwrap();
     for slug in ["alpha", "beta", "unconfigured"] {
         repository
@@ -147,25 +147,24 @@ fn templates_snapshot_every_task_path_kind_and_selected_project_without_affectin
     repository
         .replace_check_template("beta", &replacement(0, &["Docs"]))
         .unwrap();
-    let open = |record_type, projects: Vec<String>, kind| {
+    let open = |record_type, projects: Vec<String>, body: &str| {
         repository
             .open_typed_record(&NewTypedRecord {
                 record_type,
                 project_slugs: projects,
-                task_kind: kind,
-                body: "Deliver".into(),
+                body: body.into(),
                 generated_by_ids: vec![],
             })
             .unwrap()
     };
-    let spec = open(RecordType::Spec, vec!["alpha".into()], None);
+    let spec = open(RecordType::Spec, vec!["alpha".into()], "Plan");
     let map = open(
         RecordType::Wayfinder,
         vec!["alpha".into(), "beta".into()],
-        None,
+        "Map",
     );
-    let projectless = open(RecordType::Wayfinder, vec![], None);
-    let single_project_map = open(RecordType::Wayfinder, vec!["alpha".into()], None);
+    let projectless = open(RecordType::Wayfinder, vec![], "Map");
+    let single_project_map = open(RecordType::Wayfinder, vec!["alpha".into()], "Map");
     let spec_updates = repository.list_record_updates(spec.id).unwrap();
     repository
         .replace_check_template("alpha", &replacement(1, &["Review", "Tests"]))
@@ -174,12 +173,7 @@ fn templates_snapshot_every_task_path_kind_and_selected_project_without_affectin
         repository.list_record_updates(spec.id).unwrap(),
         spec_updates
     );
-    for kind in [
-        None,
-        Some(TaskKind::Research),
-        Some(TaskKind::Review),
-        Some(TaskKind::Prototype),
-    ] {
+    for body in ["Implement a feature", "Research an API", "Review work", "Build a prototype"] {
         let tasks = [
             (
                 repository
@@ -187,19 +181,18 @@ fn templates_snapshot_every_task_path_kind_and_selected_project_without_affectin
                         "Inferred Project",
                         single_project_map.id,
                         None,
-                        kind,
                         vec![],
                     )
                     .unwrap(),
                 vec!["Implementation", "Review", "Tests"],
             ),
             (
-                open(RecordType::Task, vec!["alpha".into()], kind),
+                open(RecordType::Task, vec!["alpha".into()], body),
                 vec!["Implementation", "Review", "Tests"],
             ),
             (
                 repository
-                    .open_task_under_spec("Spec task", spec.id, kind, vec![])
+                    .open_task_under_spec("Spec task", spec.id, vec![])
                     .unwrap(),
                 vec!["Implementation", "Review", "Tests"],
             ),
@@ -209,7 +202,6 @@ fn templates_snapshot_every_task_path_kind_and_selected_project_without_affectin
                         "Map task",
                         map.id,
                         Some("beta".into()),
-                        kind,
                         vec![],
                     )
                     .unwrap(),
@@ -217,18 +209,18 @@ fn templates_snapshot_every_task_path_kind_and_selected_project_without_affectin
             ),
             (
                 repository
-                    .open_task_under_wayfinder("No project", projectless.id, None, kind, vec![])
+                    .open_task_under_wayfinder("No project", projectless.id, None, vec![])
                     .unwrap(),
                 vec!["Implementation"],
             ),
             (
-                open(RecordType::Task, vec!["unconfigured".into()], kind),
+                open(RecordType::Task, vec!["unconfigured".into()], body),
                 vec!["Implementation"],
             ),
-            (open(RecordType::Task, vec![], kind), vec!["Implementation"]),
+            (open(RecordType::Task, vec![], body), vec!["Implementation"]),
         ];
         for (task, names) in tasks {
-            let checks = repository.list_task_checks(task.id).unwrap();
+            let checks = repository.list_record_checks(task.id).unwrap();
             assert_eq!(
                 checks.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
                 names
@@ -253,22 +245,22 @@ fn templates_snapshot_every_task_path_kind_and_selected_project_without_affectin
         project_slug: None,
         status: None,
         record_type: None,
-        task_kind: None,
+
     };
     let before = repository.list_records(&filter).unwrap();
     let updates = repository.list_record_updates(spec.id).unwrap();
     assert!(
         repository
-            .open_task_under_spec("Fail", spec.id, None, vec![999_999])
+            .open_task_under_spec("Fail", spec.id, vec![999_999])
             .is_err()
     );
     assert_eq!(repository.list_records(&filter).unwrap(), before);
     assert_eq!(repository.list_record_updates(spec.id).unwrap(), updates);
     let template = repository.show_check_template("alpha", None, 100).unwrap();
-    repository.connection.lock().unwrap().execute_batch("CREATE TRIGGER fail_snapshot BEFORE INSERT ON task_checks WHEN NEW.position = 2 BEGIN SELECT RAISE(ABORT, 'injected snapshot failure'); END;").unwrap();
+    repository.connection.lock().unwrap().execute_batch("CREATE TRIGGER fail_snapshot BEFORE INSERT ON record_checks WHEN NEW.position = 2 BEGIN SELECT RAISE(ABORT, 'injected snapshot failure'); END;").unwrap();
     assert!(
         repository
-            .open_task_under_spec("Fail snapshot", spec.id, None, vec![])
+            .open_task_under_spec("Fail snapshot", spec.id, vec![])
             .is_err()
     );
     assert_eq!(repository.list_records(&filter).unwrap(), before);
@@ -284,14 +276,14 @@ fn templates_snapshot_every_task_path_kind_and_selected_project_without_affectin
         .execute_batch("DROP TRIGGER fail_snapshot")
         .unwrap();
     let task = repository
-        .open_task_under_spec("Successful snapshot", spec.id, None, vec![])
+        .open_task_under_spec("Successful snapshot", spec.id, vec![])
         .unwrap();
-    let checks = repository.list_task_checks(task.id).unwrap();
+    let checks = repository.list_record_checks(task.id).unwrap();
     assert_eq!(checks.len(), 3);
     repository.start_record(task.id).unwrap();
     for check in checks {
         repository
-            .assess_task_check(
+            .assess_record_check(
                 task.id,
                 check.id,
                 &forge_app::checks::AssessmentInput {
@@ -349,7 +341,6 @@ fn concurrent_template_replacement_and_task_opening_are_coherent_and_restart_dur
                 .open_typed_record(&NewTypedRecord {
                     record_type: RecordType::Task,
                     project_slugs: vec!["alpha".into()],
-                    task_kind: None,
                     body: "Concurrent".into(),
                     generated_by_ids: vec![],
                 })
@@ -372,7 +363,7 @@ fn concurrent_template_replacement_and_task_opening_are_coherent_and_restart_dur
     assert_eq!(template.history.len(), 2);
     let snapshots: Vec<_> = tasks
         .iter()
-        .map(|task| repository.list_task_checks(task.id).unwrap())
+        .map(|task| repository.list_record_checks(task.id).unwrap())
         .collect();
     for checks in &snapshots {
         let extras: Vec<_> = checks[1..]
@@ -393,7 +384,7 @@ fn concurrent_template_replacement_and_task_opening_are_coherent_and_restart_dur
         template
     );
     for (task, checks) in tasks.iter().zip(snapshots) {
-        assert_eq!(repository.list_task_checks(task.id).unwrap(), checks);
+        assert_eq!(repository.list_record_checks(task.id).unwrap(), checks);
     }
     std::fs::remove_file(path).unwrap();
 }

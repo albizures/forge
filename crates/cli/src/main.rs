@@ -274,16 +274,6 @@ enum GrillingCommand {
 }
 #[derive(Debug, Subcommand)]
 enum TaskCommand {
-    /// Retain review Findings and verification history.
-    Finding {
-        #[command(subcommand)]
-        command: findings::FindingCommand,
-    },
-    /// Inspect and assess immutable Task completion criteria.
-    Check {
-        #[command(subcommand)]
-        command: checks::CheckCommand,
-    },
     /// Open a standalone Task with zero or one Project.
     Open(OpenTaskArgs),
     /// Open a Task beneath a Spec, inheriting the Spec's Project Scope.
@@ -506,6 +496,16 @@ struct AssignmentResolveUnknownArgs {
 
 #[derive(Debug, Subcommand)]
 enum RecordCommand {
+    /// Retain review Findings and verification history (Tasks only).
+    Finding {
+        #[command(subcommand)]
+        command: findings::FindingCommand,
+    },
+    /// Inspect and assess immutable completion criteria (Tasks only).
+    Check {
+        #[command(subcommand)]
+        command: checks::CheckCommand,
+    },
     /// Open a Record with an explicit Project Scope. Use --no-projects for an empty scope.
     Open(OpenRecordArgs),
     /// Show a Record.
@@ -542,9 +542,6 @@ struct ListRecordsArgs {
     /// Restrict results to a Record Type.
     #[arg(long = "type", value_parser = ["generic", "spec", "task", "wayfinder", "grilling", "initiative"])]
     record_type: Option<String>,
-    /// Restrict results to a Task Kind.
-    #[arg(long = "kind", value_parser = ["research", "prototype", "review"])]
-    task_kind: Option<String>,
     #[arg(long, value_name = "URL")]
     server_url: Option<String>,
     #[arg(long)]
@@ -649,9 +646,6 @@ struct OpenTaskArgs {
     /// The standalone Task's optional Project.
     #[arg(long, value_name = "SLUG")]
     project: Option<String>,
-    /// Optional immutable Task Kind metadata.
-    #[arg(long = "kind", value_parser = ["research", "prototype", "review"])]
-    task_kind: Option<String>,
     /// Record that generated this Record. Repeat for multiple generators.
     #[arg(long = "generated-by", value_name = "ID")]
     generated_by_ids: Vec<u64>,
@@ -668,9 +662,6 @@ struct OpenTaskUnderSpecArgs {
     /// The parent Spec's ID.
     #[arg(long)]
     spec: u64,
-    /// Optional immutable Task Kind metadata.
-    #[arg(long = "kind", value_parser = ["research", "prototype", "review"])]
-    task_kind: Option<String>,
     /// Record that generated this Record. Repeat for multiple generators.
     #[arg(long = "generated-by", value_name = "ID")]
     generated_by_ids: Vec<u64>,
@@ -709,9 +700,6 @@ struct OpenTaskUnderWayfinderArgs {
     /// The selected Project; inferred only for a single-Project Wayfinder.
     #[arg(long, value_name = "SLUG")]
     project: Option<String>,
-    /// Optional immutable Task Kind metadata.
-    #[arg(long = "kind", value_parser = ["research", "prototype", "review"])]
-    task_kind: Option<String>,
     /// Record that generated this Record. Repeat for multiple generators.
     #[arg(long = "generated-by", value_name = "ID")]
     generated_by_ids: Vec<u64>,
@@ -788,8 +776,6 @@ async fn run(cli: Cli) -> i32 {
             GrillingCommand::Open(args) => open_grilling_under_wayfinder(args, cli.workspace).await,
         },
         Command::Task { command } => match command {
-            TaskCommand::Finding { command } => findings::run(command, cli.workspace).await,
-            TaskCommand::Check { command } => checks::run(command, cli.workspace).await,
             TaskCommand::Open(args) => open_task(args, cli.workspace).await,
             TaskCommand::UnderSpec(args) => open_task_under_spec(args, cli.workspace).await,
             TaskCommand::UnderWayfinder(args) => {
@@ -804,6 +790,8 @@ async fn run(cli: Cli) -> i32 {
 }
 async fn run_record(command: RecordCommand, workspace: Option<String>) -> i32 {
     match command {
+        RecordCommand::Finding { command } => findings::run(command, workspace).await,
+        RecordCommand::Check { command } => checks::run(command, workspace).await,
         RecordCommand::Open(args) => open_record(args, workspace).await,
         RecordCommand::List(args) => list_records(args, workspace).await,
         RecordCommand::Show(args) => record_result(
@@ -1537,7 +1525,6 @@ async fn list_records(args: ListRecordsArgs, workspace: Option<String>) -> i32 {
         args.project,
         status,
         args.record_type,
-        args.task_kind,
     )
     .await
     {
@@ -1787,7 +1774,6 @@ async fn open_task(args: OpenTaskArgs, workspace: Option<String>) -> i32 {
             selected_record_endpoint(args.server_url.as_deref(), workspace.as_deref()).await,
             &body,
             args.project,
-            args.task_kind,
             args.generated_by_ids,
         )
         .await,
@@ -1806,7 +1792,6 @@ async fn open_task_under_spec(args: OpenTaskUnderSpecArgs, workspace: Option<Str
             selected_record_endpoint(args.server_url.as_deref(), workspace.as_deref()).await,
             &body,
             args.spec,
-            args.task_kind,
             args.generated_by_ids,
         )
         .await,
@@ -1851,7 +1836,6 @@ async fn open_task_under_wayfinder(
             &body,
             args.wayfinder,
             args.project,
-            args.task_kind,
             args.generated_by_ids,
         )
         .await,

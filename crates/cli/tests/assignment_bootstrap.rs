@@ -12,7 +12,7 @@ async fn bootstrap_returns_context_and_behavior_only_from_unified_route() {
                 "context":{
                     "schemaVersion":1,
                     "bound":{"assignmentId":"a","recordId":7,"profileRevision":1,"profileRecordType":record_type,"provider":"herdr","agentKind":"pi","model":"provider/model","attemptNumber":1,"executionDirectory":"/workspace","providerWorkspace":null},
-                    "record":{"title":"work","workspace_id":"test","id":7,"record_type":record_type,"task_kind":null,"body":"work","project_scope":{"project_slugs":[]},"status":"in_progress","completion_resolution":null,"relationships":[]},
+                    "record":{"title":"work","workspace_id":"test","id":7,"record_type":record_type,"body":"work","project_scope":{"project_slugs":[]},"status":"in_progress","completion_resolution":null,"relationships":[]},
                     "workspace":{"id":"test","name":"Test","root":"/workspace"},"projects":[],"trustedConstraints":[],"relatedRecords":[],"freshness":"1"
                 },
                 "behavior":"implementation instructions"

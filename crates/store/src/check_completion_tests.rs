@@ -21,13 +21,12 @@ fn completion_racing_assessment_or_invalidation_never_commits_a_nonpassing_done_
                     record_type: RecordType::Task,
                     body: "Verify concurrent completion".into(),
                     project_slugs: vec![],
-                    task_kind: None,
                     generated_by_ids: vec![],
                 })
                 .unwrap();
             repository.start_record(task.id).unwrap();
             check_tests::assess(&repository, task.id, Verdict::Pass);
-            let check = repository.list_task_checks(task.id).unwrap().remove(0);
+            let check = repository.list_record_checks(task.id).unwrap().remove(0);
             let before = repository.list_record_updates(task.id).unwrap().len();
             let contender = SqliteProjectRepository::open(&path).unwrap();
             let barrier = Arc::new(Barrier::new(2));
@@ -39,7 +38,7 @@ fn completion_racing_assessment_or_invalidation_never_commits_a_nonpassing_done_
             let mutation = std::thread::spawn(move || {
                 barrier.wait();
                 if invalidate {
-                    contender.invalidate_task_check(
+                    contender.invalidate_record_check(
                         task.id,
                         check.id,
                         &InvalidationInput {
@@ -52,7 +51,7 @@ fn completion_racing_assessment_or_invalidation_never_commits_a_nonpassing_done_
                         },
                     )
                 } else {
-                    contender.assess_task_check(
+                    contender.assess_record_check(
                         task.id,
                         check.id,
                         &AssessmentInput {
@@ -78,9 +77,9 @@ fn completion_racing_assessment_or_invalidation_never_commits_a_nonpassing_done_
                 assert_eq!(error.code, "record-done");
             }
             let repository = SqliteProjectRepository::open(&path).unwrap();
-            let checks = repository.list_task_checks(task.id).unwrap();
+            let checks = repository.list_record_checks(task.id).unwrap();
             let page = repository
-                .show_task_check(task.id, checks[0].id, None, 100)
+                .show_record_check(task.id, checks[0].id, None, 100)
                 .unwrap();
             assert_eq!(checks[0].version, 2 + u64::from(mutation.is_ok()));
             assert_eq!(page.activities.len(), 1 + usize::from(mutation.is_ok()));

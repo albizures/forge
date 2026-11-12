@@ -11,13 +11,13 @@ use forge_app::{
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 pub(super) fn schema(c: &Connection) -> Result<(), RegistrationError> {
-    c.execute_batch("CREATE TABLE IF NOT EXISTS task_findings (
-        id INTEGER PRIMARY KEY NOT NULL, task_id INTEGER NOT NULL REFERENCES records(id),
+    c.execute_batch("CREATE TABLE IF NOT EXISTS record_findings (
+        id INTEGER PRIMARY KEY NOT NULL, record_id INTEGER NOT NULL REFERENCES records(id),
         severity TEXT NOT NULL CHECK(severity IN ('minor','major','critical')), blocking INTEGER NOT NULL,
-        check_id INTEGER REFERENCES task_checks(id), assessment_id INTEGER REFERENCES check_assessments(id));
-        CREATE INDEX IF NOT EXISTS findings_by_task ON task_findings(task_id, id);
+        check_id INTEGER REFERENCES record_checks(id), assessment_id INTEGER REFERENCES check_assessments(id));
+        CREATE INDEX IF NOT EXISTS findings_by_record ON record_findings(record_id, id);
         CREATE TABLE IF NOT EXISTS finding_activities (
-        id INTEGER PRIMARY KEY NOT NULL, finding_id INTEGER NOT NULL REFERENCES task_findings(id),
+        id INTEGER PRIMARY KEY NOT NULL, finding_id INTEGER NOT NULL REFERENCES record_findings(id),
         action TEXT NOT NULL CHECK(action IN ('raise','resolve','respond','dismiss','reopen','amend','note')), actor TEXT NOT NULL, assignment_id TEXT,
         response TEXT CHECK(response IN ('fixed','rejected')), amendment TEXT,
         message TEXT NOT NULL, revision TEXT, dirty INTEGER, created_at_millis INTEGER NOT NULL);
@@ -72,7 +72,7 @@ fn load(
     id: u64,
     project: Option<String>,
 ) -> Result<Finding, RegistrationError> {
-    let (severity, blocking, check_id, assessment_id) = c.query_row("SELECT severity, blocking, check_id, assessment_id FROM task_findings WHERE task_id = ?1 AND id = ?2", params![task.cast_signed(), id.cast_signed()], |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?, r.get::<_, Option<i64>>(2)?, r.get::<_, Option<i64>>(3)?))).optional().map_err(storage_error)?.ok_or_else(|| RegistrationError::new("finding-not-found", "Finding does not belong to this Task"))?;
+    let (severity, blocking, check_id, assessment_id) = c.query_row("SELECT severity, blocking, check_id, assessment_id FROM record_findings WHERE record_id = ?1 AND id = ?2", params![task.cast_signed(), id.cast_signed()], |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?, r.get::<_, Option<i64>>(2)?, r.get::<_, Option<i64>>(3)?))).optional().map_err(storage_error)?.ok_or_else(|| RegistrationError::new("finding-not-found", "Finding does not belong to this Task"))?;
     let raised = c.query_row(&format!("SELECT {ACTIVITY_COLUMNS} FROM finding_activities WHERE finding_id = ?1 ORDER BY id LIMIT 1"), [id.cast_signed()], activity).map_err(storage_error)?;
     let latest_activity = c.query_row(&format!("SELECT {ACTIVITY_COLUMNS} FROM finding_activities WHERE finding_id = ?1 ORDER BY id DESC LIMIT 1"), [id.cast_signed()], activity).map_err(storage_error)?;
     let version = c
@@ -85,7 +85,7 @@ fn load(
         .cast_unsigned();
     Ok(Finding {
         id,
-        task_id: task,
+        record_id: task,
         version,
         severity: match severity.as_str() {
             "minor" => Severity::Minor,
@@ -135,7 +135,7 @@ fn append(
     Ok(activity_id)
 }
 pub(super) fn blockers(c: &Connection, task: u64) -> Result<Vec<u64>, RegistrationError> {
-    c.prepare("SELECT f.id FROM task_findings f WHERE f.task_id = ?1 AND f.blocking = 1 AND (SELECT a.action FROM finding_activities a WHERE a.finding_id = f.id AND a.action NOT IN ('note','amend') ORDER BY a.id DESC LIMIT 1) NOT IN ('resolve','dismiss') ORDER BY f.id").map_err(storage_error)?.query_map([task.cast_signed()], |r| r.get::<_, i64>(0).map(i64::cast_unsigned)).map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)
+    c.prepare("SELECT f.id FROM record_findings f WHERE f.record_id = ?1 AND f.blocking = 1 AND (SELECT a.action FROM finding_activities a WHERE a.finding_id = f.id AND a.action NOT IN ('note','amend') ORDER BY a.id DESC LIMIT 1) NOT IN ('resolve','dismiss') ORDER BY f.id").map_err(storage_error)?.query_map([task.cast_signed()], |r| r.get::<_, i64>(0).map(i64::cast_unsigned)).map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)
 }
 impl SqliteProjectRepository {
     pub(super) fn raise_finding(
@@ -161,7 +161,7 @@ impl SqliteProjectRepository {
         }
         let mut check = input.check_id;
         if let Some(assessment) = input.assessment_id {
-            let origin = tx.query_row("SELECT c.id FROM check_assessments a JOIN task_checks c ON c.id = a.check_id WHERE a.id = ?1 AND c.task_id = ?2", params![assessment.cast_signed(), task.cast_signed()], |r| r.get::<_, i64>(0)).optional().map_err(storage_error)?.map(i64::cast_unsigned).ok_or_else(|| RegistrationError::new("invalid-finding-origin", "Assessment must belong to this Task"))?;
+            let origin = tx.query_row("SELECT c.id FROM check_assessments a JOIN record_checks c ON c.id = a.check_id WHERE a.id = ?1 AND c.record_id = ?2", params![assessment.cast_signed(), task.cast_signed()], |r| r.get::<_, i64>(0)).optional().map_err(storage_error)?.map(i64::cast_unsigned).ok_or_else(|| RegistrationError::new("invalid-finding-origin", "Assessment must belong to this Task"))?;
             if check.is_some_and(|id| id != origin) {
                 return Err(RegistrationError::new(
                     "invalid-finding-origin",
@@ -173,7 +173,7 @@ impl SqliteProjectRepository {
         if let Some(check) = check {
             let exists: bool = tx
                 .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM task_checks WHERE id = ?1 AND task_id = ?2)",
+                    "SELECT EXISTS(SELECT 1 FROM record_checks WHERE id = ?1 AND record_id = ?2)",
                     params![check.cast_signed(), task.cast_signed()],
                     |r| r.get(0),
                 )
@@ -191,7 +191,7 @@ impl SqliteProjectRepository {
             Severity::Major => "major",
             Severity::Critical => "critical",
         };
-        tx.execute("INSERT INTO task_findings (task_id, severity, blocking, check_id, assessment_id) VALUES (?1, ?2, ?3, ?4, ?5)", params![task.cast_signed(), severity, blocking, check.map(u64::cast_signed), input.assessment_id.map(u64::cast_signed)]).map_err(storage_error)?;
+        tx.execute("INSERT INTO record_findings (record_id, severity, blocking, check_id, assessment_id) VALUES (?1, ?2, ?3, ?4, ?5)", params![task.cast_signed(), severity, blocking, check.map(u64::cast_signed), input.assessment_id.map(u64::cast_signed)]).map_err(storage_error)?;
         let id = tx.last_insert_rowid().cast_unsigned();
         append(
             &tx,
@@ -277,7 +277,7 @@ impl SqliteProjectRepository {
                     Severity::Critical => "critical",
                 };
                 tx.execute(
-                    "UPDATE task_findings SET severity = ?1, blocking = ?2 WHERE id = ?3",
+                    "UPDATE record_findings SET severity = ?1, blocking = ?2 WHERE id = ?3",
                     params![severity_text, new_blocking, id.cast_signed()],
                 )
                 .map_err(storage_error)?;
@@ -342,7 +342,7 @@ impl SqliteProjectRepository {
         page_args(after, limit)?;
         let mut ids = tx
             .prepare(
-                "SELECT id FROM task_findings WHERE task_id = ?1 AND id > ?2 ORDER BY id LIMIT ?3",
+                "SELECT id FROM record_findings WHERE record_id = ?1 AND id > ?2 ORDER BY id LIMIT ?3",
             )
             .map_err(storage_error)?
             .query_map(

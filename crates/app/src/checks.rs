@@ -77,9 +77,10 @@ pub struct CheckActivity {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct TaskCheck {
+#[serde(deny_unknown_fields)]
+pub struct RecordCheck {
     pub id: u64,
-    pub task_id: u64,
+    pub record_id: u64,
     pub name: String,
     pub description: String,
     pub position: u64,
@@ -89,7 +90,7 @@ pub struct TaskCheck {
     pub current_verdict: Option<Verdict>,
     pub project: Option<String>,
 }
-impl TaskCheck {
+impl RecordCheck {
     #[must_use]
     pub fn verdict(&self) -> Option<Verdict> {
         self.latest_assessment
@@ -120,7 +121,7 @@ impl AssessmentInput {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CheckPage {
-    pub check: TaskCheck,
+    pub check: RecordCheck,
     pub assessments: Vec<Assessment>,
     pub next_cursor: Option<u64>,
     pub activities: Vec<CheckActivity>,
@@ -173,26 +174,26 @@ impl Application {
     ///
     /// # Errors
     /// Rejects invalid input, stale versions, invalid transitions and frozen Tasks.
-    pub fn invalidate_task_check(
+    pub fn invalidate_record_check(
         &self,
         task: u64,
         check: u64,
         input: &InvalidationInput,
-    ) -> Result<TaskCheck, RegistrationError> {
+    ) -> Result<RecordCheck, RegistrationError> {
         input.validate()?;
-        self.records.invalidate_task_check(task, check, input)
+        self.records.invalidate_record_check(task, check, input)
     }
     /// List criteria and compare reported evidence within the Task Project.
     ///
     /// # Errors
     /// Returns validation, scope, type or storage errors.
-    pub fn compare_task_checks(
+    pub fn compare_record_checks(
         &self,
         task: u64,
         revision: Option<&str>,
-    ) -> Result<Vec<TaskCheck>, RegistrationError> {
+    ) -> Result<Vec<RecordCheck>, RegistrationError> {
         validate_revision(revision)?;
-        let mut checks = self.list_task_checks(task)?;
+        let mut checks = self.list_record_checks(task)?;
         for check in &mut checks {
             if let Some(a) = &mut check.latest_assessment {
                 compare_assessment(a, revision, check.project.is_some());
@@ -204,7 +205,7 @@ impl Application {
     ///
     /// # Errors
     /// Returns validation, scope, pagination or storage errors.
-    pub fn compare_task_check(
+    pub fn compare_record_check(
         &self,
         task: u64,
         check: u64,
@@ -213,7 +214,7 @@ impl Application {
         revision: Option<&str>,
     ) -> Result<CheckPage, RegistrationError> {
         validate_revision(revision)?;
-        let mut page = self.show_task_check(task, check, after, limit)?;
+        let mut page = self.show_record_check(task, check, after, limit)?;
         let context = page.check.project.is_some();
         if let Some(a) = &mut page.check.latest_assessment {
             compare_assessment(a, revision, context);
@@ -232,33 +233,33 @@ impl Application {
     ///
     /// # Errors
     /// Returns scope, Record type, or storage errors.
-    pub fn list_task_checks(&self, task: u64) -> Result<Vec<TaskCheck>, RegistrationError> {
-        self.records.list_task_checks(task)
+    pub fn list_record_checks(&self, task: u64) -> Result<Vec<RecordCheck>, RegistrationError> {
+        self.records.list_record_checks(task)
     }
     /// Inspect one Check and a bounded Assessment history page.
     ///
     /// # Errors
     /// Returns scope, Check ownership, pagination, or storage errors.
-    pub fn show_task_check(
+    pub fn show_record_check(
         &self,
         task: u64,
         check: u64,
         after: Option<u64>,
         limit: u32,
     ) -> Result<CheckPage, RegistrationError> {
-        self.records.show_task_check(task, check, after, limit)
+        self.records.show_record_check(task, check, after, limit)
     }
     /// Append an attributed pass/fail Assessment at the observed version.
     ///
     /// # Errors
     /// Rejects invalid input, stale versions, Done Tasks, or inaccessible Checks.
-    pub fn assess_task_check(
+    pub fn assess_record_check(
         &self,
         task: u64,
         check: u64,
         input: &AssessmentInput,
-    ) -> Result<TaskCheck, RegistrationError> {
+    ) -> Result<RecordCheck, RegistrationError> {
         input.validate()?;
-        self.records.assess_task_check(task, check, input)
+        self.records.assess_record_check(task, check, input)
     }
 }

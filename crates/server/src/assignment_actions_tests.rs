@@ -97,7 +97,6 @@ fn assignment_read_graph_is_one_hop_for_tasks_and_grillings() {
             store
                 .open_typed_record(&NewTypedRecord {
                     record_type: kind,
-                    task_kind: None,
                     body: body.into(),
                     project_slugs: vec!["alpha".into()],
                     generated_by_ids: vec![],
@@ -107,7 +106,7 @@ fn assignment_read_graph_is_one_hop_for_tasks_and_grillings() {
         let parent = open(RecordType::Wayfinder, "Parent");
         let own = if kind == RecordType::Task {
             store
-                .open_task_under_wayfinder("Own", parent.id, None, None, vec![])
+                .open_task_under_wayfinder("Own", parent.id, None, vec![])
                 .unwrap()
         } else {
             store
@@ -115,7 +114,7 @@ fn assignment_read_graph_is_one_hop_for_tasks_and_grillings() {
                 .unwrap()
         };
         let sibling = store
-            .open_task_under_wayfinder("Sibling", parent.id, None, None, vec![])
+            .open_task_under_wayfinder("Sibling", parent.id, None, vec![])
             .unwrap();
         let prerequisite = open(RecordType::Task, "Prerequisite");
         let dependent = open(RecordType::Task, "Dependent");
@@ -224,7 +223,6 @@ fn assignment_application_authenticates_real_secret_and_rechecks_graph() {
     let spec = store
         .open_typed_record(&NewTypedRecord {
             record_type: RecordType::Spec,
-            task_kind: None,
             body: "Legacy planning record".into(),
             project_slugs: vec!["alpha".into()],
             generated_by_ids: vec![],
@@ -263,7 +261,6 @@ fn authenticated_grilling_bootstrap_separates_bound_identity_and_live_context() 
     let grilling = store
         .open_typed_record(&NewTypedRecord {
             record_type: RecordType::Grilling,
-            task_kind: None,
             body: "Decide".into(),
             project_slugs: vec!["alpha".into()],
             generated_by_ids: vec![],
@@ -460,7 +457,7 @@ fn authenticated_actions_require_acknowledgement_and_normal_lifecycle_validation
     );
     assert_eq!(session.done(Some("implemented"), None).unwrap_err().code, "checks-not-passed");
     check_tests::pass_checks(&store, owner);
-    let finding = store.raise_task_finding(owner, &forge_app::findings::FindingRaiseInput {
+    let finding = store.raise_record_finding(owner, &forge_app::findings::FindingRaiseInput {
         severity: forge_app::findings::Severity::Critical, blocking: None,
         check_id: None, assessment_id: None, actor: "reviewer".into(),
         message: "Missing validation".into(), revision: None, dirty: None,
@@ -468,7 +465,7 @@ fn authenticated_actions_require_acknowledgement_and_normal_lifecycle_validation
     let blocked = session.done(Some("implemented"), None).unwrap_err();
     assert_eq!(blocked.code, "completion-blocked");
     assert!(blocked.message.contains(&format!("Finding IDs: [{}]", finding.id)));
-    store.resolve_task_finding(owner, finding.id, &forge_app::findings::FindingResolveInput {
+    store.resolve_record_finding(owner, finding.id, &forge_app::findings::FindingResolveInput {
         expected_version: 1, actor: "verifier".into(), message: "Verified correction".into(),
         revision: None, dirty: None,
     }).unwrap();

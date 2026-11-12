@@ -8,8 +8,8 @@ fn mutate(
     finding: &Finding,
     change: Change,
 ) -> Result<Finding, RegistrationError> {
-    repo.mutate_task_finding(
-        finding.task_id,
+    repo.mutate_record_finding(
+        finding.record_id,
         finding.id,
         &FindingMutationInput {
             change,
@@ -35,7 +35,7 @@ fn successive_cycles_retain_responses_dispositions_amendments_and_notes_after_re
     repo.start_record(task.id).unwrap();
     check_tests::assess(&repo, task.id, Verdict::Pass);
     let raised = repo
-        .raise_task_finding(task.id, &raise(Severity::Critical))
+        .raise_record_finding(task.id, &raise(Severity::Critical))
         .unwrap();
     let mut f = raised.clone();
     for response in [FindingResponse::Fixed, FindingResponse::Rejected] {
@@ -89,7 +89,7 @@ fn successive_cycles_retain_responses_dispositions_amendments_and_notes_after_re
     repo.done_record(task.id, None).unwrap(); // A note cannot undo dismissal for completion.
     drop(repo);
     let repo = Repository::open(&path).unwrap();
-    let page = repo.show_task_finding(task.id, f.id, None, 100).unwrap();
+    let page = repo.show_record_finding(task.id, f.id, None, 100).unwrap();
     assert_eq!(page.finding, f);
     assert_eq!(page.finding.raised, raised.raised);
     assert_eq!(page.activities.len(), 9);
@@ -105,7 +105,7 @@ fn successive_cycles_retain_responses_dispositions_amendments_and_notes_after_re
     let mut cursor = None;
     let mut ids = vec![];
     loop {
-        let page = repo.show_task_finding(task.id, f.id, cursor, 2).unwrap();
+        let page = repo.show_record_finding(task.id, f.id, cursor, 2).unwrap();
         ids.extend(page.activities.iter().map(|a| a.id));
         cursor = page.next_cursor;
         if cursor.is_none() {
@@ -126,10 +126,10 @@ fn done_permits_nonblocking_review_but_freezes_amendments_and_blocking_reopening
     repo.start_record(task.id).unwrap();
     check_tests::assess(&repo, task.id, Verdict::Pass);
     let mut minor = repo
-        .raise_task_finding(task.id, &raise(Severity::Minor))
+        .raise_record_finding(task.id, &raise(Severity::Minor))
         .unwrap();
     let mut major = repo
-        .raise_task_finding(task.id, &raise(Severity::Major))
+        .raise_record_finding(task.id, &raise(Severity::Major))
         .unwrap();
     major = mutate(&repo, &major, Change::Dismiss).unwrap();
     minor = mutate(
@@ -186,7 +186,7 @@ fn done_permits_nonblocking_review_but_freezes_amendments_and_blocking_reopening
         RecordStatus::Done
     );
     assert_eq!(
-        repo.raise_task_finding(task.id, &raise(Severity::Minor))
+        repo.raise_record_finding(task.id, &raise(Severity::Minor))
             .unwrap_err()
             .code,
         "record-done"
@@ -197,12 +197,12 @@ fn invalid_and_stale_review_mutations_leave_no_entities_activity_or_updates() {
     let repo = Repository::in_memory().unwrap();
     let task = task(&repo);
     let f = repo
-        .raise_task_finding(task.id, &raise(Severity::Major))
+        .raise_record_finding(task.id, &raise(Severity::Major))
         .unwrap();
     let before = repo.list_record_updates(task.id).unwrap();
     let other = super::task(&repo);
     assert_eq!(
-        repo.mutate_task_finding(
+        repo.mutate_record_finding(
             other.id,
             f.id,
             &FindingMutationInput {
@@ -246,7 +246,7 @@ fn invalid_and_stale_review_mutations_leave_no_entities_activity_or_updates() {
         },
     ] {
         assert!(
-            repo.mutate_task_finding(
+            repo.mutate_record_finding(
                 task.id,
                 f.id,
                 &FindingMutationInput {
@@ -277,7 +277,7 @@ fn invalid_and_stale_review_mutations_leave_no_entities_activity_or_updates() {
     }
     assert_eq!(repo.list_record_updates(task.id).unwrap(), before);
     assert_eq!(
-        repo.show_task_finding(task.id, f.id, None, 100)
+        repo.show_record_finding(task.id, f.id, None, 100)
             .unwrap()
             .finding,
         updated
@@ -303,7 +303,7 @@ fn independent_connections_serialize_every_review_action_with_observed_versions(
         let repo = Repository::open(&path).unwrap();
         let task = task(&repo);
         let mut f = repo
-            .raise_task_finding(task.id, &raise(Severity::Major))
+            .raise_record_finding(task.id, &raise(Severity::Major))
             .unwrap();
         if change == Change::Reopen {
             f = mutate(&repo, &f, Change::Resolve).unwrap();
@@ -330,7 +330,7 @@ fn independent_connections_serialize_every_review_action_with_observed_versions(
         let winner = a.ok().or_else(|| b.ok()).unwrap();
         let repo = Repository::open(&path).unwrap();
         let page = repo
-            .show_task_finding(task.id, winner.id, None, 100)
+            .show_record_finding(task.id, winner.id, None, 100)
             .unwrap();
         assert_eq!(page.finding, winner);
         assert_eq!(page.activities.len() as u64, winner.version);
@@ -350,7 +350,7 @@ fn completion_racing_amend_or_reopen_never_leaves_a_done_task_with_a_blocker() {
             repo.start_record(task.id).unwrap();
             check_tests::assess(&repo, task.id, Verdict::Pass);
             let mut f = repo
-                .raise_task_finding(
+                .raise_record_finding(
                     task.id,
                     &raise(if reopen {
                         Severity::Major
@@ -391,7 +391,7 @@ fn completion_racing_amend_or_reopen_never_leaves_a_done_task_with_a_blocker() {
                 Err(error) => assert_eq!(error.code, "completion-blocked"),
             }
             let repo = Repository::open(&path).unwrap();
-            let f = &repo.list_task_findings(task.id, None, 10).unwrap().findings[0];
+            let f = &repo.list_record_findings(task.id, None, 10).unwrap().findings[0];
             if repo.show_record(task.id).unwrap().status == RecordStatus::Done {
                 assert!(!f.blocking || f.state == FindingState::Resolved);
             }
@@ -405,7 +405,7 @@ fn failed_update_log_rolls_back_amendment_and_activity() {
     let repo = Repository::in_memory().unwrap();
     let task = task(&repo);
     let f = repo
-        .raise_task_finding(task.id, &raise(Severity::Major))
+        .raise_record_finding(task.id, &raise(Severity::Major))
         .unwrap();
     let before = repo.list_record_updates(task.id).unwrap();
     repo.connection.lock().unwrap().execute_batch("CREATE TRIGGER fail_review_update BEFORE INSERT ON record_updates BEGIN SELECT RAISE(ABORT, 'injected update failure'); END;").unwrap();
@@ -423,7 +423,7 @@ fn failed_update_log_rolls_back_amendment_and_activity() {
         "storage"
     );
     assert_eq!(
-        repo.show_task_finding(task.id, f.id, None, 100)
+        repo.show_record_finding(task.id, f.id, None, 100)
             .unwrap()
             .finding,
         f

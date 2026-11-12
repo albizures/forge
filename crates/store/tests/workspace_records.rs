@@ -49,7 +49,6 @@ fn all() -> RecordListFilter {
         project_slug: None,
         status: None,
         record_type: None,
-        task_kind: None,
     }
 }
 
@@ -97,7 +96,6 @@ fn relationships_and_child_creation_are_confined_and_transactional() {
         selected
             .open_typed_record(&NewTypedRecord {
                 record_type,
-                task_kind: None,
                 body: "work".into(),
                 project_slugs: projects,
                 generated_by_ids: vec![],
@@ -127,12 +125,10 @@ fn relationships_and_child_creation_are_confined_and_transactional() {
         assert_eq!(store.list_record_updates(task_one.id).unwrap().len(), 1);
     }
     let spec = open(&one, RecordType::Spec, vec!["one/api".into()]);
-    let child = one
-        .open_task_under_spec("child", spec.id, None, vec![])
-        .unwrap();
+    let child = one.open_task_under_spec("child", spec.id, vec![]).unwrap();
     assert_eq!(store.record_workspace(child.id).unwrap(), "one");
     assert_eq!(
-        two.open_task_under_spec("wrong parent", spec.id, None, vec![])
+        two.open_task_under_spec("wrong parent", spec.id, vec![])
             .unwrap_err()
             .code,
         "cross-workspace-record"
@@ -140,7 +136,7 @@ fn relationships_and_child_creation_are_confined_and_transactional() {
     let count = store.list_records(&all()).unwrap().len();
     let updates = store.list_record_updates(spec.id).unwrap();
     assert_eq!(
-        one.open_task_under_spec("bad provenance", spec.id, None, vec![task_two.id])
+        one.open_task_under_spec("bad provenance", spec.id, vec![task_two.id])
             .unwrap_err()
             .code,
         "cross-workspace-record"
@@ -214,14 +210,13 @@ fn every_existing_record_kind_inherits_one_workspace_and_keeps_local_relationshi
     let wayfinder = one
         .open_typed_record(&NewTypedRecord {
             record_type: RecordType::Wayfinder,
-            task_kind: None,
             body: "map".into(),
             project_slugs: vec!["one/api".into()],
             generated_by_ids: vec![],
         })
         .unwrap();
     let task = one
-        .open_task_under_wayfinder("task", wayfinder.id, None, None, vec![])
+        .open_task_under_wayfinder("task", wayfinder.id, None, vec![])
         .unwrap();
     let grilling = one
         .open_grilling_under_wayfinder("decision", wayfinder.id, None, vec![])
@@ -235,7 +230,7 @@ fn every_existing_record_kind_inherits_one_workspace_and_keeps_local_relationshi
         );
     }
     assert_eq!(
-        two.open_task_under_wayfinder("wrong", wayfinder.id, None, None, vec![])
+        two.open_task_under_wayfinder("wrong", wayfinder.id, None, vec![])
             .unwrap_err()
             .code,
         "cross-workspace-record"
@@ -255,8 +250,8 @@ fn every_existing_record_kind_inherits_one_workspace_and_keeps_local_relationshi
     one.start_record(grilling.id).unwrap();
     one.done_record(grilling.id, Some("decided")).unwrap();
     one.start_record(task.id).unwrap();
-    for check in one.list_task_checks(task.id).unwrap() {
-        one.assess_task_check(
+    for check in one.list_record_checks(task.id).unwrap() {
+        one.assess_record_check(
             task.id,
             check.id,
             &forge_app::checks::AssessmentInput {
@@ -285,7 +280,6 @@ fn initiatives_and_projectless_maps_are_owned_and_relationships_do_not_cross_wor
         store
             .open_typed_record(&NewTypedRecord {
                 record_type: kind,
-                task_kind: None,
                 body: "plan".into(),
                 project_slugs: vec![],
                 generated_by_ids: vec![],
@@ -298,7 +292,6 @@ fn initiatives_and_projectless_maps_are_owned_and_relationships_do_not_cross_wor
     let spec = one
         .open_typed_record(&NewTypedRecord {
             record_type: RecordType::Spec,
-            task_kind: None,
             body: "scoped work".into(),
             project_slugs: vec!["one/api".into()],
             generated_by_ids: vec![],
@@ -333,7 +326,7 @@ fn initiatives_and_projectless_maps_are_owned_and_relationships_do_not_cross_wor
     one.unrelate_records(map.id, initiative.id, RecordRelationshipKind::Initiative)
         .unwrap();
     let task = one
-        .open_task_under_wayfinder("explore", map.id, None, None, vec![])
+        .open_task_under_wayfinder("explore", map.id, None, vec![])
         .unwrap();
     let grilling = one
         .open_grilling_under_wayfinder("decide", map.id, None, vec![])
@@ -373,12 +366,12 @@ fn readiness_and_planning_remain_local_without_dispatch_configuration() {
     let two = app.records_in_workspace("two").unwrap();
     let map = one.open_wayfinder("Projectless planning", vec![]).unwrap();
     let task = one
-        .open_task_under_wayfinder("blocked", map.id, None, None, vec![])
+        .open_task_under_wayfinder("blocked", map.id, None, vec![])
         .unwrap();
     let decision = one
         .open_grilling_under_wayfinder("decision", map.id, None, vec![])
         .unwrap();
-    let other = two.open_task("other Workspace", None, None).unwrap();
+    let other = two.open_task("other Workspace", None).unwrap();
     one.relate_records(task.id, decision.id, RecordRelationshipKind::DependsOn)
         .unwrap();
     assert!(one.ready_records(false, false, false).unwrap().is_empty());
@@ -407,7 +400,7 @@ fn readiness_and_planning_remain_local_without_dispatch_configuration() {
 }
 
 #[test]
-fn evolving_owned_development_records_preserves_ownership_scope_and_task_kind() {
+fn owned_development_store_is_rejected_without_conversion() {
     let fixture = Fixture::new();
     let database = fixture.root.join("owned-development.sqlite");
     let connection = rusqlite::Connection::open(&database).unwrap();
@@ -423,25 +416,10 @@ fn evolving_owned_development_records_preserves_ownership_scope_and_task_kind() 
         CREATE TRIGGER record_project_workspace BEFORE INSERT ON record_projects WHEN (SELECT workspace_id FROM records WHERE id=NEW.record_id) != (SELECT workspace_id FROM projects WHERE slug=NEW.project_slug) BEGIN SELECT RAISE(ABORT, 'cross Workspace'); END;
         CREATE TRIGGER record_relationship_workspace BEFORE INSERT ON record_relationships WHEN (SELECT workspace_id FROM records WHERE id=NEW.from_id) != (SELECT workspace_id FROM records WHERE id=NEW.to_id) BEGIN SELECT RAISE(ABORT, 'cross Workspace'); END;").unwrap();
     drop(connection);
-    let reopened = SqliteProjectRepository::open(&database).unwrap();
-    let task = reopened.show_record(1).unwrap();
-    assert_eq!(task.workspace_id, "one");
-    assert_eq!(task.project_slugs, ["one/api"]);
-    assert_eq!(task.task_kind, Some(forge_app::TaskKind::Review));
-    let selected = reopened.in_record_workspace("one").unwrap();
-    assert_eq!(
-        selected
-            .open_typed_record(&NewTypedRecord {
-                record_type: RecordType::Initiative,
-                task_kind: None,
-                body: "new kind".into(),
-                project_slugs: vec![],
-                generated_by_ids: vec![]
-            })
-            .unwrap()
-            .workspace_id,
-        "one"
-    );
+    let before = std::fs::read(&database).unwrap();
+    let error = SqliteProjectRepository::open(&database).err().unwrap();
+    assert_eq!(error.code, "fresh-store-required");
+    assert_eq!(std::fs::read(&database).unwrap(), before);
 }
 
 #[test]
@@ -466,7 +444,6 @@ fn every_record_kind_rejects_foreign_scope_and_provenance_without_partial_writes
     ] {
         let valid = NewTypedRecord {
             record_type,
-            task_kind: None,
             body: "local".into(),
             project_slugs: vec!["one/api".into()],
             generated_by_ids: vec![],
@@ -539,14 +516,14 @@ fn application_selection_uses_the_store_contract_without_changing_other_requests
     );
     let one = app.records_in_workspace("one").unwrap();
     let two = app.records_in_workspace("two").unwrap();
-    let opened = one.open_task("Projectless task", None, None).unwrap();
+    let opened = one.open_task("Projectless task", None).unwrap();
     assert_eq!(
         two.show_record(opened.id).unwrap_err().code,
         "cross-workspace-record"
     );
-    assert!(two.list_records(None, None, None, None).unwrap().is_empty());
+    assert!(two.list_records(None, None, None).unwrap().is_empty());
     assert_eq!(
-        app.open_task("unselected", None, None).unwrap_err().code,
+        app.open_task("unselected", None).unwrap_err().code,
         "workspace-selection-required"
     );
     assert_eq!(one.show_record(opened.id).unwrap().body, "Projectless task");
@@ -566,7 +543,6 @@ fn records_cannot_open_with_projects_from_different_workspaces() {
         } else {
             store.open_typed_record(&NewTypedRecord {
                 record_type,
-                task_kind: None,
                 body: "mixed scope".into(),
                 project_slugs: vec!["one/api".into(), "two/api".into()],
                 generated_by_ids: vec![],

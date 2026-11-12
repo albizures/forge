@@ -20,7 +20,7 @@ impl Application {
         include_hitl: bool,
         blocked: bool,
     ) -> Result<Vec<RecordReadiness>, RegistrationError> {
-        let records = self.list_records(None, Some(RecordStatus::Open), None, None)?;
+        let records = self.list_records(None, Some(RecordStatus::Open), None)?;
         let mut frontier = Vec::new();
         for record in records {
             let included = match record.record_type {

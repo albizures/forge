@@ -27,7 +27,7 @@ For an existing Spec, first read it with `forge record show <spec-id> --json` an
 
 Create a small, ordered round: **N ordinary implementation Tasks**, then a PR-review Grilling, optionally a manual-test Grilling, then a release Task. Each implementation Task is an end-to-end slice and names its acceptance check. Use one dependency chain when work is ordered; independent work may run in parallel only when it has no shared integration risk.
 
-- Create every implementation and release Task beneath the Spec with `forge task under-spec --spec <spec-id> --body -`. Use `--kind research`, `prototype`, or `review` only when that is truly its work.
+- Create every implementation and release Task beneath the Spec with `forge task under-spec --spec <spec-id> --body -`. Describe research, prototype, or review deliverables directly in its body.
 - Add ordering edges with `forge record relate <dependent-id> --kind depends-on --to <prerequisite-id>` before dispatch. Create prerequisite records before dependents.
 - Rust Forge currently opens Grillings only beneath Wayfinders. Create a single-Project review Wayfinder with `forge wayfinder open --project <slug> --body -`, then `forge grilling open --wayfinder <wayfinder-id> --body -` for PR review and, when needed, manual testing. Their bodies must name the Spec, the PR(s), the exact review/test question, and required outcome comment. Do not claim they are Spec children or Forge dependency gates.
 - Put the release Task after the implementation chain. Its body requires all review/manual-test outcomes, ordered unification, required verification, final PR creation, and a human merge. The release Task must not be marked done before that merge.

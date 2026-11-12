@@ -17,7 +17,7 @@ fn json(output: Output) -> serde_json::Value {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::too_many_lines)]
-async fn operators_assess_task_checks_with_versions_and_explicit_explanations() {
+async fn operators_assess_record_checks_with_versions_and_explicit_explanations() {
     let root = tempfile::tempdir().unwrap();
     let database = root.path().join("forge.sqlite");
     let store = SqliteProjectRepository::open(&database).unwrap();
@@ -50,14 +50,14 @@ async fn operators_assess_task_checks_with_versions_and_explicit_explanations() 
         "--json",
     ]));
     let task = task["id"].to_string();
-    let checks = json(run(&["task", "check", "list", &task, "--json"]));
+    let checks = json(run(&["record", "check", "list", &task, "--json"]));
     let check = checks[0]["id"].to_string();
     assert_eq!(checks[0]["name"], "Implementation");
     assert!(checks[0]["latest_assessment"].is_null());
     json(run(&["record", "start", &task, "--json"]));
     assert!(!run(&["record", "done", &task]).status.success());
     let base = [
-        "task",
+        "record",
         "check",
         "assess",
         &task,
@@ -107,14 +107,14 @@ async fn operators_assess_task_checks_with_versions_and_explicit_explanations() 
             .success()
     );
     let page = json(run(&[
-        "task", "check", "show", &task, &check, "--limit", "1", "--json",
+        "record", "check", "show", &task, &check, "--limit", "1", "--json",
     ]));
     assert_eq!(page["assessments"].as_array().unwrap().len(), 1);
-    let text = run(&["task", "check", "list", &task]);
+    let text = run(&["record", "check", "list", &task]);
     assert!(String::from_utf8_lossy(&text.stdout).contains("pass"));
     let mut child = Command::new(env!("CARGO_BIN_EXE_forge"))
         .args([
-            "task",
+            "record",
             "check",
             "assess",
             &task,
@@ -149,7 +149,7 @@ async fn operators_assess_task_checks_with_versions_and_explicit_explanations() 
     );
     assert!(!run(&["record", "done", &task]).status.success());
     let passed = json(run(&[
-        "task",
+        "record",
         "check",
         "assess",
         &task,
@@ -166,7 +166,7 @@ async fn operators_assess_task_checks_with_versions_and_explicit_explanations() 
     ]));
     let assessment = passed["latest_assessment"]["id"].to_string();
     let invalidate = [
-        "task",
+        "record",
         "check",
         "invalidate",
         &task,
@@ -229,7 +229,7 @@ async fn operators_assess_task_checks_with_versions_and_explicit_explanations() 
             .success()
     );
     let repeated = run(&[
-        "task",
+        "record",
         "check",
         "invalidate",
         &task,
@@ -250,7 +250,7 @@ async fn operators_assess_task_checks_with_versions_and_explicit_explanations() 
     assert!(summary["checks"][0]["current_verdict"].is_null());
     assert!(String::from_utf8_lossy(&run(&["record", "show", &task]).stdout).contains("[pending]"));
     let compared = json(run(&[
-        "task",
+        "record",
         "check",
         "list",
         &task,
@@ -268,7 +268,7 @@ async fn operators_assess_task_checks_with_versions_and_explicit_explanations() 
         true
     );
     let page = json(run(&[
-        "task",
+        "record",
         "check",
         "show",
         &task,
@@ -282,11 +282,11 @@ async fn operators_assess_task_checks_with_versions_and_explicit_explanations() 
         page["activities"][3]["invalidation"]["assessment_id"].to_string(),
         assessment
     );
-    let text = run(&["task", "check", "show", &task, &check]);
+    let text = run(&["record", "check", "show", &task, &check]);
     assert!(String::from_utf8_lossy(&text.stdout).contains("Withdraw unsupported verdict"));
     assert!(
         !run(&[
-            "task",
+            "record",
             "check",
             "list",
             &task,
@@ -297,7 +297,7 @@ async fn operators_assess_task_checks_with_versions_and_explicit_explanations() 
         .success()
     );
     json(run(&[
-        "task",
+        "record",
         "check",
         "assess",
         &task,
@@ -314,7 +314,7 @@ async fn operators_assess_task_checks_with_versions_and_explicit_explanations() 
     ]));
     json(run(&["record", "done", &task, "--json"]));
     let frozen = run(&[
-        "task",
+        "record",
         "check",
         "invalidate",
         &task,
@@ -331,7 +331,7 @@ async fn operators_assess_task_checks_with_versions_and_explicit_explanations() 
     assert!(String::from_utf8_lossy(&frozen.stderr).contains("record-done"));
     assert!(
         !run(&[
-            "task",
+            "record",
             "check",
             "assess",
             &task,

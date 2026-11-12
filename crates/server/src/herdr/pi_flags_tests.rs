@@ -98,7 +98,6 @@ fn pi_flags_drift_and_unsupported_mcp_fail_before_provider_or_provision_intent()
         let record = store
             .open_typed_record(&NewTypedRecord {
                 record_type: RecordType::Task,
-                task_kind: None,
                 body: "task".into(),
                 project_slugs: vec!["project".into()],
                 generated_by_ids: vec![],
@@ -202,7 +201,6 @@ fn registered_grilling_receives_protected_capability_from_production_adapter() {
     let record = store
         .open_typed_record(&NewTypedRecord {
             record_type: RecordType::Grilling,
-            task_kind: None,
             body: "Grilling".into(),
             project_slugs: vec!["project".into()],
             generated_by_ids: vec![],
@@ -277,7 +275,6 @@ fn direct_input_drift_after_tab_allocation_blocks_launch_and_retains_evidence() 
     let record = store
         .open_typed_record(&NewTypedRecord {
             record_type: RecordType::Task,
-            task_kind: None,
             body: "task".into(),
             project_slugs: vec!["project".into()],
             generated_by_ids: vec![],

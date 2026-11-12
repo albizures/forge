@@ -172,7 +172,7 @@ impl AuthenticatedAssignment<'_> {
         let assignment = self.authenticate()?;
         self.record(assignment.record_id)?;
         self.application
-            .list_task_findings(assignment.record_id, after, limit, revision)
+            .list_record_findings(assignment.record_id, after, limit, revision)
     }
 
     /// Read one own-Task Finding and bounded activity history.
@@ -188,7 +188,7 @@ impl AuthenticatedAssignment<'_> {
         let assignment = self.authenticate()?;
         self.record(assignment.record_id)?;
         self.application
-            .show_task_finding(assignment.record_id, finding, after, limit, revision)
+            .show_record_finding(assignment.record_id, finding, after, limit, revision)
     }
 
     /// Raise an own-Task Finding, replacing caller attribution with authenticated identity.
@@ -237,11 +237,11 @@ impl AuthenticatedAssignment<'_> {
     pub fn check_list(
         &self,
         revision: Option<&str>,
-    ) -> Result<Vec<crate::checks::TaskCheck>, RegistrationError> {
+    ) -> Result<Vec<crate::checks::RecordCheck>, RegistrationError> {
         let assignment = self.authenticate()?;
         self.record(assignment.record_id)?;
         self.application
-            .compare_task_checks(assignment.record_id, revision)
+            .compare_record_checks(assignment.record_id, revision)
     }
 
     /// Read a bounded activity page of an own-Task Check.
@@ -257,7 +257,7 @@ impl AuthenticatedAssignment<'_> {
         let assignment = self.authenticate()?;
         self.record(assignment.record_id)?;
         self.application
-            .compare_task_check(assignment.record_id, check, after, limit, revision)
+            .compare_record_check(assignment.record_id, check, after, limit, revision)
     }
 
     /// Assess an own-Task Check; caller attribution is always replaced by authenticated identity.
@@ -267,7 +267,7 @@ impl AuthenticatedAssignment<'_> {
         &self,
         check: u64,
         input: &crate::checks::AssessmentInput,
-    ) -> Result<crate::checks::TaskCheck, RegistrationError> {
+    ) -> Result<crate::checks::RecordCheck, RegistrationError> {
         let assignment = self.authenticate()?;
         self.record(assignment.record_id)?;
         let mut input = input.clone();
@@ -288,7 +288,7 @@ impl AuthenticatedAssignment<'_> {
         &self,
         check: u64,
         input: &crate::checks::InvalidationInput,
-    ) -> Result<crate::checks::TaskCheck, RegistrationError> {
+    ) -> Result<crate::checks::RecordCheck, RegistrationError> {
         let assignment = self.authenticate()?;
         self.record(assignment.record_id)?;
         let mut input = input.clone();

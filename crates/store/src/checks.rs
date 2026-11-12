@@ -1,7 +1,7 @@
 use super::{SqliteProjectRepository, insert_update, load_record, now_millis, storage_error};
 use forge_app::checks::{
     Assessment, AssessmentInput, CheckActivity, CheckPage, IMPLEMENTATION_CRITERION, Invalidation,
-    InvalidationInput, RevisionComparison, TaskCheck, Verdict,
+    InvalidationInput, RecordCheck, RevisionComparison, Verdict,
 };
 use forge_app::{Record, RecordStatus, RecordType, RecordUpdateKind, RegistrationError};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -9,12 +9,12 @@ use rusqlite::{Connection, OptionalExtension, params};
 pub(super) fn schema(connection: &Connection) -> Result<(), RegistrationError> {
     connection
         .execute_batch(
-            "CREATE TABLE IF NOT EXISTS task_checks (
-        id INTEGER PRIMARY KEY NOT NULL, task_id INTEGER NOT NULL REFERENCES records(id),
+            "CREATE TABLE IF NOT EXISTS record_checks (
+        id INTEGER PRIMARY KEY NOT NULL, record_id INTEGER NOT NULL REFERENCES records(id),
         name TEXT NOT NULL, description TEXT NOT NULL, position INTEGER NOT NULL,
-        version INTEGER NOT NULL DEFAULT 1, UNIQUE(task_id, position), UNIQUE(task_id, name));
+        version INTEGER NOT NULL DEFAULT 1, UNIQUE(record_id, position), UNIQUE(record_id, name));
         CREATE TABLE IF NOT EXISTS check_assessments (
-        id INTEGER PRIMARY KEY NOT NULL, check_id INTEGER NOT NULL REFERENCES task_checks(id),
+        id INTEGER PRIMARY KEY NOT NULL, check_id INTEGER NOT NULL REFERENCES record_checks(id),
         verdict TEXT NOT NULL CHECK(verdict IN ('pass','fail')), actor TEXT NOT NULL,
         message TEXT NOT NULL, created_at_millis INTEGER NOT NULL, revision TEXT, dirty INTEGER, assignment_id TEXT);
         CREATE INDEX IF NOT EXISTS assessments_by_check ON check_assessments(check_id, id);
@@ -22,7 +22,7 @@ pub(super) fn schema(connection: &Connection) -> Result<(), RegistrationError> {
         id INTEGER PRIMARY KEY NOT NULL, assessment_id INTEGER NOT NULL UNIQUE REFERENCES check_assessments(id),
         actor TEXT NOT NULL, message TEXT NOT NULL, created_at_millis INTEGER NOT NULL, revision TEXT, dirty INTEGER, assignment_id TEXT);
         CREATE TABLE IF NOT EXISTS check_activities (
-        id INTEGER PRIMARY KEY NOT NULL, check_id INTEGER NOT NULL REFERENCES task_checks(id),
+        id INTEGER PRIMARY KEY NOT NULL, check_id INTEGER NOT NULL REFERENCES record_checks(id),
         assessment_id INTEGER NOT NULL REFERENCES check_assessments(id),
         invalidation_id INTEGER REFERENCES check_invalidations(id));
         CREATE INDEX IF NOT EXISTS activities_by_check ON check_activities(check_id, id);",
@@ -31,7 +31,7 @@ pub(super) fn schema(connection: &Connection) -> Result<(), RegistrationError> {
 }
 
 pub(super) fn provision(connection: &Connection, task: u64) -> Result<(), RegistrationError> {
-    connection.execute("INSERT INTO task_checks (task_id, name, description, position) VALUES (?1, 'Implementation', ?2, 0)",
+    connection.execute("INSERT INTO record_checks (record_id, name, description, position) VALUES (?1, 'Implementation', ?2, 0)",
         params![task.cast_signed(), IMPLEMENTATION_CRITERION]).map_err(storage_error)?;
     Ok(())
 }
@@ -69,14 +69,14 @@ fn invalidation(
     })).optional().map_err(storage_error)
 }
 
-fn load(connection: &Connection, task: u64, check: u64) -> Result<TaskCheck, RegistrationError> {
+fn load(connection: &Connection, task: u64, check: u64) -> Result<RecordCheck, RegistrationError> {
     let project = load_record(connection, task)?
         .project_slugs
         .into_iter()
         .next();
-    let mut check = connection.query_row("SELECT id, task_id, name, description, position, version FROM task_checks WHERE task_id = ?1 AND id = ?2",
-        params![task.cast_signed(), check.cast_signed()], |row| Ok(TaskCheck {
-            id: row.get::<_, i64>(0)?.cast_unsigned(), task_id: row.get::<_, i64>(1)?.cast_unsigned(),
+    let mut check = connection.query_row("SELECT id, record_id, name, description, position, version FROM record_checks WHERE record_id = ?1 AND id = ?2",
+        params![task.cast_signed(), check.cast_signed()], |row| Ok(RecordCheck {
+            id: row.get::<_, i64>(0)?.cast_unsigned(), record_id: row.get::<_, i64>(1)?.cast_unsigned(),
             name: row.get(2)?, description: row.get(3)?, position: row.get::<_, i64>(4)?.cast_unsigned(),
             version: row.get::<_, i64>(5)?.cast_unsigned(), latest_assessment: None,
             project, current_verdict: None,
@@ -91,7 +91,7 @@ fn load(connection: &Connection, task: u64, check: u64) -> Result<TaskCheck, Reg
 }
 
 pub(super) fn gate(connection: &Connection, task: u64) -> Result<(), RegistrationError> {
-    let mut statement = connection.prepare("SELECT c.id FROM task_checks c WHERE c.task_id = ?1 AND COALESCE((SELECT CASE WHEN EXISTS (SELECT 1 FROM check_invalidations i WHERE i.assessment_id = a.id) THEN 'pending' ELSE a.verdict END FROM check_assessments a WHERE a.check_id = c.id ORDER BY a.id DESC LIMIT 1), 'pending') != 'pass' ORDER BY c.id").map_err(storage_error)?;
+    let mut statement = connection.prepare("SELECT c.id FROM record_checks c WHERE c.record_id = ?1 AND COALESCE((SELECT CASE WHEN EXISTS (SELECT 1 FROM check_invalidations i WHERE i.assessment_id = a.id) THEN 'pending' ELSE a.verdict END FROM check_assessments a WHERE a.check_id = c.id ORDER BY a.id DESC LIMIT 1), 'pending') != 'pass' ORDER BY c.id").map_err(storage_error)?;
     let blocked = statement
         .query_map([task.cast_signed()], |row| {
             row.get::<_, i64>(0).map(i64::cast_unsigned)
@@ -102,7 +102,7 @@ pub(super) fn gate(connection: &Connection, task: u64) -> Result<(), Registratio
     // Fresh stores provision every Task; missing criteria are a corrupt invariant, never a bypass.
     let count: i64 = connection
         .query_row(
-            "SELECT count(*) FROM task_checks WHERE task_id = ?1",
+            "SELECT count(*) FROM record_checks WHERE record_id = ?1",
             [task.cast_signed()],
             |row| row.get(0),
         )
@@ -145,7 +145,7 @@ impl SqliteProjectRepository {
         }
         Ok(record)
     }
-    pub(super) fn list_checks(&self, task: u64) -> Result<Vec<TaskCheck>, RegistrationError> {
+    pub(super) fn list_checks(&self, task: u64) -> Result<Vec<RecordCheck>, RegistrationError> {
         let mut connection = self
             .connection
             .lock()
@@ -153,7 +153,7 @@ impl SqliteProjectRepository {
         let transaction = connection.transaction().map_err(storage_error)?;
         self.check_task(&transaction, task)?;
         let ids = transaction
-            .prepare("SELECT id FROM task_checks WHERE task_id = ?1 ORDER BY position, id")
+            .prepare("SELECT id FROM record_checks WHERE record_id = ?1 ORDER BY position, id")
             .map_err(storage_error)?
             .query_map([task.cast_signed()], |row| {
                 row.get::<_, i64>(0).map(i64::cast_unsigned)
@@ -234,7 +234,7 @@ impl SqliteProjectRepository {
         check: u64,
         input: &InvalidationInput,
         assignment: Option<&str>,
-    ) -> Result<TaskCheck, RegistrationError> {
+    ) -> Result<RecordCheck, RegistrationError> {
         let mut connection = self
             .connection
             .lock()
@@ -272,7 +272,7 @@ impl SqliteProjectRepository {
         transaction.execute("INSERT INTO check_activities (check_id, assessment_id, invalidation_id) VALUES (?1, ?2, ?3)", params![check.cast_signed(), input.assessment_id.cast_signed(), invalidation_id]).map_err(storage_error)?;
         transaction
             .execute(
-                "UPDATE task_checks SET version = version + 1 WHERE id = ?1",
+                "UPDATE record_checks SET version = version + 1 WHERE id = ?1",
                 [check.cast_signed()],
             )
             .map_err(storage_error)?;
@@ -293,7 +293,7 @@ impl SqliteProjectRepository {
         check: u64,
         input: &AssessmentInput,
         assignment: Option<&str>,
-    ) -> Result<TaskCheck, RegistrationError> {
+    ) -> Result<RecordCheck, RegistrationError> {
         let mut connection = self
             .connection
             .lock()
@@ -327,7 +327,7 @@ impl SqliteProjectRepository {
             .map_err(storage_error)?;
         transaction
             .execute(
-                "UPDATE task_checks SET version = version + 1 WHERE id = ?1",
+                "UPDATE record_checks SET version = version + 1 WHERE id = ?1",
                 [check.cast_signed()],
             )
             .map_err(storage_error)?;

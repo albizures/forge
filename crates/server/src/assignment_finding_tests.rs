@@ -74,7 +74,7 @@ async fn assignment_finding_rpc_retains_cycles_and_rejects_overrides_atomically(
     );
     let store = SqliteProjectRepository::open(&fixture.database_path).unwrap();
     let owner = store.agent_assignment(&assignment).unwrap().record_id;
-    let foreign_check = store.list_task_checks(neighbor).unwrap()[0].id;
+    let foreign_check = store.list_record_checks(neighbor).unwrap()[0].id;
     for check in [foreign_check, u64::MAX] {
         raise["checkId"] = check.into();
         let result = assignment_rpc(daemon.clone(), "assignment.findingRaise", raise.clone()).await;
@@ -101,7 +101,7 @@ async fn assignment_finding_rpc_retains_cycles_and_rejects_overrides_atomically(
         assignment_rpc(daemon.clone(), "assignment.findingList", list).await["error"]["data"],
         "invalid-page"
     );
-    let page = store.show_task_finding(owner, id, None, 100).unwrap();
+    let page = store.show_record_finding(owner, id, None, 100).unwrap();
     assert_eq!(page.activities.len(), 8);
     assert!(
         page.activities
@@ -147,7 +147,7 @@ fn assignment_finding_security_done_and_completion_gates_match_operator() {
             ..raise.clone()
         })
         .unwrap();
-    let foreign = store.raise_task_finding(prerequisite, &raise).unwrap();
+    let foreign = store.raise_record_finding(prerequisite, &raise).unwrap();
     let change = |version, change| FindingMutationInput {
         change,
         explanation: FindingResolveInput {
@@ -175,9 +175,9 @@ fn assignment_finding_security_done_and_completion_gates_match_operator() {
             "finding-not-found"
         );
     }
-    let foreign_check = store.list_task_checks(prerequisite).unwrap()[0].id;
+    let foreign_check = store.list_record_checks(prerequisite).unwrap()[0].id;
     let assessment = store
-        .assess_task_check(
+        .assess_record_check(
             prerequisite,
             foreign_check,
             &forge_app::checks::AssessmentInput {

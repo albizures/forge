@@ -62,7 +62,6 @@ async fn production_daemon_bootstraps_grilling_through_delivered_cli() {
     let record = store
         .open_typed_record(&NewTypedRecord {
             record_type: RecordType::Grilling,
-            task_kind: None,
             body: "Grilling title\nDiscuss".into(),
             project_slugs: vec!["alpha".into()],
             generated_by_ids: vec![],
@@ -79,7 +78,6 @@ async fn production_daemon_bootstraps_grilling_through_delivered_cli() {
     let task = store
         .open_typed_record(&NewTypedRecord {
             record_type: RecordType::Task,
-            task_kind: None,
             body: "Task title\nImplement".into(),
             project_slugs: vec!["alpha".into()],
             generated_by_ids: vec![],
@@ -98,7 +96,6 @@ async fn production_daemon_bootstraps_grilling_through_delivered_cli() {
     let missing = store
         .open_typed_record(&NewTypedRecord {
             record_type: RecordType::Task,
-            task_kind: None,
             body: "Missing worktree".into(),
             project_slugs: vec!["alpha".into()],
             generated_by_ids: vec![],
@@ -115,7 +112,6 @@ async fn production_daemon_bootstraps_grilling_through_delivered_cli() {
     let prerequisite = store
         .open_typed_record(&NewTypedRecord {
             record_type: RecordType::Task,
-            task_kind: None,
             body: "Prerequisite".into(),
             project_slugs: vec!["alpha".into()],
             generated_by_ids: vec![],
@@ -124,7 +120,6 @@ async fn production_daemon_bootstraps_grilling_through_delivered_cli() {
     let blocked = store
         .open_typed_record(&NewTypedRecord {
             record_type: RecordType::Task,
-            task_kind: None,
             body: "Blocked task".into(),
             project_slugs: vec!["alpha".into()],
             generated_by_ids: vec![],
@@ -216,9 +211,9 @@ async fn production_daemon_bootstraps_grilling_through_delivered_cli() {
     assert!(!String::from_utf8_lossy(&blocked_output.stderr).contains("blocked-secret"));
     let repair_store = SqliteProjectRepository::open(&db).unwrap();
     repair_store.start_record(prerequisite.id).unwrap();
-    for check in repair_store.list_task_checks(prerequisite.id).unwrap() {
+    for check in repair_store.list_record_checks(prerequisite.id).unwrap() {
         repair_store
-            .assess_task_check(
+            .assess_record_check(
                 prerequisite.id,
                 check.id,
                 &forge_app::checks::AssessmentInput {

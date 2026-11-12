@@ -145,7 +145,7 @@ fn action(command: Command) -> Result<(AssignmentCheckAction, bool), String> {
 }
 fn render(value: serde_json::Value) -> String {
     if value.is_array() {
-        let checks: Vec<forge_rpc::TaskCheck> =
+        let checks: Vec<forge_rpc::RecordCheck> =
             serde_json::from_value(value).expect("typed Check response");
         return checks
             .iter()
@@ -157,6 +157,7 @@ fn render(value: serde_json::Value) -> String {
         let page: forge_rpc::CheckPage = serde_json::from_value(value).expect("typed Check page");
         return super::checks::render_page(&page);
     }
-    let check: forge_rpc::TaskCheck = serde_json::from_value(value).expect("typed Check response");
+    let check: forge_rpc::RecordCheck =
+        serde_json::from_value(value).expect("typed Check response");
     super::checks::render_check(&check)
 }

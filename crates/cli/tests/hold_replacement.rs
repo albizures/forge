@@ -109,7 +109,6 @@ impl Fixture {
         let task = store
             .open_typed_record(&NewTypedRecord {
                 record_type: RecordType::Task,
-                task_kind: None,
                 body: "private task instructions".into(),
                 project_slugs: vec!["alpha".into()],
                 generated_by_ids: vec![],

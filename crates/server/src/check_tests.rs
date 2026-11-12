@@ -2,14 +2,14 @@ use super::*;
 use forge_app::checks::{AssessmentInput, Verdict};
 use forge_rpc::{
     DoneRecordRequest, OpenTaskRequest, RecordIdRequest, SelectedRecordRequest,
-    TaskCheckAssessRequest, TaskCheckShowRequest,
+    RecordCheckAssessRequest, RecordCheckShowRequest,
 };
 
-pub(super) fn pass_checks(repository: &dyn forge_app::RecordRepository, task: u64) {
-    for check in repository.list_task_checks(task).unwrap() {
+pub(super) fn pass_checks(repository: &dyn forge_app::RecordRepository, record: u64) {
+    for check in repository.list_record_checks(record).unwrap() {
         repository
-            .assess_task_check(
-                task,
+            .assess_record_check(
+                record,
                 check.id,
                 &AssessmentInput {
                     expected_version: check.version,
@@ -45,20 +45,20 @@ async fn checks_round_trip_over_typed_rpc_and_preserve_workspace_bounds() {
         .open_task(selected(OpenTaskRequest {
             body: "Deliver work".into(),
             project_slug: None,
-            task_kind: Some("research".into()),
             generated_by_ids: vec![],
         }))
         .await
         .unwrap();
     let check = client
-        .task_check_list(selected(forge_rpc::TaskCheckListRequest {
-            task: task.id,
+        .record_check_list(selected(forge_rpc::RecordCheckListRequest {
+            record: task.id,
             compare_revision: None,
         }))
         .await
         .unwrap()
         .remove(0);
     assert_eq!(check.name, "Implementation");
+    assert_eq!(check.record_id, task.id);
     client
         .start(selected(RecordIdRequest { id: task.id }))
         .await
@@ -81,8 +81,8 @@ async fn checks_round_trip_over_typed_rpc_and_preserve_workspace_bounds() {
         dirty: Some(false),
     };
     let passed = client
-        .task_check_assess(selected(TaskCheckAssessRequest {
-            task: task.id,
+        .record_check_assess(selected(RecordCheckAssessRequest {
+            record: task.id,
             check: check.id,
             assessment: input.clone(),
         }))
@@ -90,8 +90,8 @@ async fn checks_round_trip_over_typed_rpc_and_preserve_workspace_bounds() {
         .unwrap();
     assert_eq!(passed.version, check.version + 1);
     let stale = client
-        .task_check_assess(selected(TaskCheckAssessRequest {
-            task: task.id,
+        .record_check_assess(selected(RecordCheckAssessRequest {
+            record: task.id,
             check: check.id,
             assessment: input.clone(),
         }))
@@ -99,9 +99,9 @@ async fn checks_round_trip_over_typed_rpc_and_preserve_workspace_bounds() {
         .unwrap_err();
     assert!(stale.to_string().contains("stale-version"));
     let page = client
-        .task_check_show(selected(TaskCheckShowRequest {
+        .record_check_show(selected(RecordCheckShowRequest {
             compare_revision: None,
-            task: task.id,
+            record: task.id,
             check: check.id,
             after: None,
             limit: 1,
@@ -112,12 +112,12 @@ async fn checks_round_trip_over_typed_rpc_and_preserve_workspace_bounds() {
     assert_eq!(page.check, passed);
     let wrong_workspace = SelectedRecordRequest::selected(
         "missing",
-        forge_rpc::TaskCheckListRequest {
-            task: task.id,
+        forge_rpc::RecordCheckListRequest {
+            record: task.id,
             compare_revision: None,
         },
     );
-    assert!(client.task_check_list(wrong_workspace).await.is_err());
+    assert!(client.record_check_list(wrong_workspace).await.is_err());
     let updates = client
         .updates(selected(RecordIdRequest { id: task.id }))
         .await
@@ -126,8 +126,8 @@ async fn checks_round_trip_over_typed_rpc_and_preserve_workspace_bounds() {
         updates.updates[0].assessment_id,
         Some(page.assessments[0].id)
     );
-    let invalidate = forge_rpc::TaskCheckInvalidateRequest {
-        task: task.id,
+    let invalidate = forge_rpc::RecordCheckInvalidateRequest {
+        record: task.id,
         check: check.id,
         invalidation: forge_rpc::InvalidationInput {
             expected_version: passed.version,
@@ -140,7 +140,7 @@ async fn checks_round_trip_over_typed_rpc_and_preserve_workspace_bounds() {
     };
     assert!(
         client
-            .task_check_invalidate(SelectedRecordRequest::selected(
+            .record_check_invalidate(SelectedRecordRequest::selected(
                 "missing",
                 invalidate.clone()
             ))
@@ -148,13 +148,13 @@ async fn checks_round_trip_over_typed_rpc_and_preserve_workspace_bounds() {
             .is_err()
     );
     let pending = client
-        .task_check_invalidate(selected(invalidate.clone()))
+        .record_check_invalidate(selected(invalidate.clone()))
         .await
         .unwrap();
     assert_eq!(pending.current_verdict, None);
     assert_eq!(pending.version, 3);
     let stale = client
-        .task_check_invalidate(selected(invalidate))
+        .record_check_invalidate(selected(invalidate))
         .await
         .unwrap_err();
     assert!(stale.to_string().contains("stale-version"));
@@ -167,8 +167,8 @@ async fn checks_round_trip_over_typed_rpc_and_preserve_workspace_bounds() {
         std::slice::from_ref(&pending)
     );
     let page = client
-        .task_check_show(selected(TaskCheckShowRequest {
-            task: task.id,
+        .record_check_show(selected(RecordCheckShowRequest {
+            record: task.id,
             check: check.id,
             after: None,
             limit: 1,
@@ -177,8 +177,8 @@ async fn checks_round_trip_over_typed_rpc_and_preserve_workspace_bounds() {
         .await
         .unwrap();
     let next = client
-        .task_check_show(selected(TaskCheckShowRequest {
-            task: task.id,
+        .record_check_show(selected(RecordCheckShowRequest {
+            record: task.id,
             check: check.id,
             after: page.next_cursor,
             limit: 1,
@@ -200,8 +200,8 @@ async fn checks_round_trip_over_typed_rpc_and_preserve_workspace_bounds() {
             .is_err()
     );
     let passed = client
-        .task_check_assess(selected(TaskCheckAssessRequest {
-            task: task.id,
+        .record_check_assess(selected(RecordCheckAssessRequest {
+            record: task.id,
             check: check.id,
             assessment: AssessmentInput {
                 expected_version: pending.version,
@@ -218,8 +218,8 @@ async fn checks_round_trip_over_typed_rpc_and_preserve_workspace_bounds() {
         .await
         .unwrap();
     let frozen = client
-        .task_check_assess(selected(TaskCheckAssessRequest {
-            task: task.id,
+        .record_check_assess(selected(RecordCheckAssessRequest {
+            record: task.id,
             check: check.id,
             assessment: AssessmentInput {
                 expected_version: passed.version,
@@ -230,4 +230,49 @@ async fn checks_round_trip_over_typed_rpc_and_preserve_workspace_bounds() {
         .unwrap_err();
     assert!(frozen.to_string().contains("record-done"));
     server.abort();
+}
+
+#[tokio::test]
+async fn obsolete_operator_methods_and_inputs_are_rejected_without_writes() {
+    let daemon = Daemon::new(super::test_application());
+    let created = super::assignment_rpc(daemon.clone(), "record.openTask", serde_json::json!({
+        "workspace":"test", "body":"Research deliverables", "generated_by_ids":[]
+    })).await;
+    let record = created["result"]["id"].as_u64().unwrap();
+    assert!(created["result"].get("task_kind").is_none());
+    let selector = serde_json::json!({"workspace":"test", "record":record});
+    let before = super::assignment_rpc(daemon.clone(), "record.recordCheckList", selector.clone()).await;
+    assert_eq!(before["result"][0]["record_id"], record);
+    assert!(before["result"][0].get("task_id").is_none());
+    let updates = super::assignment_rpc(daemon.clone(), "record.updates", serde_json::json!({
+        "workspace":"test", "id":record
+    })).await;
+    for method in ["taskCheckList", "taskCheckShow", "taskCheckAssess", "taskCheckInvalidate",
+        "taskFindingList", "taskFindingShow", "taskFindingRaise", "taskFindingResolve", "taskFindingMutate"] {
+        let response = super::assignment_rpc(daemon.clone(), &format!("record.{method}"), selector.clone()).await;
+        assert_eq!(response["error"]["code"], -32601, "{method}: {response}");
+    }
+    for method in ["recordCheckList", "recordFindingList"] {
+        let mut params = serde_json::json!({"workspace":"test", "record":record, "task":record});
+        if method == "recordFindingList" { params["limit"] = 50.into(); }
+        let response = super::assignment_rpc(daemon.clone(), &format!("record.{method}"), params).await;
+        assert_eq!(response["error"]["code"], -32602, "{method}: {response}");
+    }
+    for (method, mut params) in [
+        ("openTask", serde_json::json!({"body":"Do not create", "generated_by_ids":[]})),
+        ("openTaskUnderSpec", serde_json::json!({"body":"Do not create", "spec_id":record, "generated_by_ids":[]})),
+        ("openTaskUnderWayfinder", serde_json::json!({"body":"Do not create", "wayfinder_id":record, "generated_by_ids":[]})),
+        ("list", serde_json::json!({})),
+    ] {
+        params["workspace"] = "test".into();
+        params["task_kind"] = serde_json::Value::Null;
+        let response = super::assignment_rpc(daemon.clone(), &format!("record.{method}"), params).await;
+        assert_eq!(response["error"]["code"], -32602, "{method}: {response}");
+    }
+    assert_eq!(super::assignment_rpc(daemon.clone(), "record.recordCheckList", selector).await, before);
+    assert_eq!(super::assignment_rpc(daemon.clone(), "record.updates", serde_json::json!({
+        "workspace":"test", "id":record
+    })).await, updates);
+    let records = super::assignment_rpc(daemon, "record.list", serde_json::json!({"workspace":"test"})).await;
+    assert_eq!(records["result"]["records"].as_array().unwrap().len(), 1);
 }

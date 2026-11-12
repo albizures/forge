@@ -217,7 +217,6 @@ async fn exercise_launch() {
     let record = store
         .open_typed_record(&NewTypedRecord {
             record_type: RecordType::Grilling,
-            task_kind: None,
             body: "A decision".into(),
             project_slugs: vec!["test/api".into()],
             generated_by_ids: vec![],
@@ -313,7 +312,6 @@ async fn exercise_launch() {
     let task = store
         .open_typed_record(&NewTypedRecord {
             record_type: RecordType::Task,
-            task_kind: None,
             body: "Implement task".into(),
             project_slugs: vec!["test/api".into()],
             generated_by_ids: vec![],
@@ -357,7 +355,6 @@ async fn exercise_launch() {
     let legacy = store
         .open_typed_record(&NewTypedRecord {
             record_type: RecordType::Grilling,
-            task_kind: None,
             body: "Legacy decision".into(),
             project_slugs: vec!["test/api".into()],
             generated_by_ids: vec![],

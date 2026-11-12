@@ -41,10 +41,10 @@ forge spec open --body 'Deliver the capability' --project alpha
 forge initiative open --body 'Coordinate delivery' --workspace personal --project alpha --project beta
 forge wayfinder open --body 'Explore the route' --project alpha --project beta
 forge wayfinder open --body 'Workspace-wide discovery' --workspace personal
-forge task open --body 'Deliberately scope-free investigation' --kind research
+forge task open --body 'Deliberately scope-free investigation'
 forge task open --body 'Standalone implementation' --project alpha
 forge task under-spec --body - --spec 42
-forge task under-wayfinder --body 'Compare alternatives' --wayfinder 43 --project alpha --kind research --generated-by 41
+forge task under-wayfinder --body 'Compare alternatives' --wayfinder 43 --project alpha --generated-by 41
 forge grilling open --body 'Resolve the scope decision' --wayfinder 43 --project alpha --project beta
 ```
 
@@ -54,7 +54,7 @@ Use `--body -` to read creation content from stdin. Supply stdin yourself; runni
 
 ```sh
 forge record show 42 --json
-forge record list --project alpha --status open --type task --kind research --json
+forge record list --project alpha --status open --type task --json
 forge record comments 42
 forge record updates 42
 forge record edit 42 --body 'Revised canonical body'

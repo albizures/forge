@@ -131,11 +131,12 @@ retire resources. Removal deletes only an empty registration, never root files,
 repositories or Herdr containers. Workspace-root relocation, Project reparenting
 and cascading deletion are unavailable.
 
-There is no legacy-installation migration/import requirement. Owned development
-schemas can evolve while retaining their durable facts, but pre-Workspace unowned
-data is rejected with an actionable new-store diagnostic, not silently adopted
-into a default Workspace. Preserve existing evidence before changing stores; a
-new store is not a way to reconcile an uncertain old agent.
+Opening an unversioned or incompatible store fails with `fresh-store-required`
+before initialization, without conversion, deletion, reset, or adoption into a
+default Workspace. Restart of the current marked schema retains durable facts.
+Preserve existing evidence before changing stores; a fresh store is not a way to
+reconcile an uncertain old agent. Any separate operator reset first requires safe
+ownership retirement and retained-resource reconciliation.
 
 Author and register immutable profile revisions using [Agent Profile policy](agent-profile-policy.md);
 registration never changes a Workspace selection. For the delivered agent's

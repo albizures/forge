@@ -156,7 +156,6 @@ fn verify_timeout_revisions(
         store
             .open_typed_record(&NewTypedRecord {
                 record_type: RecordType::Task,
-                task_kind: None,
                 body: "configured task".into(),
                 project_slugs: vec!["alpha".into()],
                 generated_by_ids: vec![],

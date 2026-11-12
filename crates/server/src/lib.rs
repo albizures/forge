@@ -40,8 +40,7 @@ use axum::{
 use forge_app::{
     AgentDispatchAdapter, AgentDispatchAdapterFactory, AgentDispatchContext, AgentProfile,
     Application, ApplicationStatus, AssignmentCapabilityDelivery, ManagedWorktreeAdapter, Project,
-    RecordStatus, RecordType, RegistrationError, RepositoryInspector, TaskKind,
-    WorktreeSafetyAssessment,
+    RecordStatus, RecordType, RegistrationError, RepositoryInspector, WorktreeSafetyAssessment,
 };
 use forge_rpc::{
     AddRecordCommentRequest, AgentAssignmentResponse, AgentDispatchApiServer,
@@ -1272,25 +1271,25 @@ impl RecordApiServer for Daemon {
             .replace_check_template(&r.project, &r.replacement)
             .map_err(rpc_error)
     }
-    async fn task_finding_list(
+    async fn record_finding_list(
         &self,
-        request: forge_rpc::SelectedRecordRequest<forge_rpc::TaskFindingListRequest>,
+        request: forge_rpc::SelectedRecordRequest<forge_rpc::RecordFindingListRequest>,
     ) -> RpcResult<forge_rpc::FindingList> {
         let application = self.record_application(&request.selection, &mut [])?;
         let r = request.record;
         application
-            .list_task_findings(r.task, r.after, r.limit, r.compare_revision.as_deref())
+            .list_record_findings(r.record, r.after, r.limit, r.compare_revision.as_deref())
             .map_err(rpc_error)
     }
-    async fn task_finding_show(
+    async fn record_finding_show(
         &self,
-        request: forge_rpc::SelectedRecordRequest<forge_rpc::TaskFindingShowRequest>,
+        request: forge_rpc::SelectedRecordRequest<forge_rpc::RecordFindingShowRequest>,
     ) -> RpcResult<forge_rpc::FindingPage> {
         let application = self.record_application(&request.selection, &mut [])?;
         let r = request.record;
         application
-            .show_task_finding(
-                r.task,
+            .show_record_finding(
+                r.record,
                 r.finding,
                 r.after,
                 r.limit,
@@ -1298,56 +1297,56 @@ impl RecordApiServer for Daemon {
             )
             .map_err(rpc_error)
     }
-    async fn task_finding_raise(
+    async fn record_finding_raise(
         &self,
-        request: forge_rpc::SelectedRecordRequest<forge_rpc::TaskFindingRaiseRequest>,
+        request: forge_rpc::SelectedRecordRequest<forge_rpc::RecordFindingRaiseRequest>,
     ) -> RpcResult<forge_rpc::Finding> {
         let application = self.record_application(&request.selection, &mut [])?;
         let r = request.record;
         application
-            .raise_task_finding(r.task, &r.finding)
+            .raise_record_finding(r.record, &r.finding)
             .map_err(rpc_error)
     }
-    async fn task_finding_resolve(
+    async fn record_finding_resolve(
         &self,
-        request: forge_rpc::SelectedRecordRequest<forge_rpc::TaskFindingResolveRequest>,
+        request: forge_rpc::SelectedRecordRequest<forge_rpc::RecordFindingResolveRequest>,
     ) -> RpcResult<forge_rpc::Finding> {
         let application = self.record_application(&request.selection, &mut [])?;
         let r = request.record;
         application
-            .resolve_task_finding(r.task, r.finding, &r.resolution)
+            .resolve_record_finding(r.record, r.finding, &r.resolution)
             .map_err(rpc_error)
     }
-    async fn task_finding_mutate(
+    async fn record_finding_mutate(
         &self,
-        request: forge_rpc::SelectedRecordRequest<forge_rpc::TaskFindingMutationRequest>,
+        request: forge_rpc::SelectedRecordRequest<forge_rpc::RecordFindingMutationRequest>,
     ) -> RpcResult<forge_rpc::Finding> {
         let application = self.record_application(&request.selection, &mut [])?;
         let r = request.record;
         application
-            .mutate_task_finding(r.task, r.finding, &r.mutation)
+            .mutate_record_finding(r.record, r.finding, &r.mutation)
             .map_err(rpc_error)
     }
-    async fn task_check_list(
+    async fn record_check_list(
         &self,
-        request: forge_rpc::SelectedRecordRequest<forge_rpc::TaskCheckListRequest>,
-    ) -> RpcResult<Vec<forge_app::checks::TaskCheck>> {
+        request: forge_rpc::SelectedRecordRequest<forge_rpc::RecordCheckListRequest>,
+    ) -> RpcResult<Vec<forge_app::checks::RecordCheck>> {
         self.record_application(&request.selection, &mut [])?
-            .compare_task_checks(
-                request.record.task,
+            .compare_record_checks(
+                request.record.record,
                 request.record.compare_revision.as_deref(),
             )
             .map_err(rpc_error)
     }
-    async fn task_check_show(
+    async fn record_check_show(
         &self,
-        request: forge_rpc::SelectedRecordRequest<forge_rpc::TaskCheckShowRequest>,
+        request: forge_rpc::SelectedRecordRequest<forge_rpc::RecordCheckShowRequest>,
     ) -> RpcResult<forge_app::checks::CheckPage> {
         let application = self.record_application(&request.selection, &mut [])?;
         let r = request.record;
         application
-            .compare_task_check(
-                r.task,
+            .compare_record_check(
+                r.record,
                 r.check,
                 r.after,
                 r.limit,
@@ -1355,24 +1354,24 @@ impl RecordApiServer for Daemon {
             )
             .map_err(rpc_error)
     }
-    async fn task_check_invalidate(
+    async fn record_check_invalidate(
         &self,
-        request: forge_rpc::SelectedRecordRequest<forge_rpc::TaskCheckInvalidateRequest>,
-    ) -> RpcResult<forge_app::checks::TaskCheck> {
+        request: forge_rpc::SelectedRecordRequest<forge_rpc::RecordCheckInvalidateRequest>,
+    ) -> RpcResult<forge_app::checks::RecordCheck> {
         let application = self.record_application(&request.selection, &mut [])?;
         let r = request.record;
         application
-            .invalidate_task_check(r.task, r.check, &r.invalidation)
+            .invalidate_record_check(r.record, r.check, &r.invalidation)
             .map_err(rpc_error)
     }
-    async fn task_check_assess(
+    async fn record_check_assess(
         &self,
-        request: forge_rpc::SelectedRecordRequest<forge_rpc::TaskCheckAssessRequest>,
-    ) -> RpcResult<forge_app::checks::TaskCheck> {
+        request: forge_rpc::SelectedRecordRequest<forge_rpc::RecordCheckAssessRequest>,
+    ) -> RpcResult<forge_app::checks::RecordCheck> {
         let application = self.record_application(&request.selection, &mut [])?;
         let r = request.record;
         application
-            .assess_task_check(r.task, r.check, &r.assessment)
+            .assess_record_check(r.record, r.check, &r.assessment)
             .map_err(rpc_error)
     }
     async fn open_initiative(
@@ -1390,7 +1389,6 @@ impl RecordApiServer for Daemon {
                 forge_app::RecordType::Initiative,
                 &request.body,
                 request.project_scope.project_slugs,
-                None,
                 request.generated_by_ids,
             )
             .map(Into::into)
@@ -1454,7 +1452,6 @@ impl RecordApiServer for Daemon {
                 forge_app::RecordType::Spec,
                 &request.body,
                 vec![request.project_slug],
-                None,
                 request.generated_by_ids,
             )
             .map(Into::into)
@@ -1476,7 +1473,6 @@ impl RecordApiServer for Daemon {
                 forge_app::RecordType::Task,
                 &request.body,
                 request.project_slug.into_iter().collect(),
-                request.task_kind.as_deref().map(task_kind).transpose()?,
                 request.generated_by_ids,
             )
             .map(Into::into)
@@ -1498,7 +1494,6 @@ impl RecordApiServer for Daemon {
                 forge_app::RecordType::Wayfinder,
                 &request.body,
                 request.project_scope.project_slugs,
-                None,
                 request.generated_by_ids,
             )
             .map(Into::into)
@@ -1515,12 +1510,7 @@ impl RecordApiServer for Daemon {
         } = request;
         let application = self.record_application(&selection, &mut [])?;
         application
-            .open_task_under_spec(
-                &request.body,
-                request.spec_id,
-                request.task_kind.as_deref().map(task_kind).transpose()?,
-                request.generated_by_ids,
-            )
+            .open_task_under_spec(&request.body, request.spec_id, request.generated_by_ids)
             .map(Into::into)
             .map_err(rpc_error)
     }
@@ -1540,7 +1530,6 @@ impl RecordApiServer for Daemon {
                 &request.body,
                 request.wayfinder_id,
                 request.project_slug,
-                request.task_kind.as_deref().map(task_kind).transpose()?,
                 request.generated_by_ids,
             )
             .map(Into::into)
@@ -1585,7 +1574,7 @@ impl RecordApiServer for Daemon {
         if response.record_type == "task" {
             response.checks = Some(
                 application
-                    .list_task_checks(request.id)
+                    .list_record_checks(request.id)
                     .map_err(rpc_error)?,
             );
         }
@@ -1608,9 +1597,8 @@ impl RecordApiServer for Daemon {
             .as_deref()
             .map(record_type)
             .transpose()?;
-        let task_kind = request.task_kind.as_deref().map(task_kind).transpose()?;
         application
-            .list_records(request.project_slug, status, record_type, task_kind)
+            .list_records(request.project_slug, status, record_type)
             .map(|records| ListRecordsResponse {
                 records: records.into_iter().map(Into::into).collect(),
             })
@@ -1821,18 +1809,6 @@ fn record_status(status: &str) -> RpcResult<RecordStatus> {
         _ => Err(rpc_error(RegistrationError::new(
             "invalid-status",
             "Record status must be open, in_progress, or done",
-        ))),
-    }
-}
-
-fn task_kind(task_kind: &str) -> RpcResult<TaskKind> {
-    match task_kind {
-        "research" => Ok(TaskKind::Research),
-        "prototype" => Ok(TaskKind::Prototype),
-        "review" => Ok(TaskKind::Review),
-        _ => Err(rpc_error(RegistrationError::new(
-            "invalid-task-kind",
-            "Task Kind must be research, prototype, or review",
         ))),
     }
 }
@@ -2581,7 +2557,6 @@ mod tests {
             let record = store
                 .open_typed_record(&NewTypedRecord {
                     record_type: kind,
-                    task_kind: None,
                     body: "work".into(),
                     project_slugs: vec!["alpha".into()],
                     generated_by_ids: vec![],
@@ -2793,7 +2768,6 @@ mod tests {
         let task = store
             .open_typed_record(&NewTypedRecord {
                 record_type: RecordType::Task,
-                task_kind: None,
                 body: "work".into(),
                 project_slugs: vec!["alpha".into()],
                 generated_by_ids: vec![],
@@ -2929,7 +2903,6 @@ mod tests {
         let grilling = store
             .open_typed_record(&NewTypedRecord {
                 record_type: RecordType::Grilling,
-                task_kind: None,
                 body: "question".into(),
                 project_slugs: vec!["alpha".into()],
                 generated_by_ids: vec![],
@@ -3016,7 +2989,6 @@ mod tests {
         let owner = store
             .open_typed_record(&NewTypedRecord {
                 record_type: RecordType::Task,
-                task_kind: None,
                 body: "owner".into(),
                 project_slugs: vec!["alpha".into()],
                 generated_by_ids: vec![],
@@ -3025,7 +2997,6 @@ mod tests {
         let target = store
             .open_typed_record(&NewTypedRecord {
                 record_type: RecordType::Task,
-                task_kind: None,
                 body: "target".into(),
                 project_slugs: vec!["alpha".into()],
                 generated_by_ids: vec![],
@@ -3495,7 +3466,7 @@ mod tests {
             .agent_assignment("target-assignment")
             .unwrap()
             .record_id;
-        let foreign = store.list_task_checks(other).unwrap()[0].id;
+        let foreign = store.list_record_checks(other).unwrap()[0].id;
         assert!(session.record(other).is_ok());
         assert_eq!(
             session
@@ -3522,9 +3493,9 @@ mod tests {
         );
         std::fs::write(root.join(&assignment), "check-secret\n").unwrap();
         // Satisfy existing lifecycle/dependency constraints before comparing Check gates.
-        let other_check = store.list_task_checks(other).unwrap().remove(0);
+        let other_check = store.list_record_checks(other).unwrap().remove(0);
         store
-            .assess_task_check(
+            .assess_record_check(
                 other,
                 other_check.id,
                 &forge_app::checks::AssessmentInput {
@@ -3566,7 +3537,7 @@ mod tests {
             "assignment-capability-denied"
         );
         let reopened = SqliteProjectRepository::open(&fixture.database_path).unwrap();
-        let persisted = reopened.show_task_check(task, check, None, 10).unwrap();
+        let persisted = reopened.show_record_check(task, check, None, 10).unwrap();
         assert!(
             persisted
                 .assessments
@@ -3599,7 +3570,6 @@ mod tests {
         let task = store
             .open_typed_record(&NewTypedRecord {
                 record_type: RecordType::Task,
-                task_kind: None,
                 body: "templated".into(),
                 project_slugs: vec!["alpha".into()],
                 generated_by_ids: vec![],
@@ -3668,14 +3638,13 @@ mod tests {
         let foreign = foreign_store
             .open_typed_record(&NewTypedRecord {
                 record_type: RecordType::Task,
-                task_kind: None,
                 body: "foreign".into(),
                 project_slugs: vec![],
                 generated_by_ids: vec![],
             })
             .unwrap();
         let foreign_check = foreign_store
-            .list_task_checks(foreign.id)
+            .list_record_checks(foreign.id)
             .unwrap()
             .remove(0);
         assert!(session.record(foreign.id).is_err());
@@ -3698,7 +3667,6 @@ mod tests {
         let grilling = store
             .open_typed_record(&NewTypedRecord {
                 record_type: RecordType::Grilling,
-                task_kind: None,
                 body: "decision".into(),
                 project_slugs: vec!["alpha".into()],
                 generated_by_ids: vec![],
@@ -3730,7 +3698,7 @@ mod tests {
         // Operator attribution remains explicitly distinct, even if it uses the same actor text.
         assert_eq!(
             foreign_store
-                .assess_task_check(foreign.id, foreign_check.id, &input)
+                .assess_record_check(foreign.id, foreign_check.id, &input)
                 .unwrap()
                 .latest_assessment
                 .unwrap()
@@ -4565,7 +4533,6 @@ mod tests {
                     project_slug: Some(project.reference.clone()),
                     status: Some("open".into()),
                     record_type: None,
-                    task_kind: None,
                 }))
                 .await
                 .unwrap()
@@ -4585,7 +4552,6 @@ mod tests {
             .open_task_under_spec(selected(OpenTaskUnderSpecRequest {
                 body: "A daemon-backed Task".into(),
                 spec_id: spec.id,
-                task_kind: None,
                 generated_by_ids: vec![],
             }))
             .await
@@ -4598,7 +4564,6 @@ mod tests {
                 .open_task(selected(OpenTaskRequest {
                     body: "Standalone daemon-backed Task".into(),
                     project_slug: None,
-                    task_kind: None,
                     generated_by_ids: vec![],
                 }))
                 .await
@@ -4621,7 +4586,6 @@ mod tests {
                 body: "A scoped daemon-backed Task".into(),
                 wayfinder_id: wayfinder.id,
                 project_slug: None,
-                task_kind: None,
                 generated_by_ids: vec![],
             }))
             .await
@@ -4646,7 +4610,6 @@ mod tests {
                 project_slug: Some(project.reference.clone()),
                 status: None,
                 record_type: Some("wayfinder".into()),
-                task_kind: None,
             }))
             .await
             .unwrap();
@@ -4658,7 +4621,6 @@ mod tests {
                 project_slug: None,
                 status: None,
                 record_type: Some("spec".into()),
-                task_kind: None,
             }))
             .await
             .unwrap();
@@ -4670,7 +4632,6 @@ mod tests {
                 .open_task_under_spec(selected(OpenTaskUnderSpecRequest {
                     body: "Invalid child".into(),
                     spec_id: record.id,
-                    task_kind: None,
                     generated_by_ids: vec![],
                 }))
                 .await
@@ -4682,7 +4643,6 @@ mod tests {
                     project_slug: None,
                     status: None,
                     record_type: Some("invalid".into()),
-                    task_kind: None,
                 }))
                 .await
                 .is_err()

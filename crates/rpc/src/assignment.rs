@@ -305,19 +305,19 @@ pub trait AssignmentApi {
     async fn check_list(
         &self,
         request: AssignmentCheckListRequest,
-    ) -> RpcResult<Vec<crate::TaskCheck>>;
+    ) -> RpcResult<Vec<crate::RecordCheck>>;
     #[method(name = "checkShow")]
     async fn check_show(&self, request: AssignmentCheckShowRequest) -> RpcResult<crate::CheckPage>;
     #[method(name = "checkAssess")]
     async fn check_assess(
         &self,
         request: AssignmentCheckAssessRequest,
-    ) -> RpcResult<crate::TaskCheck>;
+    ) -> RpcResult<crate::RecordCheck>;
     #[method(name = "checkInvalidate")]
     async fn check_invalidate(
         &self,
         request: AssignmentCheckInvalidateRequest,
-    ) -> RpcResult<crate::TaskCheck>;
+    ) -> RpcResult<crate::RecordCheck>;
     #[method(name = "bootstrap")]
     async fn bootstrap(
         &self,

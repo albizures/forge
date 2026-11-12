@@ -55,7 +55,7 @@ pub(super) fn provision(
         return Ok(());
     };
     for (index, criterion) in current(connection, project)?.criteria.iter().enumerate() {
-        connection.execute("INSERT INTO task_checks (task_id, name, description, position) VALUES (?1, ?2, ?3, ?4)",
+        connection.execute("INSERT INTO record_checks (record_id, name, description, position) VALUES (?1, ?2, ?3, ?4)",
             params![task.cast_signed(), criterion.name, criterion.description, i64::try_from(index + 1).map_err(template_storage_error)?]).map_err(storage_error)?;
     }
     Ok(())

@@ -148,7 +148,7 @@ async fn project_templates_round_trip_through_cli_and_typed_rpc_with_workspace_c
     let text = String::from_utf8(text.stdout).unwrap();
     assert!(text.contains("version 1") && text.contains("operator") && text.contains("Review"));
     let old_checks = json(run(&[
-        "task",
+        "record",
         "check",
         "list",
         &task_before["id"].to_string(),
@@ -165,7 +165,7 @@ async fn project_templates_round_trip_through_cli_and_typed_rpc_with_workspace_c
         "--json",
     ]));
     let checks = json(run(&[
-        "task",
+        "record",
         "check",
         "list",
         &task["id"].to_string(),
