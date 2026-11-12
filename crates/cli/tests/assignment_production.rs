@@ -212,6 +212,15 @@ async fn production_daemon_bootstraps_grilling_through_delivered_cli() {
     assert!(blocked_output.stdout.is_empty());
     assert!(!String::from_utf8_lossy(&blocked_output.stderr).contains("blocked-secret"));
     let repair_store = SqliteProjectRepository::open(&db).unwrap();
+    repair_store
+        .set_record_execution_mode(
+            prerequisite.id,
+            forge_app::ExecutionMode::Dispatched,
+            forge_app::ExecutionMode::Manual,
+            "fixture",
+            "Manual prerequisite",
+        )
+        .unwrap();
     repair_store.start_record(prerequisite.id).unwrap();
     for check in repair_store.list_record_checks(prerequisite.id).unwrap() {
         manual::pass(&repair_store, prerequisite.id, check.id);

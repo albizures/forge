@@ -14,6 +14,8 @@ by migrations—not just the initial `CREATE TABLE` statements.
 - [`src/checks.rs`](src/checks.rs): Task Checks, Assessments, Invalidations,
   activity history, and completion gating.
 - [`src/findings.rs`](src/findings.rs): Task Findings and retained review cycles.
+- [`src/execution_modes.rs`](src/execution_modes.rs): explicit policy handoff,
+  atomic ownership/resource gates, mode-change history and start authorization.
 - [`src/check_templates.rs`](src/check_templates.rs): Project Check Templates,
   replacement history, and Task provisioning.
 - [`src/workspace_dispatch.rs`](src/workspace_dispatch.rs): Workspace dispatch
@@ -82,6 +84,7 @@ erDiagram
         TEXT body
         TEXT status
         TEXT completion_resolution "NULL"
+        TEXT execution_mode
     }
     record_projects {
         INTEGER record_id PK,FK
@@ -422,6 +425,7 @@ updates to `slug`, `registered_folder`, `workspace_id`, or `local_slug`.
 | `body` | TEXT |
 | `status` | TEXT: `open`, `in_progress`, `done` |
 | `completion_resolution` | TEXT? |
+| `execution_mode` | TEXT: `manual`, `dispatched`; SQL default `manual`, Task provisioning selects `dispatched` when Project-scoped |
 
 `workspace_records` indexes `(workspace_id, id)`. Triggers require ownership on
 insert and prevent Workspace changes. Type applicability, lifecycle rules,
@@ -466,7 +470,9 @@ repository/application rules rather than SQL checks.
 | `id` | INTEGER, PK |
 | `record_id` | INTEGER, FK → `records.id` |
 | `created_at_millis` | INTEGER |
-| `kind` | TEXT: `created`, `body-edited`, `status-transition`, `relationship-added`, `relationship-removed`, `comment-added`, `comment-deleted`, `check-assessed`, `check-invalidated`, `finding-activity` |
+| `kind` | TEXT: `created`, `body-edited`, `status-transition`, `relationship-added`, `relationship-removed`, `comment-added`, `comment-deleted`, `check-assessed`, `check-invalidated`, `finding-activity`, `execution-mode-changed` |
+| `from_mode`, `to_mode` | TEXT?, mode-change old/new values |
+| `mode_actor`, `mode_message` | TEXT?, attributed mode-change explanation |
 | `from_status`, `to_status` | TEXT? |
 | `related_record_id` | INTEGER?, FK → `records.id` |
 | `comment_id` | INTEGER?, deliberately no FK |
@@ -816,6 +822,10 @@ Project templates beginning with Implementation. Revision 4 adds Manual attempts
 evidence, freshness and durable atomic-outcome replay. Revision 5 adds Check-owned
 Finding verification and atomic handback outcomes. Revision-2, revision-3 and
 revision-4 stores are incompatible; no bindings or outcomes are inferred/backfilled.
+Revision 6 adds Record `execution_mode` and attributed `execution-mode-changed`
+updates. Revision-5 stores are incompatible; modes are not inferred from old
+lifecycle or Assignments. Mode changes preserve runtime history/resources and
+never clear holds or counters.
 
 Select a fresh store rather than inventing ownership or rewriting version markers.
 Any local reset is a separate operator action: first safely retire ownership and

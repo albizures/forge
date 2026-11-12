@@ -241,6 +241,14 @@ fn every_existing_record_kind_inherits_one_workspace_and_keeps_local_relationshi
             .code,
         "cross-workspace-record"
     );
+    one.set_record_execution_mode(
+        task.id,
+        forge_app::ExecutionMode::Dispatched,
+        forge_app::ExecutionMode::Manual,
+        "operator",
+        "Manual workflow",
+    )
+    .unwrap();
     one.relate_records(task.id, grilling.id, RecordRelationshipKind::DependsOn)
         .unwrap();
     assert_eq!(

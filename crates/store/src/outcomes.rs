@@ -80,15 +80,13 @@ fn mutable(c: &Connection, record: u64) -> Result<(), RegistrationError> {
             "Manual attempts require an In Progress Task",
         ));
     }
-    // Ownership/resource reconciliation and mode gates are extended by the mode slice.
-    let assigned: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM agent_assignments WHERE record_id = ?1 AND closed_at_millis IS NULL)", [record.cast_signed()], |r| r.get(0)).map_err(storage_error)?;
-    if assigned {
+    if load_record(c, record)?.execution_mode != forge_app::ExecutionMode::Manual {
         return Err(error(
-            "assignment-active",
-            "retire existing Assignment ownership before Manual work",
+            "manual-mode-required",
+            "explicit Manual Execution Mode is required for Manual attempts",
         ));
     }
-    Ok(())
+    super::execution_modes::safe_ownership(c, record)
 }
 fn ordered(c: &Connection, record: u64, check: u64) -> Result<(), RegistrationError> {
     let current = checks::load(c, record, check)?;

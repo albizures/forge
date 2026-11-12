@@ -233,6 +233,7 @@ fn fixed_order_requires_implementation_output_and_failed_implementation_never_ad
             generated_by_ids: vec![],
         })
         .unwrap();
+    repository.set_record_execution_mode(task.id, forge_app::ExecutionMode::Dispatched, forge_app::ExecutionMode::Manual, "fixture", "Manual review").unwrap();
     repository.start_record(task.id).unwrap();
     let checks = repository.list_record_checks(task.id).unwrap();
     let review = AttemptInput {
@@ -367,6 +368,7 @@ fn application_compares_repository_evidence_without_git_and_cannot_change_author
             generated_by_ids: vec![],
         })
         .unwrap();
+    repository.set_record_execution_mode(task.id, forge_app::ExecutionMode::Dispatched, forge_app::ExecutionMode::Manual, "fixture", "Manual evidence").unwrap();
     repository.start_record(task.id).unwrap();
     let check = repository.list_record_checks(task.id).unwrap().remove(0);
     let mut input = attempt(&repository, task.id, check.id, "repository");

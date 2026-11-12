@@ -66,6 +66,15 @@ async fn cli_publishes_atomic_handback_then_only_the_owning_review_verifies() {
             generated_by_ids: vec![],
         })
         .unwrap();
+    selected
+        .set_record_execution_mode(
+            task.id,
+            forge_app::ExecutionMode::Dispatched,
+            forge_app::ExecutionMode::Manual,
+            "fixture",
+            "Manual review workflow",
+        )
+        .unwrap();
     selected.start_record(task.id).unwrap();
     let checks = selected.list_record_checks(task.id).unwrap();
     let task = task.id.to_string();

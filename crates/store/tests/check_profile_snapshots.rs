@@ -1,3 +1,4 @@
+use forge_app::ExecutionMode::{Dispatched, Manual};
 use forge_app::{
     AgentAdapterError, AgentDispatchAdapter, AgentDispatchAdapterFactory, AgentDispatchRepository,
     AgentProfile, Application, NewTypedRecord, Project, ProjectRepository, RecordRepository,
@@ -183,7 +184,76 @@ fn pinned_configuration_survives_template_selection_changes_and_restart_without_
         Box::new(NoGit),
     );
     assert_eq!(app.list_record_checks(first.id).unwrap(), original);
+    assert_eq!(
+        app.dispatch_record(projectless.id).unwrap_err().code,
+        "manual-dispatch-forbidden"
+    );
+    // Even explicit Dispatched metadata is insufficient without a Project. The
+    // baseline cannot gain a profile binding through a mode change.
+    let mut metadata = app.show_record(projectless.id).unwrap();
+    metadata.execution_mode = Dispatched;
+    assert_eq!(
+        forge_app::validate_task_dispatch_mode(&metadata)
+            .unwrap_err()
+            .code,
+        "dispatch-requires-project"
+    );
     app.validate_record_check_profiles(first.id).unwrap();
+    assert_eq!(
+        app.show_record(first.id).unwrap().execution_mode,
+        Dispatched
+    );
+    assert_eq!(
+        app.start_record(first.id).unwrap_err().code,
+        "dispatched-start-forbidden"
+    );
+    assert_eq!(
+        app.dispatch_record(first.id).unwrap_err().code,
+        "task-dispatch-unsupported-contract"
+    );
+    app.set_record_execution_mode(first.id, Dispatched, Manual, "operator", "Manual work")
+        .unwrap();
+    assert_eq!(
+        app.dispatch_record(first.id).unwrap_err().code,
+        "manual-dispatch-forbidden"
+    );
+    unavailable.store(true, Ordering::SeqCst);
+    assert_eq!(
+        app.set_record_execution_mode(first.id, Manual, Dispatched, "operator", "Try dispatch")
+            .unwrap_err()
+            .code,
+        "invalid-check-profile"
+    );
+    assert_eq!(app.show_record(first.id).unwrap().execution_mode, Manual);
+    unavailable.store(false, Ordering::SeqCst);
+    app.set_record_execution_mode(
+        first.id,
+        Manual,
+        Dispatched,
+        "operator",
+        "Restore dispatched policy",
+    )
+    .unwrap();
+    assert_eq!(app.list_record_checks(first.id).unwrap(), original);
+    for task in [missing_task.id, manual.id, unregistered_policy.id] {
+        app.set_record_execution_mode(task, Dispatched, Manual, "operator", "Select Manual")
+            .unwrap();
+        let before = app.list_record_checks(task).unwrap();
+        assert_eq!(
+            app.set_record_execution_mode(
+                task,
+                Manual,
+                Dispatched,
+                "operator",
+                "Invalid configuration"
+            )
+            .unwrap_err()
+            .code,
+            "invalid-check-profile"
+        );
+        assert_eq!(app.list_record_checks(task).unwrap(), before);
+        assert_eq!(app.show_record(task).unwrap().execution_mode, Manual);
+    }
     let error = app
         .validate_record_check_profiles(missing_task.id)
         .unwrap_err();

@@ -554,7 +554,7 @@ impl AuthenticatedAssignment<'_> {
         if own.status == crate::RecordStatus::InProgress {
             Ok(own)
         } else {
-            repository.start_record(own.id)
+            repository.start_owned_record(own.id, &assignment.id)
         }
     }
 

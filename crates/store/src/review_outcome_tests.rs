@@ -43,6 +43,7 @@ fn reviewed_task(
             generated_by_ids: vec![],
         })
         .unwrap();
+    repository.set_record_execution_mode(task.id, forge_app::ExecutionMode::Dispatched, forge_app::ExecutionMode::Manual, "fixture", "Manual reviews").unwrap();
     repository.start_record(task.id).unwrap();
     (task.id, repository.list_record_checks(task.id).unwrap())
 }

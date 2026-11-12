@@ -86,6 +86,44 @@ pub enum RecordType {
     Initiative,
 }
 
+/// Explicit execution policy, independent of lifecycle and ownership.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExecutionMode {
+    Manual,
+    Dispatched,
+}
+
+impl ExecutionMode {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Dispatched => "dispatched",
+        }
+    }
+}
+
+/// Validate Task mode and Project eligibility without authorizing unsupported dispatch.
+///
+/// # Errors
+/// Rejects Manual Tasks and Projectless Tasks, in that order.
+pub fn validate_task_dispatch_mode(record: &Record) -> Result<(), RegistrationError> {
+    if record.execution_mode == ExecutionMode::Manual {
+        return Err(RegistrationError::new(
+            "manual-dispatch-forbidden",
+            "Manual Tasks cannot be dispatched; explicitly select Dispatched at a safe boundary",
+        ));
+    }
+    if record.project_slugs.is_empty() {
+        return Err(RegistrationError::new(
+            "dispatch-requires-project",
+            "Task dispatch requires a Project",
+        ));
+    }
+    Ok(())
+}
+
 /// A unit of work whose immutable type governs its scope and hierarchy.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Record {
@@ -99,6 +137,8 @@ pub struct Record {
     pub body: String,
     /// Immutable, lexically ordered Project Scope selected at opening.
     pub project_slugs: Vec<String>,
+    /// Explicit policy; never inferred from status or absence of Assignments.
+    pub execution_mode: ExecutionMode,
     /// The Record's lifecycle status.
     pub status: RecordStatus,
     /// Immutable optional explanation recorded when the Record was completed.
@@ -165,6 +205,12 @@ pub struct RecordComment {
 pub enum RecordUpdateKind {
     Created,
     BodyEdited,
+    ExecutionModeChanged {
+        from: ExecutionMode,
+        to: ExecutionMode,
+        actor: String,
+        message: String,
+    },
     CheckAssessed {
         assessment_id: u64,
     },
@@ -804,6 +850,33 @@ pub trait RecordRepository: ProjectRepository {
     ///
     /// Returns a user-facing error for an invalid transition, absent Record, or storage failure.
     fn start_record(&self, id: u64) -> Result<Record, RegistrationError>;
+
+    /// Start only under a matching open Assignment after capability authorization.
+    /// # Errors
+    /// Returns ownership, lifecycle or storage errors.
+    fn start_owned_record(&self, id: u64, assignment: &str) -> Result<Record, RegistrationError> {
+        let _ = assignment;
+        self.start_record(id)
+    }
+
+    /// Change explicit execution policy at a safe between-attempt boundary.
+    ///
+    /// # Errors
+    /// Rejects unsafe ownership/resources, open attempts, invalid profiles or stale mode.
+    fn set_record_execution_mode(
+        &self,
+        id: u64,
+        expected: ExecutionMode,
+        mode: ExecutionMode,
+        actor: &str,
+        message: &str,
+    ) -> Result<Record, RegistrationError> {
+        let _ = (id, expected, mode, actor, message);
+        Err(RegistrationError::new(
+            "unsupported",
+            "Execution Mode changes unavailable",
+        ))
+    }
     /// Returns an In Progress Task to Open so it can become dispatch-eligible again.
     ///
     /// # Errors
@@ -2074,7 +2147,7 @@ pub fn assignment_start_task<R: AgentDispatchRepository + ?Sized>(
         allowed,
     )?;
     if task.status == RecordStatus::Open {
-        repository.start_record(task_id)
+        repository.start_owned_record(task_id, assignment_id)
     } else {
         Ok(task)
     }
@@ -2385,6 +2458,7 @@ impl Application {
             ));
         }
         if record.record_type == RecordType::Task {
+            validate_task_dispatch_mode(&record)?;
             return Err(task_dispatch_unsupported());
         }
         if let Some(assignment) = dispatch
@@ -2772,7 +2846,10 @@ impl Application {
                 );
             })?
             .into_iter()
-            .filter(|record| record.project_slugs.len() == 1)
+            .filter(|record| {
+                record.project_slugs.len() == 1
+                    && record.execution_mode == ExecutionMode::Dispatched
+            })
             .map(|record| record.project_slugs[0].clone())
             .collect();
         for project_slug in projects {
@@ -2797,6 +2874,7 @@ impl Application {
         record_id: u64,
     ) -> Result<WorktreeClaim, RegistrationError> {
         let managed = self.managed_worktrees()?;
+        validate_task_dispatch_mode(&managed.show_record(record_id)?)?;
         let base = managed.task_base_commit(record_id)?.ok_or_else(|| {
             let error = RegistrationError::new(
                 "task-base-commit-unavailable",
@@ -3350,6 +3428,29 @@ impl Application {
         self.records.start_record(id)
     }
 
+    /// Explicitly change policy without claiming, launching or clearing safety blocks.
+    ///
+    /// # Errors
+    /// Rejects invalid pinned profiles, unsafe handoff, stale mode or scope violations.
+    pub fn set_record_execution_mode(
+        &self,
+        id: u64,
+        expected: ExecutionMode,
+        mode: ExecutionMode,
+        actor: &str,
+        message: &str,
+    ) -> Result<Record, RegistrationError> {
+        let record = self.records.show_record(id)?;
+        if record.record_type == RecordType::Task
+            && mode == ExecutionMode::Dispatched
+            && expected != mode
+        {
+            self.validate_record_check_profiles(id)?;
+        }
+        self.records
+            .set_record_execution_mode(id, expected, mode, actor, message)
+    }
+
     /// Completes an in-progress Record with an optional Resolution.
     ///
     /// # Errors
@@ -3601,6 +3702,7 @@ mod tests {
                 workspace_id: "test".into(),
                 id: (records.len() + 1) as u64,
                 record_type: RecordType::Generic,
+                execution_mode: ExecutionMode::Manual,
                 body: record.body.clone(),
                 project_slugs: record.project_slugs.clone(),
                 status: RecordStatus::Open,
@@ -3616,6 +3718,13 @@ mod tests {
                 workspace_id: "test".into(),
                 id: (records.len() + 1) as u64,
                 record_type: record.record_type,
+                execution_mode: if record.record_type == RecordType::Task
+                    && !record.project_slugs.is_empty()
+                {
+                    ExecutionMode::Dispatched
+                } else {
+                    ExecutionMode::Manual
+                },
                 body: record.body.clone(),
                 project_slugs: record.project_slugs.clone(),
                 status: RecordStatus::Open,
@@ -3661,6 +3770,7 @@ mod tests {
                 record_type: RecordType::Task,
                 body: body.to_owned(),
                 project_slugs: spec.project_slugs,
+                execution_mode: ExecutionMode::Dispatched,
                 workspace_id: spec.workspace_id,
                 status: RecordStatus::Open,
                 completion_resolution: None,
@@ -3719,6 +3829,7 @@ mod tests {
                 record_type: RecordType::Task,
                 body: body.to_owned(),
                 project_slugs: vec![project_slug],
+                execution_mode: ExecutionMode::Dispatched,
                 workspace_id: wayfinder.workspace_id,
                 status: RecordStatus::Open,
                 completion_resolution: None,
@@ -3782,6 +3893,7 @@ mod tests {
                 workspace_id: wayfinder.workspace_id,
                 id: grilling_id,
                 record_type: RecordType::Grilling,
+                execution_mode: ExecutionMode::Manual,
                 body: body.to_owned(),
                 project_slugs,
                 status: RecordStatus::Open,
@@ -4332,6 +4444,7 @@ mod tests {
                 workspace_id: "test".into(),
                 id: 7,
                 record_type: RecordType::Task,
+                execution_mode: ExecutionMode::Dispatched,
                 body: "task".into(),
                 project_slugs: vec!["alpha".into()],
                 status: RecordStatus::Open,
@@ -4390,6 +4503,7 @@ mod tests {
             workspace_id: "test".into(),
             id: 7,
             record_type: RecordType::Task,
+            execution_mode: ExecutionMode::Dispatched,
             body: "task".into(),
             project_slugs: vec!["alpha".into()],
             status: RecordStatus::Open,
@@ -4661,6 +4775,7 @@ mod tests {
                 workspace_id: "test".into(),
                 id: 1,
                 record_type: RecordType::Generic,
+                execution_mode: ExecutionMode::Manual,
                 body: "body".into(),
                 project_slugs: vec!["alpha".into(), "zeta".into()],
                 status: RecordStatus::Open,

@@ -7,9 +7,12 @@ provider adapter: provider state is never proof of Forge Task completion.
 ## Interim Task dispatch restriction
 
 Task dispatch is disabled until the Check execution contract is supported.
-Explicit application/RPC/CLI requests fail with
+Explicit application/RPC/CLI requests reject Manual Tasks with
+`manual-dispatch-forbidden` and Projectless Dispatched Tasks with
+`dispatch-requires-project`. Otherwise they fail with
 `task-dispatch-unsupported-contract`, including requests for an already assigned
-Task. Automatic scheduling never claims Tasks or prepares their worktrees.
+Task. See [explicit Execution Mode selection](records.md#explicit-execution-mode);
+ordinary operator start never changes a Task's mode. Automatic scheduling never claims Tasks or prepares their worktrees.
 Provisioning Task Assignments are retained unchanged across reconciliation and
 restart: no provider provisioning, launch, retry, or implicit Manual fallback.
 Existing non-provisioning ownership can still be observed, and explicit retirement

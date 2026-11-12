@@ -51,6 +51,19 @@ pub(super) fn provision(
     task: u64,
     project: Option<&str>,
 ) -> Result<(), RegistrationError> {
+    connection
+        .execute(
+            "UPDATE records SET execution_mode = ?2 WHERE id = ?1",
+            params![
+                task.cast_signed(),
+                if project.is_some() {
+                    "dispatched"
+                } else {
+                    "manual"
+                }
+            ],
+        )
+        .map_err(storage_error)?;
     let criteria = match project {
         Some(project) => current(connection, project)?.criteria,
         None => forge_app::check_templates::baseline(),

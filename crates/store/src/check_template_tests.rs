@@ -257,6 +257,7 @@ fn templates_snapshot_all_task_deliverables_paths_and_selected_projects_without_
                     .enumerate()
                     .all(|(i, c)| c.position == i as u64 && c.latest_assessment.is_none())
             );
+            super::check_tests::manual(&repository, task.id);
             repository.start_record(task.id).unwrap();
             super::check_tests::assess(&repository, task.id, forge_app::checks::Verdict::Pass);
             if checks.len() > 1 {
@@ -306,6 +307,7 @@ fn templates_snapshot_all_task_deliverables_paths_and_selected_projects_without_
         .unwrap();
     let checks = repository.list_record_checks(task.id).unwrap();
     assert_eq!(checks.len(), 3);
+    super::check_tests::manual(&repository, task.id);
     repository.start_record(task.id).unwrap();
     for check in checks {
         super::check_tests::assess_check(&repository, task.id, check.id, forge_app::checks::Verdict::Pass);

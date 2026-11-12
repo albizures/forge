@@ -1651,6 +1651,32 @@ impl RecordApiServer for Daemon {
             .map_err(rpc_error)
     }
 
+    async fn execution_mode_set(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<forge_rpc::SetExecutionModeRequest>,
+    ) -> RpcResult<RecordResponse> {
+        let forge_rpc::SelectedRecordRequest {
+            selection,
+            record: request,
+        } = request;
+        // Scope authorization precedes provider/profile access. The record-only
+        // composition deliberately has no adapter factory; use the daemon's
+        // configured application after this immutable-owner check.
+        self.record_application(&selection, &mut [])?
+            .show_record(request.id)
+            .map_err(rpc_error)?;
+        self.application
+            .set_record_execution_mode(
+                request.id,
+                request.expected,
+                request.mode,
+                &request.actor,
+                &request.message,
+            )
+            .map(Into::into)
+            .map_err(rpc_error)
+    }
+
     async fn start(
         &self,
         request: forge_rpc::SelectedRecordRequest<RecordIdRequest>,
@@ -3524,7 +3550,9 @@ mod tests {
         std::fs::write(root.join(&assignment), "check-secret\n").unwrap();
         // Satisfy existing lifecycle/dependency constraints before comparing Check gates.
         check_tests::pass_checks(&store, other);
-        store.start_record(other).unwrap();
+        store
+            .start_owned_record(other, "target-assignment")
+            .unwrap();
         store.done_record(other, None).unwrap();
         session.acknowledge().unwrap();
         session.start().unwrap();
@@ -4133,7 +4161,9 @@ mod tests {
             .is_err()
         );
         let store = SqliteProjectRepository::open(database_path).unwrap();
-        store.start_record(other_task).unwrap();
+        store
+            .start_owned_record(other_task, "target-assignment")
+            .unwrap();
         check_tests::pass_checks(&store, other_task);
         store.done_record(other_task, Some("done")).unwrap();
         assert!(

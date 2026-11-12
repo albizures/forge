@@ -32,6 +32,32 @@ fn register_behavior(
     (profile, skill)
 }
 
+#[tokio::test]
+async fn selected_mode_rpc_uses_configured_profile_validation_without_launching() {
+    use forge_app::ExecutionMode::{Dispatched, Manual};
+    let fixture = Fixture::new();
+    let (profile, _) = registered_policy(&fixture, RecordType::Task);
+    let store = fixture.store();
+    store.replace_check_template("one/api", &forge_app::check_templates::TemplateReplacement {
+        expected_version: 0, actor: "operator".into(), message: "Pin profile".into(),
+        criteria: vec![forge_app::check_templates::CheckCriterion { name: "Implementation".into(), description: "Deliver work".into(), profile_revision: Some(profile.revision) }],
+    }).unwrap();
+    let task = store.open_typed_record(&NewTypedRecord { record_type: RecordType::Task, body: "Manual and dispatched policy".into(), project_slugs: vec!["one/api".into()], generated_by_ids: vec![] }).unwrap();
+    let daemon = Daemon::new(fixture.app());
+    let request = |workspace: &str, expected, mode| forge_rpc::SelectedRecordRequest {
+        selection: forge_rpc::RecordSelection { workspace: Some(workspace.into()), cwd: None },
+        record: forge_rpc::SetExecutionModeRequest { id: task.id, expected, mode, actor: "human".into(), message: "Explicit mode selection".into() },
+    };
+    assert!(RecordApiServer::execution_mode_set(&daemon, request("two", Dispatched, Manual)).await.is_err());
+    assert_eq!(store.show_record(task.id).unwrap().execution_mode, Dispatched);
+    RecordApiServer::execution_mode_set(&daemon, request("one", Dispatched, Manual)).await.unwrap();
+    let changed = RecordApiServer::execution_mode_set(&daemon, request("one", Manual, Dispatched)).await.unwrap();
+    assert_eq!(changed.execution_mode, Dispatched);
+    assert_eq!(daemon.application.dispatch_record(task.id).unwrap_err().code, "task-dispatch-unsupported-contract");
+    assert!(store.list_agent_assignments(task.id).unwrap().is_empty());
+    assert!(store.worktree_claim(task.id).unwrap().is_none());
+}
+
 fn launch_count(provider: &Provider) -> usize {
     provider
         .state

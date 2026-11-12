@@ -6,6 +6,10 @@ use forge_rpc::{
 };
 
 pub(super) fn pass_checks(repository: &dyn forge_app::RecordRepository, record: u64) {
+    let mode = repository.show_record(record).unwrap().execution_mode;
+    if mode != forge_app::ExecutionMode::Manual {
+        repository.set_record_execution_mode(record, mode, forge_app::ExecutionMode::Manual, "fixture", "Manual evidence setup").unwrap();
+    }
     for check in repository.list_record_checks(record).unwrap() {
         if check.current_verdict == Some(Verdict::Pass) {
             continue;

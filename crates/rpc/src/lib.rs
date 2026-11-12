@@ -20,6 +20,7 @@ pub use forge_app::findings::{
 pub use forge_app::outcomes::{AcceptedOutcome, Attempt, WorkState};
 pub use record_selection::*;
 
+pub use forge_app::ExecutionMode;
 use forge_app::{
     AgentDispatchProjectStatus, AgentDispatchReconcileResult, AgentDispatchStatus, AgentProfile,
     ApplicationStatus, ManagedWorktreeInfo, Project, Record, RecordComment, RecordRelationshipKind,
@@ -324,6 +325,11 @@ pub trait RecordApi {
     async fn edit(
         &self,
         request: SelectedRecordRequest<EditRecordRequest>,
+    ) -> RpcResult<RecordResponse>;
+    #[method(name = "executionModeSet")]
+    async fn execution_mode_set(
+        &self,
+        request: SelectedRecordRequest<SetExecutionModeRequest>,
     ) -> RpcResult<RecordResponse>;
     #[method(name = "start")]
     async fn start(
@@ -1129,6 +1135,10 @@ impl From<RecordComment> for RecordCommentResponse {
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RecordUpdateResponse {
+    pub from_mode: Option<forge_app::ExecutionMode>,
+    pub to_mode: Option<forge_app::ExecutionMode>,
+    pub mode_actor: Option<String>,
+    pub mode_message: Option<String>,
     pub id: u64,
     pub created_at_millis: u64,
     pub kind: String,
@@ -1142,6 +1152,20 @@ pub struct RecordUpdateResponse {
 }
 impl From<RecordUpdate> for RecordUpdateResponse {
     fn from(update: RecordUpdate) -> Self {
+        let (from_mode, to_mode, mode_actor, mode_message) = match &update.kind {
+            RecordUpdateKind::ExecutionModeChanged {
+                from,
+                to,
+                actor,
+                message,
+            } => (
+                Some(*from),
+                Some(*to),
+                Some(actor.clone()),
+                Some(message.clone()),
+            ),
+            _ => (None, None, None, None),
+        };
         let finding_activity_id = match &update.kind {
             RecordUpdateKind::FindingActivity { activity_id } => Some(*activity_id),
             _ => None,
@@ -1153,6 +1177,9 @@ impl From<RecordUpdate> for RecordUpdateResponse {
         };
         let (kind, from_status, to_status, related_record_id, relationship_kind, comment_id) =
             match update.kind {
+                RecordUpdateKind::ExecutionModeChanged { .. } => {
+                    ("execution-mode-changed", None, None, None, None, None)
+                }
                 RecordUpdateKind::FindingActivity { .. } => {
                     ("finding-activity", None, None, None, None, None)
                 }
@@ -1207,6 +1234,10 @@ impl From<RecordUpdate> for RecordUpdateResponse {
                 ),
             };
         Self {
+            from_mode,
+            to_mode,
+            mode_actor,
+            mode_message,
             id: update.id.0,
             created_at_millis: update.created_at_millis,
             kind: kind.into(),
@@ -1250,6 +1281,15 @@ fn record_status_name(status: RecordStatus) -> String {
     .into()
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetExecutionModeRequest {
+    pub id: u64,
+    pub expected: forge_app::ExecutionMode,
+    pub mode: forge_app::ExecutionMode,
+    pub actor: String,
+    pub message: String,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct EditRecordRequest {
     pub id: u64,
     pub body: String,
@@ -1279,6 +1319,7 @@ pub struct RecordRelationshipResponse {
 pub struct RecordResponse {
     /// Current Check summaries on Task inspection; no history is embedded.
     pub checks: Option<Vec<RecordCheck>>,
+    pub execution_mode: forge_app::ExecutionMode,
     pub workspace_id: String,
     pub id: u64,
     pub record_type: String,
@@ -1292,6 +1333,7 @@ impl From<Record> for RecordResponse {
     fn from(record: Record) -> Self {
         Self {
             checks: None,
+            execution_mode: record.execution_mode,
             workspace_id: record.workspace_id,
             id: record.id,
             record_type: record_type_name(record.record_type),

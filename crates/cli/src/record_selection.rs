@@ -111,6 +111,7 @@ requests! {
     record_attempt_begin(forge_rpc::RecordAttemptBeginRequest) -> forge_rpc::Attempt;
     record_outcome_submit(forge_rpc::RecordOutcomeSubmitRequest) -> forge_rpc::AcceptedOutcome;
     record_work_invalidate(forge_rpc::RecordWorkInvalidateRequest) -> forge_rpc::WorkState;
+    execution_mode_set(forge_rpc::SetExecutionModeRequest) -> forge_rpc::RecordResponse;
     open_initiative(OpenRecordRequest) -> RecordResponse;
     ready(ReadyRecordsRequest) -> ReadyRecordsResponse;
     open(OpenRecordRequest) -> RecordResponse;

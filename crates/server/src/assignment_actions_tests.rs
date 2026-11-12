@@ -53,8 +53,8 @@ async fn production_assignment_routes_authenticate_and_reject_spoofed_fields() {
         "{good}"
     );
     let store = SqliteProjectRepository::open(&fixture.database_path).unwrap();
-    store.start_record(neighbor).unwrap();
     check_tests::pass_checks(&store, neighbor);
+    store.start_owned_record(neighbor, "target-assignment").unwrap();
     store.done_record(neighbor, Some("satisfied")).unwrap();
     let owner = store.agent_assignment(&assignment).unwrap().record_id;
     let legacy_own = assignment_rpc(daemon.clone(), "agentDispatch.taskStart", serde_json::json!({"assignment_id":assignment,"capability_id":assignment,"correlation_id":"actual-secret","task_id":owner})).await;
@@ -425,8 +425,8 @@ fn authenticated_actions_require_acknowledgement_and_normal_lifecycle_validation
         "open prerequisite still blocks start"
     );
     let store = SqliteProjectRepository::open(&fixture.database_path).unwrap();
-    store.start_record(prerequisite).unwrap();
     check_tests::pass_checks(&store, prerequisite);
+    store.start_owned_record(prerequisite, "target-assignment").unwrap();
     store.done_record(prerequisite, Some("satisfied")).unwrap();
     assert_eq!(
         session.start().unwrap().status,
@@ -474,7 +474,7 @@ fn authenticated_actions_require_acknowledgement_and_normal_lifecycle_validation
             )
             .unwrap_err()
             .code,
-        "assignment-active"
+        "execution-mode-unsafe-ownership"
     );
     check_tests::pass_checks(&store, owner);
     let finding = store

@@ -54,6 +54,50 @@ forge grilling open --body 'Choose the route' --wayfinder 43 --workspace persona
   Projectless Wayfinder children inherit empty scope.
 - Describe research, prototype, and review deliverables in the Task body; they are not separate execution categories.
 
+## Explicit Execution Mode
+
+Every Record stores `execution_mode` independently of its type, lifecycle and
+profiles. Project-scoped Tasks default to `dispatched`; Projectless Tasks and
+all other types default to `manual`. Missing Assignments never imply Manual.
+Other types' metadata does not authorize unsupported execution; Grilling's
+existing explicit Assignment workflow remains separate from Task mode gates.
+
+Ordinary operator start of a Dispatched Task returns `dispatched-start-forbidden`.
+Select Manual explicitly before starting Project work without agents:
+
+```sh
+forge record execution-mode 44 manual --expected dispatched \
+  --actor human --message 'Deliver and verify manually' --workspace personal
+forge record start 44 --workspace personal
+```
+
+`record_executionModeSet` exposes the same selected-scope RPC contract with
+`id`, `expected`, `mode`, `actor` and `message`. Only `manual` and `dispatched`
+are accepted. Inspection includes the mode; Update Logs retain both modes,
+attribution and explanation. A stale expected mode rejects without writes.
+Starting never changes mode, and Done Records cannot change it.
+
+Changes require a between-attempt boundary: close or explicitly invalidate any
+open Manual attempt, confirm Assignment retirement, and reconcile retained or
+uncertain resources. Active, idle, blocked and uncertain ownership all reject
+with `execution-mode-unsafe-ownership`; silence is not retirement. Switching to
+Dispatched validates **every immutable pinned Check profile**, including external
+prerequisites, without selecting an adapter or substituting profiles. Missing or
+unusable bindings return `invalid-check-profile` identifying the Check. Restore
+prerequisites or remain Manual; profile-less Manual Checks need no launch setup.
+
+Successful changes invalidate current Assessments and advance existing work
+freshness without deleting history, Findings, holds, Assignment resources or
+retry counters. A pristine Task has no work to invalidate. No-op selections do
+not rewrite history. Neither mode selection nor a passing outcome clears a hold.
+
+Manual Tasks reject explicit dispatch with `manual-dispatch-forbidden` and are
+excluded from automatic scheduling. A Dispatched Projectless Task is ineligible
+with `dispatch-requires-project`; Dispatched metadata cannot supply a Project.
+Otherwise eligible Task dispatch still fails with
+`task-dispatch-unsupported-contract`. This release never launches Task agents or
+silently falls back to Manual.
+
 ## Relationships and lifecycle
 
 ```sh

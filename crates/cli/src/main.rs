@@ -514,7 +514,9 @@ enum RecordCommand {
     List(ListRecordsArgs),
     /// Edit a non-Done Record Body.
     Edit(EditRecordArgs),
-    /// Advance an open Record to in-progress.
+    /// Explicitly change Execution Mode after safe ownership/resource handoff.
+    ExecutionMode(ExecutionModeArgs),
+    /// Advance an open Record to in-progress (Tasks require Manual mode).
     Start(RecordIdArgs),
     /// Complete an in-progress Record.
     Done(DoneRecordArgs),
@@ -530,6 +532,22 @@ enum RecordCommand {
     Comments(RecordIdArgs),
     /// List a Record's Forge-authored Update Log newest first.
     Updates(RecordIdArgs),
+}
+#[derive(Args, Debug)]
+struct ExecutionModeArgs {
+    id: u64,
+    #[arg(value_parser = ["manual", "dispatched"])]
+    mode: String,
+    #[arg(long, value_parser = ["manual", "dispatched"])]
+    expected: String,
+    #[arg(long)]
+    actor: String,
+    #[arg(long)]
+    message: String,
+    #[arg(long)]
+    server_url: Option<String>,
+    #[arg(long)]
+    json: bool,
 }
 #[derive(Args, Debug)]
 struct ListRecordsArgs {
@@ -813,6 +831,31 @@ async fn run_record(command: RecordCommand, workspace: Option<String>) -> i32 {
             )
             .await,
         ),
+        RecordCommand::ExecutionMode(args) => {
+            let mode = |s: &str| {
+                if s == "manual" {
+                    forge_rpc::ExecutionMode::Manual
+                } else {
+                    forge_rpc::ExecutionMode::Dispatched
+                }
+            };
+            record_result(
+                "execution-mode",
+                args.json,
+                forge_cli::request_set_execution_mode(
+                    selected_record_endpoint(args.server_url.as_deref(), workspace.as_deref())
+                        .await,
+                    forge_rpc::SetExecutionModeRequest {
+                        id: args.id,
+                        expected: mode(&args.expected),
+                        mode: mode(&args.mode),
+                        actor: args.actor,
+                        message: args.message,
+                    },
+                )
+                .await,
+            )
+        }
         RecordCommand::Start(args) => record_result(
             "start",
             args.json,

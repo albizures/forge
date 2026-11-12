@@ -242,7 +242,7 @@ fn assignment_finding_security_done_and_completion_gates_match_operator() {
             ),
         )
         .unwrap();
-    store.start_record(prerequisite).unwrap();
+    store.start_owned_record(prerequisite, "target-assignment").unwrap();
     store.done_record(prerequisite, Some("verified")).unwrap();
     session.acknowledge().unwrap();
     session.start().unwrap();

@@ -329,6 +329,15 @@ async fn fixed_layout_selection_and_lifecycle_survive_reopen_without_dispatch_co
     ));
     assert!(!nested_path.exists());
     // Completion retains the Claim, and a new application can inspect/remove it.
+    store
+        .set_record_execution_mode(
+            task.id,
+            forge_rpc::ExecutionMode::Dispatched,
+            forge_rpc::ExecutionMode::Manual,
+            "fixture",
+            "Manual lifecycle",
+        )
+        .unwrap();
     store.start_record(task.id).unwrap();
     for check in store.list_record_checks(task.id).unwrap() {
         manual::pass(&store, task.id, check.id);

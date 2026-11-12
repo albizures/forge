@@ -1295,6 +1295,17 @@ pub async fn request_edit_record(
 /// # Errors
 ///
 /// Returns an endpoint or daemon validation error.
+pub async fn request_set_execution_mode(
+    url: impl Into<RecordEndpoint>,
+    request: forge_rpc::SetExecutionModeRequest,
+) -> Result<RecordResponse, String> {
+    record_client(url)?
+        .execution_mode_set(request)
+        .await
+        .map_err(record_error("execution-mode"))
+}
+/// # Errors
+/// Returns an endpoint or daemon validation error.
 pub async fn request_start_record(
     url: impl Into<RecordEndpoint>,
     id: u64,
@@ -1424,8 +1435,12 @@ fn record_error(operation: &'static str) -> impl FnOnce(jsonrpsee::core::client:
 pub fn render_record(record: &RecordResponse) -> String {
     use std::fmt::Write as _;
     let mut text = format!(
-        "{} {} ({})\n\n{}",
-        record.record_type, record.id, record.status, record.body
+        "{} {} ({}, {})\n\n{}",
+        record.record_type,
+        record.id,
+        record.status,
+        record.execution_mode.as_str(),
+        record.body
     );
     if let Some(checks) = &record.checks {
         for check in checks {
@@ -1482,6 +1497,14 @@ pub fn render_record_updates(updates: &ListRecordUpdatesResponse) -> String {
                 format!(" Finding Activity {id}")
             } else if let Some(id) = update.assessment_id {
                 format!(" Assessment {id}")
+            } else if let (Some(from), Some(to)) = (update.from_mode, update.to_mode) {
+                format!(
+                    " {} -> {} by {}: {}",
+                    from.as_str(),
+                    to.as_str(),
+                    update.mode_actor.as_deref().unwrap_or(""),
+                    update.mode_message.as_deref().unwrap_or("")
+                )
             } else {
                 match (
                     &update.from_status,
@@ -1673,7 +1696,7 @@ mod tests {
                 .iter()
                 .all(|record| record.record_type == "task")
         );
-        assert_eq!(render_record(&spec), "spec 1 (open)\n\nSpec body");
+        assert_eq!(render_record(&spec), "spec 1 (open, manual)\n\nSpec body");
         assert_eq!(render_record_opened(&child), "Opened task 5 (open)");
 
         server.abort();
@@ -1683,6 +1706,7 @@ mod tests {
     fn record_list_renders_records_in_response_order() {
         let records = ListRecordsResponse {
             records: vec![RecordResponse {
+                execution_mode: forge_rpc::ExecutionMode::Manual,
                 checks: None,
                 workspace_id: "test".into(),
                 id: 4,
@@ -1696,7 +1720,10 @@ mod tests {
                 relationships: vec![],
             }],
         };
-        assert_eq!(render_record_list(&records), "generic 4 (open)\n\nbody");
+        assert_eq!(
+            render_record_list(&records),
+            "generic 4 (open, manual)\n\nbody"
+        );
     }
 
     #[test]
@@ -1704,6 +1731,10 @@ mod tests {
         assert_eq!(
             render_record_updates(&ListRecordUpdatesResponse {
                 updates: vec![RecordUpdateResponse {
+                    from_mode: None,
+                    to_mode: None,
+                    mode_actor: None,
+                    mode_message: None,
                     assessment_id: None,
                     finding_activity_id: None,
                     id: 7,
@@ -1724,6 +1755,7 @@ mod tests {
     fn record_output_identifies_the_new_record() {
         assert_eq!(
             render_record_opened(&RecordResponse {
+                execution_mode: forge_rpc::ExecutionMode::Manual,
                 checks: None,
                 workspace_id: "test".into(),
                 id: 4,

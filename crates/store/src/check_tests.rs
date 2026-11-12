@@ -2,6 +2,12 @@ use super::*;
 use forge_app::checks::{AssessmentInput, Verdict};
 use forge_app::outcomes::{AttemptInput, Evidence, OutcomeInput, WorkInvalidationInput};
 
+pub(super) fn manual(repository: &dyn RecordRepository, task: u64) {
+    let mode = repository.show_record(task).unwrap().execution_mode;
+    if mode != forge_app::ExecutionMode::Manual {
+        repository.set_record_execution_mode(task, mode, forge_app::ExecutionMode::Manual, "fixture", "Manual lifecycle setup").unwrap();
+    }
+}
 pub(super) fn evidence() -> Evidence {
     Evidence::Artifact {
         uri: "urn:test:deliverable".into(),
@@ -69,6 +75,7 @@ pub(super) fn assess_check(
     check: u64,
     verdict: Verdict,
 ) {
+    manual(repository, task);
     if repository.show_record(task).unwrap().status == RecordStatus::Open {
         repository.start_record(task).unwrap();
     }

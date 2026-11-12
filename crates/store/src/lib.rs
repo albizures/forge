@@ -20,6 +20,7 @@ use rusqlite::{Connection, ErrorCode, OptionalExtension, params};
 
 mod check_templates;
 mod checks;
+mod execution_modes;
 mod findings;
 mod outcome_findings;
 mod outcomes;
@@ -90,7 +91,8 @@ impl SqliteProjectRepository {
                 workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT,
                 body TEXT NOT NULL,
                 status TEXT NOT NULL CHECK (status IN ('open', 'in_progress', 'done')),
-                completion_resolution TEXT
+                completion_resolution TEXT,
+                execution_mode TEXT NOT NULL DEFAULT 'manual' CHECK(execution_mode IN ('manual', 'dispatched'))
             );
             CREATE TABLE IF NOT EXISTS record_projects (
                 record_id INTEGER NOT NULL REFERENCES records(id),
@@ -109,7 +111,11 @@ impl SqliteProjectRepository {
                 id INTEGER PRIMARY KEY NOT NULL,
                 record_id INTEGER NOT NULL REFERENCES records(id),
                 created_at_millis INTEGER NOT NULL,
-                kind TEXT NOT NULL CHECK (kind IN ('created', 'body-edited', 'status-transition', 'relationship-added', 'relationship-removed', 'comment-added', 'comment-deleted', 'check-assessed', 'check-invalidated', 'finding-activity')),
+                kind TEXT NOT NULL CHECK (kind IN ('created', 'body-edited', 'status-transition', 'relationship-added', 'relationship-removed', 'comment-added', 'comment-deleted', 'check-assessed', 'check-invalidated', 'finding-activity', 'execution-mode-changed')),
+                from_mode TEXT,
+                to_mode TEXT,
+                mode_actor TEXT,
+                mode_message TEXT,
                 assessment_id INTEGER,
                 finding_activity_id INTEGER,
                 from_status TEXT,
@@ -1271,44 +1277,23 @@ impl RecordRepository for SqliteProjectRepository {
         Ok(record)
     }
 
+    fn set_record_execution_mode(
+        &self,
+        id: u64,
+        expected: forge_app::ExecutionMode,
+        mode: forge_app::ExecutionMode,
+        actor: &str,
+        message: &str,
+    ) -> Result<Record, RegistrationError> {
+        self.change_execution_mode(id, expected, mode, actor, message)
+    }
+
     fn start_record(&self, id: u64) -> Result<Record, RegistrationError> {
-        self.record_workspace(id)?;
-        let mut connection = self
-            .connection
-            .lock()
-            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
-        // Reserve the writer before reading prerequisites. A deferred transaction's
-        // read-to-write upgrade can fail immediately (bypassing the busy timeout)
-        // when another connection, e.g. resume/reconciliation, holds the reservation.
-        // BEGIN IMMEDIATE instead waits within SQLite's bounded busy timeout before
-        // taking a read snapshot; no lifecycle operation needs to be replayed.
-        let transaction = connection
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(storage_error)?;
-        let unfinished = unfinished_prerequisite_ids(&transaction, id)?;
-        if !unfinished.is_empty() {
-            return Err(dependencies_not_done_error(&unfinished));
-        }
-        let updated = transaction
-            .execute(
-                "UPDATE records SET status = 'in_progress' WHERE id = ?1 AND status = 'open'",
-                [id.cast_signed()],
-            )
-            .map_err(storage_error)?;
-        if updated == 0 {
-            return record_or_transition_error(&transaction, id);
-        }
-        insert_update(
-            &transaction,
-            id,
-            RecordUpdateKind::StatusTransition {
-                from: RecordStatus::Open,
-                to: RecordStatus::InProgress,
-            },
-        )?;
-        let record = load_record(&transaction, id)?;
-        transaction.commit().map_err(storage_error)?;
-        Ok(record)
+        self.start_with_ownership(id, None)
+    }
+
+    fn start_owned_record(&self, id: u64, assignment: &str) -> Result<Record, RegistrationError> {
+        self.start_with_ownership(id, Some(assignment))
     }
 
     fn reopen_record(&self, id: u64) -> Result<Record, RegistrationError> {
@@ -1638,7 +1623,7 @@ impl RecordRepository for SqliteProjectRepository {
             .connection
             .lock()
             .map_err(|_| RegistrationError::new("storage", "store lock poisoned"))?;
-        connection.prepare("SELECT id, created_at_millis, kind, from_status, to_status, related_record_id, comment_id, relationship_kind, assessment_id, finding_activity_id FROM record_updates WHERE record_id = ?1 AND id > ?2 AND id <= ?3 ORDER BY id LIMIT ?4").map_err(storage_error)?.query_map(params![id.cast_signed(), after.cast_signed(), through.cast_signed(), limit], update_from_row).map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)
+        connection.prepare("SELECT id, created_at_millis, kind, from_status, to_status, related_record_id, comment_id, relationship_kind, assessment_id, finding_activity_id, from_mode, to_mode, mode_actor, mode_message FROM record_updates WHERE record_id = ?1 AND id > ?2 AND id <= ?3 ORDER BY id LIMIT ?4").map_err(storage_error)?.query_map(params![id.cast_signed(), after.cast_signed(), through.cast_signed(), limit], update_from_row).map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)
     }
 
     fn list_record_updates(&self, id: u64) -> Result<Vec<RecordUpdate>, RegistrationError> {
@@ -1648,7 +1633,7 @@ impl RecordRepository for SqliteProjectRepository {
             .lock()
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
         load_record(&connection, id)?;
-        connection.prepare("SELECT id, created_at_millis, kind, from_status, to_status, related_record_id, comment_id, relationship_kind, assessment_id, finding_activity_id FROM record_updates WHERE record_id = ?1 ORDER BY created_at_millis DESC, id DESC")
+        connection.prepare("SELECT id, created_at_millis, kind, from_status, to_status, related_record_id, comment_id, relationship_kind, assessment_id, finding_activity_id, from_mode, to_mode, mode_actor, mode_message FROM record_updates WHERE record_id = ?1 ORDER BY created_at_millis DESC, id DESC")
             .map_err(storage_error)?
             .query_map([id.cast_signed()], update_from_row)
             .map_err(storage_error)?
@@ -3405,6 +3390,15 @@ fn insert_update(
 ) -> Result<(), RegistrationError> {
     let (kind, from_status, to_status, related_record_id, comment_id, relationship_kind) =
         match kind {
+            RecordUpdateKind::ExecutionModeChanged {
+                from,
+                to,
+                actor,
+                message,
+            } => {
+                connection.execute("INSERT INTO record_updates (record_id, created_at_millis, kind, from_mode, to_mode, mode_actor, mode_message) VALUES (?1, ?2, 'execution-mode-changed', ?3, ?4, ?5, ?6)", params![record_id.cast_signed(), now_millis()?, from.as_str(), to.as_str(), actor, message]).map_err(storage_error)?;
+                return Ok(());
+            }
             RecordUpdateKind::FindingActivity { activity_id } => {
                 connection.execute("INSERT INTO record_updates (record_id, created_at_millis, kind, finding_activity_id) VALUES (?1, ?2, 'finding-activity', ?3)", params![record_id.cast_signed(), now_millis()?, activity_id.cast_signed()]).map_err(storage_error)?;
                 return Ok(());
@@ -3498,6 +3492,14 @@ fn update_from_row_at(
         _ => Err(rusqlite::Error::InvalidQuery),
     };
     let kind = match kind.as_str() {
+        "execution-mode-changed" => RecordUpdateKind::ExecutionModeChanged {
+            from: execution_modes::parse(&row.get::<_, String>(created_at_index + 9)?)
+                .map_err(|_| rusqlite::Error::InvalidQuery)?,
+            to: execution_modes::parse(&row.get::<_, String>(created_at_index + 10)?)
+                .map_err(|_| rusqlite::Error::InvalidQuery)?,
+            actor: row.get(created_at_index + 11)?,
+            message: row.get(created_at_index + 12)?,
+        },
         "finding-activity" => RecordUpdateKind::FindingActivity {
             activity_id: row.get::<_, i64>(created_at_index + 8)?.cast_unsigned(),
         },
@@ -3726,9 +3728,9 @@ fn record_type(value: &str) -> Result<RecordType, RegistrationError> {
 }
 
 fn load_record(connection: &Connection, id: u64) -> Result<Record, RegistrationError> {
-    let (stored_record_type, body, status, completion_resolution) = connection
+    let (stored_record_type, body, status, completion_resolution, execution_mode) = connection
         .query_row(
-            "SELECT record_type, body, status, completion_resolution FROM records WHERE id = ?1",
+            "SELECT record_type, body, status, completion_resolution, execution_mode FROM records WHERE id = ?1",
             [id.cast_signed()],
             |row| {
                 Ok((
@@ -3736,6 +3738,7 @@ fn load_record(connection: &Connection, id: u64) -> Result<Record, RegistrationE
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     row.get(3)?,
+                    row.get::<_, String>(4)?,
                 ))
             },
         )
@@ -3785,7 +3788,7 @@ fn load_record(connection: &Connection, id: u64) -> Result<Record, RegistrationE
         workspace_id: record_workspaces::owner(connection, id)?,
         id,
         record_type: record_type(&stored_record_type)?,
-
+        execution_mode: execution_modes::parse(&execution_mode)?,
         body,
         project_slugs,
         status,
@@ -3993,6 +3996,7 @@ mod tests {
                 generated_by_ids: vec![],
             })
             .unwrap();
+        check_tests::manual(&starter, task.id);
         starter
             .hold_dispatch(task.id, "acknowledgement timeout")
             .unwrap();
@@ -4084,6 +4088,7 @@ mod tests {
                 generated_by_ids: vec![],
             })
             .unwrap();
+        check_tests::manual(&store, task.id);
         // Shorten only the test connection's wait, not the production policy.
         store
             .connection
@@ -4104,13 +4109,13 @@ mod tests {
             store.show_record(task.id).unwrap().status,
             RecordStatus::Open
         );
-        assert_eq!(store.list_record_updates(task.id).unwrap().len(), 1);
+        assert_eq!(store.list_record_updates(task.id).unwrap().len(), 2);
         reserved.rollback().unwrap();
         assert_eq!(
             store.start_record(task.id).unwrap().status,
             RecordStatus::InProgress
         );
-        assert_eq!(store.list_record_updates(task.id).unwrap().len(), 2);
+        assert_eq!(store.list_record_updates(task.id).unwrap().len(), 3);
         drop(competing);
         drop(store);
         std::fs::remove_file(&path).unwrap();
@@ -4186,6 +4191,8 @@ mod tests {
         let prerequisite = store.open_typed_record(&task("prerequisite")).unwrap();
         let other = store.open_typed_record(&task("other")).unwrap();
         let later = store.open_typed_record(&task("later")).unwrap();
+        check_tests::manual(&store, blocked.id);
+        check_tests::manual(&store, prerequisite.id);
 
         let related = store
             .relate_records(
@@ -4722,6 +4729,7 @@ mod tests {
         let alpha_task = store
             .open_task_under_wayfinder("alpha task", wayfinder.id, Some("alpha".into()), vec![])
             .unwrap();
+        check_tests::manual(&store, alpha_task.id);
         store
             .relate_records(
                 alpha_task.id,
@@ -5516,6 +5524,7 @@ mod tests {
             store.worktree_claims_requiring_cleanup().unwrap(),
             vec![cleanup.clone()]
         );
+        check_tests::manual(&store, task.id);
         store.start_record(task.id).unwrap();
         check_tests::assess(&store, task.id, forge_app::checks::Verdict::Pass);
         store.done_record(task.id, None).unwrap();
@@ -5965,6 +5974,7 @@ mod tests {
             "unsupported-record-type"
         );
         let prerequisite = open(RecordType::Task, vec!["alpha"]);
+        check_tests::manual(&store, prerequisite.id);
         let task = open(RecordType::Task, vec!["alpha"]);
         store
             .relate_records(task.id, prerequisite.id, RecordRelationshipKind::DependsOn)
@@ -5989,6 +5999,7 @@ mod tests {
         );
         assert!(store.dispatch_hold(task.id).unwrap().is_some());
         let in_progress = open(RecordType::Task, vec!["beta"]);
+        check_tests::manual(&store, in_progress.id);
         store.start_record(in_progress.id).unwrap();
         assert_eq!(
             store
@@ -6600,6 +6611,7 @@ mod tests {
         let sibling = store
             .open_task_under_spec("sibling", spec.id, vec![])
             .unwrap();
+        check_tests::manual(&store, task.id);
         store.start_record(task.id).unwrap();
         check_tests::assess(&store, task.id, forge_app::checks::Verdict::Pass);
         store
