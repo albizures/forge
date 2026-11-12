@@ -109,7 +109,13 @@ Failed Implementation remains Implementation. Acceptance records evidence and ou
 not provider retirement or permission for another live attempt. Handoff atomically
 revokes the old capability and retains a `check-handoff` resource blocker before
 provider cleanup. Failed or uncertain cleanup retains capacity across restart;
-an adapter's successful response cannot clear other retained resources. Holds,
+an adapter's successful response cannot clear other retained resources. Successful
+Herdr provisioning reconciles its `provision-intent` uncertainty marker only after
+allocation and launch responses succeed and all resource identities are retained.
+The one-shot marker row remains, preventing another allocation. Lost responses or
+persistence failures retain uncertainty for explicit recovery; a restart does not
+infer that an old unresolved marker represented successful provisioning. Known
+provider resources still reserve capacity until verified retirement. Holds,
 dependencies, mode, capacity, worktree safety and provider prerequisites are
 rechecked before the next claim. An authenticated interrupted review retries the
 same Check at the same freshness and evidence only after confirmed retirement and
@@ -320,9 +326,19 @@ replacement. Explicit dispatch is not a recovery override: follow the
 ## Launch and acknowledgement
 
 Forge persists a one-shot launch intent and acknowledgement deadline before
-launching Pi. Launch arguments contain a short bootstrap and profile model,
-not rendered Task instructions or capability secrets. The capability is delivered
-through an owner-only secret file outside the Agent Workspace.
+launching Pi. Pi starts without a positional prompt. Forge pins the returned
+terminal identity and waits for the named Pi at the exact Workspace/tab/pane tuple
+to become interactively ready with startup no longer pending, then sends the short
+trusted bootstrap once through `agent.prompt`. Passing a prompt to Pi at startup
+can keep Herdr's launch pending until its deadline, losing the name during a long
+first turn. A successful `agent.start` response alone is not readiness.
+
+The same durable one-shot intents cover start and bootstrap delivery: a timeout,
+identity change or lost response retains resources and never retries the prompt or
+launch. Successful provisioning reconciles its uncertainty marker only after the
+bootstrap admission response validates the same identity. Launch arguments contain
+the profile model, not rendered Task instructions or capability secrets. The
+capability is delivered through an owner-only secret file outside the Agent Workspace.
 
 Agents use `forge assignment bootstrap` with their delivered environment;
 credentials are never supplied as command arguments. The authenticated bootstrap

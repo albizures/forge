@@ -93,10 +93,11 @@ impl Provider {
                                     name.clone(),
                                     json!({
                                         "name":name, "workspace_id":workspace,
-                                        "tab_id":"tab", "pane_id":"pane", "agent_status":"working"
+                                        "tab_id":"tab", "pane_id":"pane", "terminal_id":format!("terminal-{name}"),
+                                        "agent":"pi", "agent_status":"idle", "interactive_ready":true
                                     }),
                                 );
-                                json!({"type":"agent_started"})
+                                json!({"type":"agent_started", "agent":state.agents[&name]})
                             }
                             "agent.get" => {
                                 match state
@@ -106,6 +107,12 @@ impl Provider {
                                     Some(agent) => json!({"type":"agent_info", "agent":agent}),
                                     None => json!({"absent":true}),
                                 }
+                            }
+                            "agent.prompt" => {
+                                let name = request["params"]["target"].as_str().unwrap();
+                                state.agents.get_mut(name).unwrap()["agent_status"] =
+                                    json!("working");
+                                json!({"type":"agent_prompted", "agent":state.agents[name]})
                             }
                             "agent.list" => {
                                 json!({"type":"agent_list", "agents":state.agents.values().collect::<Vec<_>>()})
@@ -677,8 +684,19 @@ fn production_grilling_launch_uses_its_selected_revision_and_retained_container(
         .iter()
         .find(|call| call["method"] == "agent.start")
         .unwrap();
-    assert!(launch.to_string().contains("assignment bootstrap"));
+    assert!(!launch.to_string().contains("assignment bootstrap"));
     assert!(!launch.to_string().contains("decision"));
+    let prompt = calls
+        .calls
+        .iter()
+        .find(|call| call["method"] == "agent.prompt")
+        .unwrap();
+    assert!(
+        prompt["params"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("assignment bootstrap")
+    );
     assert_eq!(
         calls
             .calls
@@ -794,13 +812,13 @@ fn workspace_launch_context_and_recovery_stay_with_the_original_owner_after_rest
             assert_eq!(tab["params"]["workspace_id"], format!("herdr-{workspace}"));
             assert_eq!(tab["params"]["focus"], false);
         }
-        let launch = state
+        let delivery = state
             .calls
             .iter()
-            .filter(|call| call["method"] == "agent.start")
+            .filter(|call| call["method"] == "agent.prompt")
             .nth(1)
             .unwrap();
-        let prompt = launch["params"]["args"][2].as_str().unwrap();
+        let prompt = delivery["params"]["text"].as_str().unwrap();
         assert!(prompt.contains("assignment bootstrap"));
         assert!(!prompt.contains("multi-project decision"));
     }
@@ -912,7 +930,7 @@ fn workspace_launch_context_and_recovery_stay_with_the_original_owner_after_rest
             .iter()
             .filter(|call| call["method"] == "agent.get")
             .count(),
-        2
+        4
     );
     assert!(state.calls.iter().all(|call| matches!(
         call["method"].as_str(),
@@ -923,6 +941,7 @@ fn workspace_launch_context_and_recovery_stay_with_the_original_owner_after_rest
                 | "tab.create"
                 | "agent.start"
                 | "agent.get"
+                | "agent.prompt"
         )
     )));
 }

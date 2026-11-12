@@ -131,8 +131,16 @@ async fn exercise_launch() {
                     }
                     "workspace.get" => json!({"workspace":{"workspace_id":"provider-workspace"}}),
                     "tab.create" => json!({"tab":{"tab_id":"tab"},"root_pane":{"pane_id":"pane"}}),
-                    "agent.start" => {
-                        // Authenticate while the launch response is still in flight.
+                    "agent.start" => json!({"type":"agent_started","agent":{
+                        "name":request["params"]["name"],"agent":"pi","workspace_id":"provider-workspace",
+                        "tab_id":"tab","pane_id":"pane","terminal_id":"terminal","agent_status":"unknown","launch_pending":true
+                    }}),
+                    "agent.get" => json!({"type":"agent_info","agent":{
+                        "name":request["params"]["target"],"agent":"pi","workspace_id":"provider-workspace",
+                        "tab_id":"tab","pane_id":"pane","terminal_id":"terminal","agent_status":"idle","interactive_ready":true
+                    }}),
+                    "agent.prompt" => {
+                        // Authenticate while the one-shot bootstrap delivery is still in flight.
                         let env = {
                             let calls = calls.lock().unwrap();
                             calls.iter().rfind(|c| c["method"] == "tab.create").unwrap()["params"]["env"].as_object().unwrap().clone()
@@ -152,7 +160,10 @@ async fn exercise_launch() {
                         let bootstrap: Value = serde_json::from_slice(&output.stdout).unwrap();
                         assert_eq!(bootstrap["context"]["record"]["status"], "in_progress");
                         assert!(bootstrap["behavior"].is_string());
-                        json!({"type":"agent_started"})
+                        json!({"type":"agent_prompted","agent":{
+                            "name":request["params"]["target"],"agent":"pi","workspace_id":"provider-workspace",
+                            "tab_id":"tab","pane_id":"pane","terminal_id":"terminal","agent_status":"working"
+                        }})
                     }
                     method => panic!("unexpected provider call {method}"),
                 };
@@ -394,8 +405,18 @@ async fn exercise_launch() {
             .rfind(|c| c["method"] == "agent.start")
             .unwrap();
         assert!(
-            start["params"]["args"]
+            !start["params"]["args"]
                 .to_string()
+                .contains("assignment bootstrap")
+        );
+        let prompt = calls
+            .iter()
+            .rfind(|c| c["method"] == "agent.prompt")
+            .unwrap();
+        assert!(
+            prompt["params"]["text"]
+                .as_str()
+                .unwrap()
                 .contains("assignment bootstrap")
         );
         assert!(

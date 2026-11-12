@@ -176,8 +176,11 @@ For registered policies the adapter:
   `--append-system-prompt`. On Pi 1.5.0 these suppress ambient `SYSTEM.md` and
   `APPEND_SYSTEM.md` discovery while retaining Pi's default prompt. Herdr must
   preserve these empty arguments, not drop them.
-- Terminates options with `--` before the trusted bootstrap prompt. Behavior and
-  credential-bearing MCP configuration are never argument payloads.
+- Terminates options with `--` and starts Pi without a positional prompt. After
+  Herdr confirms interactive readiness at the exact named resource/terminal identity,
+  sends the short trusted bootstrap once through `agent.prompt`. Start and prompt
+  delivery share the durable one-shot launch guard; uncertainty never authorizes a
+  retry. Behavior and credential-bearing MCP configuration are never argument payloads.
 
 **Selected MCP servers are currently unsupported.** Pi 1.5.0 has no documented
 per-run flag for supplying the persisted selected MCP configuration. A nonempty

@@ -200,21 +200,15 @@ fn verify_source_independent_retirement(kind: RecordType) {
     assert_eq!(info.assignment.profile, original.profile);
     assert!(info.dispatch_hold.is_some());
     assert!(
-        info.capacity_reserved(),
-        "unknown provisioning evidence still needs explicit resolution"
+        !info.capacity_reserved(),
+        "completed provisioning and verified cleanup leave no unknown allocation"
     );
-    app.resolve_unknown_agent_resources(&original.id, true, true)
-        .unwrap();
-    assert!(
-        !app.agent_assignment_info(&original.id)
-            .unwrap()
-            .capacity_reserved()
-    );
+    assert!(info.resources.iter().all(|r| r.retired_at_millis.is_some()));
     drop(app);
     let reopened = fixture.app().agent_assignment_info(&original.id).unwrap();
     assert_eq!(reopened.assignment.profile, original.profile);
     assert!(reopened.dispatch_hold.is_some());
-    assert!(reopened.unknown_resource_resolution.is_some());
+    assert!(reopened.unknown_resource_resolution.is_none());
     let diagnostics = format!("{reopened:?}");
     for forbidden in [
         secret.trim(),

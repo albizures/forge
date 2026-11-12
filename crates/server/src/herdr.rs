@@ -712,6 +712,147 @@ fn provisioning_prompt(context: &AgentDispatchContext) -> Result<&str, AgentAdap
 }
 
 impl HerdrAdapter {
+    /// `agent.start` acknowledges command admission, not interactive readiness. Keep
+    /// the returned terminal identity pinned while Herdr confirms the named Pi process.
+    fn wait_for_started_agent(
+        &self,
+        name: &str,
+        workspace: &str,
+        tab: &str,
+        pane: &str,
+        started: &Value,
+        timeout: Duration,
+    ) -> Result<(), AgentAdapterError> {
+        if started.get("type").and_then(Value::as_str) != Some("agent_started") {
+            return Err(AgentAdapterError::Endpoint(
+                "invalid agent.start response".into(),
+            ));
+        }
+        let initial = started.get("agent").ok_or_else(|| {
+            AgentAdapterError::Endpoint("agent.start has no agent identity".into())
+        })?;
+        Self::matching_resource(
+            started,
+            "agent",
+            &[
+                ("name", name),
+                ("workspace_id", workspace),
+                ("tab_id", tab),
+                ("pane_id", pane),
+            ],
+        )?;
+        let terminal = initial
+            .get("terminal_id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| {
+                AgentAdapterError::Endpoint("agent.start has no terminal identity".into())
+            })?;
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if std::time::Instant::now() >= deadline {
+                return Err(AgentAdapterError::Transient(
+                    "agent startup readiness timed out".into(),
+                ));
+            }
+            let response = self.request("agent.get", json!({"target": name}))?;
+            if response.get("type").and_then(Value::as_str) != Some("agent_info") {
+                return Err(AgentAdapterError::Endpoint(
+                    "invalid startup agent.get response".into(),
+                ));
+            }
+            let agent = response.get("agent").ok_or_else(|| {
+                AgentAdapterError::Endpoint("startup agent.get has no agent identity".into())
+            })?;
+            Self::matching_resource(
+                &response,
+                "agent",
+                &[
+                    ("name", name),
+                    ("workspace_id", workspace),
+                    ("tab_id", tab),
+                    ("pane_id", pane),
+                    ("terminal_id", terminal),
+                ],
+            )?;
+            if agent
+                .get("agent")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| kind != "pi")
+            {
+                return Err(AgentAdapterError::Conflict(
+                    "startup agent kind changed".into(),
+                ));
+            }
+            let state = Self::observation_from_agent(agent, (workspace, tab, pane))?;
+            if state == AgentObservation::Blocked {
+                return Err(AgentAdapterError::InvalidRequest(
+                    "agent blocked during startup".into(),
+                ));
+            }
+            if matches!(state, AgentObservation::Idle | AgentObservation::Done)
+                && agent.get("agent").and_then(Value::as_str) == Some("pi")
+                && agent.get("interactive_ready").and_then(Value::as_bool) == Some(true)
+                && agent.get("launch_pending").and_then(Value::as_bool) != Some(true)
+            {
+                return Ok(());
+            }
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(AgentAdapterError::Transient(
+                    "agent startup readiness timed out".into(),
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(100).min(remaining));
+        }
+    }
+
+    fn bootstrap_started_agent(
+        &self,
+        context: &AgentDispatchContext,
+        name: &str,
+        tuple: (&str, &str, &str),
+        started: &Value,
+    ) -> Result<(), AgentAdapterError> {
+        self.wait_for_started_agent(
+            name,
+            tuple.0,
+            tuple.1,
+            tuple.2,
+            started,
+            Duration::from_millis(context.assignment.profile.startup_timeout_millis),
+        )?;
+        // The durable one-shot launch/provision intents cover prompt delivery too:
+        // a lost response or crash cannot retry this bootstrap or launch another Pi.
+        let delivered = self.request(
+            "agent.prompt",
+            json!({"target": name, "text": provisioning_prompt(context)?}),
+        )?;
+        if delivered.get("type").and_then(Value::as_str) != Some("agent_prompted") {
+            return Err(AgentAdapterError::Endpoint(
+                "invalid agent.prompt response".into(),
+            ));
+        }
+        Self::matching_resource(
+            &delivered,
+            "agent",
+            &[
+                ("name", name),
+                ("agent", "pi"),
+                ("workspace_id", tuple.0),
+                ("tab_id", tuple.1),
+                ("pane_id", tuple.2),
+                (
+                    "terminal_id",
+                    started
+                        .pointer("/agent/terminal_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or(""),
+                ),
+            ],
+        )
+    }
+
     fn provision_resources(
         &self,
         context: &AgentDispatchContext,
@@ -792,9 +933,14 @@ impl HerdrAdapter {
                     "launch was already attempted or Assignment is no longer provisioning".into(),
                 ));
             }
-            self.request("agent.start", json!({"name": label, "kind": "pi", "pane_id": pane, "args": launch_args, "timeout_ms": context.assignment.profile.startup_timeout_millis}))?;
+            let started = self.request("agent.start", json!({"name": label, "kind": "pi", "pane_id": pane, "args": launch_args, "timeout_ms": context.assignment.profile.startup_timeout_millis}))?;
             Self::retain(resources, context, "agent-name", label)?;
+            self.bootstrap_started_agent(context, label, (workspace, &tab, &pane), &started)?;
         }
+        // All allocation/launch responses and their resource identities are now durable.
+        // Preserve the one-shot row, but stop treating this completed provision as an
+        // unknown allocation. Any earlier error retains the marker for operator recovery.
+        Self::retire_resource(resources, context, "provision-intent", "once")?;
         Ok(())
     }
 }
@@ -820,8 +966,9 @@ impl AgentDispatchAdapter for HerdrAdapter {
         context: &AgentDispatchContext,
         resources: &dyn AgentDispatchRepository,
     ) -> Result<(), AgentAdapterError> {
-        let prompt = provisioning_prompt(context)?;
-        let launch_args = pi_launch_arguments(&context.assignment.profile, prompt)?;
+        provisioning_prompt(context)?;
+        let mut launch_args = pi_launch_arguments(&context.assignment.profile, "")?;
+        launch_args.pop(); // Start without a positional prompt so Herdr can confirm readiness.
         self.probe()?;
         let label = Self::label(context)?;
         let workspace = self.dispatch_workspace_from_context(context)?;
@@ -1100,26 +1247,57 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn provisioning_launches_only_short_bootstrap_and_delivers_secret_path() {
-        provisioning_launch_contract(forge_app::RecordType::Task, false);
+        provisioning_launch_contract(forge_app::RecordType::Task, false, None);
     }
 
     #[test]
     fn legacy_grilling_uses_protected_bootstrap_at_workspace_root() {
-        provisioning_launch_contract(forge_app::RecordType::Grilling, false);
+        provisioning_launch_contract(forge_app::RecordType::Grilling, false, None);
     }
 
     #[test]
     fn registered_profile_uses_explicit_pi_flags_without_delivering_behavior() {
-        provisioning_launch_contract(forge_app::RecordType::Task, true);
+        provisioning_launch_contract(forge_app::RecordType::Task, true, None);
     }
 
     #[test]
     fn registered_grilling_uses_protected_bootstrap_at_workspace_root() {
-        provisioning_launch_contract(forge_app::RecordType::Grilling, true);
+        provisioning_launch_contract(forge_app::RecordType::Grilling, true, None);
+    }
+
+    #[test]
+    fn uncertain_allocation_or_launch_retains_one_shot_provisioning_blocker() {
+        for method in ["tab.create", "agent.start", "agent.prompt"] {
+            provisioning_launch_contract(forge_app::RecordType::Task, true, Some(method));
+        }
+    }
+
+    #[test]
+    fn unverified_bootstrap_admission_retains_provisioning_uncertainty() {
+        for failure in ["delivery-identity", "delivery-malformed"] {
+            provisioning_launch_contract(forge_app::RecordType::Task, true, Some(failure));
+        }
+    }
+
+    #[test]
+    fn startup_identity_and_readiness_failures_never_deliver_bootstrap() {
+        for failure in [
+            "startup-terminal",
+            "startup-name",
+            "startup-kind",
+            "startup-blocked",
+            "startup-timeout",
+        ] {
+            provisioning_launch_contract(forge_app::RecordType::Task, true, Some(failure));
+        }
     }
 
     #[allow(clippy::too_many_lines)]
-    fn provisioning_launch_contract(record_type: forge_app::RecordType, registered: bool) {
+    fn provisioning_launch_contract(
+        record_type: forge_app::RecordType,
+        registered: bool,
+        lost_response: Option<&'static str>,
+    ) {
         use forge_app::{
             AgentDispatchContext, AgentDispatchRepository, AssignmentCapabilityDelivery,
             DispatchWorkspace, NewAgentAssignment, NewTypedRecord, RecordRepository,
@@ -1150,6 +1328,9 @@ mod tests {
             })
             .unwrap();
         let mut assignment = assignment;
+        if lost_response == Some("startup-timeout") {
+            assignment.profile.startup_timeout_millis = 0;
+        }
         if registered {
             assignment.profile.launch_policy =
                 Some(forge_app::agent_profiles::ResolvedLaunchPolicy {
@@ -1196,11 +1377,47 @@ mod tests {
         ));
         let listener = UnixListener::bind(&path).unwrap();
         let model = assignment.profile.model.clone();
-        let server = launch_contract_server(listener, interactive, model, registered);
+        let server =
+            launch_contract_server(listener, interactive, model, registered, lost_response);
         let adapter = super::HerdrAdapter {
             socket_path: path.clone(),
         };
-        adapter.provision(&context, &repository).unwrap();
+        let result = adapter.provision(&context, &repository);
+        if lost_response.is_some() {
+            assert!(result.is_err());
+            let retained = repository
+                .list_agent_assignment_resources(&assignment.id)
+                .unwrap();
+            assert!(retained.iter().any(|resource| {
+                resource.resource_kind == "provision-intent" && resource.retired_at_millis.is_none()
+            }));
+            assert!(!repository.begin_agent_provision(&assignment.id).unwrap());
+            server.join().unwrap();
+            std::fs::remove_file(path).unwrap();
+            return;
+        }
+        result.unwrap();
+        let retained = repository
+            .list_agent_assignment_resources(&assignment.id)
+            .unwrap();
+        let intent = retained
+            .iter()
+            .find(|resource| resource.resource_kind == "provision-intent")
+            .unwrap();
+        assert!(
+            intent.retired_at_millis.is_some(),
+            "successful provisioning must reconcile its uncertainty marker"
+        );
+        assert!(
+            retained
+                .iter()
+                .filter(|r| r.resource_kind != "provision-intent")
+                .all(|r| r.retired_at_millis.is_none())
+        );
+        assert!(
+            !repository.begin_agent_provision(&assignment.id).unwrap(),
+            "reconciled provisioning intent must still prevent a second allocation"
+        );
         if registered {
             let mut missing_bootstrap = context.clone();
             missing_bootstrap.bootstrap_prompt = None;
@@ -1235,15 +1452,17 @@ mod tests {
         std::fs::remove_file(path).unwrap();
     }
 
+    #[allow(clippy::too_many_lines)] // One socket transcript covers startup, delivery and fault boundaries.
     fn launch_contract_server(
         listener: std::os::unix::net::UnixListener,
         interactive: bool,
         model: String,
         registered: bool,
+        lost_response: Option<&'static str>,
     ) -> std::thread::JoinHandle<()> {
         use std::io::{BufRead, BufReader, Write};
         std::thread::spawn(move || {
-            for (method, response) in [
+            for (method, mut response) in [
                 (
                     "ping",
                     serde_json::json!({"type":"pong","protocol":22,"version":"test"}),
@@ -1260,7 +1479,22 @@ mod tests {
                     "tab.create",
                     serde_json::json!({"tab":{"tab_id":"tab"},"root_pane":{"pane_id":"pane"}}),
                 ),
-                ("agent.start", serde_json::json!({"type":"agent_started"})),
+                (
+                    "agent.start",
+                    serde_json::json!({"type":"agent_started","agent":{"name":"forge-dispatch-assignment","agent":"pi","workspace_id":"workspace","tab_id":"tab","pane_id":"pane","terminal_id":"terminal","agent_status":"unknown","launch_pending":true}}),
+                ),
+                (
+                    "agent.get",
+                    serde_json::json!({"type":"agent_info","agent":{"name":"forge-dispatch-assignment","agent":"pi","workspace_id":"workspace","tab_id":"tab","pane_id":"pane","terminal_id":"terminal","agent_status":"idle","interactive_ready":true,"launch_pending":true}}),
+                ),
+                (
+                    "agent.get",
+                    serde_json::json!({"type":"agent_info","agent":{"name":"forge-dispatch-assignment","agent":"pi","workspace_id":"workspace","tab_id":"tab","pane_id":"pane","terminal_id":"terminal","agent_status":"idle","interactive_ready":true}}),
+                ),
+                (
+                    "agent.prompt",
+                    serde_json::json!({"type":"agent_prompted","agent":{"name":"forge-dispatch-assignment","agent":"pi","workspace_id":"workspace","tab_id":"tab","pane_id":"pane","terminal_id":"terminal","agent_status":"working"}}),
+                ),
             ] {
                 let mut stream = listener.accept().unwrap().0;
                 let mut line = String::new();
@@ -1301,16 +1535,52 @@ mod tests {
                             "--append-system-prompt",
                             "",
                             "--no-tools",
-                            "--",
-                            "short bootstrap"
+                            "--"
                         ])
                     } else {
-                        serde_json::json!(["--model", model, "short bootstrap"])
+                        serde_json::json!(["--model", model])
                     };
                     assert_eq!(request["params"]["args"], expected);
                     assert!(!line.contains("private registered behavior"));
                     assert!(!line.contains("private full instructions"));
                     assert!(!line.contains("/secrets/assignment"));
+                }
+                if method == "agent.get" {
+                    match lost_response {
+                        Some("startup-terminal") => {
+                            response["agent"]["terminal_id"] = serde_json::json!("replacement");
+                        }
+                        Some("startup-name") => {
+                            response["agent"]["name"] = serde_json::json!("replacement");
+                        }
+                        Some("startup-kind") => {
+                            response["agent"]["agent"] = serde_json::json!("codex");
+                        }
+                        Some("startup-blocked") => {
+                            response["agent"]["agent_status"] = serde_json::json!("blocked");
+                        }
+                        _ => {}
+                    }
+                }
+                if method == "agent.prompt" {
+                    match lost_response {
+                        Some("delivery-identity") => {
+                            response["agent"]["terminal_id"] = serde_json::json!("replacement");
+                        }
+                        Some("delivery-malformed") => {
+                            response["type"] = serde_json::json!("unexpected");
+                        }
+                        _ => {}
+                    }
+                    assert_eq!(request["params"]["target"], "forge-dispatch-assignment");
+                    assert_eq!(request["params"]["text"], "short bootstrap");
+                    assert!(!line.contains("private registered behavior"));
+                    assert!(!line.contains("/secrets/assignment"));
+                }
+                if lost_response == Some(method) {
+                    // The provider may have performed the side effect; a disconnected
+                    // response cannot authorize reconciliation or another allocation.
+                    return;
                 }
                 serde_json::to_writer(
                     &mut stream,
@@ -1318,6 +1588,12 @@ mod tests {
                 )
                 .unwrap();
                 stream.write_all(b"\n").unwrap();
+                if (method == "agent.get"
+                    && lost_response.is_some_and(|s| s.starts_with("startup-")))
+                    || (method == "agent.start" && lost_response == Some("startup-timeout"))
+                {
+                    return;
+                }
             }
         })
     }
