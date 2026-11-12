@@ -228,6 +228,8 @@ supported way to create Assessments.
 
 ### Manual attempts and immutable evidence
 
+For a complete two-review handback walkthrough, see [Complete a Task manually](manual-release.md).
+
 Start the Task explicitly, then inspect `record check work <record>`. Freshness starts
 at generation 1. No Managed Worktree, Agent Profile or provider launch is needed.
 Explicit Manual Execution Mode and confirmed safe ownership/resource state are required
@@ -300,7 +302,7 @@ is accepted. Verification ownership is Check identity, not a claimed actor name.
 Residual blockers are reported in `blocking_findings` and retain a durable Dispatch
 Hold with a diagnostic. Existing safety holds are neither overwritten nor cleared;
 verification also does not clear the operator-owned hold.
- Exact replay returns the
+Exact replay returns the
 **original** result even after closure, invalidation, Done and restart. Conflicting
 replay returns `outcome-conflict`. Replay never restores historical freshness.
 New stale/unauthorized outcomes cause no Assessment, activity, output or acceptance

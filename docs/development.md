@@ -110,10 +110,12 @@ cargo test --workspace
 git diff --check
 ```
 
-Known verification limitations include existing `forge-app` strict-Clippy debt
-and intermittent server ownership-lock/listener failures under default-parallel
-workspace tests (`WouldBlock` / `AddrInUse`). A serial run can help diagnose the
-latter, but does not substitute for a passing default-parallel gate:
+Historical runs have encountered ownership-lock/listener failures under
+parallel tests (`WouldBlock` / `AddrInUse`) and Forgeup executable registration
+failures (`Text file busy`). These are not blanket waivers: the Manual release
+verification passed both strict Clippy and the default-parallel workspace suite.
+A serial run can help diagnose a failure, but does not substitute for a passing
+default-parallel gate:
 
 ```sh
 cargo test --workspace -- --test-threads=1
