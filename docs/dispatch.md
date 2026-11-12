@@ -36,7 +36,9 @@ not sufficient. This explicitly enrolls the Task in controlled acceptance
 continuation: after a current passing outcome or substantive review handback,
 daemon reconciliation retires the
 old agent, reconciles its retained resources, then launches the next required
-Check with its pinned profile. It does not create a worktree or complete the Task.
+Check with its pinned profile. The explicit command does not create a worktree or
+complete the Task; daemon reconciliation can complete enrolled work only through
+the separate final gate below.
 Ordinary `dispatcher dispatch` and scheduling of unenrolled Tasks remain closed.
 Repeating acceptance returns the existing Assignment without relaunching it while
 no passing outcome or freshness invalidation is available; both use the same
@@ -118,8 +120,22 @@ resources are reconciled, and the operator clears the retirement hold. Closure,
 missing acknowledgement, absent provider resources or a lost launch response alone
 never authorize replacement. Failed Implementation retries only Implementation,
 under the same bounded remediation/no-progress policy as review handback.
-The final pass retires its agent but leaves the
-Task In Progress; completion remains gated separately. Exact outcome replay
+The final passing outcome leaves the Task In Progress. Reconciliation first confirms
+agent retirement and all retained resources, then observes the clean active Managed
+Worktree again. A separate writer transaction rechecks Dispatched eligibility,
+current evidence/freshness, every current Check's matching Assignment-attributed
+pass and confirmed retirement, no open attempt, no blocking Findings or Dispatch
+Hold (including bounded-progress holds), and satisfied dependencies before recording
+Done. Dependency changes after the final review still block completion. Concurrent
+scans record Done only once. Failed gates preserve safety state and history; they
+never force-clear a hold, commit/discard changes, or remove the Managed Worktree.
+
+Explicit operator completion of a Dispatched Task remains forbidden. Safely changing
+Execution Mode requires between-attempt confirmed retirement/resource reconciliation,
+nonblank attribution and recorded history; it invalidates current Assessments but
+retains Findings, historical outcomes, holds and progress counters. Manual Tasks
+still support explicit human completion under their Check/Finding, dependency and
+ownership gates, without requiring a Managed Worktree. Exact outcome replay
 returns its original result (including after closure/restart when the original
 credential remains available); this replay-only path does not restore closed
 Assignment reads or mutation authority. Conflicting, stale and cross-owner submissions have
@@ -169,7 +185,7 @@ Dispatch Hold, interrupted retry count, Finding, Assessment, evidence, freshness
 ownership or resource blocker. To recover an exhausted interrupted Check, safely
 hand off to Manual, successfully assess that Check, then explicitly clear the hold
 and safely return to Dispatched. Normal Task dispatch remains disabled pending the
-remaining deterministic, completion and real-provider rollout gates.
+remaining deterministic and real-provider rollout gates.
 
 Storage revision 7 requires a fresh store; older attempts cannot safely be given
 zero retry/remediation counts. No conversion, inferred backfill or automatic reset

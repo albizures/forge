@@ -1905,6 +1905,15 @@ pub trait AgentDispatchRepository: RecordRepository + WorkspaceDispatchRepositor
     fn begin_task_check_handoff(&self, _assignment: &str) -> Result<bool, RegistrationError> {
         Ok(false)
     }
+    /// Complete enrolled Dispatched work only after retirement, with current observed evidence.
+    fn complete_task_check_acceptance(
+        &self,
+        _record: u64,
+        _generation: u64,
+        _evidence: &outcomes::Evidence,
+    ) -> Result<Record, RegistrationError> {
+        Err(task_dispatch_unsupported())
+    }
     /// Immutable Task-specific binding; absent on Grilling and legacy test Assignments.
     fn assignment_check_attempt(
         &self,

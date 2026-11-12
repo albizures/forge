@@ -37,9 +37,9 @@ impl Application {
         })
     }
 
-    /// Resume enrolled Tasks after a pass, interruption or explicit freshness invalidation.
-    /// Unclaimed Tasks and current failed Implementation do not advance. All replacements
-    /// require confirmed retirement/resource reconciliation; interruption is not handback.
+    /// Resume enrolled Tasks under bounded Check policy, or complete current passing work.
+    /// Unclaimed Tasks do not advance. Replacements and completion require confirmed
+    /// retirement/resource reconciliation; interruption is not handback.
     pub(crate) fn continue_task_check_acceptance(&self) -> Result<(), RegistrationError> {
         let repository = self.dispatch()?;
         for task in repository.list_records(&crate::RecordListFilter {
@@ -61,7 +61,16 @@ impl Application {
                 if self.retire_accepted_task_check(&latest)? {
                     match self.execute_task_check_acceptance(task.id) {
                         Ok(_) => {}
-                        Err(e) if e.code == "checks-passed" => {}
+                        Err(e) if e.code == "checks-passed" => {
+                            let work = self.record_work_state(task.id)?;
+                            let observed = self.observe_task_evidence(task.id);
+                            self.records.reconcile_task_evidence(task.id, &observed)?;
+                            repository.complete_task_check_acceptance(
+                                task.id,
+                                work.generation,
+                                &observed?,
+                            )?;
+                        }
                         Err(e) => return Err(e),
                     }
                 }
@@ -121,7 +130,8 @@ impl Application {
 
     /// Launch at most one Check-bound attempt for controlled acceptance testing.
     /// Requires a previously prepared, clean Managed Worktree. Continues only after safe
-    /// retirement of a passing, interrupted or freshness-invalidated attempt; never completes work.
+    /// retirement of a passing, interrupted or freshness-invalidated attempt. Completion is
+    /// a separate reconciliation gate, never a side effect of outcome acceptance.
     /// # Errors
     /// Rejects unsupported owners, unsafe resources, unavailable pinned profiles and stale inputs.
     #[allow(clippy::too_many_lines)]

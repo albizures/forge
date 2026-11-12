@@ -27,6 +27,121 @@ pub(super) fn binding(
 }
 
 impl SqliteProjectRepository {
+    /// Serialize the final lifecycle decision with all Forge evidence/ownership mutations.
+    #[allow(clippy::too_many_lines)]
+    pub(super) fn complete_check_run(
+        &self,
+        record: u64,
+        generation: u64,
+        evidence: &Evidence,
+    ) -> Result<forge_app::Record, RegistrationError> {
+        let mut c = self
+            .connection
+            .lock()
+            .map_err(|_| error("storage", "storage lock poisoned"))?;
+        let tx = c
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        let task = self.check_task(&tx, record)?;
+        forge_app::validate_task_dispatch_mode(&task)?;
+        if task.status != RecordStatus::InProgress {
+            return Err(error(
+                "record-not-ready",
+                "completion requires In Progress work",
+            ));
+        }
+        execution_modes::safe_ownership(&tx, record)?;
+        let open: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM record_attempts WHERE record_id = ?1 AND closed = 0)",
+                [record.cast_signed()],
+                |r| r.get(0),
+            )
+            .map_err(storage_error)?;
+        let worktree: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM worktree_claims WHERE record_id = ?1 AND state = 'active')", [record.cast_signed()], |r| r.get(0)).map_err(storage_error)?;
+        if open || !worktree {
+            return Err(error(
+                "completion-unsafe",
+                "confirm Check retirement, close attempts and retain an active Managed Worktree",
+            ));
+        }
+        super::outcome_findings::retain_blocker_hold(&tx, record)?;
+        super::task_progress::retain_hold(&tx, record)?;
+        let held: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM dispatch_holds WHERE record_id = ?1)",
+                [record.cast_signed()],
+                |r| r.get(0),
+            )
+            .map_err(storage_error)?;
+        if held {
+            tx.commit().map_err(storage_error)?;
+            return Err(error(
+                "dispatch-held",
+                "investigate the Dispatch Hold and explicitly resume",
+            ));
+        }
+        let work = outcomes::state(&tx, record)?;
+        if work.generation != generation || work.output.as_ref() != Some(evidence) {
+            return Err(error(
+                "stale-completion",
+                "completion evidence or freshness changed",
+            ));
+        }
+        checks::gate(&tx, record)?;
+        let ids = tx
+            .prepare("SELECT id FROM record_checks WHERE record_id = ?1")
+            .map_err(storage_error)?
+            .query_map([record.cast_signed()], |r| r.get::<_, i64>(0))
+            .map_err(storage_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(storage_error)?;
+        for id in ids {
+            let check = checks::load(&tx, record, id.cast_unsigned())?;
+            if !check.latest_assessment.as_ref().is_some_and(|a| {
+                a.generation == generation && &a.evidence == evidence && a.assignment_id.is_some()
+            }) {
+                return Err(error(
+                    "stale-completion",
+                    "every Check must pass against current evidence and freshness in this Check run",
+                ));
+            }
+            // Every current pass must belong to its own safely retired Check-bound
+            // Assignment, not merely to some historical enrollment on this Task.
+            let assessment = check
+                .latest_assessment
+                .as_ref()
+                .expect("validated Assessment");
+            let retired: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM agent_assignments a JOIN assignment_check_attempts b ON b.assignment_id = a.id WHERE a.id = ?1 AND a.record_id = ?2 AND b.attempt_id = ?3 AND a.closed_at_millis IS NOT NULL AND a.closure_reason = 'retired' AND EXISTS(SELECT 1 FROM agent_assignment_resources r WHERE r.assignment_id = a.id AND r.resource_kind IN ('check-handoff', 'retirement-pending') AND r.retired_at_millis IS NOT NULL))", params![assessment.assignment_id, record.cast_signed(), assessment.attempt_id], |r| r.get(0)).map_err(storage_error)?;
+            if !retired {
+                return Err(error(
+                    "completion-unsafe",
+                    "confirm retirement of every current Check Assignment",
+                ));
+            }
+        }
+        let unfinished = super::unfinished_prerequisite_ids(&tx, record)?;
+        if !unfinished.is_empty() {
+            return Err(super::dependencies_not_done_error(&unfinished));
+        }
+        tx.execute(
+            "UPDATE records SET status = 'done' WHERE id = ?1",
+            [record.cast_signed()],
+        )
+        .map_err(storage_error)?;
+        super::insert_update(
+            &tx,
+            record,
+            forge_app::RecordUpdateKind::StatusTransition {
+                from: RecordStatus::InProgress,
+                to: RecordStatus::Done,
+            },
+        )?;
+        let result = load_record(&tx, record)?;
+        tx.commit().map_err(storage_error)?;
+        Ok(result)
+    }
+
     /// Reserve capacity before revocation; restart must retry cleanup, never infer retirement.
     pub(super) fn begin_check_handoff(&self, id: &str) -> Result<bool, RegistrationError> {
         let mut c = self

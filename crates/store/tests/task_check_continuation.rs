@@ -11,7 +11,10 @@ use forge_app::{
     outcomes::{Evidence, OutcomeDisposition, OutcomeInput},
 };
 use forge_store::SqliteProjectRepository;
-use std::sync::{Arc, Mutex, atomic::AtomicBool};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 #[path = "support/task_attempt_adapters.rs"]
 mod adapters;
 use adapters::Provider;
@@ -378,6 +381,54 @@ fn dirty_implementation_creates_a_durable_hold_without_an_assessment() {
 }
 
 #[test]
+fn public_execution_mode_defaults_and_eligibility_remain_fail_closed() {
+    run_case("mode-matrix");
+}
+
+#[test]
+fn final_completion_transaction_failure_preserves_in_progress_work() {
+    run_case("final-transaction");
+}
+
+#[test]
+fn concurrent_final_reconciliation_records_completion_once() {
+    run_case("final-concurrent");
+}
+
+#[test]
+fn final_completion_waits_for_confirmed_retirement() {
+    run_case("final-retirement");
+}
+#[test]
+fn final_completion_waits_for_all_retained_resources() {
+    run_case("final-resources");
+}
+#[test]
+fn final_completion_retains_operator_holds() {
+    run_case("final-hold");
+}
+#[test]
+fn final_completion_rechecks_dependencies_added_after_review() {
+    run_case("final-dependency");
+}
+#[test]
+fn final_completion_rechecks_clean_commit_evidence() {
+    run_case("final-commit");
+}
+#[test]
+fn final_completion_rechecks_dirty_checkout() {
+    run_case("final-dirty");
+}
+#[test]
+fn final_completion_rechecks_freshness_after_description_edit() {
+    run_case("final-description");
+}
+#[test]
+fn safe_mode_handoff_invalidates_passes_without_losing_history() {
+    run_case("final-mode");
+}
+
+#[test]
 fn controlled_checks_continue_only_after_retirement_and_survive_restart() {
     run_case("success");
 }
@@ -661,7 +712,7 @@ fn handback(
     assert_eq!(store.list_agent_assignments(task).unwrap().len(), 6);
     assert_eq!(
         restarted.show_record(task).unwrap().status,
-        RecordStatus::InProgress
+        RecordStatus::Done
     );
     assert!(store.dispatch_hold(task).unwrap().is_none());
 }
@@ -947,6 +998,92 @@ fn run_case(case: &str) {
         return;
     }
     let app = application();
+    if case == "mode-matrix" {
+        let scoped = app.records_in_workspace("test").unwrap();
+        for (kind, projects, expected) in [
+            (RecordType::Task, vec!["test/api".into()], Dispatched),
+            (RecordType::Task, vec![], Manual),
+            (RecordType::Generic, vec![], Manual),
+            (RecordType::Spec, vec!["test/api".into()], Manual),
+            (RecordType::Wayfinder, vec![], Manual),
+            (RecordType::Initiative, vec![], Manual),
+        ] {
+            let record = if kind == RecordType::Generic {
+                scoped.open_record("Matrix work", projects)
+            } else {
+                scoped.open_typed_record_with_generators(kind, "Matrix work", projects, vec![])
+            }
+            .unwrap();
+            assert_eq!(record.execution_mode, expected);
+            if kind == RecordType::Wayfinder {
+                let grilling = scoped
+                    .open_grilling_under_wayfinder("Decide", record.id, None, vec![])
+                    .unwrap();
+                assert_eq!(grilling.execution_mode, Manual);
+                assert_eq!(
+                    app.execute_task_check_acceptance(grilling.id)
+                        .unwrap_err()
+                        .code,
+                    "unsupported-record-type"
+                );
+            }
+            if kind == RecordType::Task {
+                let error = if expected == Manual {
+                    "manual-dispatch-forbidden"
+                } else {
+                    "task-dispatch-unsupported-contract"
+                };
+                assert_eq!(app.dispatch_record(record.id).unwrap_err().code, error);
+                if expected == Dispatched {
+                    app.set_record_execution_mode(
+                        record.id, Dispatched, Manual, "operator", "Opt out",
+                    )
+                    .unwrap();
+                } else {
+                    let mut explicit = record.clone();
+                    explicit.execution_mode = Dispatched;
+                    assert_eq!(
+                        forge_app::validate_task_dispatch_mode(&explicit)
+                            .unwrap_err()
+                            .code,
+                        "dispatch-requires-project"
+                    );
+                }
+                assert_eq!(
+                    app.execute_task_check_acceptance(record.id)
+                        .unwrap_err()
+                        .code,
+                    "manual-dispatch-forbidden"
+                );
+            } else {
+                app.set_record_execution_mode(
+                    record.id,
+                    Manual,
+                    Dispatched,
+                    "operator",
+                    "Metadata is not authority",
+                )
+                .unwrap();
+                assert_eq!(
+                    app.dispatch_record(record.id).unwrap_err().code,
+                    "unsupported-record-type"
+                );
+                assert_eq!(
+                    app.execute_task_check_acceptance(record.id)
+                        .unwrap_err()
+                        .code,
+                    "unsupported-record-type"
+                );
+            }
+            assert!(store.list_agent_assignments(record.id).unwrap().is_empty());
+        }
+        application()
+            .reconcile_agent_dispatch("matrix", 400_000)
+            .unwrap();
+        assert!(launches.lock().unwrap().is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+        return;
+    }
     if case == "unlinked" {
         use forge_app::findings::{
             FindingMutation, FindingMutationInput, FindingRaiseInput, FindingResolveInput, Severity,
@@ -1415,6 +1552,194 @@ fn run_case(case: &str) {
             return;
         }
         let accepted = session.submit_outcome(&input).unwrap();
+        if index == 2 && case == "final-concurrent" {
+            let barrier = std::sync::Barrier::new(2);
+            std::thread::scope(|scope| {
+                for _ in 0..2 {
+                    scope.spawn(|| {
+                        let app = application();
+                        barrier.wait();
+                        app.reconcile_agent_dispatch("final-concurrent", 2_000_000)
+                            .unwrap();
+                    });
+                }
+            });
+            assert_eq!(app.show_record(task.id).unwrap().status, RecordStatus::Done);
+            assert_eq!(
+                app.list_record_updates(task.id)
+                    .unwrap()
+                    .iter()
+                    .filter(|u| matches!(
+                        u.kind,
+                        forge_app::RecordUpdateKind::StatusTransition {
+                            to: RecordStatus::Done,
+                            ..
+                        }
+                    ))
+                    .count(),
+                1
+            );
+            assert_eq!(session.submit_outcome(&input).unwrap(), accepted);
+            assert_eq!(launches.lock().unwrap().len(), 3);
+            std::fs::remove_dir_all(root).unwrap();
+            return;
+        }
+        if index == 2 && case.starts_with("final-") {
+            assert_eq!(
+                app.show_record(task.id).unwrap().status,
+                RecordStatus::InProgress
+            );
+            assert_eq!(
+                app.done_record(task.id, None).unwrap_err().code,
+                "dispatched-completion-forbidden"
+            );
+            let before = app.list_record_checks(task.id).unwrap();
+            let generation = app.record_work_state(task.id).unwrap().generation;
+            if case == "final-mode" {
+                assert_eq!(
+                    app.set_record_execution_mode(
+                        task.id,
+                        Dispatched,
+                        Manual,
+                        "operator",
+                        "Unsafe takeover"
+                    )
+                    .unwrap_err()
+                    .code,
+                    "execution-mode-unsafe-ownership"
+                );
+                assert_eq!(app.list_record_checks(task.id).unwrap(), before);
+                assert_eq!(app.show_record(task.id).unwrap().execution_mode, Dispatched);
+            }
+            if case == "final-transaction" {
+                rusqlite::Connection::open(&path).unwrap().execute_batch("CREATE TRIGGER fail_completion BEFORE INSERT ON record_updates WHEN NEW.kind = 'status-transition' AND NEW.to_status = 'done' BEGIN SELECT RAISE(ABORT, 'completion fault'); END;").unwrap();
+            }
+            if case == "final-retirement" {
+                unavailable.store(true, Ordering::SeqCst);
+            } else if case == "final-resources" {
+                store
+                    .add_agent_assignment_resource(&forge_app::NewAgentAssignmentResource {
+                        assignment_id: assignment.id.clone(),
+                        resource_kind: "provider-pane".into(),
+                        resource_id: "final-pane".into(),
+                    })
+                    .unwrap();
+            } else if case == "final-hold" {
+                store
+                    .hold_dispatch(task.id, "Operator final investigation")
+                    .unwrap();
+            } else if matches!(case, "final-dependency" | "final-mode") {
+                // Confirm retirement first, without running the completion decision.
+                app.execute_task_check_acceptance(task.id).unwrap_err();
+                if case == "final-dependency" {
+                    let prerequisite = store
+                        .open_typed_record(&NewTypedRecord {
+                            record_type: RecordType::Task,
+                            project_slugs: vec!["test/api".into()],
+                            body: "New prerequisite".into(),
+                            generated_by_ids: vec![],
+                        })
+                        .unwrap();
+                    app.relate_records(
+                        task.id,
+                        prerequisite.id,
+                        forge_app::RecordRelationshipKind::DependsOn,
+                    )
+                    .unwrap();
+                } else {
+                    app.set_record_execution_mode(
+                        task.id,
+                        Dispatched,
+                        Manual,
+                        "operator",
+                        "Take over after safe retirement",
+                    )
+                    .unwrap();
+                }
+            } else if case == "final-commit" {
+                *head.lock().unwrap() = "c".repeat(40);
+            } else if case == "final-dirty" {
+                dirty.store(true, Ordering::SeqCst);
+            } else if case == "final-description" {
+                app.edit_record(task.id, "Changed final requirements")
+                    .unwrap();
+                // Preserve the invalidation instead of immediately launching new work.
+                store
+                    .hold_dispatch(task.id, "Inspect new requirements")
+                    .unwrap();
+            }
+            application()
+                .reconcile_agent_dispatch("final-gate-restart", 2_000_000)
+                .unwrap();
+            assert_eq!(
+                app.show_record(task.id).unwrap().status,
+                RecordStatus::InProgress
+            );
+            assert_eq!(launches.lock().unwrap().len(), 3);
+            assert_eq!(session.submit_outcome(&input).unwrap(), accepted);
+            if matches!(
+                case,
+                "final-commit" | "final-dirty" | "final-description" | "final-mode"
+            ) {
+                let checks = app.list_record_checks(task.id).unwrap();
+                assert!(checks.iter().all(|c| c.current_verdict.is_none()));
+                assert!(checks.iter().all(|c| c.latest_assessment.is_some()));
+                assert_eq!(
+                    app.record_work_state(task.id).unwrap().generation,
+                    generation + 1
+                );
+            } else {
+                assert_eq!(app.list_record_checks(task.id).unwrap(), before);
+            }
+            if matches!(
+                case,
+                "final-commit" | "final-dirty" | "final-description" | "final-hold"
+            ) {
+                assert!(store.dispatch_hold(task.id).unwrap().is_some());
+            }
+            if case == "final-mode" {
+                assert_eq!(
+                    app.execute_task_check_acceptance(task.id).unwrap_err().code,
+                    "manual-dispatch-forbidden"
+                );
+                assert_eq!(app.show_record(task.id).unwrap().execution_mode, Manual);
+                assert_eq!(store.list_agent_assignments(task.id).unwrap().len(), 3);
+            }
+            if matches!(
+                case,
+                "final-retirement" | "final-resources" | "final-hold" | "final-transaction"
+            ) {
+                unavailable.store(false, Ordering::SeqCst);
+                if case == "final-transaction" {
+                    rusqlite::Connection::open(&path)
+                        .unwrap()
+                        .execute_batch("DROP TRIGGER fail_completion")
+                        .unwrap();
+                }
+                if case == "final-resources" {
+                    store
+                        .retire_agent_assignment_resource(
+                            &assignment.id,
+                            "provider-pane",
+                            "final-pane",
+                        )
+                        .unwrap();
+                }
+                if case == "final-hold" {
+                    store.resume_dispatch(task.id).unwrap();
+                }
+                application()
+                    .reconcile_agent_dispatch("final-recovered", 2_400_000)
+                    .unwrap();
+                assert_eq!(app.show_record(task.id).unwrap().status, RecordStatus::Done);
+                application()
+                    .reconcile_agent_dispatch("final-done-replay", 2_800_000)
+                    .unwrap();
+                assert_eq!(launches.lock().unwrap().len(), 3);
+            }
+            std::fs::remove_dir_all(root).unwrap();
+            return;
+        }
         if case == "residual" {
             assert_eq!(store.dispatch_hold(task.id).unwrap().is_some(), index == 2);
         }
@@ -1578,7 +1903,11 @@ fn run_case(case: &str) {
     assert_eq!(launches.lock().unwrap().len(), 3);
     assert_eq!(
         app.show_record(task.id).unwrap().status,
-        RecordStatus::InProgress
+        if case == "residual" {
+            RecordStatus::InProgress
+        } else {
+            RecordStatus::Done
+        }
     );
     assert_eq!(
         app.execute_task_check_acceptance(task.id).unwrap_err().code,

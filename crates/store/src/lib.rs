@@ -2293,6 +2293,14 @@ impl AgentDispatchRepository for SqliteProjectRepository {
     fn begin_task_check_handoff(&self, assignment: &str) -> Result<bool, RegistrationError> {
         self.begin_check_handoff(assignment)
     }
+    fn complete_task_check_acceptance(
+        &self,
+        record: u64,
+        generation: u64,
+        evidence: &forge_app::outcomes::Evidence,
+    ) -> Result<Record, RegistrationError> {
+        self.complete_check_run(record, generation, evidence)
+    }
 
     fn assignment_check_attempt(
         &self,
