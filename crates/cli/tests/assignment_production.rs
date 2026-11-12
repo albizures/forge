@@ -1,3 +1,5 @@
+#[path = "support/manual.rs"]
+mod manual;
 mod support;
 use forge_app::{
     AgentDispatchRepository, ManagedWorktreeRepository, NewAgentAssignment, NewTypedRecord,
@@ -212,20 +214,7 @@ async fn production_daemon_bootstraps_grilling_through_delivered_cli() {
     let repair_store = SqliteProjectRepository::open(&db).unwrap();
     repair_store.start_record(prerequisite.id).unwrap();
     for check in repair_store.list_record_checks(prerequisite.id).unwrap() {
-        repair_store
-            .assess_record_check(
-                prerequisite.id,
-                check.id,
-                &forge_app::checks::AssessmentInput {
-                    expected_version: check.version,
-                    verdict: forge_app::checks::Verdict::Pass,
-                    actor: "test operator".into(),
-                    message: "Fixture deliverables verified".into(),
-                    revision: None,
-                    dirty: None,
-                },
-            )
-            .unwrap();
+        manual::pass(&repair_store, prerequisite.id, check.id);
     }
     repair_store
         .done_record(prerequisite.id, Some("resolved"))

@@ -1,145 +1,86 @@
+use super::check_tests::{attempt, evidence, task};
 use super::*;
+use forge_app::checks::{InvalidationInput, RevisionComparison, Verdict};
+use forge_app::outcomes::{AttemptInput, Evidence, WorkInvalidationInput};
 use forge_app::{Application, RepositoryInspector};
-use rusqlite::Connection;
-
-mod test_directory {
-    pub struct Directory(std::path::PathBuf);
-    impl Directory {
-        pub fn path(&self) -> &std::path::Path {
-            &self.0
-        }
-    }
-    impl Drop for Directory {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-    pub fn tempdir() -> std::io::Result<Directory> {
-        let path = std::env::temp_dir().join(format!(
-            "forge-invalidation-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir(&path)?;
-        Ok(Directory(path))
-    }
-}
 
 struct FakeInspector;
 impl RepositoryInspector for FakeInspector {
     fn inspect(&self, _: &std::path::Path) -> Result<Project, RegistrationError> {
-        panic!("evidence views must never inspect Git")
+        panic!("Manual evidence must never inspect Git")
     }
 }
-use forge_app::checks::{AssessmentInput, InvalidationInput, RevisionComparison, Verdict};
-
-fn task(repository: &dyn RecordRepository, projects: Vec<String>) -> Record {
+fn invalidate(repository: &dyn RecordRepository, task: u64) {
     repository
-        .open_typed_record(&NewTypedRecord {
-            record_type: RecordType::Task,
-            body: "Deliver work".into(),
-            project_slugs: projects,
-            generated_by_ids: vec![],
-        })
-        .unwrap()
-}
-fn assessment(version: u64, verdict: Verdict) -> AssessmentInput {
-    AssessmentInput {
-        expected_version: version,
-        verdict,
-        actor: "reviewer".into(),
-        message: "Inspected deliverables".into(),
-        revision: Some("a".repeat(40)),
-        dirty: Some(false),
-    }
-}
-fn invalidation(check: &forge_app::checks::RecordCheck) -> InvalidationInput {
-    InvalidationInput {
-        expected_version: check.version,
-        assessment_id: check.latest_assessment.as_ref().unwrap().id,
-        actor: "operator".into(),
-        message: "Evidence no longer sufficient".into(),
-        revision: Some("b".repeat(40)),
-        dirty: None,
-    }
+        .invalidate_record_work(
+            task,
+            &WorkInvalidationInput {
+                generation: repository.record_work_state(task).unwrap().generation,
+                evidence: evidence(),
+                actor: "operator".into(),
+                message: "Same immutable deliverable, new freshness".into(),
+            },
+        )
+        .unwrap();
 }
 
 #[test]
-#[allow(clippy::too_many_lines)]
-fn invalidation_is_pending_without_fallback_and_retains_bounded_durable_activity() {
-    let directory = test_directory::tempdir().unwrap();
-    let path = directory.path().join("checks.sqlite");
-    let repository = SqliteProjectRepository::open(&path).unwrap();
-    let task = task(&repository, vec![]);
+fn invalidation_never_revives_history_and_pages_preserve_immutable_attempt_evidence() {
+    let repository = SqliteProjectRepository::in_memory().unwrap();
+    let task = task(&repository);
     repository.start_record(task.id).unwrap();
     let check = repository.list_record_checks(task.id).unwrap().remove(0);
-    let passed = repository
-        .assess_record_check(task.id, check.id, &assessment(1, Verdict::Pass))
-        .unwrap();
-    let failed = repository
-        .assess_record_check(task.id, check.id, &assessment(2, Verdict::Fail))
-        .unwrap();
-    let before = repository.list_record_updates(task.id).unwrap();
-    let historical = InvalidationInput {
-        expected_version: failed.version,
-        ..invalidation(&passed)
-    };
-    assert_eq!(
-        repository
-            .invalidate_record_check(task.id, check.id, &historical)
-            .unwrap_err()
-            .code,
-        "invalid-transition"
-    );
-    assert_eq!(
-        repository
-            .invalidate_record_check(task.id, check.id, &invalidation(&passed))
-            .unwrap_err()
-            .code,
-        "stale-version"
-    );
-    assert_eq!(repository.list_record_updates(task.id).unwrap(), before);
-    let pending = repository
-        .invalidate_record_check(task.id, check.id, &invalidation(&failed))
-        .unwrap();
-    assert_eq!(pending.version, 4);
+    let input = attempt(&repository, task.id, check.id, "first");
+    let accepted = repository.submit_record_outcome(task.id, &input).unwrap();
+    invalidate(&repository, task.id);
+    assert_eq!(repository.record_work_state(task.id).unwrap().generation, 2);
+    let pending = repository.list_record_checks(task.id).unwrap().remove(0);
     assert_eq!(pending.current_verdict, None);
-    let latest = pending.latest_assessment.as_ref().unwrap();
-    assert_eq!(latest.verdict, Verdict::Fail);
-    assert_eq!(
-        latest.message,
-        failed.latest_assessment.as_ref().unwrap().message
-    );
-    assert_eq!(latest.invalidation.as_ref().unwrap().dirty, None);
-    assert_eq!(
-        repository.done_record(task.id, None).unwrap_err().code,
-        "checks-not-passed"
-    );
-    let repeated = InvalidationInput {
-        expected_version: pending.version,
-        ..invalidation(&failed)
-    };
-    let updates = repository.list_record_updates(task.id).unwrap();
-    assert_eq!(
-        repository
-            .invalidate_record_check(task.id, check.id, &repeated)
-            .unwrap_err()
-            .code,
-        "invalid-transition"
-    );
-    assert_eq!(repository.list_record_updates(task.id).unwrap(), updates);
     assert!(
-        matches!(updates.first().unwrap().kind, RecordUpdateKind::CheckInvalidated { assessment_id } if assessment_id == latest.id)
+        pending
+            .latest_assessment
+            .as_ref()
+            .unwrap()
+            .invalidation
+            .is_some()
     );
     assert_eq!(
-        repository
-            .show_record_check(task.id, check.id, Some(u64::MAX), 1)
-            .unwrap_err()
-            .code,
-        "invalid-page"
+        repository.submit_record_outcome(task.id, &input).unwrap(),
+        accepted,
+        "replay returns original result, not current freshness"
+    );
+    assert_eq!(
+        repository.list_record_checks(task.id).unwrap().remove(0),
+        pending
+    );
+    let mut second = attempt(&repository, task.id, check.id, "second");
+    second.verdict = Verdict::Fail;
+    repository.submit_record_outcome(task.id, &second).unwrap();
+    let history = repository
+        .show_record_check(task.id, check.id, None, 100)
+        .unwrap();
+    assert_eq!(history.assessments.len(), 2);
+    assert_eq!(history.activities.len(), 3);
+    assert_eq!(history.assessments[0].attempt_id, "first");
+    assert_eq!(history.assessments[0].generation, 1);
+    assert_eq!(history.assessments[0].evidence, evidence());
+    assert_eq!(history.assessments[1].verdict, Verdict::Fail);
+    assert_eq!(history.check.current_verdict, Some(Verdict::Fail));
+    let mut cursor = None;
+    let mut ids = vec![];
+    loop {
+        let page = repository
+            .show_record_check(task.id, check.id, cursor, 1)
+            .unwrap();
+        ids.extend(page.activities.iter().map(|a| a.id));
+        cursor = page.next_cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(
+        ids,
+        history.activities.iter().map(|a| a.id).collect::<Vec<_>>()
     );
     for limit in [0, 101] {
         assert_eq!(
@@ -150,275 +91,364 @@ fn invalidation_is_pending_without_fallback_and_retains_bounded_durable_activity
             "invalid-page"
         );
     }
-    let mut cursor = None;
-    let mut activity_ids = vec![];
-    let mut assessment_ids = vec![];
-    let mut invalidations = vec![];
-    loop {
-        let page = repository
-            .show_record_check(task.id, check.id, cursor, 1)
-            .unwrap();
-        assert_eq!(page.activities.len(), 1);
-        activity_ids.push(page.activities[0].id);
-        assessment_ids.extend(page.assessments.iter().map(|a| a.id));
-        invalidations.extend(page.activities.into_iter().filter_map(|a| a.invalidation));
-        cursor = page.next_cursor;
-        if cursor.is_none() {
-            break;
-        }
-    }
-    assert_eq!(activity_ids.len(), 3);
-    assert!(activity_ids.windows(2).all(|ids| ids[0] < ids[1]));
-    assert_eq!(
-        assessment_ids,
-        [passed.latest_assessment.unwrap().id, latest.id]
-    );
-    assert_eq!(invalidations, [latest.invalidation.clone().unwrap()]);
-    assert!(
-        repository
-            .show_record_check(task.id, check.id, Some(*activity_ids.last().unwrap()), 1)
-            .unwrap()
-            .activities
-            .is_empty()
-    );
-    drop(repository);
-    let repository = SqliteProjectRepository::open(&path).unwrap();
-    assert_eq!(
-        repository.list_record_checks(task.id).unwrap().as_slice(),
-        std::slice::from_ref(&pending)
-    );
-    let passed = repository
-        .assess_record_check(
-            task.id,
-            check.id,
-            &assessment(pending.version, Verdict::Pass),
-        )
-        .unwrap();
-    assert_eq!(passed.current_verdict, Some(Verdict::Pass));
-    repository.done_record(task.id, None).unwrap();
+}
+
+#[test]
+fn same_commit_invalidation_stale_actor_and_body_edits_cannot_reuse_attempts() {
+    let repository = SqliteProjectRepository::in_memory().unwrap();
+    let task = task(&repository);
+    repository.start_record(task.id).unwrap();
+    let check = repository.list_record_checks(task.id).unwrap().remove(0);
+    let input = attempt(&repository, task.id, check.id, "old");
+    let before = repository.list_record_updates(task.id).unwrap();
+    let mut unauthorized = input.clone();
+    unauthorized.actor = "other".into();
     assert_eq!(
         repository
-            .invalidate_record_check(task.id, check.id, &invalidation(&passed))
+            .submit_record_outcome(task.id, &unauthorized)
             .unwrap_err()
             .code,
-        "record-done"
+        "unauthorized-attempt"
+    );
+    assert_eq!(repository.list_record_updates(task.id).unwrap(), before);
+    invalidate(&repository, task.id);
+    assert_eq!(
+        repository
+            .submit_record_outcome(task.id, &input)
+            .unwrap_err()
+            .code,
+        "stale-generation"
+    );
+    let current = attempt(&repository, task.id, check.id, "new");
+    repository
+        .edit_record(task.id, "Changed Task deliverables")
+        .unwrap();
+    assert_eq!(repository.record_work_state(task.id).unwrap().generation, 3);
+    assert_eq!(
+        repository
+            .submit_record_outcome(task.id, &current)
+            .unwrap_err()
+            .code,
+        "stale-generation"
+    );
+    assert!(
+        repository
+            .show_record_check(task.id, check.id, None, 100)
+            .unwrap()
+            .assessments
+            .is_empty()
+    );
+    invalidate(&repository, task.id);
+    assert_eq!(repository.record_work_state(task.id).unwrap().generation, 4);
+}
+
+#[test]
+fn check_invalidation_advances_work_generation_atomically_and_failure_rolls_back() {
+    let path = std::env::temp_dir().join(format!(
+        "forge-invalidation-rollback-{}-{}.db",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let repository = SqliteProjectRepository::open(&path).unwrap();
+    let fault = rusqlite::Connection::open(&path).unwrap();
+    let task = task(&repository);
+    repository.start_record(task.id).unwrap();
+    let check = repository.list_record_checks(task.id).unwrap().remove(0);
+    let input = attempt(&repository, task.id, check.id, "invalidate");
+    let accepted = repository.submit_record_outcome(task.id, &input).unwrap();
+    let invalidation = InvalidationInput {
+        expected_version: accepted.check.version,
+        assessment_id: accepted.check.latest_assessment.as_ref().unwrap().id,
+        actor: "operator".into(),
+        message: "Withdraw".into(),
+        revision: None,
+        dirty: None,
+    };
+    fault.execute_batch("CREATE TRIGGER fail_invalidate BEFORE INSERT ON record_updates WHEN NEW.kind = 'check-invalidated' BEGIN SELECT RAISE(ABORT, 'injected failure'); END;").unwrap();
+    assert!(
+        repository
+            .invalidate_record_check(task.id, check.id, &invalidation)
+            .is_err()
+    );
+    assert_eq!(repository.record_work_state(task.id).unwrap().generation, 1);
+    assert_eq!(
+        repository.list_record_checks(task.id).unwrap(),
+        vec![accepted.check.clone()]
+    );
+    fault.execute_batch("DROP TRIGGER fail_invalidate").unwrap();
+    let pending = repository
+        .invalidate_record_check(task.id, check.id, &invalidation)
+        .unwrap();
+    assert_eq!(pending.current_verdict, None);
+    assert_eq!(repository.record_work_state(task.id).unwrap().generation, 2);
+    assert_eq!(
+        repository
+            .invalidate_record_check(task.id, check.id, &invalidation)
+            .unwrap_err()
+            .code,
+        "stale-version"
+    );
+    drop(fault);
+    drop(repository);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn fixed_order_requires_implementation_output_and_failed_implementation_never_advances_reviews() {
+    use forge_app::check_templates::{CheckCriterion, TemplateReplacement};
+    let repository = SqliteProjectRepository::in_memory().unwrap();
+    repository
+        .register(&project("alpha", "/manual-order"))
+        .unwrap();
+    repository
+        .replace_check_template(
+            "alpha",
+            &TemplateReplacement {
+                expected_version: 0,
+                actor: "operator".into(),
+                message: "Two reviews".into(),
+                criteria: [
+                    forge_app::check_templates::baseline(),
+                    ["Review 1", "Review 2"]
+                        .map(|name| CheckCriterion {
+                            name: name.into(),
+                            description: "Review output".into(),
+                            profile_revision: None,
+                        })
+                        .to_vec(),
+                ]
+                .concat(),
+            },
+        )
+        .unwrap();
+    let task = repository
+        .open_typed_record(&NewTypedRecord {
+            record_type: RecordType::Task,
+            body: "Deliver".into(),
+            project_slugs: vec!["alpha".into()],
+            generated_by_ids: vec![],
+        })
+        .unwrap();
+    repository.start_record(task.id).unwrap();
+    let checks = repository.list_record_checks(task.id).unwrap();
+    let review = AttemptInput {
+        id: "review".into(),
+        check_id: checks[1].id,
+        generation: 1,
+        evidence: evidence(),
+        actor: "operator".into(),
+    };
+    assert_eq!(
+        repository
+            .begin_record_attempt(task.id, &review)
+            .unwrap_err()
+            .code,
+        "check-order"
+    );
+    let mut implementation = attempt(&repository, task.id, checks[0].id, "failed");
+    implementation.verdict = Verdict::Fail;
+    implementation.message = "Need more research".into();
+    repository
+        .submit_record_outcome(task.id, &implementation)
+        .unwrap();
+    assert_eq!(
+        repository
+            .begin_record_attempt(task.id, &review)
+            .unwrap_err()
+            .code,
+        "check-order"
+    );
+    let mut implementation = attempt(&repository, task.id, checks[0].id, "passed");
+    let output = Evidence::Artifact {
+        uri: "urn:report:final".into(),
+        sha256: "b".repeat(64),
+    };
+    implementation.evidence = output.clone();
+    repository
+        .submit_record_outcome(task.id, &implementation)
+        .unwrap();
+    assert_eq!(
+        repository
+            .begin_record_attempt(task.id, &review)
+            .unwrap_err()
+            .code,
+        "evidence-mismatch"
+    );
+    let second = AttemptInput {
+        id: "second-review".into(),
+        check_id: checks[2].id,
+        evidence: output.clone(),
+        ..review.clone()
+    };
+    assert_eq!(
+        repository
+            .begin_record_attempt(task.id, &second)
+            .unwrap_err()
+            .code,
+        "check-order"
+    );
+    let first = attempt(&repository, task.id, checks[1].id, "first-review");
+    let mut wrong = first.clone();
+    wrong.evidence = evidence();
+    assert_eq!(
+        repository
+            .submit_record_outcome(task.id, &wrong)
+            .unwrap_err()
+            .code,
+        "evidence-mismatch"
+    );
+    repository.submit_record_outcome(task.id, &first).unwrap();
+    let last = attempt(&repository, task.id, checks[2].id, "last-review");
+    repository.submit_record_outcome(task.id, &last).unwrap();
+    assert_eq!(
+        repository.show_record(task.id).unwrap().status,
+        RecordStatus::InProgress
+    );
+    invalidate(&repository, task.id);
+    assert!(
+        repository
+            .list_record_checks(task.id)
+            .unwrap()
+            .iter()
+            .all(|c| c.current_verdict.is_none())
     );
     assert_eq!(
         repository
-            .assess_record_check(
+            .begin_record_attempt(
                 task.id,
-                check.id,
-                &assessment(passed.version, Verdict::Fail)
+                &AttemptInput {
+                    generation: 2,
+                    ..second
+                }
             )
             .unwrap_err()
             .code,
-        "record-done"
+        "check-order"
     );
-}
-
-#[test]
-fn invalidation_validation_workspace_and_update_failure_are_atomic() {
-    let directory = test_directory::tempdir().unwrap();
-    let path = directory.path().join("checks.sqlite");
-    let store = crate::SqliteProjectRepository::open(&path).unwrap();
-    std::fs::create_dir(directory.path().join("home")).unwrap();
-    std::fs::create_dir(directory.path().join("foreign")).unwrap();
-    store
-        .create_workspace("test", "Test", &directory.path().join("home"))
+    let implementation = attempt(&repository, task.id, checks[0].id, "remediation");
+    repository
+        .submit_record_outcome(task.id, &implementation)
         .unwrap();
-    let repository = store.in_record_workspace("test").unwrap();
-    let task = task(&repository, vec![]);
-    let check = repository.list_record_checks(task.id).unwrap().remove(0);
-    let passed = repository
-        .assess_record_check(task.id, check.id, &assessment(check.version, Verdict::Pass))
-        .unwrap();
-    let input = invalidation(&passed);
-    let before = repository
-        .show_record_check(task.id, check.id, None, 100)
-        .unwrap();
-    let updates = repository.list_record_updates(task.id).unwrap();
-    for invalid in [
-        InvalidationInput {
-            actor: " ".into(),
-            ..input.clone()
-        },
-        InvalidationInput {
-            message: "\n".into(),
-            ..input.clone()
-        },
-        InvalidationInput {
-            revision: Some("abc".into()),
-            ..input.clone()
-        },
-        InvalidationInput {
-            revision: Some("z".repeat(40)),
-            ..input.clone()
-        },
-    ] {
-        assert!(
-            repository
-                .invalidate_record_check(task.id, check.id, &invalid)
-                .is_err()
-        );
-    }
-    let other = self::task(&repository, vec![]);
+    let first = attempt(&repository, task.id, checks[1].id, "rerun-first");
+    repository.submit_record_outcome(task.id, &first).unwrap();
+    let late = attempt(&repository, task.id, checks[2].id, "late-review");
+    invalidate(&repository, task.id);
     assert_eq!(
         repository
-            .invalidate_record_check(other.id, check.id, &input)
+            .submit_record_outcome(task.id, &late)
             .unwrap_err()
             .code,
-        "check-not-found"
+        "stale-generation"
     );
-    repository
-        .create_workspace("foreign", "Foreign", &directory.path().join("foreign"))
-        .unwrap();
-    let foreign = repository.records_in_workspace("foreign").unwrap();
     assert!(
-        foreign
-            .invalidate_record_check(task.id, check.id, &input)
-            .is_err()
-    );
-    let fault = Connection::open(&path).unwrap();
-    fault.execute_batch("CREATE TRIGGER reject_invalidation BEFORE INSERT ON record_updates WHEN NEW.kind = 'check-invalidated' BEGIN SELECT RAISE(ABORT, 'injected update failure'); END;").unwrap();
-    assert_eq!(
         repository
-            .invalidate_record_check(task.id, check.id, &input)
-            .unwrap_err()
-            .code,
-        "storage"
+            .list_record_checks(task.id)
+            .unwrap()
+            .iter()
+            .all(|c| c.current_verdict.is_none())
     );
-    assert_eq!(
-        repository
-            .show_record_check(task.id, check.id, None, 100)
-            .unwrap(),
-        before
-    );
-    assert_eq!(repository.list_record_updates(task.id).unwrap(), updates);
-    fault
-        .execute_batch("DROP TRIGGER reject_invalidation")
-        .unwrap();
-    repository
-        .invalidate_record_check(task.id, check.id, &input)
-        .unwrap();
 }
 
 #[test]
-fn invalidation_racing_new_assessment_has_one_observed_version_winner() {
-    use std::sync::{Arc, Barrier};
-    let directory = test_directory::tempdir().unwrap();
-    let path = directory.path().join("checks.sqlite");
-    let repository = SqliteProjectRepository::open(&path).unwrap();
-    let task = task(&repository, vec![]);
-    let check = repository.list_record_checks(task.id).unwrap().remove(0);
-    let passed = repository
-        .assess_record_check(task.id, check.id, &assessment(1, Verdict::Pass))
-        .unwrap();
-    let barrier = Arc::new(Barrier::new(2));
-    let handles = (0..2)
-        .map(|operation| {
-            let repository = SqliteProjectRepository::open(&path).unwrap();
-            let barrier = barrier.clone();
-            let input = invalidation(&passed);
-            std::thread::spawn(move || {
-                barrier.wait();
-                if operation == 0 {
-                    repository.invalidate_record_check(task.id, check.id, &input)
-                } else {
-                    repository.assess_record_check(task.id, check.id, &assessment(2, Verdict::Fail))
-                }
-            })
-        })
-        .collect::<Vec<_>>();
-    let results = handles
-        .into_iter()
-        .map(|h| h.join().unwrap())
-        .collect::<Vec<_>>();
-    assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
-    assert_eq!(
-        results.iter().find_map(|r| r.as_ref().err()).unwrap().code,
-        "stale-version"
-    );
-    let page = repository
-        .show_record_check(task.id, check.id, None, 100)
-        .unwrap();
-    assert_eq!(page.check.version, 3);
-    assert_eq!(page.activities.len(), 2);
-}
-
-#[test]
-fn application_comparison_is_explicit_contextual_and_never_changes_authority() {
+fn application_compares_repository_evidence_without_git_and_cannot_change_authority() {
     let repository = SqliteProjectRepository::in_memory().unwrap();
     repository
         .register(&project("alpha", "/not-a-git-repository"))
         .unwrap();
-    let project_task = task(&repository, vec!["alpha".into()]);
-    let projectless = task(&repository, vec![]);
-    for task in [&project_task, &projectless] {
-        let check = repository.list_record_checks(task.id).unwrap().remove(0);
-        let passed = repository
-            .assess_record_check(task.id, check.id, &assessment(1, Verdict::Pass))
-            .unwrap();
-        repository
-            .invalidate_record_check(task.id, check.id, &invalidation(&passed))
-            .unwrap();
-    }
+    let task = repository
+        .open_typed_record(&NewTypedRecord {
+            record_type: RecordType::Task,
+            body: "Deliver".into(),
+            project_slugs: vec!["alpha".into()],
+            generated_by_ids: vec![],
+        })
+        .unwrap();
+    repository.start_record(task.id).unwrap();
+    let check = repository.list_record_checks(task.id).unwrap().remove(0);
+    let mut input = attempt(&repository, task.id, check.id, "repository");
+    input.evidence = Evidence::Repository {
+        repository: "alpha".into(),
+        commit: "a".repeat(40),
+    };
+    repository.submit_record_outcome(task.id, &input).unwrap();
     let app = Application::new(Box::new(repository), Box::new(FakeInspector));
-    for (task, expected) in [
-        (&project_task, RevisionComparison::Matching),
-        (&projectless, RevisionComparison::Unknown),
-    ] {
-        let checks = app
-            .compare_record_checks(task.id, Some(&"A".repeat(40)))
-            .unwrap();
-        let check = &checks[0];
-        assert_eq!(check.current_verdict, None);
-        let latest = check.latest_assessment.as_ref().unwrap();
-        assert_eq!(latest.comparison, expected);
-        assert_eq!(latest.dirty, Some(false));
-        assert_eq!(latest.invalidation.as_ref().unwrap().dirty, None);
-        let page = app
-            .compare_record_check(task.id, check.id, None, 100, Some(&"b".repeat(40)))
-            .unwrap();
-        assert_eq!(
-            page.assessments[0].comparison,
-            if task.id == project_task.id {
-                RevisionComparison::Mismatching
-            } else {
-                RevisionComparison::Unknown
-            }
-        );
-        assert_eq!(
-            page.activities[1].invalidation.as_ref().unwrap().comparison,
-            expected
-        );
-        assert_eq!(
-            app.list_record_checks(task.id).unwrap()[0]
-                .latest_assessment
-                .as_ref()
-                .unwrap()
-                .comparison,
-            RevisionComparison::Unknown
-        );
-    }
     assert_eq!(
-        app.compare_record_checks(project_task.id, Some("short"))
+        app.compare_record_checks(task.id, Some(&"A".repeat(40)))
+            .unwrap()[0]
+            .latest_assessment
+            .as_ref()
+            .unwrap()
+            .comparison,
+        RevisionComparison::Matching
+    );
+    assert_eq!(
+        app.compare_record_check(task.id, check.id, None, 100, Some(&"b".repeat(40)))
+            .unwrap()
+            .assessments[0]
+            .comparison,
+        RevisionComparison::Mismatching
+    );
+    assert_eq!(
+        app.list_record_checks(task.id).unwrap()[0]
+            .latest_assessment
+            .as_ref()
+            .unwrap()
+            .comparison,
+        RevisionComparison::Unknown
+    );
+    assert_eq!(
+        app.compare_record_checks(task.id, Some("short"))
             .unwrap_err()
             .code,
         "invalid-revision"
     );
-    let check = app.list_record_checks(project_task.id).unwrap().remove(0);
-    let mut input = assessment(check.version, Verdict::Pass);
-    input.revision = None;
-    input.dirty = None;
-    app.assess_record_check(project_task.id, check.id, &input)
+    let accepted = app.submit_record_outcome(task.id, &input).unwrap();
+    let work = app
+        .invalidate_record_work(
+            task.id,
+            &WorkInvalidationInput {
+                generation: 1,
+                evidence: input.evidence.clone(),
+                actor: "operator".into(),
+                message: "Recheck unchanged commit".into(),
+            },
+        )
         .unwrap();
-    let check = app
-        .compare_record_checks(project_task.id, Some(&"a".repeat(40)))
-        .unwrap()
-        .remove(0);
-    assert_eq!(check.current_verdict, Some(Verdict::Pass));
+    assert_eq!(work.generation, 2);
+    assert_eq!(work.input, Some(input.evidence.clone()));
     assert_eq!(
-        check.latest_assessment.unwrap().comparison,
-        RevisionComparison::Unknown
+        app.submit_record_outcome(task.id, &input).unwrap(),
+        accepted
+    );
+    assert_eq!(
+        app.list_record_checks(task.id).unwrap()[0].current_verdict,
+        None
+    );
+    app.begin_record_attempt(
+        task.id,
+        &AttemptInput {
+            id: "same-commit-new-generation".into(),
+            check_id: check.id,
+            generation: 2,
+            evidence: input.evidence.clone(),
+            actor: "operator".into(),
+        },
+    )
+    .unwrap();
+    let current = forge_app::outcomes::OutcomeInput {
+        attempt_id: "same-commit-new-generation".into(),
+        generation: 2,
+        ..input
+    };
+    assert_eq!(
+        app.submit_record_outcome(task.id, &current)
+            .unwrap()
+            .check
+            .current_verdict,
+        Some(Verdict::Pass)
     );
 }

@@ -175,22 +175,9 @@ fn assignment_finding_security_done_and_completion_gates_match_operator() {
             "finding-not-found"
         );
     }
-    let foreign_check = store.list_record_checks(prerequisite).unwrap()[0].id;
-    let assessment = store
-        .assess_record_check(
-            prerequisite,
-            foreign_check,
-            &forge_app::checks::AssessmentInput {
-                expected_version: 1,
-                actor: "operator".into(),
-                verdict: forge_app::checks::Verdict::Pass,
-                message: "Verified".into(),
-                revision: None,
-                dirty: None,
-            },
-        )
-        .unwrap()
+    let assessment = store.list_record_checks(prerequisite).unwrap()[0]
         .latest_assessment
+        .as_ref()
         .unwrap()
         .id;
     for origin in [assessment, u64::MAX] {
@@ -261,14 +248,13 @@ fn assignment_finding_security_done_and_completion_gates_match_operator() {
     session.start().unwrap();
     let operator = store.done_record(owner, Some("done")).unwrap_err();
     let assigned = session.done(Some("done"), None).unwrap_err();
-    assert_eq!(operator.code, "checks-not-passed");
+    assert_eq!(operator.code, "completion-blocked");
     assert_eq!(operator.code, assigned.code);
     assert_eq!(operator.message, assigned.message);
     assert!(
-        operator.message.contains("Check IDs:")
-            && operator
-                .message
-                .contains(&format!("Finding IDs: [{}]", critical.id))
+        operator
+            .message
+            .contains(&format!("Finding IDs: [{}]", critical.id))
     );
     check_tests::pass_checks(&store, owner);
     assert_eq!(

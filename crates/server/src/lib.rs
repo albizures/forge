@@ -1327,6 +1327,38 @@ impl RecordApiServer for Daemon {
             .mutate_record_finding(r.record, r.finding, &r.mutation)
             .map_err(rpc_error)
     }
+    async fn record_work_state(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<forge_rpc::RecordWorkStateRequest>,
+    ) -> RpcResult<forge_app::outcomes::WorkState> {
+        self.record_application(&request.selection, &mut [])?
+            .record_work_state(request.record.record)
+            .map_err(rpc_error)
+    }
+    async fn record_attempt_begin(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<forge_rpc::RecordAttemptBeginRequest>,
+    ) -> RpcResult<forge_app::outcomes::Attempt> {
+        self.record_application(&request.selection, &mut [])?
+            .begin_record_attempt(request.record.record, &request.record.attempt)
+            .map_err(rpc_error)
+    }
+    async fn record_outcome_submit(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<forge_rpc::RecordOutcomeSubmitRequest>,
+    ) -> RpcResult<forge_app::outcomes::AcceptedOutcome> {
+        self.record_application(&request.selection, &mut [])?
+            .submit_record_outcome(request.record.record, &request.record.outcome)
+            .map_err(rpc_error)
+    }
+    async fn record_work_invalidate(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<forge_rpc::RecordWorkInvalidateRequest>,
+    ) -> RpcResult<forge_app::outcomes::WorkState> {
+        self.record_application(&request.selection, &mut [])?
+            .invalidate_record_work(request.record.record, &request.record.invalidation)
+            .map_err(rpc_error)
+    }
     async fn record_check_list(
         &self,
         request: forge_rpc::SelectedRecordRequest<forge_rpc::RecordCheckListRequest>,
@@ -3002,6 +3034,13 @@ mod tests {
                 generated_by_ids: vec![],
             })
             .unwrap();
+        // Historical Assignment fixtures retain accepted evidence seeded through the
+        // public Manual boundary before ownership is claimed; no live agents run.
+        store.edit_record(target.id, "updated target").unwrap();
+        for record in [owner.id, target.id] {
+            check_tests::pass_checks(&store, record);
+            store.reopen_record(record).unwrap();
+        }
         store
             .relate_records(owner.id, target.id, RecordRelationshipKind::DependsOn)
             .unwrap();
@@ -3021,7 +3060,6 @@ mod tests {
                 profile_revision: 1,
             })
             .unwrap();
-        store.edit_record(target.id, "updated target").unwrap();
         drop(store);
         let records = SqliteProjectRepository::open(&database_path).unwrap();
         let dispatch = SqliteProjectRepository::open(&database_path).unwrap();
@@ -3345,7 +3383,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(checks[0].name, "Implementation");
-        let assessed = AssignmentApiServer::check_assess(
+        let rejected = AssignmentApiServer::check_assess(
             &daemon,
             AssignmentCheckAssessRequest {
                 assignment_id: assignment.clone(),
@@ -3359,14 +3397,8 @@ mod tests {
             },
         )
         .await
-        .unwrap();
-        let assessment = assessed.latest_assessment.unwrap();
-        assert_eq!(assessment.actor, assignment);
-        assert_eq!(
-            assessment.assignment_id.as_deref(),
-            Some(assignment.as_str())
-        );
-        assert_eq!(assessment.dirty, Some(false));
+        .unwrap_err();
+        assert!(rejected.to_string().contains("attempt-required"));
         let session = daemon
             .assignment_session(&assignment, "check-secret")
             .unwrap();
@@ -3375,24 +3407,22 @@ mod tests {
         let check = checks[0].id;
         let input = forge_app::checks::AssessmentInput {
             actor: "forged operator".into(),
-            expected_version: assessed.version,
+            expected_version: checks[0].version,
             verdict: forge_app::checks::Verdict::Fail,
             message: "needs work".into(),
             revision: Some("a".repeat(40)),
             dirty: Some(true),
         };
-        let failed = session.check_assess(check, &input).unwrap();
-        assert_eq!(failed.latest_assessment.as_ref().unwrap().actor, assignment);
         let before = store.list_record_updates(task).unwrap();
         assert_eq!(
             session.check_assess(check, &input).unwrap_err().code,
-            "stale-version"
+            "attempt-required"
         );
         assert_eq!(store.list_record_updates(task).unwrap(), before);
         let invalidation = forge_app::checks::InvalidationInput {
             actor: "untrusted".into(),
-            expected_version: failed.version,
-            assessment_id: failed.latest_assessment.as_ref().unwrap().id,
+            expected_version: checks[0].version,
+            assessment_id: checks[0].latest_assessment.as_ref().unwrap().id,
             message: "withdraw evidence".into(),
             revision: Some("b".repeat(40)),
             dirty: None,
@@ -3428,7 +3458,7 @@ mod tests {
             session.check_invalidate(check, &repeated).unwrap_err().code,
             "invalid-transition"
         );
-        repeated.assessment_id = assessment.id;
+        repeated.assessment_id = checks[0].latest_assessment.as_ref().unwrap().id;
         assert_eq!(
             session.check_invalidate(check, &repeated).unwrap_err().code,
             "invalid-transition"
@@ -3439,7 +3469,7 @@ mod tests {
         assert_eq!(page.activities.len(), 1);
         assert_eq!(
             page.check.latest_assessment.as_ref().unwrap().comparison,
-            forge_app::checks::RevisionComparison::Matching
+            forge_app::checks::RevisionComparison::Unknown
         );
         assert_eq!(
             page.check
@@ -3493,18 +3523,7 @@ mod tests {
         );
         std::fs::write(root.join(&assignment), "check-secret\n").unwrap();
         // Satisfy existing lifecycle/dependency constraints before comparing Check gates.
-        let other_check = store.list_record_checks(other).unwrap().remove(0);
-        store
-            .assess_record_check(
-                other,
-                other_check.id,
-                &forge_app::checks::AssessmentInput {
-                    expected_version: other_check.version,
-                    verdict: forge_app::checks::Verdict::Pass,
-                    ..fresh.clone()
-                },
-            )
-            .unwrap();
+        check_tests::pass_checks(&store, other);
         store.start_record(other).unwrap();
         store.done_record(other, None).unwrap();
         session.acknowledge().unwrap();
@@ -3515,13 +3534,11 @@ mod tests {
         assert_eq!(operator_error, assignment_error);
         assert!(operator_error.message.contains(&check.to_string()));
         fresh.verdict = forge_app::checks::Verdict::Pass;
-        let passed = session.check_assess(check, &fresh).unwrap();
-        fresh.expected_version = passed.version;
-        session.done(None, None).unwrap();
         assert_eq!(
             session.check_assess(check, &fresh).unwrap_err().code,
-            "record-done"
+            "attempt-required"
         );
+        assert_eq!(store.record_work_state(task).unwrap().generation, 2);
         store
             .close_agent_assignment(
                 &assignment,
@@ -3542,7 +3559,7 @@ mod tests {
             persisted
                 .assessments
                 .iter()
-                .all(|a| a.assignment_id.as_deref() == Some(assignment.as_str()))
+                .all(|a| a.assignment_id.is_none() && !a.attempt_id.is_empty())
         );
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -3634,7 +3651,10 @@ mod tests {
             "invalid-revision"
         );
         assert_eq!(store.list_record_updates(task.id).unwrap(), updates);
-        session.check_assess(checks[0].id, &input).unwrap();
+        assert_eq!(
+            session.check_assess(checks[0].id, &input).unwrap_err().code,
+            "attempt-required"
+        );
         assert!(session.done(None, None).is_err());
         // Cross-Workspace Check IDs do not acquire authority through capability requests.
         forge_app::WorkspaceRepository::create_workspace(&store, "foreign", "Foreign", &root)
@@ -3667,8 +3687,14 @@ mod tests {
                 .code,
             "check-not-found"
         );
-        session.check_assess(checks[1].id, &input).unwrap();
-        session.done(None, None).unwrap();
+        assert_eq!(
+            session.check_assess(checks[1].id, &input).unwrap_err().code,
+            "attempt-required"
+        );
+        assert_eq!(
+            session.done(None, None).unwrap_err().code,
+            "checks-not-passed"
+        );
         let grilling = store
             .open_typed_record(&NewTypedRecord {
                 record_type: RecordType::Grilling,
@@ -3701,15 +3727,13 @@ mod tests {
             "invalid-record-type"
         );
         // Operator attribution remains explicitly distinct, even if it uses the same actor text.
-        assert_eq!(
-            foreign_store
-                .assess_record_check(foreign.id, foreign_check.id, &input)
-                .unwrap()
-                .latest_assessment
-                .unwrap()
-                .assignment_id,
-            None
-        );
+        check_tests::pass_checks(foreign_store.as_ref(), foreign.id);
+        let assessment = foreign_store.list_record_checks(foreign.id).unwrap()[0]
+            .latest_assessment
+            .clone()
+            .unwrap();
+        assert_eq!(assessment.assignment_id, None);
+        assert!(!assessment.attempt_id.is_empty());
         std::fs::remove_dir_all(root).unwrap();
     }
 

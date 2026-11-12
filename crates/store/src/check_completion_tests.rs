@@ -1,8 +1,8 @@
 use super::*;
-use forge_app::checks::{AssessmentInput, InvalidationInput, Verdict};
+use forge_app::checks::{InvalidationInput, Verdict};
 
 #[test]
-fn completion_racing_assessment_or_invalidation_never_commits_a_nonpassing_done_task() {
+fn completion_racing_body_edit_or_invalidation_never_commits_a_nonpassing_done_task() {
     use std::sync::{Arc, Barrier};
     // Independent connections exercise SQLite transactions, not the per-repository mutex.
     for invalidate in [false, true] {
@@ -38,31 +38,24 @@ fn completion_racing_assessment_or_invalidation_never_commits_a_nonpassing_done_
             let mutation = std::thread::spawn(move || {
                 barrier.wait();
                 if invalidate {
-                    contender.invalidate_record_check(
-                        task.id,
-                        check.id,
-                        &InvalidationInput {
-                            expected_version: check.version,
-                            assessment_id: check.latest_assessment.unwrap().id,
-                            actor: "reviewer".into(),
-                            message: "Withdraw evidence".into(),
-                            revision: None,
-                            dirty: None,
-                        },
-                    )
+                    contender
+                        .invalidate_record_check(
+                            task.id,
+                            check.id,
+                            &InvalidationInput {
+                                expected_version: check.version,
+                                assessment_id: check.latest_assessment.unwrap().id,
+                                actor: "reviewer".into(),
+                                message: "Withdraw evidence".into(),
+                                revision: None,
+                                dirty: None,
+                            },
+                        )
+                        .map(|_| ())
                 } else {
-                    contender.assess_record_check(
-                        task.id,
-                        check.id,
-                        &AssessmentInput {
-                            expected_version: check.version,
-                            verdict: Verdict::Fail,
-                            actor: "reviewer".into(),
-                            message: "Deliverables incomplete".into(),
-                            revision: None,
-                            dirty: None,
-                        },
-                    )
+                    contender
+                        .edit_record(task.id, "Changed deliverables")
+                        .map(|_| ())
                 }
             });
             let completion = completion.join().unwrap();
@@ -74,7 +67,10 @@ fn completion_racing_assessment_or_invalidation_never_commits_a_nonpassing_done_
                 assert!(matches!(error.code, "checks-not-passed" | "storage"));
             }
             if let Err(error) = &mutation {
-                assert_eq!(error.code, "record-done");
+                assert!(matches!(
+                    error.code,
+                    "record-done" | "invalid-status-transition"
+                ));
             }
             let repository = SqliteProjectRepository::open(&path).unwrap();
             let checks = repository.list_record_checks(task.id).unwrap();
@@ -85,7 +81,9 @@ fn completion_racing_assessment_or_invalidation_never_commits_a_nonpassing_done_
             assert_eq!(page.activities.len(), 1 + usize::from(mutation.is_ok()));
             assert_eq!(
                 repository.list_record_updates(task.id).unwrap().len(),
-                before + usize::from(completion.is_ok()) + usize::from(mutation.is_ok())
+                before
+                    + usize::from(completion.is_ok())
+                    + usize::from(mutation.is_ok()) * if invalidate { 1 } else { 2 }
             );
             if completion.is_ok() {
                 assert_eq!(checks[0].current_verdict, Some(Verdict::Pass));

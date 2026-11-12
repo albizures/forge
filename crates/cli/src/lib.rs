@@ -1186,10 +1186,58 @@ pub async fn request_record_check_show(
         .await
         .map_err(record_error("record check show"))
 }
-/// Append an attributed Assessment using the observed Check version.
+/// Inspect work freshness and evidence.
+/// # Errors
+/// Returns endpoint, scope or storage errors.
+pub async fn request_record_work_state(
+    url: impl Into<RecordEndpoint>,
+    record: u64,
+) -> Result<forge_rpc::WorkState, String> {
+    record_client(url)?
+        .record_work_state(forge_rpc::RecordWorkStateRequest { record })
+        .await
+        .map_err(record_error("record check work"))
+}
+/// Begin a Manual attempt without provider launch.
+/// # Errors
+/// Returns endpoint, scope, ordering or freshness errors.
+pub async fn request_record_attempt_begin(
+    url: impl Into<RecordEndpoint>,
+    request: forge_rpc::RecordAttemptBeginRequest,
+) -> Result<forge_rpc::Attempt, String> {
+    record_client(url)?
+        .record_attempt_begin(request)
+        .await
+        .map_err(record_error("record check begin"))
+}
+/// Submit one atomic evidence-bound outcome.
+/// # Errors
+/// Returns endpoint, scope, attempt or freshness errors.
+pub async fn request_record_outcome_submit(
+    url: impl Into<RecordEndpoint>,
+    request: forge_rpc::RecordOutcomeSubmitRequest,
+) -> Result<forge_rpc::AcceptedOutcome, String> {
+    record_client(url)?
+        .record_outcome_submit(request)
+        .await
+        .map_err(record_error("record check outcome"))
+}
+/// Invalidate current work and advance freshness.
+/// # Errors
+/// Returns endpoint, scope, transition or freshness errors.
+pub async fn request_record_work_invalidate(
+    url: impl Into<RecordEndpoint>,
+    request: forge_rpc::RecordWorkInvalidateRequest,
+) -> Result<forge_rpc::WorkState, String> {
+    record_client(url)?
+        .record_work_invalidate(request)
+        .await
+        .map_err(record_error("record check invalidate-work"))
+}
+/// Request the rejecting diagnostic for unsupported unbound Assessments.
 ///
 /// # Errors
-/// Returns endpoint, validation, stale-version, frozen-Task, or scope errors.
+/// Returns `attempt-required` or endpoint, validation, version, lifecycle or scope errors.
 pub async fn request_record_check_assess(
     url: impl Into<RecordEndpoint>,
     request: forge_rpc::RecordCheckAssessRequest,

@@ -308,20 +308,7 @@ fn templates_snapshot_all_task_deliverables_paths_and_selected_projects_without_
     assert_eq!(checks.len(), 3);
     repository.start_record(task.id).unwrap();
     for check in checks {
-        repository
-            .assess_record_check(
-                task.id,
-                check.id,
-                &forge_app::checks::AssessmentInput {
-                    expected_version: check.version,
-                    verdict: forge_app::checks::Verdict::Pass,
-                    actor: "operator".into(),
-                    message: "Criterion verified".into(),
-                    revision: None,
-                    dirty: None,
-                },
-            )
-            .unwrap();
+        super::check_tests::assess_check(&repository, task.id, check.id, forge_app::checks::Verdict::Pass);
     }
     assert_eq!(
         repository.done_record(task.id, None).unwrap().status,

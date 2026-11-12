@@ -112,6 +112,7 @@ pub async fn assignment_check(action: AssignmentCheckAction) -> Result<serde_jso
                     | "stale-version"
                     | "invalid-transition"
                     | "invalid-assessment"
+                    | "attempt-required"
                     | "invalid-revision"
                     | "invalid-page"
             )

@@ -1,9 +1,9 @@
-use super::{SqliteProjectRepository, insert_update, load_record, now_millis, storage_error};
+use super::{SqliteProjectRepository, load_record, storage_error};
 use forge_app::checks::{
     Assessment, AssessmentInput, CheckActivity, CheckPage, Invalidation, InvalidationInput,
     RecordCheck, RevisionComparison, Verdict,
 };
-use forge_app::{Record, RecordStatus, RecordType, RecordUpdateKind, RegistrationError};
+use forge_app::{Record, RecordStatus, RecordType, RegistrationError};
 use rusqlite::{Connection, OptionalExtension, params};
 
 pub(super) fn schema(connection: &Connection) -> Result<(), RegistrationError> {
@@ -17,7 +17,8 @@ pub(super) fn schema(connection: &Connection) -> Result<(), RegistrationError> {
         CREATE TABLE IF NOT EXISTS check_assessments (
         id INTEGER PRIMARY KEY NOT NULL, check_id INTEGER NOT NULL REFERENCES record_checks(id),
         verdict TEXT NOT NULL CHECK(verdict IN ('pass','fail')), actor TEXT NOT NULL,
-        message TEXT NOT NULL, created_at_millis INTEGER NOT NULL, revision TEXT, dirty INTEGER, assignment_id TEXT);
+        message TEXT NOT NULL, created_at_millis INTEGER NOT NULL, revision TEXT, dirty INTEGER, assignment_id TEXT,
+        attempt_id TEXT NOT NULL UNIQUE REFERENCES record_attempts(id), generation INTEGER NOT NULL CHECK(generation > 0), evidence_json TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS assessments_by_check ON check_assessments(check_id, id);
         CREATE TABLE IF NOT EXISTS check_invalidations (
         id INTEGER PRIMARY KEY NOT NULL, assessment_id INTEGER NOT NULL UNIQUE REFERENCES check_assessments(id),
@@ -41,6 +42,10 @@ fn assessment(row: &rusqlite::Row<'_>) -> rusqlite::Result<Assessment> {
             _ => return Err(rusqlite::Error::InvalidQuery),
         },
         assignment_id: row.get(8)?,
+        attempt_id: row.get(9)?,
+        generation: row.get::<_, i64>(10)?.cast_unsigned(),
+        evidence: serde_json::from_str(&row.get::<_, String>(11)?)
+            .map_err(|_| rusqlite::Error::InvalidQuery)?,
         actor: row.get(3)?,
         message: row.get(4)?,
         created_at_millis: row.get::<_, i64>(5)?.cast_unsigned(),
@@ -50,8 +55,7 @@ fn assessment(row: &rusqlite::Row<'_>) -> rusqlite::Result<Assessment> {
         comparison: RevisionComparison::Unknown,
     })
 }
-const ASSESSMENT_COLUMNS: &str =
-    "id, check_id, verdict, actor, message, created_at_millis, revision, dirty, assignment_id";
+const ASSESSMENT_COLUMNS: &str = "id, check_id, verdict, actor, message, created_at_millis, revision, dirty, assignment_id, attempt_id, generation, evidence_json";
 
 fn invalidation(
     connection: &Connection,
@@ -64,7 +68,11 @@ fn invalidation(
     })).optional().map_err(storage_error)
 }
 
-fn load(connection: &Connection, task: u64, check: u64) -> Result<RecordCheck, RegistrationError> {
+pub(super) fn load(
+    connection: &Connection,
+    task: u64,
+    check: u64,
+) -> Result<RecordCheck, RegistrationError> {
     let project = load_record(connection, task)?
         .project_slugs
         .into_iter()
@@ -262,22 +270,17 @@ impl SqliteProjectRepository {
                 "only the latest, not-yet-invalidated Assessment may be invalidated",
             ));
         }
-        transaction.execute("INSERT INTO check_invalidations (assessment_id, actor, message, created_at_millis, revision, dirty, assignment_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)", params![input.assessment_id.cast_signed(), input.actor, input.message, now_millis()?, input.revision, input.dirty, assignment]).map_err(storage_error)?;
-        let invalidation_id = transaction.last_insert_rowid();
-        transaction.execute("INSERT INTO check_activities (check_id, assessment_id, invalidation_id) VALUES (?1, ?2, ?3)", params![check.cast_signed(), input.assessment_id.cast_signed(), invalidation_id]).map_err(storage_error)?;
+        super::outcomes::invalidate(&transaction, task, &input.actor, &input.message, assignment)?;
         transaction
             .execute(
-                "UPDATE record_checks SET version = version + 1 WHERE id = ?1",
-                [check.cast_signed()],
+                "UPDATE check_invalidations SET revision = ?2, dirty = ?3 WHERE assessment_id = ?1",
+                params![
+                    input.assessment_id.cast_signed(),
+                    input.revision,
+                    input.dirty
+                ],
             )
             .map_err(storage_error)?;
-        insert_update(
-            &transaction,
-            task,
-            RecordUpdateKind::CheckInvalidated {
-                assessment_id: input.assessment_id,
-            },
-        )?;
         let updated = load(&transaction, task, check)?;
         transaction.commit().map_err(storage_error)?;
         Ok(updated)
@@ -311,28 +314,10 @@ impl SqliteProjectRepository {
                 "Check version changed; read it again before assessing",
             ));
         }
-        transaction.execute("INSERT INTO check_assessments (check_id, verdict, actor, message, created_at_millis, revision, dirty, assignment_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![check.cast_signed(), match input.verdict { Verdict::Pass => "pass", Verdict::Fail => "fail" }, input.actor, input.message, now_millis()?, input.revision, input.dirty, assignment]).map_err(storage_error)?;
-        let assessment_id = transaction.last_insert_rowid().cast_unsigned();
-        transaction
-            .execute(
-                "INSERT INTO check_activities (check_id, assessment_id) VALUES (?1, ?2)",
-                params![check.cast_signed(), assessment_id.cast_signed()],
-            )
-            .map_err(storage_error)?;
-        transaction
-            .execute(
-                "UPDATE record_checks SET version = version + 1 WHERE id = ?1",
-                [check.cast_signed()],
-            )
-            .map_err(storage_error)?;
-        insert_update(
-            &transaction,
-            task,
-            RecordUpdateKind::CheckAssessed { assessment_id },
-        )?;
-        let updated = load(&transaction, task, check)?;
-        transaction.commit().map_err(storage_error)?;
-        Ok(updated)
+        let _ = assignment;
+        Err(RegistrationError::new(
+            "attempt-required",
+            "unbound Assessments are unsupported; begin a Manual attempt and submit its evidence-bound outcome",
+        ))
     }
 }

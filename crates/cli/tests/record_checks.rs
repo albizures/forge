@@ -5,7 +5,6 @@ use std::{
     io::Write,
     process::{Command, Output, Stdio},
 };
-
 fn json(output: Output) -> serde_json::Value {
     assert!(
         output.status.success(),
@@ -17,7 +16,7 @@ fn json(output: Output) -> serde_json::Value {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::too_many_lines)]
-async fn operators_assess_record_checks_with_versions_and_explicit_explanations() {
+async fn operators_submit_bound_manual_outcomes_with_evidence_freshness_and_durable_replay() {
     let root = tempfile::tempdir().unwrap();
     let database = root.path().join("forge.sqlite");
     let store = SqliteProjectRepository::open(&database).unwrap();
@@ -46,86 +45,61 @@ async fn operators_assess_record_checks_with_versions_and_explicit_explanations(
         "task",
         "open",
         "--body",
-        "Deliver the work",
+        "Deliver the report",
         "--json",
-    ]));
-    let task = task["id"].to_string();
+    ]))["id"]
+        .to_string();
     let checks = json(run(&["record", "check", "list", &task, "--json"]));
-    let check = checks[0]["id"].to_string();
+    let check = checks[0]["id"].as_u64().unwrap();
     assert_eq!(checks[0]["name"], "Implementation");
-    assert!(checks[0]["latest_assessment"].is_null());
     json(run(&["record", "start", &task, "--json"]));
     assert!(!run(&["record", "done", &task]).status.success());
-    let base = [
-        "record",
-        "check",
-        "assess",
-        &task,
-        &check,
-        "--verdict",
-        "pass",
-        "--actor",
-        "operator",
-        "--expected-version",
-        "1",
-    ];
-    for invalid in [
-        vec![],
-        vec!["--message", " "],
-        vec!["--message", "ok", "--message-file", "-"],
-    ] {
-        assert!(
-            !run(&[base.as_slice(), invalid.as_slice()].concat())
-                .status
-                .success()
-        );
-    }
-    let message = root.path().join("message.txt");
-    std::fs::write(&message, "Verified deliverables").unwrap();
-    let passed = json(run(&[
-        base.as_slice(),
-        &[
-            "--message-file",
-            message.to_str().unwrap(),
-            "--dirty",
-            "false",
+    let evidence =
+        serde_json::json!({"kind":"artifact", "uri":"urn:report:v1", "sha256":"a".repeat(64)});
+    let path = root.path().join("input.json");
+    let submit = |operation: &str, input: &serde_json::Value| {
+        std::fs::write(&path, input.to_string()).unwrap();
+        run(&[
+            "record",
+            "check",
+            operation,
+            &task,
+            "--input-file",
+            path.to_str().unwrap(),
             "--json",
-        ],
-    ]
-    .concat()));
-    assert_eq!(passed["version"], 2);
-    assert_eq!(passed["latest_assessment"]["verdict"], "pass");
-    assert_eq!(passed["latest_assessment"]["dirty"], false);
-    let updates = run(&["record", "updates", &task]);
+        ])
+    };
+    let begin = serde_json::json!({"id":"manual-1", "check_id":check, "generation":1, "evidence":evidence, "actor":"operator"});
+    let bound = json(submit("begin", &begin));
+    assert_eq!(bound["body"], "Deliver the report");
+    assert_eq!(json(submit("begin", &begin)), bound);
+    let mut invalid = begin.clone();
+    invalid["id"] = "competing".into();
+    assert!(!submit("begin", &invalid).status.success());
+    let outcome = serde_json::json!({"attempt_id":"manual-1", "generation":1, "evidence":evidence, "verdict":"pass", "actor":"operator", "message":"Verified report"});
+    for (field, value) in [
+        ("actor", serde_json::json!("other")),
+        ("generation", serde_json::json!(2)),
+        ("message", serde_json::json!(" ")),
+    ] {
+        let mut invalid = outcome.clone();
+        invalid[field] = value;
+        assert!(!submit("outcome", &invalid).status.success());
+    }
+    let mut unknown = outcome.clone();
+    unknown["findings"] = serde_json::json!([]);
     assert!(
-        String::from_utf8_lossy(&updates.stdout)
-            .contains(&format!("Assessment {}", passed["latest_assessment"]["id"]))
+        !submit("outcome", &unknown).status.success(),
+        "unsupported partial outcome fields must not be ignored"
     );
-    assert!(
-        !run(&[base.as_slice(), &["--message", "stale"]].concat())
-            .status
-            .success()
-    );
-    let page = json(run(&[
-        "record", "check", "show", &task, &check, "--limit", "1", "--json",
-    ]));
-    assert_eq!(page["assessments"].as_array().unwrap().len(), 1);
-    let text = run(&["record", "check", "list", &task]);
-    assert!(String::from_utf8_lossy(&text.stdout).contains("pass"));
+    // JSON stdin is supported, not only filesystem input.
     let mut child = Command::new(env!("CARGO_BIN_EXE_forge"))
         .args([
             "record",
             "check",
-            "assess",
+            "outcome",
             &task,
-            &check,
-            "--expected-version",
-            "2",
-            "--verdict",
-            "fail",
-            "--actor",
-            "operator",
-            "--message-file",
+            "--input-file",
             "-",
             "--json",
             "--server-url",
@@ -141,212 +115,62 @@ async fn operators_assess_record_checks_with_versions_and_explicit_explanations(
         .stdin
         .take()
         .unwrap()
-        .write_all(b"A deliverable needs correction")
+        .write_all(outcome.to_string().as_bytes())
         .unwrap();
+    let accepted = json(child.wait_with_output().unwrap());
+    assert_eq!(accepted["check"]["current_verdict"], "pass");
     assert_eq!(
-        json(child.wait_with_output().unwrap())["latest_assessment"]["verdict"],
-        "fail"
+        accepted["check"]["latest_assessment"]["attempt_id"],
+        "manual-1"
     );
-    assert!(!run(&["record", "done", &task]).status.success());
-    let passed = json(run(&[
-        "record",
-        "check",
-        "assess",
-        &task,
-        &check,
-        "--expected-version",
-        "3",
-        "--actor",
-        "operator",
-        "--verdict",
-        "pass",
-        "--message",
-        "Correction verified",
-        "--json",
-    ]));
-    let assessment = passed["latest_assessment"]["id"].to_string();
-    let invalidate = [
-        "record",
-        "check",
-        "invalidate",
-        &task,
-        &check,
-        "--assessment",
-        &assessment,
-        "--expected-version",
-        "4",
-        "--actor",
-        "operator",
-    ];
-    for extra in [
-        vec![],
-        vec!["--message", " "],
-        vec!["--message", "why", "--message-file", "-"],
-        vec!["--message", "why", "--revision", "short"],
-    ] {
-        assert!(
-            !run(&[invalidate.as_slice(), &extra].concat())
-                .status
-                .success()
-        );
-    }
-    let mut child = Command::new(env!("CARGO_BIN_EXE_forge"))
-        .args(invalidate)
-        .args([
-            "--message-file",
-            "-",
-            "--revision",
-            &"a".repeat(40),
-            "--dirty",
-            "true",
-            "--json",
-            "--server-url",
-            &endpoint,
-        ])
-        .current_dir(root.path())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"Withdraw unsupported verdict")
-        .unwrap();
-    let pending = json(child.wait_with_output().unwrap());
-    assert_eq!(pending["version"], 5);
-    assert!(pending["current_verdict"].is_null());
-    assert_eq!(pending["latest_assessment"]["verdict"], "pass");
-    assert_eq!(
-        pending["latest_assessment"]["invalidation"]["message"],
-        "Withdraw unsupported verdict"
-    );
+    assert_eq!(accepted["check"]["latest_assessment"]["evidence"], evidence);
+    assert_eq!(json(submit("outcome", &outcome)), accepted);
+    let mut conflict = outcome.clone();
+    conflict["message"] = "changed".into();
     assert!(
-        !run(&[invalidate.as_slice(), &["--message", "stale"]].concat())
-            .status
-            .success()
+        String::from_utf8_lossy(&submit("outcome", &conflict).stderr).contains("outcome-conflict")
     );
-    let repeated = run(&[
-        "record",
-        "check",
-        "invalidate",
-        &task,
-        &check,
-        "--assessment",
-        &assessment,
-        "--expected-version",
-        "5",
-        "--actor",
-        "operator",
-        "--message",
-        "again",
-    ]);
-    assert!(String::from_utf8_lossy(&repeated.stderr).contains("invalid-transition"));
-    assert!(!run(&["record", "done", &task]).status.success());
     let summary = json(run(&["record", "show", &task, "--json"]));
-    assert_eq!(summary["checks"][0]["version"], 5);
-    assert!(summary["checks"][0]["current_verdict"].is_null());
-    assert!(String::from_utf8_lossy(&run(&["record", "show", &task]).stdout).contains("[pending]"));
-    let compared = json(run(&[
-        "record",
-        "check",
-        "list",
-        &task,
-        "--compare-revision",
-        &"a".repeat(40),
-        "--json",
-    ]));
-    // Caller evidence survives on Projectless Tasks, but comparison is unknown.
+    assert_ne!(summary["status"], "done");
+    let invalidate = serde_json::json!({"generation":1, "evidence":evidence, "actor":"operator", "message":"Same artifact, explicit fresh verification"});
     assert_eq!(
-        compared[0]["latest_assessment"]["invalidation"]["comparison"],
-        "unknown"
+        json(submit("invalidate-work", &invalidate))["generation"],
+        2
     );
+    assert!(!run(&["record", "done", &task]).status.success());
     assert_eq!(
-        compared[0]["latest_assessment"]["invalidation"]["dirty"],
-        true
+        json(submit("outcome", &outcome)),
+        accepted,
+        "historical exact replay is not a new pass"
     );
+    let work = json(run(&["record", "check", "work", &task, "--json"]));
+    assert_eq!(work["generation"], 2);
+    let current = json(run(&["record", "check", "list", &task, "--json"]));
+    assert!(current[0]["current_verdict"].is_null());
+    let mut begin2 = begin.clone();
+    begin2["id"] = "manual-2".into();
+    begin2["generation"] = 2.into();
+    json(submit("begin", &begin2));
+    let mut outcome2 = outcome.clone();
+    outcome2["attempt_id"] = "manual-2".into();
+    outcome2["generation"] = 2.into();
+    json(submit("outcome", &outcome2));
+    json(run(&["record", "done", &task, "--json"]));
+    assert_eq!(
+        json(submit("outcome", &outcome)),
+        accepted,
+        "closed-Task replay remains immutable"
+    );
+    assert!(!submit("invalidate-work", &serde_json::json!({"generation":2, "evidence":evidence, "actor":"operator", "message":"Frozen"})).status.success());
     let page = json(run(&[
         "record",
         "check",
         "show",
         &task,
-        &check,
-        "--compare-revision",
-        &"a".repeat(40),
+        &check.to_string(),
         "--json",
     ]));
-    assert_eq!(page["activities"].as_array().unwrap().len(), 4);
-    assert_eq!(
-        page["activities"][3]["invalidation"]["assessment_id"].to_string(),
-        assessment
-    );
-    let text = run(&["record", "check", "show", &task, &check]);
-    assert!(String::from_utf8_lossy(&text.stdout).contains("Withdraw unsupported verdict"));
-    assert!(
-        !run(&[
-            "record",
-            "check",
-            "list",
-            &task,
-            "--compare-revision",
-            "short"
-        ])
-        .status
-        .success()
-    );
-    json(run(&[
-        "record",
-        "check",
-        "assess",
-        &task,
-        &check,
-        "--expected-version",
-        "5",
-        "--actor",
-        "operator",
-        "--verdict",
-        "pass",
-        "--message",
-        "Reverified",
-        "--json",
-    ]));
-    json(run(&["record", "done", &task, "--json"]));
-    let frozen = run(&[
-        "record",
-        "check",
-        "invalidate",
-        &task,
-        &check,
-        "--assessment",
-        &assessment,
-        "--expected-version",
-        "6",
-        "--actor",
-        "operator",
-        "--message",
-        "frozen",
-    ]);
-    assert!(String::from_utf8_lossy(&frozen.stderr).contains("record-done"));
-    assert!(
-        !run(&[
-            "record",
-            "check",
-            "assess",
-            &task,
-            &check,
-            "--expected-version",
-            "2",
-            "--actor",
-            "operator",
-            "--verdict",
-            "fail",
-            "--message",
-            "frozen"
-        ])
-        .status
-        .success()
-    );
+    assert_eq!(page["activities"].as_array().unwrap().len(), 3);
+    assert_eq!(page["assessments"].as_array().unwrap().len(), 2);
     server.abort();
 }

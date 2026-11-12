@@ -17,6 +17,7 @@ pub use forge_app::findings::{
     Finding, FindingActivity, FindingAmendment, FindingList, FindingMutation, FindingMutationInput,
     FindingPage, FindingRaiseInput, FindingResolveInput, FindingResponse, FindingState, Severity,
 };
+pub use forge_app::outcomes::{AcceptedOutcome, Attempt, WorkState};
 pub use record_selection::*;
 
 use forge_app::{
@@ -244,6 +245,26 @@ pub trait RecordApi {
         &self,
         request: SelectedRecordRequest<RecordFindingMutationRequest>,
     ) -> RpcResult<Finding>;
+    #[method(name = "recordWorkState")]
+    async fn record_work_state(
+        &self,
+        request: SelectedRecordRequest<RecordWorkStateRequest>,
+    ) -> RpcResult<forge_app::outcomes::WorkState>;
+    #[method(name = "recordAttemptBegin")]
+    async fn record_attempt_begin(
+        &self,
+        request: SelectedRecordRequest<RecordAttemptBeginRequest>,
+    ) -> RpcResult<forge_app::outcomes::Attempt>;
+    #[method(name = "recordOutcomeSubmit")]
+    async fn record_outcome_submit(
+        &self,
+        request: SelectedRecordRequest<RecordOutcomeSubmitRequest>,
+    ) -> RpcResult<forge_app::outcomes::AcceptedOutcome>;
+    #[method(name = "recordWorkInvalidate")]
+    async fn record_work_invalidate(
+        &self,
+        request: SelectedRecordRequest<RecordWorkInvalidateRequest>,
+    ) -> RpcResult<forge_app::outcomes::WorkState>;
     #[method(name = "recordCheckList")]
     async fn record_check_list(
         &self,
@@ -393,6 +414,29 @@ pub struct RecordFindingMutationRequest {
     pub record: u64,
     pub finding: u64,
     pub mutation: FindingMutationInput,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecordWorkStateRequest {
+    pub record: u64,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecordAttemptBeginRequest {
+    pub record: u64,
+    pub attempt: forge_app::outcomes::AttemptInput,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecordOutcomeSubmitRequest {
+    pub record: u64,
+    pub outcome: forge_app::outcomes::OutcomeInput,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecordWorkInvalidateRequest {
+    pub record: u64,
+    pub invalidation: forge_app::outcomes::WorkInvalidationInput,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]

@@ -10,10 +10,37 @@ pub enum CheckCommand {
     List(ListArgs),
     /// Show one Check and a bounded ascending Assessment history page.
     Show(ShowArgs),
-    /// Append a pass/fail Assessment using the observed Check version.
+    /// Begin an evidence-bound Manual attempt (JSON `AttemptInput`).
+    Begin(BoundArgs),
+    /// Atomically submit an outcome (JSON `OutcomeInput`); exact replay is idempotent.
+    Outcome(BoundArgs),
+    /// Inspect the Task's freshness generation and input/output evidence.
+    Work(StateArgs),
+    /// Advance freshness and invalidate all Checks (JSON `WorkInvalidationInput`).
+    InvalidateWork(BoundArgs),
+    /// Unsupported unbound Assessment path; use begin and outcome instead.
     Assess(AssessArgs),
     /// Invalidate the latest active Assessment, leaving the Check pending.
     Invalidate(InvalidateArgs),
+}
+#[derive(Debug, Args)]
+pub struct BoundArgs {
+    record: u64,
+    /// File containing the strict JSON input object; use - for stdin.
+    #[arg(long)]
+    input_file: String,
+    #[arg(long)]
+    server_url: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Debug, Args)]
+pub struct StateArgs {
+    record: u64,
+    #[arg(long)]
+    server_url: Option<String>,
+    #[arg(long)]
+    json: bool,
 }
 #[derive(Debug, Args)]
 pub struct ListArgs {
@@ -112,6 +139,10 @@ pub async fn run(command: CheckCommand, workspace: Option<String>) -> i32 {
         CheckCommand::Show(a) => (&a.server_url, a.json),
         CheckCommand::Assess(a) => (&a.server_url, a.json),
         CheckCommand::Invalidate(a) => (&a.server_url, a.json),
+        CheckCommand::Begin(a) | CheckCommand::Outcome(a) | CheckCommand::InvalidateWork(a) => {
+            (&a.server_url, a.json)
+        }
+        CheckCommand::Work(a) => (&a.server_url, a.json),
     };
     let url = match super::resolve_managed_endpoint(url.as_deref()).await {
         Ok(url) => url,
@@ -121,7 +152,36 @@ pub async fn run(command: CheckCommand, workspace: Option<String>) -> i32 {
         }
     };
     let endpoint = (url.as_str(), workspace.as_deref());
+    if matches!(
+        &command,
+        CheckCommand::Begin(_)
+            | CheckCommand::Outcome(_)
+            | CheckCommand::InvalidateWork(_)
+            | CheckCommand::Work(_)
+    ) {
+        return match run_bound(command, endpoint).await {
+            Ok(value) => {
+                if json {
+                    println!("{value}");
+                } else {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&value).expect("JSON value")
+                    );
+                }
+                0
+            }
+            Err(error) => {
+                eprintln!("forge record check: {error}");
+                1
+            }
+        };
+    }
     let result = match command {
+        CheckCommand::Begin(_)
+        | CheckCommand::Outcome(_)
+        | CheckCommand::InvalidateWork(_)
+        | CheckCommand::Work(_) => unreachable!("handled above"),
         CheckCommand::Invalidate(a) => match explanation(a.message, a.message_file) {
             Err(error) => Err(error),
             Ok(message) => forge_cli::request_record_check_invalidate(
@@ -228,6 +288,48 @@ pub async fn run(command: CheckCommand, workspace: Option<String>) -> i32 {
             eprintln!("forge record check: {error}");
             1
         }
+    }
+}
+fn input<T: serde::de::DeserializeOwned>(file: &str) -> Result<T, String> {
+    let text = explanation(None, Some(file.into()))?;
+    serde_json::from_str(&text).map_err(|e| e.to_string())
+}
+async fn run_bound(
+    command: CheckCommand,
+    endpoint: (&str, Option<&str>),
+) -> Result<serde_json::Value, String> {
+    match command {
+        CheckCommand::Begin(a) => forge_cli::request_record_attempt_begin(
+            endpoint,
+            forge_rpc::RecordAttemptBeginRequest {
+                record: a.record,
+                attempt: input(&a.input_file)?,
+            },
+        )
+        .await
+        .and_then(|v| serde_json::to_value(v).map_err(|e| e.to_string())),
+        CheckCommand::Outcome(a) => forge_cli::request_record_outcome_submit(
+            endpoint,
+            forge_rpc::RecordOutcomeSubmitRequest {
+                record: a.record,
+                outcome: input(&a.input_file)?,
+            },
+        )
+        .await
+        .and_then(|v| serde_json::to_value(v).map_err(|e| e.to_string())),
+        CheckCommand::InvalidateWork(a) => forge_cli::request_record_work_invalidate(
+            endpoint,
+            forge_rpc::RecordWorkInvalidateRequest {
+                record: a.record,
+                invalidation: input(&a.input_file)?,
+            },
+        )
+        .await
+        .and_then(|v| serde_json::to_value(v).map_err(|e| e.to_string())),
+        CheckCommand::Work(a) => forge_cli::request_record_work_state(endpoint, a.record)
+            .await
+            .and_then(|v| serde_json::to_value(v).map_err(|e| e.to_string())),
+        _ => unreachable!("only bound operations"),
     }
 }
 pub(super) fn render_page(page: &forge_rpc::CheckPage) -> String {

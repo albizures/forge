@@ -1,3 +1,5 @@
+#[path = "support/manual.rs"]
+mod manual;
 use forge_app::{
     AgentAdapterError, AgentDispatchAdapter, AgentDispatchAdapterFactory, AgentDispatchRepository,
     AgentProfile, Application, ManagedWorktreeRepository, RecordRepository, WorkspaceRepository,
@@ -329,20 +331,7 @@ async fn fixed_layout_selection_and_lifecycle_survive_reopen_without_dispatch_co
     // Completion retains the Claim, and a new application can inspect/remove it.
     store.start_record(task.id).unwrap();
     for check in store.list_record_checks(task.id).unwrap() {
-        store
-            .assess_record_check(
-                task.id,
-                check.id,
-                &forge_app::checks::AssessmentInput {
-                    expected_version: check.version,
-                    verdict: forge_app::checks::Verdict::Pass,
-                    actor: "test operator".into(),
-                    message: "Fixture deliverables verified".into(),
-                    revision: None,
-                    dirty: None,
-                },
-            )
-            .unwrap();
+        manual::pass(&store, task.id, check.id);
     }
     store.done_record(task.id, None).unwrap();
     let reopened = application(&database);

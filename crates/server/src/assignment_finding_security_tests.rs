@@ -38,21 +38,10 @@ async fn assignment_finding_rpc_confines_reads_origins_and_all_mutations() {
         .raise_record_finding(foreign_task.id, &input)
         .unwrap();
     let foreign_check = foreign_store.list_record_checks(foreign_task.id).unwrap()[0].id;
-    let foreign_assessment = foreign_store
-        .assess_record_check(
-            foreign_task.id,
-            foreign_check,
-            &forge_app::checks::AssessmentInput {
-                expected_version: 1,
-                actor: "foreign".into(),
-                verdict: forge_app::checks::Verdict::Pass,
-                message: "Verified".into(),
-                revision: None,
-                dirty: None,
-            },
-        )
-        .unwrap()
+    check_tests::pass_checks(foreign_store.as_ref(), foreign_task.id);
+    let foreign_assessment = foreign_store.list_record_checks(foreign_task.id).unwrap()[0]
         .latest_assessment
+        .as_ref()
         .unwrap()
         .id;
     let credentials =

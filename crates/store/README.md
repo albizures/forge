@@ -43,8 +43,8 @@ is documented separately in [Records](../../docs/records.md),
 
 ## Entity Relationship Diagrams
 
-These four views include **every column of all 31 tables** after fresh-store
-initialization. Each table has one full definition; boxes without attributes are
+These four views describe the core tables. The snapshot and Manual outcome
+additions are documented in the appendices below. Boxes without attributes are
 references to a table defined in another view, not incomplete definitions.
 
 - Attribute comments beginning with `NULL` mark nullable columns. All other
@@ -741,6 +741,37 @@ Comparing it with `verified_generation` invalidates stale Workspace verification
 
 Records profile preflight blockers per Workspace and dispatchable type.
 
+## Manual attempt, evidence and freshness storage
+
+Schema revision 4 adds these fresh-store-only tables (no migration/backfill):
+
+- `record_work`: PK/FK `record_id` → `records.id`, positive `generation`
+  (default 1), nullable `input_json` and `output_json` immutable evidence identities.
+- `record_attempts`: TEXT PK `id`, FK `record_id` → `records.id`, FK `check_id`
+  → `record_checks.id`, `attempt_json` (immutable binding including Task body),
+  `closed` (default 0), nullable `outcome_json` and `result_json`.
+  `one_open_record_attempt` uniquely indexes `record_id` where `closed = 0`.
+- `record_work_invalidations`: INTEGER PK `id`, FK `record_id` → `records.id`,
+  `generation`, `actor`, `message`, `created_at_millis`. Invalidation audit is retained
+  even when there were no Assessments; the current work view exposes the latest entry.
+- `check_assessments` gains required unique `attempt_id` (FK → `record_attempts.id`),
+  positive `generation`, and `evidence_json`. Supported writes require all three through the
+  atomic outcome boundary; unbound operator/Assignment Assessment writes reject.
+
+JSON evidence is either a repository identity plus full commit SHA or an artifact URI
+plus full SHA-256. Forge validates identity syntax without Git or artifact fetches.
+Repository validation enforces Task ownership, same-owner attempt/Check linkage,
+operator Workspace scope, fixed Check order and current freshness before effects.
+
+Outcome acceptance uses an immediate transaction to insert the Assessment/activity,
+advance the Check version, bind Implementation output, append the Record Update, and
+close the attempt with its original serialized request/result. Exact retries return
+that result before closed-Task/freshness checks; different requests reject. Scope is
+always checked first. Invalidations and Task body edits advance generation, clear
+output, close outstanding attempts and invalidate all current Assessments in the
+same transaction. They never delete Findings, old evidence, accepted results,
+Assignments, holds or retained resources.
+
 ## Initialization and compatibility
 
 Opening a repository first checks SQLite's `application_id` and `user_version`
@@ -755,7 +786,7 @@ opens serialize through SQLite's write lock. Ordinary restart retains existing
 Records, history, Assignments, resources, and safety state.
 
 The initialization helpers still build the current schema in this order:
-base tables → Check, Finding, and Template tables → Record/relationship/update
+base tables → Check, Manual outcome, Finding, and Template tables → Record/relationship/update
 initialization → Assignment, profile, audit, and worktree initialization →
 profile seeds → Workspace ownership → Record ownership → Workspace dispatch
 configuration and binding triggers. They are not an upgrade path for incompatible
@@ -763,8 +794,9 @@ stores. Every subsequent breaking storage-contract change must advance the
 schema revision in `src/schema_compatibility.rs`. Revision 2 is the breaking
 Record-oriented Check/Finding contract, without Task classification metadata.
 Revision 3 adds immutable `record_checks.profile_revision` snapshots and full ordered
-Project templates beginning with Implementation. Existing revision-2 stores are
-incompatible; no bindings are inferred or backfilled.
+Project templates beginning with Implementation. Revision 4 adds Manual attempts,
+evidence, freshness and durable atomic-outcome replay. Existing revision-2 and
+revision-3 stores are incompatible; no bindings or outcomes are inferred/backfilled.
 
 Select a fresh store rather than inventing ownership or rewriting version markers.
 Any local reset is a separate operator action: first safely retire ownership and

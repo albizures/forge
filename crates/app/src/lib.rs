@@ -12,6 +12,7 @@ pub mod assignment;
 pub mod check_templates;
 pub mod checks;
 pub mod findings;
+pub mod outcomes;
 mod profile_catalog;
 mod workspaces;
 pub use workspaces::{Workspace, WorkspaceRepository};
@@ -555,6 +556,54 @@ pub trait RecordRepository: ProjectRepository {
             "Findings are not supported",
         ))
     }
+    /// Inspect a Task's current work evidence and freshness.
+    /// # Errors
+    /// Returns unsupported, scope or storage errors.
+    fn record_work_state(&self, _record: u64) -> Result<outcomes::WorkState, RegistrationError> {
+        Err(RegistrationError::new(
+            "unsupported",
+            "Manual outcomes unavailable",
+        ))
+    }
+    /// Begin an evidence-bound Manual attempt.
+    /// # Errors
+    /// Returns validation, ordering, ownership or storage errors.
+    fn begin_record_attempt(
+        &self,
+        _record: u64,
+        _input: &outcomes::AttemptInput,
+    ) -> Result<outcomes::Attempt, RegistrationError> {
+        Err(RegistrationError::new(
+            "unsupported",
+            "Manual outcomes unavailable",
+        ))
+    }
+    /// Atomically submit an attempt's outcome, with durable exact replay.
+    /// # Errors
+    /// Returns validation, freshness, ownership or storage errors.
+    fn submit_record_outcome(
+        &self,
+        _record: u64,
+        _input: &outcomes::OutcomeInput,
+    ) -> Result<outcomes::AcceptedOutcome, RegistrationError> {
+        Err(RegistrationError::new(
+            "unsupported",
+            "Manual outcomes unavailable",
+        ))
+    }
+    /// Invalidate current work, retaining all immutable history.
+    /// # Errors
+    /// Returns validation, freshness, ownership or storage errors.
+    fn invalidate_record_work(
+        &self,
+        _record: u64,
+        _input: &outcomes::WorkInvalidationInput,
+    ) -> Result<outcomes::WorkState, RegistrationError> {
+        Err(RegistrationError::new(
+            "unsupported",
+            "Manual outcomes unavailable",
+        ))
+    }
     /// Inspect immutable completion criteria for a Task.
     /// # Errors
     /// Returns scope, Record type or storage errors.
@@ -583,10 +632,10 @@ pub trait RecordRepository: ProjectRepository {
             "Task Checks are unavailable",
         ))
     }
-    /// Append an Assessment if the observed Check version is still current.
+    /// Reject an unbound Assessment; accepted Assessments require the outcome boundary.
     ///
     /// # Errors
-    /// Rejects invalid input, stale versions, Done Tasks, or inaccessible Checks.
+    /// Returns `attempt-required` or normal validation/scope/version errors.
     fn assess_record_check(
         &self,
         _task: u64,
@@ -598,10 +647,10 @@ pub trait RecordRepository: ProjectRepository {
             "Task Checks are unavailable",
         ))
     }
-    /// Append an Assessment with authenticated Assignment provenance.
+    /// Reject unbound Assignment Assessments; live Check-bound outcomes remain unsupported.
     ///
     /// # Errors
-    /// Returns unsupported-operation or normal Check validation errors.
+    /// Returns `attempt-required`, unsupported-operation or normal Check validation errors.
     fn assess_assignment_check(
         &self,
         _task: u64,

@@ -47,6 +47,10 @@ fn claim_context_fixture(
             generated_by_ids: vec![],
         })
         .unwrap();
+    if kind == RecordType::Task {
+        check_tests::pass_checks(store, own.id);
+        store.reopen_record(own.id).unwrap();
+    }
     let worktree = if kind == RecordType::Task {
         let claim = store.reserve_worktree_claim(own.id).unwrap();
         store.activate_worktree_claim(own.id).unwrap();

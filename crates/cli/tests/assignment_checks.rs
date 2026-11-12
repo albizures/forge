@@ -7,7 +7,8 @@ use std::{
 fn check() -> serde_json::Value {
     serde_json::json!({"id":3,"record_id":7,"name":"Implementation","description":"Deliver work",
         "position":0,"version":2,"latest_assessment":{"id":4,"check_id":3,"verdict":"pass",
-        "actor":"assigned","assignment_id":"assigned","message":"verified","created_at_millis":123,
+        "actor":"operator","assignment_id":null,"message":"verified","created_at_millis":123,
+        "attempt_id":"manual-fixture","generation":1,"evidence":{"kind":"repository","repository":"test/project","commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
         "revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","dirty":false,"invalidation":null,"comparison":"matching"},
         "current_verdict":"pass","project":"test/project"})
 }
@@ -38,7 +39,8 @@ async fn assignment_check_cli_uses_typed_own_task_routes_and_protected_credentia
                 assert_eq!(p["verdict"], "pass");
                 assert_eq!(p["message"], "verified from stdin");
                 assert_eq!(p["dirty"], false);
-                check()
+                return Json(serde_json::json!({"jsonrpc":"2.0","id":r["id"],"error":{
+                    "code":-32001,"message":"sentinel-secret must not leak","data":"attempt-required"}}));
             }
             "assignment_checkInvalidate" => {
                 assert_eq!(p["assessmentId"], 4);
@@ -105,7 +107,7 @@ async fn assignment_check_cli_uses_typed_own_task_routes_and_protected_credentia
     assert!(output.status.success());
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(text.contains("Next cursor: 10"));
-    assert!(text.contains("assigned"));
+    assert!(text.contains("operator"));
     let output = run(
         &[
             "assess",
@@ -122,11 +124,8 @@ async fn assignment_check_cli_uses_typed_own_task_routes_and_protected_credentia
         ],
         Some("verified from stdin"),
     );
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("attempt-required"));
     let output = run(
         &[
             "invalidate",

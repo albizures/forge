@@ -1,3 +1,5 @@
+#[path = "support/manual_cli.rs"]
+mod manual_cli;
 use forge_app::{Application, WorkspaceRepository};
 use forge_server::{Daemon, GitInspector, router};
 use forge_store::SqliteProjectRepository;
@@ -97,22 +99,7 @@ async fn operator_findings_retain_explanations_and_block_completion_over_rpc() {
     assert!(!blocked.status.success());
     let error = String::from_utf8_lossy(&blocked.stderr);
     assert!(error.contains("Check IDs:") && error.contains("Finding IDs:"));
-    json(run(&[
-        "record",
-        "check",
-        "assess",
-        &task,
-        &check,
-        "--verdict",
-        "pass",
-        "--expected-version",
-        "1",
-        "--actor",
-        "operator",
-        "--message",
-        "Verified implementation",
-        "--json",
-    ]));
+    manual_cli::pass(&run, &task, check.parse().unwrap(), root.path());
     assert!(!run(&["record", "done", &task]).status.success());
     let list = json(run(&[
         "record", "finding", "list", &task, "--limit", "1", "--json",

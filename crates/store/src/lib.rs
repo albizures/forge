@@ -21,6 +21,7 @@ use rusqlite::{Connection, ErrorCode, OptionalExtension, params};
 mod check_templates;
 mod checks;
 mod findings;
+mod outcomes;
 mod record_workspaces;
 mod schema_compatibility;
 mod workspace_dispatch;
@@ -225,6 +226,7 @@ impl SqliteProjectRepository {
             )
             .map_err(storage_error)?;
         checks::schema(connection)?;
+        outcomes::schema(connection)?;
         findings::schema(connection)?;
         check_templates::schema(connection)?;
         migrate_record_status_schema(connection)?;
@@ -1216,6 +1218,33 @@ impl RecordRepository for SqliteProjectRepository {
         load_record(&connection, id)
     }
 
+    fn record_work_state(
+        &self,
+        record: u64,
+    ) -> Result<forge_app::outcomes::WorkState, RegistrationError> {
+        self.work_state(record)
+    }
+    fn begin_record_attempt(
+        &self,
+        record: u64,
+        input: &forge_app::outcomes::AttemptInput,
+    ) -> Result<forge_app::outcomes::Attempt, RegistrationError> {
+        self.begin_attempt(record, input)
+    }
+    fn submit_record_outcome(
+        &self,
+        record: u64,
+        input: &forge_app::outcomes::OutcomeInput,
+    ) -> Result<forge_app::outcomes::AcceptedOutcome, RegistrationError> {
+        self.submit_outcome(record, input)
+    }
+    fn invalidate_record_work(
+        &self,
+        record: u64,
+        input: &forge_app::outcomes::WorkInvalidationInput,
+    ) -> Result<forge_app::outcomes::WorkState, RegistrationError> {
+        self.invalidate_work(record, input)
+    }
     fn edit_record(&self, id: u64, body: &str) -> Result<Record, RegistrationError> {
         self.record_workspace(id)?;
         let mut connection = self
@@ -1231,6 +1260,9 @@ impl RecordRepository for SqliteProjectRepository {
             .map_err(storage_error)?;
         if updated == 0 {
             return record_or_transition_error(&transaction, id);
+        }
+        if load_record(&transaction, id)?.record_type == RecordType::Task {
+            outcomes::invalidate(&transaction, id, "operator", "Task inputs edited", None)?;
         }
         insert_update(&transaction, id, RecordUpdateKind::BodyEdited)?;
         let record = load_record(&transaction, id)?;
@@ -6565,6 +6597,7 @@ mod tests {
             .open_task_under_spec("sibling", spec.id, vec![])
             .unwrap();
         store.start_record(task.id).unwrap();
+        check_tests::assess(&store, task.id, forge_app::checks::Verdict::Pass);
         store
             .create_agent_assignment(&NewAgentAssignment {
                 id: "attempt".into(),
@@ -6595,7 +6628,6 @@ mod tests {
         );
         assignment_add_comment(&store, "attempt", "cap-1", "comment-2", task.id, "finished")
             .unwrap();
-        check_tests::assess(&store, task.id, forge_app::checks::Verdict::Pass);
         assignment_complete_task(
             &store,
             "attempt",

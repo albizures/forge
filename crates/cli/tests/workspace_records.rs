@@ -1,3 +1,5 @@
+#[path = "support/manual_cli.rs"]
+mod manual_cli;
 use forge_app::{Application, Project, ProjectRepository, RecordRepository, WorkspaceRepository};
 use forge_rpc::{RecordApiClient, RecordIdRequest, RecordSelection, SelectedRecordRequest};
 use forge_server::{Daemon, GitInspector, router};
@@ -437,25 +439,12 @@ async fn record_commands_and_rpc_are_confined_by_explicit_or_client_cwd_selectio
             ],
             &two,
         ));
-        json(run(
-            &[
-                "record",
-                "check",
-                "assess",
-                &task_id,
-                &check["id"].to_string(),
-                "--expected-version",
-                &check["version"].to_string(),
-                "--verdict",
-                "pass",
-                "--actor",
-                "test operator",
-                "--message",
-                "Fixture deliverables verified",
-                "--json",
-            ],
+        manual_cli::pass(
+            |args| run(args, &one),
+            &task_id,
+            check["id"].as_u64().unwrap(),
             &one,
-        ));
+        );
     }
     json(run(
         &[

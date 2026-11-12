@@ -16,6 +16,9 @@ pub enum Verdict {
 pub struct Assessment {
     /// Present only for capability-authenticated mutations; None denotes operator attribution.
     pub assignment_id: Option<String>,
+    pub attempt_id: String,
+    pub generation: u64,
+    pub evidence: crate::outcomes::Evidence,
     pub id: u64,
     pub check_id: u64,
     pub verdict: Verdict,
@@ -299,10 +302,10 @@ impl Application {
     ) -> Result<CheckPage, RegistrationError> {
         self.records.show_record_check(task, check, after, limit)
     }
-    /// Append an attributed pass/fail Assessment at the observed version.
+    /// Reject unbound Assessments; use an evidence-bound Manual attempt/outcome instead.
     ///
     /// # Errors
-    /// Rejects invalid input, stale versions, Done Tasks, or inaccessible Checks.
+    /// Returns `attempt-required` after normal input, ownership and version validation.
     pub fn assess_record_check(
         &self,
         task: u64,

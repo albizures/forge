@@ -251,16 +251,31 @@ fn every_existing_record_kind_inherits_one_workspace_and_keeps_local_relationshi
     one.done_record(grilling.id, Some("decided")).unwrap();
     one.start_record(task.id).unwrap();
     for check in one.list_record_checks(task.id).unwrap() {
-        one.assess_record_check(
+        let evidence = forge_app::outcomes::Evidence::Artifact {
+            uri: "urn:fixture:deliverable".into(),
+            sha256: "a".repeat(64),
+        };
+        let id = format!("fixture-{}", check.id);
+        one.begin_record_attempt(
             task.id,
-            check.id,
-            &forge_app::checks::AssessmentInput {
-                expected_version: check.version,
+            &forge_app::outcomes::AttemptInput {
+                id: id.clone(),
+                check_id: check.id,
+                generation: 1,
+                evidence: evidence.clone(),
+                actor: "operator".into(),
+            },
+        )
+        .unwrap();
+        one.submit_record_outcome(
+            task.id,
+            &forge_app::outcomes::OutcomeInput {
+                attempt_id: id,
+                generation: 1,
+                evidence,
                 verdict: forge_app::checks::Verdict::Pass,
-                actor: "test operator".into(),
+                actor: "operator".into(),
                 message: "Fixture deliverables verified".into(),
-                revision: None,
-                dirty: None,
             },
         )
         .unwrap();

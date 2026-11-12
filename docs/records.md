@@ -103,10 +103,9 @@ Check IDs, names, descriptions and ordering cannot be edited or removed.
 ```sh
 forge record check list 44 --workspace personal --json
 forge record check show 44 1 --limit 50 --workspace personal --json
-forge record check assess 44 1 --verdict pass --expected-version 1 \
-  --actor reviewer --message 'Deliverables verified' --workspace personal --json
-forge record check assess 44 1 --verdict fail --expected-version 2 \
-  --actor reviewer --message-file explanation.md --workspace personal
+forge record check work 44 --workspace personal --json
+forge record check begin 44 --input-file attempt.json --workspace personal --json
+forge record check outcome 44 --input-file outcome.json --workspace personal --json
 forge record check invalidate 44 1 --assessment 7 --expected-version 3 \
   --actor reviewer --message 'Evidence withdrawn' --workspace personal --json
 forge record check show 44 1 --compare-revision aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
@@ -121,30 +120,31 @@ constraints still apply. Completion never fabricates an Assessment. Assessments
 and invalidations are frozen once the Task is Done (`record-done`). Other Record
 Types are unchanged.
 
-Each immutable Assessment retains its numeric ID, verdict (`pass` or `fail`),
-actor, explanation and timestamp. The latest Assessment alone is authoritative:
-a new fail supersedes an older pass. List/show and successful assessment return
-the observed Check `version`; assessment requires `--expected-version`. A stale
-write returns `stale-version` without changing verdict, version, history or Update
-Log. Each successful assessment atomically adds a minimal `check-assessed` Record
-Update referring to its Assessment ID, not a copy of the explanation.
+Each immutable Assessment retains its numeric ID, verdict, actor, explanation,
+timestamp, attempt ID, generation and immutable evidence. Only its current,
+not-invalidated verdict counts. Each accepted outcome atomically adds its Assessment,
+activity, Check version, output evidence and `check-assessed` Record Update, and
+closes the attempt with a durable replay result. Unsupported unbound `check assess`
+and Assignment `check assess` operations return `attempt-required`; they cannot
+manufacture passing evidence.
 
 `invalidate` requires the observed Check version and `--assessment` ID. Only the
 latest, not-yet-invalidated Assessment may be invalidated (`invalid-transition`
 otherwise). It appends attributed invalidation metadata and activity, preserving
-the original Assessment payload. The Check becomes pending: an older pass never
-revives. A new Assessment establishes a new verdict. Invalidation, version increment,
-activity and minimal `check-invalidated` Record Update (referencing the Assessment)
-commit together. Failed or stale attempts leave no partial history or Update Log.
-Invalidation accepts the same explanation, actor and optional evidence inputs as
-assessment. Repeating it at the old version is stale; at the current version it is
-an invalid transition.
+the original Assessment payload. Invalidation conservatively invalidates **all**
+current Checks, clears output evidence, advances the Task's freshness generation,
+and closes outstanding attempts, even at an unchanged commit. An older pass never
+revives. These changes, activities and `check-invalidated` updates commit together.
+Invalidation accepts attribution, explanation and optional revision/dirty annotations.
+Repeating it at the old version is stale; at the current version it is an invalid
+transition. `invalidate-work` below also works when there is no current Assessment.
 
 Operators must supply a nonblank `--actor` and exactly one of `--message` or
 `--message-file`. Explanations must be nonblank; `--message-file -` reads stdin.
-Optional caller-reported `--revision` accepts a full 40-hex commit SHA and `--dirty
-true|false` distinguishes a known state from omitted/unknown state. Evidence is
-retained without fetching Git data, running commands or changing verdict authority.
+For Check invalidation annotations, optional `--revision` accepts a full 40-hex
+commit SHA and `--dirty true|false` distinguishes known from unknown state. Outcomes
+instead require the immutable evidence object below. Evidence is caller-attested;
+Forge does not fetch artifacts, inspect Git or independently certify their contents.
 List/show accept explicit `--compare-revision` (a full SHA). Assessment and invalidation
 `comparison` is `matching`, `mismatching` or `unknown`, separate from `dirty`.
 Matching is case-insensitive SHA equality within the Task's Project context;
@@ -169,16 +169,77 @@ current `checks` summaries, never history; its text output labels pending Checks
 
 Typed operator RPC additions are `record_recordCheckList` (`record`, optional `compare_revision`),
 `record_recordCheckShow` (`record`, `check`, `after`, `limit`, optional `compare_revision`),
-`record_recordCheckAssess` (`record`, `check`, `assessment`) and
 `record_recordCheckInvalidate` (`record`, `check`, `invalidation`). Each uses the flattened
-Workspace/cwd selection envelope. Assessment input contains `expected_version`,
-`verdict`, `actor`, `message`, optional `revision` and optional `dirty`. Responses
-are respectively a Check array, `{check, assessments, activities, next_cursor}`, and
-an updated Check for either mutation (including its latest Assessment). Invalidation
-input replaces `verdict` with `assessment_id`, retaining the other Assessment input
-fields. Invalid attribution/evidence, wrong Record
-type or Check ownership, stale versions, frozen Tasks and completion blockers have
-distinct error categories. Assignment completion shares these gates.
+Workspace/cwd selection envelope. Responses are a Check array, a bounded Check page,
+and an updated Check. Invalidation input contains `expected_version`, `assessment_id`,
+`actor`, `message`, optional `revision` and `dirty`. The former unbound
+`record_recordCheckAssess` method remains a rejecting diagnostic boundary, not a
+supported way to create Assessments.
+
+### Manual attempts and immutable evidence
+
+Start the Task explicitly, then inspect `record check work <record>`. Freshness starts
+at generation 1. No Managed Worktree, Agent Profile or provider launch is needed.
+Execution Mode and full ownership/completion gates are delivered by the subsequent
+mode/completion slices; existing open Assignment ownership already rejects new Manual
+attempts. These commands do not retire ownership, reconcile resources or clear holds.
+Task dispatch remains fail-closed with `task-dispatch-unsupported-contract`.
+
+`attempt.json` (use the actual Check ID and observed generation):
+
+```json
+{"id":"report-implementation-1","check_id":1,"generation":1,"actor":"operator",
+ "evidence":{"kind":"artifact","uri":"urn:report:input","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}
+```
+
+An attempt permanently binds its ID, Task, Check, generation, actor, input evidence
+and Task body. Only one attempt per Task may be open. An Implementation attempt binds
+the current input; reviews bind the passing Implementation's output and may proceed
+only after every earlier Check passes. Reusing an ID with different bindings returns
+`attempt-conflict`. A failed Implementation retains its explanation/history and cannot
+advance reviews; a new attempt can retry it. A passing Check requires invalidation
+before reassessment.
+
+`outcome.json`:
+
+```json
+{"attempt_id":"report-implementation-1","generation":1,"verdict":"pass",
+ "actor":"operator","message":"Verified the completed report",
+ "evidence":{"kind":"artifact","uri":"urn:report:final","sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}
+```
+
+Implementation may produce different output evidence. Reviews must repeat the output
+evidence they bound at attempt start. Repository evidence is also supported:
+`{"kind":"repository","repository":"personal/project","commit":"<full 40-hex SHA>"}`.
+An artifact requires a nonblank URI plus full 64-hex SHA-256; mutable URLs or paths alone
+are insufficient. `--input-file -` reads strict JSON from stdin. Unknown fields are
+rejected, including unsupported partial Finding/handback fields; that atomic extension
+belongs to the next slice.
+
+`record check outcome` returns `{attempt, evidence, check}`. Exact replay returns the
+**original** result even after closure, invalidation, Done and restart. Conflicting
+replay returns `outcome-conflict`. Replay never restores historical freshness.
+New stale/unauthorized outcomes cause no Assessment, activity, output or acceptance
+writes. Actor is operator attribution, not a replacement for Workspace authorization;
+Assignment capabilities cannot submit these operator-owned Manual attempts.
+
+To change inputs/deliverables or explicitly invalidate at the same commit:
+
+```sh
+forge record check invalidate-work 44 --input-file invalidation.json --workspace personal --json
+```
+
+The JSON fields are `generation`, `evidence` (new immutable input), `actor`, `message`.
+Editing the Task body also advances freshness and invalidates all current Assessments.
+`work` exposes input/output evidence, generation and the latest invalidation's attribution.
+Accepted outcomes remain history; old-generation unaccepted submissions return
+`stale-generation`. Rerun Implementation and reviews in fixed order. Passing the final
+Check does **not** complete the Task: a human must still request `record done`.
+
+The operator RPC methods are `record_recordWorkState` (`record`),
+`record_recordAttemptBegin` (`record`, `attempt`), `record_recordOutcomeSubmit`
+(`record`, `outcome`), and `record_recordWorkInvalidate` (`record`, `invalidation`),
+using the same strict flattened selection envelope and Task-only ownership rules.
 
 ## Record Findings (Task review cycles)
 
@@ -331,14 +392,13 @@ messages, secrets, or delivery endpoints.
 ```sh
 forge assignment check list --compare-revision aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --json
 forge assignment check show 3 --after 9 --limit 50 --json
-forge assignment check assess 3 --verdict pass --expected-version 1 --message 'Verified deliverables' --dirty false --json
 forge assignment check invalidate 3 --assessment 4 --expected-version 2 --message-file - --json
 ```
 
 These use only protected Assignment delivery (`FORGE_ASSIGNMENT_ID`,
 `FORGE_ASSIGNMENT_DAEMON_URL`, `FORGE_ASSIGNMENT_CAPABILITY_SECRET_FILE`), not
 operator Workspace selection or endpoint overrides. No Task selector or `--actor`
-is accepted: all four operations implicitly target the authenticated Assignment's
+is accepted: these operations implicitly target the authenticated Assignment's
 Task. They grant no template mutation or arbitrary cross-Task access, even to
 Checks of Records readable through the existing one-hop context API. Grilling
 Assignments cannot operate on Task Checks. Every operation revalidates delivery
@@ -348,8 +408,8 @@ without extending or reviving capability lifetime.
 
 The same input, evidence, pagination, version, transaction and completion rules
 apply as for operators. Mutations require exactly one nonblank `--message` or
-`--message-file` (including stdin via `-`). Both Assessments and invalidations
-retain `actor` derived from authenticated Assignment identity and a separate
+`--message-file` (including stdin via `-`). Invalidations retain `actor` derived
+from authenticated Assignment identity and a separate
 `assignment_id` provenance field; operator mutations have `assignment_id: null`,
 even if the supplied actor text happens to equal an Assignment ID. The immutable
 Assignment retains its profile/execution provenance. Attribution is not an
@@ -357,7 +417,8 @@ independent reviewer identity registry. Text and JSON expose current state and
 bounded history using the same views as operator Check commands.
 
 Typed RPCs are `assignment_checkList`, `assignment_checkShow`,
-`assignment_checkAssess`, and `assignment_checkInvalidate`. All requests contain
+and `assignment_checkInvalidate`. Unbound `assignment_checkAssess` rejects with
+`attempt-required`; Check-bound live Assignment outcomes are not enabled in this release. All requests contain
 `assignmentId` and `secret` (never Debug-logged). List adds optional
 `compareRevision`; show adds `check`, `after`, `limit` and optional
 `compareRevision`. Assessment adds `check`, `expectedVersion`, `verdict`, `message`,

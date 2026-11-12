@@ -406,6 +406,7 @@ fn authenticated_pages_are_complete_bounded_and_cursor_bound() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn authenticated_actions_require_acknowledgement_and_normal_lifecycle_validation() {
     let (fixture, assignment, prerequisite) = assignment_test_daemon();
     let root = fixture.database_path.with_extension("lifecycle-secrets");
@@ -455,20 +456,62 @@ fn authenticated_actions_require_acknowledgement_and_normal_lifecycle_validation
         session.done(Some("  "), None).unwrap_err().code,
         "invalid-resolution"
     );
-    assert_eq!(session.done(Some("implemented"), None).unwrap_err().code, "checks-not-passed");
+    let check = store.list_record_checks(owner).unwrap().remove(0);
+    assert_eq!(
+        store
+            .begin_record_attempt(
+                owner,
+                &forge_app::outcomes::AttemptInput {
+                    id: "cannot-take-over-agent".into(),
+                    check_id: check.id,
+                    generation: 1,
+                    evidence: forge_app::outcomes::Evidence::Artifact {
+                        uri: "urn:fixture:deliverable".into(),
+                        sha256: "a".repeat(64)
+                    },
+                    actor: "operator".into(),
+                }
+            )
+            .unwrap_err()
+            .code,
+        "assignment-active"
+    );
     check_tests::pass_checks(&store, owner);
-    let finding = store.raise_record_finding(owner, &forge_app::findings::FindingRaiseInput {
-        severity: forge_app::findings::Severity::Critical, blocking: None,
-        check_id: None, assessment_id: None, actor: "reviewer".into(),
-        message: "Missing validation".into(), revision: None, dirty: None,
-    }).unwrap();
+    let finding = store
+        .raise_record_finding(
+            owner,
+            &forge_app::findings::FindingRaiseInput {
+                severity: forge_app::findings::Severity::Critical,
+                blocking: None,
+                check_id: None,
+                assessment_id: None,
+                actor: "reviewer".into(),
+                message: "Missing validation".into(),
+                revision: None,
+                dirty: None,
+            },
+        )
+        .unwrap();
     let blocked = session.done(Some("implemented"), None).unwrap_err();
     assert_eq!(blocked.code, "completion-blocked");
-    assert!(blocked.message.contains(&format!("Finding IDs: [{}]", finding.id)));
-    store.resolve_record_finding(owner, finding.id, &forge_app::findings::FindingResolveInput {
-        expected_version: 1, actor: "verifier".into(), message: "Verified correction".into(),
-        revision: None, dirty: None,
-    }).unwrap();
+    assert!(
+        blocked
+            .message
+            .contains(&format!("Finding IDs: [{}]", finding.id))
+    );
+    store
+        .resolve_record_finding(
+            owner,
+            finding.id,
+            &forge_app::findings::FindingResolveInput {
+                expected_version: 1,
+                actor: "verifier".into(),
+                message: "Verified correction".into(),
+                revision: None,
+                dirty: None,
+            },
+        )
+        .unwrap();
     session.done(Some("implemented"), None).unwrap();
     assert!(session.start().is_err());
     std::fs::remove_dir_all(root).unwrap();
