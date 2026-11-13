@@ -191,10 +191,11 @@ async fn exercise_launch() {
         "---\nname: entry\ndescription: entry\n---\nskill body",
     )
     .unwrap();
-    std::fs::write(skill.join("forge-agent.md"), "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\ntools: []\n---\nFROZEN GRILLING BEHAVIOR").unwrap();
+    std::fs::create_dir_all(workspace.join(".agents/profiles")).unwrap();
+    std::fs::write(workspace.join(".agents/profiles/grilling.md"), "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\ntools: []\n---\nFROZEN GRILLING BEHAVIOR").unwrap();
     let policy = forge_app::agent_profiles::ResourceCatalog::discover(&fixture.0, &workspace)
         .unwrap()
-        .resolve(&workspace, ".agents/skills/entry/forge-agent.md")
+        .resolve(&workspace, ".agents/profiles/grilling.md")
         .unwrap();
     let profile = store
         .register_agent_profile("test", RecordType::Grilling, &policy)

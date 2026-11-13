@@ -28,10 +28,12 @@ fn registered_policy_survives_reopen_and_lifecycle_revision_without_selection() 
         "---\nname: entry\ndescription: entry\n---\nSkill",
     )
     .unwrap();
-    std::fs::write(skill.join("forge-agent.md"), "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\ntools: [read]\nskills: [{name: entry}]\nextensions: [{name: entry}]\nmcpServers: [{name: local}]\n---\nUse entry.\n").unwrap();
+    std::fs::create_dir_all(workspace.join(".agents/profiles")).unwrap();
+    let source = workspace.join(".agents/profiles/entry.md");
+    std::fs::write(&source, "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\ntools: [read]\nskills: [{name: entry}]\nextensions: [{name: entry}]\nmcpServers: [{name: local}]\n---\nUse entry.\n").unwrap();
     let policy = ResourceCatalog::discover(&fixture.0.join("two"), &workspace)
         .unwrap()
-        .resolve(&workspace, ".agents/skills/entry/forge-agent.md")
+        .resolve(&workspace, ".agents/profiles/entry.md")
         .unwrap();
     let registered = {
         let store = fixture.open();
@@ -56,7 +58,7 @@ fn registered_policy_survives_reopen_and_lifecycle_revision_without_selection() 
         );
         registered
     };
-    std::fs::remove_file(skill.join("forge-agent.md")).unwrap();
+    std::fs::remove_file(&source).unwrap();
     let store = fixture.open();
     assert_eq!(
         store

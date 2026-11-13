@@ -68,10 +68,11 @@ impl Fixture {
             "---\nname: profile\ndescription: profile\n---\nVerify work.\n",
         )
         .unwrap();
-        std::fs::write(workspace.join(".agents/skills/profile/forge-agent.md"), "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\ntools: [read]\n---\nVerify deliverables.\n").unwrap();
+        std::fs::create_dir_all(workspace.join(".agents/profiles")).unwrap();
+        std::fs::write(workspace.join(".agents/profiles/verify.md"), "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\ntools: [read]\n---\nVerify deliverables.\n").unwrap();
         let policy = ResourceCatalog::discover(&self.root.join("operator"), &workspace)
             .unwrap()
-            .resolve(&workspace, ".agents/skills/profile/forge-agent.md")
+            .resolve(&workspace, ".agents/profiles/verify.md")
             .unwrap();
         let profile = self
             .store

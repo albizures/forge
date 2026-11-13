@@ -38,7 +38,7 @@ impl Fixture {
             "catalog/.agents/skills/chosen/SKILL.md",
             "---\nname: chosen\ndescription: chosen-description\n---\nSKILL_BODY_NOT_PRELOADED\n",
         );
-        self.write("catalog/.agents/skills/chosen/forge-agent.md", &format!(
+        self.write("catalog/.agents/profiles/chosen.md", &format!(
             "---\nversion: 1\nruntime: herdr/pi\nmodel: forge-test/fixture\ntools: {tools}\n{resources}---\nPRIVATE_REGISTERED_BEHAVIOR\n"
         ));
         self.write("catalog/.pi/extensions/chosen.mjs", &format!(
@@ -51,10 +51,7 @@ impl Fixture {
         )
         .unwrap();
         let policy = catalog
-            .resolve(
-                &self.0.join("catalog"),
-                ".agents/skills/chosen/forge-agent.md",
-            )
+            .resolve(&self.0.join("catalog"), ".agents/profiles/chosen.md")
             .unwrap();
         let store = forge_store::SqliteProjectRepository::in_memory().unwrap();
         let mut profile = store.agent_profile(RecordType::Task, 1).unwrap();
@@ -77,17 +74,14 @@ fn pi_flags_drift_and_unsupported_mcp_fail_before_provider_or_provision_intent()
         let mut profile = fixture.profile(true);
         if mcp {
             fixture.write("catalog/.pi/mcp.json", r#"{"mcpServers":{"selected":{"command":"unused","env":{"KEY":"CREDENTIAL_SENTINEL"}}}}"#);
-            fixture.write("catalog/.agents/skills/chosen/forge-agent.md", "---\nversion: 1\nruntime: herdr/pi\nmodel: forge-test/fixture\ntools: []\nmcpServers: [{name: selected}]\n---\nPRIVATE_REGISTERED_BEHAVIOR\n");
+            fixture.write("catalog/.agents/profiles/chosen.md", "---\nversion: 1\nruntime: herdr/pi\nmodel: forge-test/fixture\ntools: []\nmcpServers: [{name: selected}]\n---\nPRIVATE_REGISTERED_BEHAVIOR\n");
             profile.launch_policy = Some(
                 forge_app::agent_profiles::ResourceCatalog::discover(
                     &fixture.0.join("home"),
                     &fixture.0.join("catalog"),
                 )
                 .unwrap()
-                .resolve(
-                    &fixture.0.join("catalog"),
-                    ".agents/skills/chosen/forge-agent.md",
-                )
+                .resolve(&fixture.0.join("catalog"), ".agents/profiles/chosen.md")
                 .unwrap(),
             );
         } else {

@@ -60,7 +60,7 @@ impl std::fmt::Debug for ResolvedLaunchPolicy {
     }
 }
 impl ResolvedLaunchPolicy {
-    /// Recheck only selected entry files and frozen MCP configuration, never companion
+    /// Recheck only selected entry files and frozen MCP configuration, never profile source
     /// Markdown or supporting files. Existing Assignment operations must not call this.
     /// # Errors
     /// Missing or changed direct inputs reject a new launch or supported reload.
@@ -181,7 +181,8 @@ impl ResourceCatalog {
         Ok(catalog)
     }
 
-    /// Resolve the companion from the selected Workspace, not the client cwd.
+    /// Resolve a Markdown profile beneath the selected Workspace's .agents/profiles,
+    /// not the client cwd. Resource references remain relative to the document.
     /// # Errors
     /// Rejects missing, ambiguous, or nonmember references without substitution.
     pub fn resolve(
@@ -192,15 +193,29 @@ impl ResourceCatalog {
         if !workspace.is_absolute() {
             return Err("Workspace root must be absolute".into());
         }
-        let path = workspace.join(document);
-        if path.file_name().is_none_or(|name| name != "forge-agent.md")
-            || !path.with_file_name("SKILL.md").is_file()
-        {
-            return Err("expected forge-agent.md beside SKILL.md".into());
+        let workspace = workspace
+            .canonicalize()
+            .map_err(|_| "Workspace root unavailable")?;
+        let profiles = workspace.join(".agents/profiles");
+        let canonical_profiles = profiles
+            .canonicalize()
+            .map_err(|_| "profile directory unavailable")?;
+        // Do not let the designated directory (or its .agents parent) redirect
+        // elsewhere, even inside the Workspace: that could broaden containment
+        // to the entire Workspace or a skill directory.
+        if canonical_profiles != profiles {
+            return Err("profile directory must not redirect outside .agents/profiles".into());
         }
-        let path = path
+        let path = workspace
+            .join(document)
             .canonicalize()
             .map_err(|_| "profile document unavailable")?;
+        if !path.starts_with(&canonical_profiles)
+            || path.extension().is_none_or(|extension| extension != "md")
+            || !path.is_file()
+        {
+            return Err("expected a Markdown file within .agents/profiles".into());
+        }
         let document = ProfileDocument::parse(
             &fs::read_to_string(&path).map_err(|_| "profile document unavailable")?,
         )?;

@@ -205,7 +205,7 @@ The bounded Forge information an Agent Assignment may read, combining its bound 
 _Avoid_: project visibility, record graph access, execution snapshot
 
 **Agent Profile**:
-An immutable, revisioned Forge-owned configuration for a Record Type containing agent launch policy and behavioral instructions, subordinate to Forge-owned execution and lifecycle rules. Task Checks pin their revisions through Check Templates, while Forge Workspaces select Grilling revisions; each Agent Assignment retains its bound revision, freezing configuration and behavior rather than the complete runtime or resource filesystem.
+An immutable, revisioned Forge-owned configuration for a Record Type containing agent launch policy and role-specific behavioral instructions, subordinate to Forge-owned execution and lifecycle rules. It may select zero or more reusable Skills but does not belong to a Skill. Task Checks pin their revisions through Check Templates, while Forge Workspaces select Grilling revisions; each Agent Assignment retains its bound revision, freezing configuration and behavior rather than the complete runtime or resource filesystem.
 _Avoid_: agent configuration, mutable profile, record profile
 
 **Agent Workspace**:

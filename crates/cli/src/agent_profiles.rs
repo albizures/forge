@@ -17,7 +17,7 @@ impl RecordType {
 }
 #[derive(Debug, Args)]
 #[command(
-    after_long_help = "Requires explicit --workspace. Document paths resolve from that Workspace root, not cwd; resource paths resolve from the document directory. Preview does not execute extensions, connect MCP servers, register or select. Registration creates an immutable revision without selecting it. Use dispatcher config set task-profile|grilling-profile <revision> to select explicitly. Runtime support is checked separately before dispatch."
+    after_long_help = "Requires explicit --workspace. Documents must be .md files beneath that Workspace's .agents/profiles/ directory (nested folders allowed); canonical containment rejects symlink escapes. Document paths resolve from that Workspace root, not cwd; resource paths resolve from the document directory. Profiles are independent of Skills and select them explicitly. Preview does not execute extensions, connect MCP servers, register or select. Registration creates an immutable revision without selecting it. Use dispatcher config set task-profile|grilling-profile <revision> to select explicitly. Runtime support is checked separately before dispatch."
 )]
 pub struct AgentProfileArgs {
     #[command(subcommand)]

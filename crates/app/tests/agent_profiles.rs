@@ -14,24 +14,23 @@ fn resolves_workspace_catalog_and_checks_only_selected_direct_inputs() {
         )
         .unwrap();
     }
-    let document = workspace.join(".agents/skills/entry/forge-agent.md");
+    fs::create_dir_all(workspace.join(".agents/profiles")).unwrap();
+    let document = workspace.join(".agents/profiles/implementation.md");
     fs::write(&document, "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\ntools: []\nskills: [{name: entry}]\n---\nBehavior").unwrap();
     let catalog = ResourceCatalog::discover(&operator, &workspace).unwrap();
     assert!(
         catalog
-            .resolve(&workspace, ".agents/skills/entry/forge-agent.md")
+            .resolve(&workspace, ".agents/profiles/implementation.md")
             .is_err()
     );
-    fs::write(&document, "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\ntools: []\nskills: [{path: SKILL.md}]\n---\nBehavior").unwrap();
+    fs::write(&document, "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\ntools: []\nskills: [{path: ../skills/entry/SKILL.md}]\n---\nBehavior").unwrap();
     let policy = catalog
-        .resolve(&workspace, ".agents/skills/entry/forge-agent.md")
+        .resolve(&workspace, ".agents/profiles/implementation.md")
         .unwrap();
     assert_eq!(
         policy.skills[0].path,
-        document
-            .parent()
-            .unwrap()
-            .join("SKILL.md")
+        workspace
+            .join(".agents/skills/entry/SKILL.md")
             .canonicalize()
             .unwrap()
     );
@@ -39,10 +38,10 @@ fn resolves_workspace_catalog_and_checks_only_selected_direct_inputs() {
     fs::remove_file(&document).unwrap();
     policy.validate_direct_inputs().unwrap();
     assert_eq!(policy.behavior, "Behavior");
-    fs::write(document.parent().unwrap().join("SKILL.md"), "changed").unwrap();
+    fs::write(workspace.join(".agents/skills/entry/SKILL.md"), "changed").unwrap();
     assert!(policy.validate_direct_inputs().is_err());
     fs::write(
-        document.parent().unwrap().join("SKILL.md"),
+        workspace.join(".agents/skills/entry/SKILL.md"),
         "---\nname: entry\ndescription: entry\n---\nSkill",
     )
     .unwrap();
@@ -56,7 +55,7 @@ fn catalog_membership_is_canonical_and_cannot_be_granted_by_a_path() {
     let workspace = root.path().join("workspace");
     let outside = root.path().join("outside");
     fs::create_dir_all(operator.join(".agents/skills")).unwrap();
-    fs::create_dir_all(&workspace).unwrap();
+    fs::create_dir_all(workspace.join(".agents/profiles")).unwrap();
     fs::create_dir_all(&outside).unwrap();
     fs::write(
         outside.join("SKILL.md"),
@@ -72,11 +71,11 @@ fn catalog_membership_is_canonical_and_cannot_be_granted_by_a_path() {
         "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\ntools: []\nskills: [{{path: '{}'}}]\n---\nBehavior",
         outside.display()
     );
-    fs::write(workspace.join("forge-agent.md"), document).unwrap();
+    fs::write(workspace.join(".agents/profiles/external.md"), document).unwrap();
     assert!(
         ResourceCatalog::discover(&operator, &workspace)
             .unwrap()
-            .resolve(&workspace, "forge-agent.md")
+            .resolve(&workspace, ".agents/profiles/external.md")
             .is_err()
     );
     #[cfg(unix)]
@@ -84,15 +83,19 @@ fn catalog_membership_is_canonical_and_cannot_be_granted_by_a_path() {
         std::os::unix::fs::symlink(&outside, operator.join(".agents/skills/alias")).unwrap();
         std::os::unix::fs::symlink(&outside, operator.join(".agents/skills/duplicate")).unwrap();
         let catalog = ResourceCatalog::discover(&operator, &workspace).unwrap();
-        let policy = catalog.resolve(&workspace, "forge-agent.md").unwrap();
+        let policy = catalog
+            .resolve(&workspace, ".agents/profiles/external.md")
+            .unwrap();
         assert_eq!(policy.skills.len(), 1);
         assert_eq!(
             policy.skills[0].path,
             outside.join("SKILL.md").canonicalize().unwrap()
         );
-        fs::write(workspace.join("forge-agent.md"), "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\ntools: []\nskills: [{name: external}]\n---\nBehavior").unwrap();
+        fs::write(workspace.join(".agents/profiles/external.md"), "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\ntools: []\nskills: [{name: external}]\n---\nBehavior").unwrap();
         assert_eq!(
-            catalog.resolve(&workspace, "forge-agent.md").unwrap(),
+            catalog
+                .resolve(&workspace, ".agents/profiles/external.md")
+                .unwrap(),
             policy
         );
     }
@@ -117,10 +120,11 @@ fn freezes_mcp_configuration_but_detects_extension_entry_drift() {
         r#"{"mcpServers":{"local":{"command":"never-connect","args":[]}}}"#,
     )
     .unwrap();
-    fs::write(root.path().join("forge-agent.md"), "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\ntools: []\nextensions: [{name: entry}]\nmcpServers: [{name: local}]\n---\nBehavior").unwrap();
+    fs::create_dir_all(root.path().join(".agents/profiles")).unwrap();
+    fs::write(root.path().join(".agents/profiles/mcp.md"), "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\ntools: []\nextensions: [{name: entry}]\nmcpServers: [{name: local}]\n---\nBehavior").unwrap();
     let policy = ResourceCatalog::discover(root.path(), root.path())
         .unwrap()
-        .resolve(root.path(), "forge-agent.md")
+        .resolve(root.path(), ".agents/profiles/mcp.md")
         .unwrap();
     assert_eq!(
         policy.mcp_servers[0].configuration["command"],
@@ -152,9 +156,11 @@ fn extension_directories_select_the_entry_not_supporting_modules() {
     )
     .unwrap();
     let document = "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\ntools: []\nextensions: [{name: plugin}]\n---\nBehavior";
-    fs::write(root.path().join("forge-agent.md"), document).unwrap();
+    fs::create_dir_all(root.path().join(".agents/profiles")).unwrap();
+    let source = root.path().join(".agents/profiles/extensions.md");
+    fs::write(&source, document).unwrap();
     let catalog = ResourceCatalog::discover(root.path(), root.path()).unwrap();
-    let policy = catalog.resolve(root.path(), "forge-agent.md").unwrap();
+    let policy = catalog.resolve(root.path(), &source).unwrap();
     assert_eq!(
         policy.extensions[0].path,
         root.path()
@@ -163,20 +169,20 @@ fn extension_directories_select_the_entry_not_supporting_modules() {
             .unwrap()
     );
     fs::write(
-        root.path().join("forge-agent.md"),
-        document.replace("name: plugin", "path: .pi/extensions/plugin"),
+        &source,
+        document.replace("name: plugin", "path: ../../.pi/extensions/plugin"),
     )
     .unwrap();
-    assert_eq!(
-        catalog.resolve(root.path(), "forge-agent.md").unwrap(),
-        policy
-    );
+    assert_eq!(catalog.resolve(root.path(), &source).unwrap(), policy);
     fs::write(
-        root.path().join("forge-agent.md"),
-        document.replace("name: plugin", "path: .pi/extensions/plugin/support.ts"),
+        &source,
+        document.replace(
+            "name: plugin",
+            "path: ../../.pi/extensions/plugin/support.ts",
+        ),
     )
     .unwrap();
-    assert!(catalog.resolve(root.path(), "forge-agent.md").is_err());
+    assert!(catalog.resolve(root.path(), &source).is_err());
 }
 
 #[test]
