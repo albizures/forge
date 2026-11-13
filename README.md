@@ -70,7 +70,7 @@ Install the skills with the [Skills CLI](https://skills.sh):
 npx skills add albizures/forge
 
 # Required extra skills
-npx skills add mattpocock/skills --skill prototype research
+npx skills add mattpocock/skills --skill prototype research grill-with-docs
 
 # Optional extra skills
 npx skills add mattpocock/skills --skill grill-me writing-for-agents improve-codebase-architecture

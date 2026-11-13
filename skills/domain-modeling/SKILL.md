@@ -57,11 +57,9 @@ When domain relationships are being discussed, stress-test them with specific sc
 
 When the user states how something works, check whether the code agrees. If you find a contradiction, surface it: "Your code cancels entire Orders, but you just said partial cancellation is possible. Which is right?"
 
-### Update GLOSSARY.md inline
+### GLOSSARY.md
 
-When a term is resolved, update `GLOSSARY.md` right there. Don't batch these up: capture them as they happen. Use the format in [GLOSSARY-FORMAT.md](./GLOSSARY-FORMAT.md).
-
-`GLOSSARY.md` should be totally devoid of implementation details. Do not treat `GLOSSARY.md` as a spec, a scratch pad, or a repository for implementation decisions. It is a glossary and nothing else.
+`GLOSSARY.md` should be totally devoid of implementation details. Do not treat `GLOSSARY.md` as a spec, a scratch pad, or a repository for implementation decisions. It is a glossary and nothing else. Use the format in [GLOSSARY-FORMAT.md](./GLOSSARY-FORMAT.md).
 
 ### Offer ADRs sparingly
 
@@ -72,3 +70,9 @@ Only offer to create an ADR when all three are true:
 3. **The result of a real trade-off**: there were genuine alternatives and you picked one for specific reasons
 
 If any of the three is missing, skip the ADR. Use the format in [ADR-FORMAT.md](./ADR-FORMAT.md).
+
+### Updates
+
+When a term is resolved, avoid updating `GLOSSARY.md` unless explicitly requested. This same rule applies to ADRs too.
+
+If the current session is a gilling session add a new `Glossary updates:` or `ADRs updates:` sections bellow the `Settled decisions:`. So the updates ca be implemented in the end or added into a spec
