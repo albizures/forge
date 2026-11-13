@@ -4,7 +4,7 @@ Synthesize settled discussion into exactly one published Forge Spec. This mode i
 
 ## 1. Gather settled context
 
-Read the conversation and any referenced Wayfinder, Grilling, or other source Records, including relevant Comments and Update Logs. A Wayfinder skill is not required: use the Forge command reference to inspect its findings directly.
+Read the conversation and any referenced Wayfinder, Grilling, or other source Records, including relevant Comments and Update Logs. A Wayfinder skill is not required: use the Forge CLI's record commands, inspecting their help for syntax.
 
 Explore the repository for missing facts. Use its domain glossary vocabulary and respect relevant ADRs. Separate settled decisions from proposals and unanswered questions.
 

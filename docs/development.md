@@ -99,6 +99,26 @@ are allocated by Forgeup rather than fixed at 45003.
 CLI status calls `system.status` over JSON-RPC/HTTP and reports failures on
 stderr, with a request timeout of at most 10 seconds.
 
+## Maintaining skills
+
+When explicitly developing Forge, inspect the source CLI with
+`cargo run -p forge-cli --bin forge -- --help` from the repository root. Installed
+skills use the installed executable instead.
+
+Keep required skill references inside their skill directory and resolve other
+skills by name. Use installed CLI help for syntax rather than duplicating the
+manual in a skill. [CLI examples](cli-examples.md) remain repository documentation.
+Their fenced `sh` blocks and those in the skills contain one complete command per
+line, with concrete illustrative arguments and shell quoting; they are parser
+fixtures, not a batch script. `cargo test -p forge-cli --bin forge documented_skill`
+checks their syntax without invoking handlers; it does not establish operational
+safety or authorization.
+
+`python3 -m unittest discover -s tests -p 'test_skill_*.py'` copies each skill into
+an isolated directory and checks local documentation links without sibling skills
+or repository docs. Fenced examples describe destination-project files rather
+than installation dependencies and are excluded from link checks.
+
 ## Verification
 
 Run from the repository root:

@@ -54,7 +54,7 @@ A list of testing decisions that were made. Include:
 
 The domain-model changes this Spec makes, written here instead of in the main checkout. Write "None" when empty.
 
-- **Glossary**: the exact Markdown blocks to add, change or remove in `CONTEXT.md` (or the context's own `CONTEXT.md`). Label each block add, change or remove.
+- **Glossary**: the exact Markdown blocks to add, change or remove in the project's domain glossary. Name the actual target document and label each block add, change or remove.
 - **ADRs**: for each, the file name (e.g. `docs/adr/0003-title.md`) and the full text.
 
 ## Out of Scope
@@ -69,7 +69,7 @@ A description of the things that are out of scope for this spec.
 
 Relevant skills:
 
-- [skills/{relevant-skill}/SKILL.md](../skills/{relevant-skill}/SKILL.md)
+- {Installed skill name} — {why the implementer needs it}. Resolve through the agent's available skills.
 
 Relevant files
 

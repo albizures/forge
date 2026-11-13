@@ -16,7 +16,7 @@ For an explicit request to define and create Tasks, run define first, then to ta
 
 ## Shared boundaries
 
-- Use [the Forge skill](../forge/SKILL.md) and its command reference for CLI revision/endpoint selection, Workspace and Project scope, relationships, and Record operations. The installed global CLI may be a different Forge Revision.
-- Use the project's domain glossary and relevant ADRs. [The Skills glossary](../CONTEXT.md) defines this workflow's terms.
+- **Required skill: `forge`.** Resolve it through the agent's available skills and read it for CLI/endpoint selection, scope, relationships, and Record operations. If unavailable, stop and ask the user to install it with `npx skills add albizures/forge --skill forge`; installation is user-controlled.
+- Use the project's domain glossary and relevant ADRs.
 - Forge owns workflow Records and relationships; change them through its public commands, not backing storage or GitHub issues.
 - These modes publish definitions and plans only. Stop after reporting the created Record IDs; Task execution, dispatch administration, worktrees, PR orchestration, and Spec completion belong outside this skill.

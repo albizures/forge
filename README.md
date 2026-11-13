@@ -79,14 +79,26 @@ npx skills add mattpocock/skills --skill grill-me writing-for-agents improve-cod
 | Skill | Description |
 | --- | --- |
 | [forge](skills/forge/SKILL.md) | Manage Forge records, worktrees, agent dispatch, and assignment recovery. |
-| [spec](skills/spec/SKILL.md) | Define, plan, and deliver a Spec through task rounds, agent assignments, and review. |
+| [spec](skills/spec/SKILL.md) | Publish a Spec or create its linear Task plan. Requires the `forge` skill. |
 | [grilling](skills/grilling/SKILL.md) | Stress-test a plan or idea through structured questions and explicit decisions. |
 | [domain-modeling](skills/domain-modeling/SKILL.md) | Clarify domain terminology, maintain a glossary, and record architectural decisions. |
+
+Each skill directory is directly installable and includes its required local
+references. To install `spec` individually, also install its named dependency:
+
+```sh
+npx skills add albizures/forge --skill spec forge
+```
+
+Agents resolve dependencies by skill name, not relative installation paths. A
+missing dependency is reported for user-controlled installation. The Forge skill
+uses installed CLI help; no Forge source checkout or online manual is required.
 
 ## Documentation
 
 | Guide | Contents |
 | --- | --- |
+| [CLI examples](docs/cli-examples.md) | Illustrative commands for repository readers; installed skills use CLI help |
 | [Workspaces](docs/workspaces.md) | Registration, selection, filesystem boundaries, and configuration ownership |
 | [Projects](docs/projects.md) | Workspace-local identities, nested main checkouts, and canonical roots |
 | [Records](docs/records.md) | Scope, lifecycle, hierarchy, and provenance |

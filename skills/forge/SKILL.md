@@ -7,15 +7,15 @@ description: "Operate Forge records, project scope, relationships, lifecycle, ma
 
 ## Select the CLI and endpoint
 
-Use the CLI matching the intended Forge Revision. When working on this repository, inspect help by running from the repository root:
+Use the installed `forge` and inspect its help before choosing commands:
 
 ```sh
-cargo run -p forge-cli --bin forge -- --help
+forge --help
 ```
 
-An installed `forge` may be a different Revision. Examples in [commands.md](commands.md) use `forge` as shorthand; in this checkout replace that executable with `cargo run -p forge-cli --bin forge --`. Read that reference before creating records, changing relationships, administering dispatch, or recovering assignments/worktrees.
+Use subcommand `--help` for syntax and supported capabilities. If the CLI or a required capability is missing, stop and request installation or an appropriate update. Switching to a source-built CLI is a separate, explicit Forge-development action.
 
-Ordinary commands resolve the Active Forge Revision through Forgeup and verify that the invoking CLI matches it. For a source-built CLI talking to a manually launched daemon, supply the intended RPC endpoint with the command's `--server-url` or `FORGE_SERVER_URL`. Help and parser tests need no daemon. Forgeup is a separate program, not a Forge subcommand.
+Ordinary commands use Forgeup's Active Forge Revision. Use `--server-url` or `FORGE_SERVER_URL` only when an explicit endpoint override is intended. Forgeup is a separate program, not a Forge subcommand.
 
 ## Establish scope before writing
 
@@ -54,14 +54,10 @@ forge assignment bootstrap
 
 Bootstrap reads `FORGE_ASSIGNMENT_ID`, `FORGE_ASSIGNMENT_DAEMON_URL`, and the owner-only file named by `FORGE_ASSIGNMENT_CAPABILITY_SECRET_FILE`. It authenticates, acknowledges, starts the bound Task or Grilling and fetches context before returning separately labelled behavior. If any step fails or is uncertain, stop and report the diagnostic. Keep the capability secret out of prompts, comments, shell arguments, and logs.
 
-Work in the bound execution directory and follow the returned trusted constraints and behavior. Use `forge assignment` for bounded reads and own-Record actions; read [Assignment context](../../docs/assignment-context.md) for commands, scope and Grilling confirmation. Bootstrap's assignment endpoint is separate from ordinary CLI endpoint selection. Do not bypass assignment ownership with a manual `record start` or replace an agent merely because it has not acknowledged.
+Work in the bound execution directory and follow the returned trusted constraints and behavior. Use `forge assignment --help` for bounded reads and own-Record actions. Task workers submit the bound Check outcome with `assignment outcome`; Grilling completion requires explicit human confirmation and the agreed outcome via `assignment done`. Bootstrap's assignment endpoint is separate from ordinary CLI endpoint selection. Preserve assignment ownership; report bootstrap failures to the operator rather than starting manually or replacing an unacknowledged agent.
 
 ## Operators
 
-Dispatch administration, recovery assertions, setup hooks, and destructive worktree actions are operator responsibilities. Inspect persisted evidence before recovery; use the relevant sections of [commands.md](commands.md).
+Dispatch administration, recovery assertions, setup hooks, and destructive worktree actions are operator responsibilities. Inspect command help and persisted evidence before acting. Reconciliation can launch agents; it is not a read-only check. Verify that old agents cannot act and retained resources are safe before making recovery assertions. Clearing a Dispatch Hold alone does not establish safe replacement.
 
 Forge owns managed local worktrees and dispatch state. Git pushes, PRs, and integration policy remain the surrounding workflow's responsibility. Use Forge commands for Forge state and `git`/`gh` for repository hosting operations; never edit Forge persistence by hand.
-
-## Maintaining this skill
-
-The command reference uses fenced `sh` blocks containing one complete command per line, with concrete illustrative arguments and shell quoting. These are parser fixtures, not a script to execute in sequence. Source-run examples may use the exact Cargo prefix above. Keep every executable example in this format so `cargo test -p forge-cli --bin forge documented_skill` checks both files against the actual Clap parser without invoking handlers. Passing checks establish syntax only, not daemon validation, authorization, or operational safety.

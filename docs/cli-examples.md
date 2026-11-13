@@ -1,6 +1,6 @@
-# Command reference
+# CLI examples
 
-Read [SKILL.md](SKILL.md) first for CLI selection, scope, and role boundaries. IDs, Project Slugs, paths, branches, and assignment identifiers below are illustrative: substitute inspected values. Commands are independent examples, not a batch workflow. Add `--json` where supported for structured output; consult source-built subcommand help for exact flags.
+Read [the Forge skill](../skills/forge/SKILL.md) first for CLI selection, scope, and role boundaries. IDs, Project Slugs, paths, branches, and assignment identifiers below are illustrative: substitute inspected values. Commands are independent examples, not a batch workflow. Add `--json` where supported for structured output; consult the selected CLI's subcommand help for exact flags.
 
 ## Connection and Project registration
 
@@ -15,7 +15,7 @@ forge here --project personal/alpha --json
 
 Registration accepts a Git main checkout as its canonical Project root, within a selected Forge Workspace. The Repository needs an `origin` remote; independent clones are distinct Repositories. Project roots may equal their Workspace root or nest inside other Project roots; duplicate canonical roots, linked Worktrees and the reserved Workspace-relative `.forge/worktrees` subtree are rejected. Project slugs are immutable and unique within their Workspace.
 
-Project selectors use `--workspace personal --project alpha` or the qualified `--project personal/alpha`. Explicit selection wins over cwd; contradictory selectors fail. Otherwise `here` selects the deepest containing Project root. Outside registered Workspaces, supply a Workspace or qualified Project selector; there is no saved default. Examples using short Project slugs below assume cwd is within the intended Workspace (or add `--workspace`). Project output exposes `reference`, `workspace_id`, local `slug`, and `project_root`; persist the returned `reference` in scope/configuration requests. See [Project registration and selection](../../docs/projects.md).
+Project selectors use `--workspace personal --project alpha` or the qualified `--project personal/alpha`. Explicit selection wins over cwd; contradictory selectors fail. Otherwise `here` selects the deepest containing Project root. Outside registered Workspaces, supply a Workspace or qualified Project selector; there is no saved default. Examples using short Project slugs below assume cwd is within the intended Workspace (or add `--workspace`). Project output exposes `reference`, `workspace_id`, local `slug`, and `project_root`; persist the returned `reference` in scope/configuration requests. See [Project registration and selection](projects.md).
 
 ## Forge Workspace registrations
 
@@ -30,7 +30,7 @@ forge workspace remove personal
 
 A Forge Workspace owns a fixed canonical filesystem root; it is distinct from a Herdr terminal container. IDs and roots are immutable, display names are editable, and equal or overlapping roots (including symlink aliases) are rejected. `show` and `here` prefer `--workspace`, otherwise infer from canonical cwd; outside all registered roots, supply an explicit selector. There is no saved default. Listing and registration work without selection. Removal requires an empty registration and leaves files and provider containers untouched.
 
-Projects and every Record belong to one Forge Workspace. Record commands select it by `--workspace`, a qualified Project selector, or canonical client cwd. Bare Record IDs do not select a Workspace; outside registered roots, pass `--workspace`. Mixed-Workspace Project scopes, parentage, Initiative membership, dependencies and provenance are rejected atomically. Lists without a Project filter include only the selected Workspace. Managed Worktrees use the fixed Workspace-rooted layout; profile selections and provider binding are Workspace-owned. See [the Workspace guide](../../docs/workspaces.md) for ownership, readiness, removal and development-store boundaries. Selection is routing, not authentication or OS isolation; no Herdr plugin or change is required.
+Projects and every Record belong to one Forge Workspace. Record commands select it by `--workspace`, a qualified Project selector, or canonical client cwd. Bare Record IDs do not select a Workspace; outside registered roots, pass `--workspace`. Mixed-Workspace Project scopes, parentage, Initiative membership, dependencies and provenance are rejected atomically. Lists without a Project filter include only the selected Workspace. Managed Worktrees use the fixed Workspace-rooted layout; profile selections and provider binding are Workspace-owned. See [the Workspace guide](workspaces.md) for ownership, readiness, removal and development-store boundaries. Selection is routing, not authentication or OS isolation; no Herdr plugin or change is required.
 
 ## Open work
 
@@ -119,7 +119,7 @@ Selection is independent of launch readiness. Registered policies use protected
 bootstrap and Pi flags; selected MCP servers are unsupported, and the flags do
 not attest a closed runtime.
 For schema, catalog membership, redacted output, fingerprint limits and an
-isolated runnable example, read [Agent Profile policy](../../docs/agent-profile-policy.md).
+isolated runnable example, read [Agent Profile policy](agent-profile-policy.md).
 
 ## Dispatch administration
 

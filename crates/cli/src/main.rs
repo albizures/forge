@@ -2151,8 +2151,8 @@ mod tests {
         let documents = [
             ("SKILL.md", include_str!("../../../skills/forge/SKILL.md")),
             (
-                "commands.md",
-                include_str!("../../../skills/forge/commands.md"),
+                "docs/cli-examples.md",
+                include_str!("../../../docs/cli-examples.md"),
             ),
             (
                 "spec/define.md",
