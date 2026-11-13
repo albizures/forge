@@ -73,6 +73,9 @@ async fn preview_registration_and_explicit_selections_are_isolated_immutable_and
     let fixture = Fixture::new();
     let store = fixture.store();
     let root = fixture.0.join("workspace");
+    let profiles = root.join(".agents/profiles");
+    std::fs::create_dir_all(&profiles).unwrap();
+    let source = profiles.join("example.md");
     let skill = root.join(".agents/skills/example");
     std::fs::create_dir_all(&skill).unwrap();
     std::fs::write(
@@ -81,7 +84,7 @@ async fn preview_registration_and_explicit_selections_are_isolated_immutable_and
     )
     .unwrap();
     let document = "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\ntools: [read]\nskills: [{name: example}]\nextensions: []\nmcpServers: []\n---\nBEHAVIOR_SENTINEL\n";
-    std::fs::write(skill.join("forge-agent.md"), document).unwrap();
+    std::fs::write(&source, document).unwrap();
     store.create_workspace("one", "One", &root).unwrap();
     let app = Application::with_agent_dispatch(
         Box::new(fixture.store()),
@@ -101,7 +104,7 @@ async fn preview_registration_and_explicit_selections_are_isolated_immutable_and
     let document = document
         .replace("extensions: []", "extensions: [{name: sentinel}]")
         .replace("mcpServers: []", "mcpServers: [{name: sentinel}]");
-    std::fs::write(skill.join("forge-agent.md"), &document).unwrap();
+    std::fs::write(&source, &document).unwrap();
     let second_root = fixture.0.join("two");
     std::fs::create_dir_all(&second_root).unwrap();
     store.create_workspace("two", "Two", &second_root).unwrap();
@@ -118,7 +121,7 @@ async fn preview_registration_and_explicit_selections_are_isolated_immutable_and
         .args([
             "agent-profile",
             "preview",
-            ".agents/skills/example/forge-agent.md",
+            ".agents/profiles/example.md",
             "--workspace",
             "one",
             "--server-url",
@@ -174,13 +177,30 @@ async fn preview_registration_and_explicit_selections_are_isolated_immutable_and
         }
         command.output().unwrap()
     };
+    // Both production operations enforce the new authoring boundary without
+    // consuming revisions or exposing source contents in errors.
+    let legacy = skill.join("forge-agent.md");
+    std::fs::write(&legacy, &document).unwrap();
+    std::fs::write(root.join("outside.md"), &document).unwrap();
+    for path in [".agents/skills/example/forge-agent.md", "outside.md"] {
+        for operation in ["preview", "register"] {
+            let output = cli(
+                "one",
+                &["agent-profile", operation, path, "--record-type", "task"],
+                true,
+            );
+            assert!(!output.status.success());
+            let error = String::from_utf8(output.stderr).unwrap();
+            assert!(error.contains("within .agents/profiles"));
+            assert!(!error.contains("BEHAVIOR_SENTINEL"));
+            assert!(!error.contains("CREDENTIAL_SENTINEL"));
+        }
+    }
+    assert!(store.agent_profile(RecordType::Task, 2).is_err());
+    std::fs::remove_file(legacy).unwrap();
     let readable = cli(
         "one",
-        &[
-            "agent-profile",
-            "preview",
-            ".agents/skills/example/forge-agent.md",
-        ],
+        &["agent-profile", "preview", ".agents/profiles/example.md"],
         false,
     );
     assert!(readable.status.success());
@@ -193,11 +213,7 @@ async fn preview_registration_and_explicit_selections_are_isolated_immutable_and
     // The same relative path is NOT resolved from the client cwd or another Workspace.
     let missing = cli(
         "two",
-        &[
-            "agent-profile",
-            "preview",
-            ".agents/skills/example/forge-agent.md",
-        ],
+        &["agent-profile", "preview", ".agents/profiles/example.md"],
         true,
     );
     assert!(!missing.status.success());
@@ -206,7 +222,7 @@ async fn preview_registration_and_explicit_selections_are_isolated_immutable_and
         &[
             "agent-profile",
             "register",
-            ".agents/skills/example/forge-agent.md",
+            ".agents/profiles/example.md",
             "--record-type",
             "task",
         ],
@@ -268,7 +284,7 @@ async fn preview_registration_and_explicit_selections_are_isolated_immutable_and
         &[
             "agent-profile",
             "register",
-            ".agents/skills/example/forge-agent.md",
+            ".agents/profiles/example.md",
             "--record-type",
             "grilling",
         ],
@@ -298,7 +314,7 @@ async fn preview_registration_and_explicit_selections_are_isolated_immutable_and
         true,
     ));
     std::fs::write(
-        skill.join("forge-agent.md"),
+        &source,
         document
             .replace("openai/gpt-5", "anthropic/claude")
             .replace("BEHAVIOR_SENTINEL", "NEW_BEHAVIOR"),
@@ -309,14 +325,14 @@ async fn preview_registration_and_explicit_selections_are_isolated_immutable_and
         &[
             "agent-profile",
             "register",
-            ".agents/skills/example/forge-agent.md",
+            ".agents/profiles/example.md",
             "--record-type",
             "task",
         ],
         true,
     ));
     assert_eq!(newer["revision"], 3);
-    std::fs::remove_file(skill.join("forge-agent.md")).unwrap();
+    std::fs::remove_file(&source).unwrap();
     assert_eq!(
         fixture
             .store()
@@ -360,7 +376,7 @@ async fn preview_registration_and_explicit_selections_are_isolated_immutable_and
         .unwrap();
     let request = forge_rpc::AgentProfileDocumentRequest {
         workspace: "one".into(),
-        document: ".agents/skills/example/forge-agent.md".into(),
+        document: ".agents/profiles/example.md".into(),
         record_type: "spec".into(),
     };
     let error = client
@@ -370,7 +386,7 @@ async fn preview_registration_and_explicit_selections_are_isolated_immutable_and
         .to_string();
     assert!(error.contains("select task or grilling"));
     std::fs::write(
-        skill.join("forge-agent.md"),
+        &source,
         "---\nversion: 1\nsecret: CREDENTIAL_SENTINEL\n---\nBEHAVIOR_SENTINEL",
     )
     .unwrap();

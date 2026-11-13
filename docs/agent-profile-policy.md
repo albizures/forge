@@ -17,7 +17,21 @@ mapping and the guarantees superseded by that decision.
 
 ## Authoring and resolution
 
-A `forge-agent.md` must sit beside `SKILL.md`:
+An Agent Profile is independent of Skills: its Markdown body contains role-specific
+instructions, while its resource selections compose reusable workflows. Forge retains
+execution authority and lifecycle rules.
+
+Profile sources must be `.md` files beneath the selected Forge Workspace's
+`.agents/profiles/` directory, for example `.agents/profiles/implementation.md`.
+Nested directories such as `.agents/profiles/reviews/security.md` are supported.
+Preview and registration validate canonical containment: file or directory symlinks
+cannot escape this directory. The profiles directory itself (or its `.agents`
+parent) cannot redirect elsewhere, even within the Workspace. This is an authoring
+boundary, not a security sandbox. No special basename or neighboring `SKILL.md` is
+required. No discovery, inheritance, or automatic selection is added.
+Only explicitly selected Skills are included; proximity never selects a Skill.
+
+Example `.agents/profiles/implementation.md`:
 
 ```markdown
 ---
@@ -64,9 +78,9 @@ entries is ambiguous and must be selected by unique server name instead.
 ## Operator preview, registration and selection
 
 ```sh
-forge agent-profile preview .agents/skills/implementation/forge-agent.md \
+forge agent-profile preview .agents/profiles/implementation.md \
   --workspace development --record-type task --json
-forge agent-profile register .agents/skills/implementation/forge-agent.md \
+forge agent-profile register .agents/profiles/implementation.md \
   --workspace development --record-type task --json
 # Use the returned revision explicitly; do not assume a latest/default revision.
 forge dispatcher config set task-profile 2 --workspace development
@@ -119,13 +133,14 @@ cargo build -p forge-cli -p forge-server
 FORGE="$PWD/target/debug/forge"
 DAEMON="$PWD/target/debug/forge-server"
 fixture=$(mktemp -d)
-mkdir -p "$fixture/home" "$fixture/workspace/.agents/skills/example"
+mkdir -p "$fixture/home" "$fixture/workspace/.agents/skills/example" \
+  "$fixture/workspace/.agents/profiles"
 printf '%s\n' '---' 'name: example' 'description: Example skill' '---' \
   'Follow the assigned work.' > "$fixture/workspace/.agents/skills/example/SKILL.md"
 printf '%s\n' '---' 'version: 1' 'runtime: herdr/pi' 'model: openai/gpt-5' \
   'tools: [read]' 'skills: [{name: example}]' '---' \
   'Read and follow the example skill before working.' \
-  > "$fixture/workspace/.agents/skills/example/forge-agent.md"
+  > "$fixture/workspace/.agents/profiles/example.md"
 HOME="$fixture/home" FORGE_STORE_PATH="$fixture/store.sqlite" \
   "$DAEMON" --bind-addr 127.0.0.1:45014 > "$fixture/daemon.log" 2>&1 &
 daemon_pid=$!
@@ -138,8 +153,8 @@ done
 (
   cd "$fixture"
   "$FORGE" workspace add demo --root "$fixture/workspace"
-  "$FORGE" agent-profile preview .agents/skills/example/forge-agent.md --workspace demo
-  "$FORGE" agent-profile register .agents/skills/example/forge-agent.md \
+  "$FORGE" agent-profile preview .agents/profiles/example.md --workspace demo
+  "$FORGE" agent-profile register .agents/profiles/example.md \
     --workspace demo --record-type task --json
   # This isolated fresh store returns Task revision 2. Registration did not select it.
   "$FORGE" dispatcher config set task-profile 2 --workspace demo
@@ -155,7 +170,22 @@ The example intentionally does not dispatch. No external credentials, Herdr
 resources, MCP servers or extension execution are required. Integration tests
 exercise this command sequence with isolated operator/Workspace catalogs plus
 extension/MCP sentinels, two Workspaces, both Record Types, new revisions and
-companion mutation/deletion.
+profile source mutation/deletion.
+
+### Breaking source-authoring change
+
+Legacy profile sources under skill directories are rejected by preview and
+registration. Move their role instructions into `.agents/profiles/*.md`; retain
+only genuinely reusable workflows as Skills. Adjust relative resource references
+for the new document directory. Selected resources still use the existing catalog
+membership rules and may reside outside the profiles folder.
+
+Existing registered revisions, Assignments and Task Check pins remain unchanged and
+usable: no source migration or re-registration is required to retain their meaning.
+To adopt changed profiles, preview and register new revisions, then explicitly select
+them and update Project Check Templates for future Tasks. Existing Task pins are never
+rewritten. Deploy and activate a supporting Forge Revision before migrating live source
+files or dispatch selections; older Forge Revisions require the legacy authoring layout.
 
 ## Flags-only Pi launch configuration
 
@@ -248,7 +278,7 @@ selections remain independent. Both acknowledgement-timeout revision operations
 copy `launch_policy_json` unchanged; old revisions are not mutated. Legacy rows
 retain `launch_policy: None` without fabricating historical policy.
 
-The companion is not a runtime dependency. Editing or deleting it cannot alter
+The profile source is not a runtime dependency. Editing or deleting it cannot alter
 stored behavior/configuration. `validate_direct_inputs` validates policy and
 compares only selected SKILL.md/extension entry bytes and persisted MCP
 configuration. Supporting files/imports/dependencies are not recursively hashed.
@@ -274,7 +304,7 @@ Dependent context/runtime Tasks must use these existing durable ownership facts:
 - Context envelopes keep bound identity separate from live Record,
   relationships, comments/history and complete Project Scope, with freshness
   metadata. Never expose the persisted MCP configuration as public context.
-- Missing companion/direct files must not prevent existing authenticated actions,
+- Missing profile sources/direct files must not prevent existing authenticated actions,
   reconciliation or retirement. Direct-input validation belongs only to new
   execution and supported reload. It must not erase ownership evidence, prove
   process exit, release capacity, or replay one-shot launch.

@@ -15,13 +15,14 @@ fn register_behavior(
         "---\nname: entry\ndescription: entry\n---\nOn demand",
     )
     .unwrap();
-    std::fs::write(skill.join("forge-agent.md"), format!("---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\ntools: []\nskills: [{{name: entry}}]\n---\n{behavior}")).unwrap();
+    std::fs::create_dir_all(fixture.root.join("one/.agents/profiles")).unwrap();
+    std::fs::write(fixture.root.join("one/.agents/profiles/entry.md"), format!("---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\ntools: []\nskills: [{{name: entry}}]\n---\n{behavior}")).unwrap();
     let profile = fixture
         .app()
         .register_agent_profile(
             "one",
             &fixture.root.join("two"),
-            Path::new(".agents/skills/entry/forge-agent.md"),
+            Path::new(".agents/profiles/entry.md"),
             kind,
         )
         .unwrap();

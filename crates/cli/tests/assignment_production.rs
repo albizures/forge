@@ -53,10 +53,11 @@ async fn production_daemon_bootstraps_grilling_through_delivered_cli() {
         "---\nname: example\ndescription: example\n---\nSkill body",
     )
     .unwrap();
-    std::fs::write(skill.join("forge-agent.md"), "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\ntools: []\nskills: [{name: example}]\n---\nFROZEN-BEHAVIOR").unwrap();
+    std::fs::create_dir_all(catalog.join(".agents/profiles")).unwrap();
+    std::fs::write(catalog.join(".agents/profiles/example.md"), "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\ntools: []\nskills: [{name: example}]\n---\nFROZEN-BEHAVIOR").unwrap();
     let policy = forge_app::agent_profiles::ResourceCatalog::discover(&catalog, &catalog)
         .unwrap()
-        .resolve(&catalog, ".agents/skills/example/forge-agent.md")
+        .resolve(&catalog, ".agents/profiles/example.md")
         .unwrap();
     let profile = store
         .register_agent_profile("test", RecordType::Task, &policy)

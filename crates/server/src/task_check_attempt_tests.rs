@@ -17,8 +17,9 @@ async fn check_bound_rpc_context_outcome_and_normal_dispatch_share_same_owner() 
         "---\nname: work\ndescription: work\n---\nWork",
     )
     .unwrap();
+    std::fs::create_dir_all(workspace.root.join(".agents/profiles")).unwrap();
     std::fs::write(
-        skill.join("forge-agent.md"),
+        workspace.root.join(".agents/profiles/work.md"),
         "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\ntools: [read]\n---\nWork",
     )
     .unwrap();
@@ -27,7 +28,7 @@ async fn check_bound_rpc_context_outcome_and_normal_dispatch_share_same_owner() 
         &workspace.root,
     )
     .unwrap()
-    .resolve(&workspace.root, ".agents/skills/work/forge-agent.md")
+    .resolve(&workspace.root, ".agents/profiles/work.md")
     .unwrap();
     let profile = store
         .register_agent_profile("test", RecordType::Task, &policy)

@@ -299,7 +299,8 @@ forge dispatcher profile
 ```
 
 Profiles include seeded revisions, registered immutable revisions and Task timeout
-revisions. Author, preview and register a `forge-agent.md` as described in
+revisions. Author, preview and register a Markdown profile beneath the Forge
+Workspace's `.agents/profiles/` directory as described in
 [Agent Profile policy](agent-profile-policy.md); registration never selects it.
 `task-profile` and `grilling-profile` select revisions independently per Workspace
 and Record Type; unknown revisions are rejected. There is no automatic latest

@@ -22,10 +22,11 @@ fn context_policy_fixture(catalog: &Path) -> forge_app::agent_profiles::Resolved
     )
     .unwrap();
     std::fs::write(catalog.join(".pi/mcp.json"), r#"{"mcpServers":{"local":{"command":"never-connect","env":{"PASSWORD":"MCP-CREDENTIAL-SENTINEL"}}}}"#).unwrap();
-    std::fs::write(catalog.join(".agents/skills/entry/forge-agent.md"), "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\ntools: []\nskills: [{name: entry}]\nmcpServers: [{name: local}]\n---\nBEHAVIOR-SENTINEL").unwrap();
+    std::fs::create_dir_all(catalog.join(".agents/profiles")).unwrap();
+    std::fs::write(catalog.join(".agents/profiles/entry.md"), "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\ntools: []\nskills: [{name: entry}]\nmcpServers: [{name: local}]\n---\nBEHAVIOR-SENTINEL").unwrap();
     forge_app::agent_profiles::ResourceCatalog::discover(catalog, catalog)
         .unwrap()
-        .resolve(catalog, ".agents/skills/entry/forge-agent.md")
+        .resolve(catalog, ".agents/profiles/entry.md")
         .unwrap()
 }
 

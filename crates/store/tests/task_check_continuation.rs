@@ -842,8 +842,9 @@ fn run_case(case: &str) {
         "---\nname: work\ndescription: work\n---\nWork",
     )
     .unwrap();
+    std::fs::create_dir_all(root.join(".agents/profiles")).unwrap();
     std::fs::write(
-        root.join(".agents/skills/work/forge-agent.md"),
+        root.join(".agents/profiles/work.md"),
         "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\ntools: [read]\n---\nWork",
     )
     .unwrap();
@@ -861,7 +862,7 @@ fn run_case(case: &str) {
         .unwrap();
     let policy = ResourceCatalog::discover(&root.join("operator"), &root)
         .unwrap()
-        .resolve(&root, ".agents/skills/work/forge-agent.md")
+        .resolve(&root, ".agents/profiles/work.md")
         .unwrap();
     let pinned = store
         .register_agent_profile("test", RecordType::Task, &policy)

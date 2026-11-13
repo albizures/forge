@@ -101,7 +101,7 @@ impl AgentProfileDocumentResponse {
     ) -> Self {
         Self {
             schema_version: 1, workspace, record_type, revision, policy: policy.into(), lifecycle: lifecycle.into(),
-            fingerprint_coverage: "SHA-256 of selected SKILL.md files, extension entry files and persisted MCP launch configuration only; companion behavior is persisted, not revalidated.".into(),
+            fingerprint_coverage: "SHA-256 of selected SKILL.md files, extension entry files and persisted MCP launch configuration only; profile behavior is persisted, not revalidated.".into(),
             limitations: vec![
                 "No recursive dependency pinning or atomic validation-to-runtime-load filesystem snapshot.".into(),
                 "External services, models and credentials are not frozen; registration does not select or enable dispatch.".into(),

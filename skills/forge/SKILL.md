@@ -62,4 +62,14 @@ Work in the bound execution directory and follow the returned trusted constraint
 
 Dispatch administration, recovery assertions, setup hooks, and destructive worktree actions are operator responsibilities. Inspect command help and persisted evidence before acting. Reconciliation can launch agents; it is not a read-only check. Verify that old agents cannot act and retained resources are safe before making recovery assertions. Clearing a Dispatch Hold alone does not establish safe replacement.
 
+### Agent Profiles
+
+Agent Profiles configure launch policy and role-specific behavior; Skills provide reusable workflows. Profiles select zero or more Skills explicitly, never through filesystem adjacency. Forge retains execution authority and lifecycle rules; do not create wrapper Skills merely to house profiles.
+
+Author profiles as `.md` files beneath the selected Forge Workspace's `.agents/profiles/` directory; nested folders are allowed. Preview and registration enforce canonical containment and reject symlink escapes and legacy skill-directory sources. The profiles directory and its `.agents` parent must not redirect elsewhere. Document arguments resolve from the Workspace root, while resource references resolve from the document directory and retain catalog membership rules.
+
+Inspect `forge help agent-profile --all` before authoring or registration. Preview first, then register with explicit `--workspace` and `--record-type task|grilling`. Registration creates an immutable revision without selecting it; explicitly select the returned revision with `dispatcher config set task-profile|grilling-profile`. Inspect selections with `dispatcher profile --kind task|grilling` and provider readiness with `dispatcher status`; registration and selection do not certify dispatchability. Task execution uses Check-pinned revisions: configure the Project Check Template before opening Tasks, rather than assuming the Workspace Task selection routes existing Checks.
+
+Existing registered revisions and Task Check pins remain usable when source files move or disappear. Changed profiles require new registration and explicit selection; Check Template changes affect future Tasks only. Do not rewrite existing pins or migrate live legacy sources until a Forge Revision supporting standalone profiles is installed and active.
+
 Forge owns managed local worktrees and dispatch state. Git pushes, PRs, and integration policy remain the surrounding workflow's responsibility. Use Forge commands for Forge state and `git`/`gh` for repository hosting operations; never edit Forge persistence by hand.

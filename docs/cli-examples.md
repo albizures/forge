@@ -103,14 +103,17 @@ Hooks execute shell commands in newly created Managed Worktrees. A failed hook r
 ## Agent Profile authoring and registration
 
 ```sh
-forge agent-profile preview .agents/skills/implementation/forge-agent.md --workspace personal --json
-forge agent-profile preview .agents/skills/implementation/forge-agent.md --workspace personal --record-type grilling
-forge agent-profile register .agents/skills/implementation/forge-agent.md --workspace personal --record-type task --json
-forge agent-profile register .agents/skills/implementation/forge-agent.md --workspace personal --record-type grilling --json
+forge agent-profile preview .agents/profiles/implementation.md --workspace personal --json
+forge agent-profile preview .agents/profiles/grilling.md --workspace personal --record-type grilling
+forge agent-profile register .agents/profiles/implementation.md --workspace personal --record-type task --json
+forge agent-profile register .agents/profiles/grilling.md --workspace personal --record-type grilling --json
 ```
 
-Operator-only: both operations require explicit `--workspace`. Document paths resolve
-from its root; internal resource paths resolve from the companion directory.
+Operator-only: both operations require explicit `--workspace`. Profile documents must
+be `.md` files beneath that Workspace's `.agents/profiles/` (nested folders allowed).
+Both operations enforce canonical containment and reject legacy skill-directory sources.
+Document paths resolve from the Workspace root; internal resource paths resolve from
+the profile document directory. Skills are selected explicitly, never by adjacency.
 Preview reads catalogs without executing extensions, connecting MCP servers or
 changing registration/selections. Registration persists a new immutable per-type
 revision without selecting it. Inspect the returned revision, then explicitly

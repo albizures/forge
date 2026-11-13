@@ -4,14 +4,18 @@ use std::process::Command;
 fn profile_commands_require_explicit_authority_free_operator_selectors() {
     for (arguments, expected) in [
         (
-            vec!["agent-profile", "preview", "forge-agent.md"],
+            vec![
+                "agent-profile",
+                "preview",
+                ".agents/profiles/implementation.md",
+            ],
             "requires explicit --workspace",
         ),
         (
             vec![
                 "agent-profile",
                 "register",
-                "forge-agent.md",
+                ".agents/profiles/implementation.md",
                 "--workspace",
                 "one",
             ],
@@ -21,7 +25,7 @@ fn profile_commands_require_explicit_authority_free_operator_selectors() {
             vec![
                 "agent-profile",
                 "register",
-                "forge-agent.md",
+                ".agents/profiles/implementation.md",
                 "--workspace",
                 "one",
                 "--record-type",
