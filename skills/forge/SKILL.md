@@ -7,13 +7,15 @@ description: "Operate Forge records, project scope, relationships, lifecycle, ma
 
 ## Select the CLI and endpoint
 
-Use the installed `forge` and inspect its help before choosing commands:
+Use the installed `forge`. When the task identifies an operation, inspect that subcommand's `--help` directly. For discovery within a known area, use recursive subtree help; use full recursive help only for broad discovery:
 
 ```sh
-forge --help
+forge record list --help
+forge help workspace --all
+forge help --all
 ```
 
-Use subcommand `--help` for syntax and supported capabilities. If the CLI or a required capability is missing, stop and request installation or an appropriate update. Switching to a source-built CLI is a separate, explicit Forge-development action.
+Recursive help accepts nested command paths. If an older revision lacks recursive help, fall back to ordinary subcommand `--help`. If the CLI or a required operation is missing, stop and request installation or an appropriate update. Switching to a source-built CLI is a separate, explicit Forge-development action.
 
 Ordinary commands use Forgeup's Active Forge Revision. Use `--server-url` or `FORGE_SERVER_URL` only when an explicit endpoint override is intended. Forgeup is a separate program, not a Forge subcommand.
 

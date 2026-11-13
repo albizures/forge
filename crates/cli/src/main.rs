@@ -4,6 +4,7 @@ mod assignment_finding_commands;
 mod check_templates;
 mod checks;
 mod findings;
+mod help;
 mod project_selection;
 mod workspaces;
 
@@ -773,7 +774,15 @@ async fn main() {
     if print_build_info_if_requested() {
         return;
     }
-    let mut cli = Cli::parse_from(normalize_comment_delete(std::env::args()));
+    let arguments = normalize_comment_delete(std::env::args());
+    if let Some(result) = help::recursive(&arguments) {
+        match result {
+            Ok(output) => print!("{output}"),
+            Err(error) => error.exit(),
+        }
+        return;
+    }
+    let mut cli = Cli::parse_from(arguments);
     if let Err(error) = project_selection::qualify(&mut cli.command, cli.workspace.as_deref()).await
     {
         eprintln!("forge: {error}");
@@ -2166,6 +2175,10 @@ mod tests {
         let mut covered = std::collections::HashSet::new();
         for (name, document) in documents {
             for (line, args) in skill_examples(document).expect(name) {
+                if let Some(result) = super::help::recursive(&args) {
+                    result.unwrap_or_else(|error| panic!("{name}:{line}: {error}"));
+                    continue;
+                }
                 match Cli::try_parse_from(&args) {
                     Ok(_) => {
                         covered.insert(args[1].clone());
