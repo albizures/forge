@@ -181,6 +181,10 @@ async fn preview_registration_and_explicit_selections_are_isolated_immutable_and
     for field in [
         "",
         "thinkingLevel: null\n",
+        "thinkingLevel: !low null\n",
+        "thinkingLevel: !low\n",
+        "thinkingLevel: !low low\n",
+        "thinkingLevel: !custom low\n",
         "thinkingLevel: 3\n",
         "thinkingLevel: []\n",
         "thinkingLevel: {}\n",

@@ -31,6 +31,26 @@ fn all_exact_thinking_levels_resolve_and_round_trip() {
 }
 
 #[test]
+fn tagged_thinking_levels_are_not_exact_string_choices() {
+    for level in ["off", "minimal", "low", "medium", "high", "xhigh"] {
+        for value in [
+            format!("!{level}"),
+            format!("!{level} null"),
+            format!("!{level} {level}"),
+        ] {
+            let text = format!(
+                "---\nversion: 1\nruntime: herdr/pi\nmodel: test/model\nthinkingLevel: {value}\ntools: []\n---\nBehavior"
+            );
+            let error = ProfileDocument::parse(&text).unwrap_err();
+            assert!(
+                error.contains("thinkingLevel is required and must be one of:"),
+                "{value}: {error}"
+            );
+        }
+    }
+}
+
+#[test]
 fn historical_serialized_policy_has_no_invented_thinking_level() {
     let historical = r#"{"version":1,"runtime":"herdr/pi","model":"test/model","tools":[],"behavior":"old","skills":[],"extensions":[],"mcpServers":[]}"#;
     let policy: ResolvedLaunchPolicy = serde_json::from_str(historical).unwrap();

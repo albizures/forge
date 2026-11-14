@@ -110,10 +110,12 @@ impl ProfileDocument {
         // actionable diagnostic without echoing potentially sensitive YAML values.
         let fields: serde_yaml::Value = serde_yaml::from_str(&yaml)
             .map_err(|_| "invalid Agent Profile frontmatter".to_string())?;
-        if fields
-            .get("thinkingLevel")
-            .is_none_or(|value| serde_yaml::from_value::<ThinkingLevel>(value.clone()).is_err())
-        {
+        if fields.get("thinkingLevel").is_none_or(|value| {
+            // YAML enum deserialization also accepts tagged nulls such as `!low`.
+            // Authoring requires an exact string, not that enum representation.
+            !matches!(value, serde_yaml::Value::String(_))
+                || serde_yaml::from_value::<ThinkingLevel>(value.clone()).is_err()
+        }) {
             return Err("thinkingLevel is required and must be one of: off, minimal, low, medium, high, xhigh".into());
         }
         let mut document: Self = serde_yaml::from_str(&yaml)
