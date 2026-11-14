@@ -280,7 +280,9 @@ Record ID (creation order), skipping blocked candidates rather than starving lat
 ready work. Before a new checkout it checks lifecycle, dependencies, holds,
 ownership/resources, capacity, provider readiness and the next Check pin. It then
 prepares `feat/forge-<task-id>` in a Task Managed Worktree, using the immutable Base
-Commit captured from the Project root's `HEAD` when the Task opens. The guarded
+Commit. Non-stacked Tasks capture it from Project HEAD when opened; explicit
+[Task stacks](stacks.md) resolve and pin it from their Base Branch during
+preparation, with predecessor publication verification. The guarded
 writer transaction rechecks mutable gates and atomically reserves the Check
 attempt, pinned-profile Assignment and capacity before provider launch. Concurrent
 requests cannot create a second live attempt. A race may leave a safely retained

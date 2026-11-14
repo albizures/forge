@@ -89,8 +89,28 @@ The deterministic Forge-owned Git branch for a Task’s Managed Worktree, named 
 _Avoid_: feature branch, worktree branch
 
 **Base Commit**:
-The immutable commit recorded for a Task from its Project Root's `HEAD` when the Task opens; its Task Branch is created from it.
+The immutable starting revision from which a Task's Task Branch is created. For a stacked Task it is resolved from its Base Branch during preparation; other Tasks retain the Project Root revision captured when opened.
 _Avoid_: dispatch base, checkout evidence
+
+**Stack**:
+An explicitly configured linear chain of Tasks in one Project whose changes build on one another and whose PRs target the preceding Task's branch. Its first Task starts from and targets the Stack's selected branch, which need not be the repository default branch.
+_Avoid_: dependency chain, consecutive Record IDs
+
+**Stack Predecessor**:
+The Task whose completed changes a successor builds upon and whose Task Branch its PR targets. It is also a prerequisite, but an ordinary prerequisite does not imply stack membership.
+_Avoid_: previous Record, previous ID
+
+**Base Branch**:
+The branch supplying a stacked Task's starting changes: the selected starting branch for the first Task, or its Stack Predecessor's Task Branch.
+_Avoid_: Base Commit, default branch
+
+**PR Base Branch**:
+The branch targeted by a Task's pull request. In a Stack it is the Task's Base Branch, distinct from the exact Base Commit used to begin execution.
+_Avoid_: target commit, main
+
+**Publication Check**:
+The final required Check on a stacked Task, establishing publication of the checked changes as an open, non-draft pull request with the expected head and base. Passing publication does not imply approval or merge.
+_Avoid_: merge gate, PR creation Task
 
 **Worktree Root**:
 The reserved folder within a Forge Workspace beneath which Forge groups Managed Worktrees by Project Slug and Record Identifier.
@@ -141,7 +161,7 @@ A Record type that defines planned work for exactly one Project and may parent T
 _Avoid_: specification, issue
 
 **Task**:
-A leaf Record type that represents a unit of work with exactly one Project when opened under a Project-scoped Wayfinder, selected from that Wayfinder's Project Scope; a Projectless Wayfinder's Task remains Projectless. It may also be opened under one Spec, from which it receives its Project Scope, or opened without a parent. Its membership and scope are immutable after opening. A branch may be recorded as its work output but is not Forge lifecycle or relationship state.
+A leaf Record type that represents a unit of work with exactly one Project when opened under a Project-scoped Wayfinder, selected from that Wayfinder's Project Scope; a Projectless Wayfinder's Task remains Projectless. It may also be opened under one Spec, from which it receives its Project Scope, or opened without a parent. Its membership and scope are immutable after opening. A Task may explicitly join a Stack, which adds branch inheritance and verified pull-request publication to its completion requirements.
 _Avoid_: subtask, to-do
 
 **Check Template**:

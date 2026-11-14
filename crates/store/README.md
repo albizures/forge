@@ -839,6 +839,18 @@ hold clearance. Recorded operator remediation reset requires safe ownership, pre
 interrupted retries and holds, and exposes its latest 20 audit entries in WorkState.
 See [bounded progress operations](../../docs/dispatch.md#bounded-progress-and-operator-intervention).
 
+Revision 8 adds `task_stacks`: `record_id` is a Record primary/foreign key;
+`predecessor` is a unique nullable self-table foreign key; `source_json` stores
+an explicit root destination or predecessor; `base_commit` is nullable until
+preparation; `publication_json` stores verified repository, URL, head branch/commit,
+base branch and evidence generation. Configuration and implied dependencies commit
+atomically. Preparation pins both this row and `task_base_commits`; publication and
+required history commit together. Final Check outcome acceptance and completion
+recheck publication against current output/generation. Mutable configuration is
+rejected once any affected Task is prepared. Revision-7 stores are incompatible:
+older writers cannot enforce stack publication gates. No migration is performed.
+See [Task stacks](../../docs/stacks.md).
+
 Select a fresh store rather than inventing ownership or rewriting version markers.
 Any local reset is a separate operator action: first safely retire ownership and
 reconcile retained resources. Opening a store never performs that reset.

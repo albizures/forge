@@ -72,4 +72,12 @@ Inspect `forge help agent-profile --all` before authoring or registration. Previ
 
 Existing registered revisions and Task Check pins remain usable when source files move or disappear. Changed profiles require new registration and explicit selection; Check Template changes affect future Tasks only. Do not rewrite existing pins or migrate live legacy sources until a Forge Revision supporting standalone profiles is installed and active.
 
-Forge owns managed local worktrees and dispatch state. Git pushes, PRs, and integration policy remain the surrounding workflow's responsibility. Use Forge commands for Forge state and `git`/`gh` for repository hosting operations; never edit Forge persistence by hand.
+Forge owns managed local worktrees, dispatch state, and explicit Task stacks.
+Use `forge task stack --help` for stack configuration and `forge assignment stack`
+for own-Task destination reads and publication verification. Stack branches use
+`feat/forge-<record-id>`; links identify predecessors explicitly, never by ID
+arithmetic. A final `Publication` Check verifies an open non-draft PR before Done;
+merge is not required. Agents use `git`/`gh` to push and create/reuse PRs, while
+Forge independently validates their stack evidence. Non-stacked Tasks retain
+existing behavior. Integration and recovery remain operator responsibilities;
+never edit Forge persistence by hand.

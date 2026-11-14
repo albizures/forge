@@ -58,6 +58,12 @@ impl SqliteProjectRepository {
             }
             safe_ownership(&tx, id)?;
         }
+        if super::stacks::load(&tx, id)?.is_some_and(|s| s.base_commit.is_none()) {
+            return Err(RegistrationError::new(
+                "stack-blocked",
+                "prepare the Task stack before starting",
+            ));
+        }
         let unfinished = super::unfinished_prerequisite_ids(&tx, id)?;
         if !unfinished.is_empty() {
             return Err(super::dependencies_not_done_error(&unfinished));

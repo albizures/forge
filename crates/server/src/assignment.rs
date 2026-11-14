@@ -38,6 +38,14 @@ impl Daemon {
 
 #[async_trait]
 impl AssignmentApiServer for Daemon {
+    async fn stack(
+        &self,
+        r: forge_rpc::AssignmentStackRequest,
+    ) -> RpcResult<Option<forge_app::stacks::TaskStack>> {
+        self.assignment_session(&r.assignment_id, &r.secret)?
+            .stack(r.url.as_deref())
+            .map_err(rpc_error)
+    }
     async fn outcome_submit(
         &self,
         r: forge_rpc::AssignmentOutcomeRequest,

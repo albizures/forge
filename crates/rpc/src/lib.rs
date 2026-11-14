@@ -21,6 +21,7 @@ pub use forge_app::outcomes::{AcceptedOutcome, Attempt, WorkState};
 pub use record_selection::*;
 
 pub use forge_app::ExecutionMode;
+pub use forge_app::stacks::{StackDestination, StackSource, TaskStack};
 use forge_app::{
     AgentDispatchProjectStatus, AgentDispatchReconcileResult, AgentDispatchStatus, AgentProfile,
     ApplicationStatus, ManagedWorktreeInfo, Project, Record, RecordComment, RecordRelationshipKind,
@@ -28,6 +29,25 @@ use forge_app::{
 };
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
 use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum TaskStackAction {
+    Show,
+    Configure {
+        source: forge_app::stacks::StackSource,
+    },
+    Prepare,
+    Publish {
+        url: String,
+    },
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskStackRequest {
+    pub record_id: u64,
+    pub action: TaskStackAction,
+}
 
 pub const SYSTEM_STATUS_METHOD: &str = "system.status";
 pub const PROJECT_REGISTER_METHOD: &str = "project.register";
@@ -203,6 +223,11 @@ pub trait WorktreeApi {
 
 #[rpc(client, server, namespace = "record")]
 pub trait RecordApi {
+    #[method(name = "taskStack")]
+    async fn task_stack(
+        &self,
+        request: SelectedRecordRequest<TaskStackRequest>,
+    ) -> RpcResult<Option<forge_app::stacks::TaskStack>>;
     #[method(name = "openInitiative")]
     async fn open_initiative(
         &self,

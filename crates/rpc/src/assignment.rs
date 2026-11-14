@@ -5,6 +5,15 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssignmentStackRequest {
+    pub assignment_id: String,
+    pub secret: String,
+    /// None reads the own Task's stack; Some verifies its publication.
+    pub url: Option<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AssignmentCredentials {
     pub assignment_id: String,
     pub secret: String,
@@ -289,6 +298,11 @@ pub struct AssignmentOutcomeRequest {
 
 #[rpc(client, server, namespace = "assignment")]
 pub trait AssignmentApi {
+    #[method(name = "stack")]
+    async fn stack(
+        &self,
+        request: AssignmentStackRequest,
+    ) -> RpcResult<Option<forge_app::stacks::TaskStack>>;
     #[method(name = "outcomeSubmit")]
     async fn outcome_submit(
         &self,

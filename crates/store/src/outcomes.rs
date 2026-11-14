@@ -530,6 +530,18 @@ impl SqliteProjectRepository {
             tx.commit().map_err(storage_error)?;
             return Ok(result);
         }
+        if input.verdict == Verdict::Pass {
+            let last: i64 = tx
+                .query_row(
+                    "SELECT MAX(position) FROM record_checks WHERE record_id = ?1",
+                    [record.cast_signed()],
+                    |r| r.get(0),
+                )
+                .map_err(storage_error)?;
+            if check.position == last.cast_unsigned() {
+                super::stacks::publication_gate(&tx, record, &input.evidence, work.generation)?;
+            }
+        }
         let revision = match &input.evidence {
             Evidence::Repository { commit, .. } => Some(commit.as_str()),
             Evidence::Artifact { .. } => None,

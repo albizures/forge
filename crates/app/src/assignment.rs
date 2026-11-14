@@ -162,6 +162,34 @@ fn unhex(text: &str) -> Result<Vec<u8>, RegistrationError> {
 }
 
 impl AuthenticatedAssignment<'_> {
+    /// Read own stack or independently verify the bound publication Check's PR.
+    /// # Errors
+    /// Rejects invalid capabilities, non-publication attempts, stale evidence and hosting mismatches.
+    pub fn stack(
+        &self,
+        url: Option<&str>,
+    ) -> Result<Option<crate::stacks::TaskStack>, RegistrationError> {
+        let assignment = self.authenticate()?;
+        if let Some(url) = url {
+            let attempt = self
+                .application
+                .dispatch()?
+                .assignment_check_attempt(&assignment.id)?
+                .ok_or_else(denied)?;
+            let checks = self.application.list_record_checks(assignment.record_id)?;
+            if !checks.last().is_some_and(|c| {
+                c.id == attempt.check_id && c.name == crate::stacks::PUBLICATION_CHECK
+            }) {
+                return Err(denied());
+            }
+            self.application
+                .publish_task_stack(assignment.record_id, url, Some(&assignment.id))
+                .map(Some)
+        } else {
+            self.application.task_stack(assignment.record_id)
+        }
+    }
+
     /// Submit only this Assignment's immutable attempt, replacing caller attribution.
     /// # Errors
     /// Rejects invalid credentials, cross-owner attempts and stale/conflicting outcomes atomically.

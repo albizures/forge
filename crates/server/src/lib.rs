@@ -5,6 +5,7 @@
 
 mod agent_profiles;
 mod herdr;
+mod stacks;
 #[cfg(test)]
 mod test_projects;
 #[cfg(all(test, unix))]
@@ -847,6 +848,7 @@ fn application_from_config_with_cli(
         }),
         Box::new(GitInspector),
     )
+    .with_stack_hosting(Box::new(stacks::GitHubStackHosting))
     .with_workspace_repository(Box::new(workspaces)))
 }
 
@@ -1288,6 +1290,24 @@ impl WorktreeApiServer for Daemon {
 
 #[async_trait]
 impl RecordApiServer for Daemon {
+    async fn task_stack(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<forge_rpc::TaskStackRequest>,
+    ) -> RpcResult<Option<forge_app::stacks::TaskStack>> {
+        let app = self.record_application(&request.selection, &mut [])?;
+        let id = request.record.record_id;
+        match request.record.action {
+            forge_rpc::TaskStackAction::Show => app.task_stack(id),
+            forge_rpc::TaskStackAction::Configure { source } => {
+                app.configure_task_stack(id, &source).map(Some)
+            }
+            forge_rpc::TaskStackAction::Prepare => app.prepare_task_stack(id),
+            forge_rpc::TaskStackAction::Publish { url } => {
+                app.publish_task_stack(id, &url, None).map(Some)
+            }
+        }
+        .map_err(rpc_error)
+    }
     async fn project_check_template_show(
         &self,
         request: forge_rpc::SelectedRecordRequest<forge_rpc::CheckTemplateShowRequest>,
@@ -2422,6 +2442,9 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
+    mod stack_tests {
+        include!("stack_tests.rs");
+    }
     mod check_tests {
         include!("check_tests.rs");
     }

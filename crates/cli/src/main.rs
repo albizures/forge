@@ -6,6 +6,9 @@ mod checks;
 mod findings;
 mod help;
 mod project_selection;
+#[cfg(test)]
+mod stack_tests;
+mod stacks;
 mod workspaces;
 
 use clap::{Args, Parser, Subcommand};
@@ -275,6 +278,8 @@ enum GrillingCommand {
 }
 #[derive(Debug, Subcommand)]
 enum TaskCommand {
+    /// Configure and inspect linear Task stacks and verified GitHub publication.
+    Stack(stacks::StackArgs),
     /// Open a standalone Task with zero or one Project.
     Open(OpenTaskArgs),
     /// Open a Task beneath a Spec, inheriting the Spec's Project Scope.
@@ -284,6 +289,13 @@ enum TaskCommand {
 }
 #[derive(Debug, Subcommand)]
 enum AssignmentCommand {
+    /// Read this Task's stack, or verify its non-draft PR using --url.
+    Stack {
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Inspect and review only the assigned Task's Findings.
     Finding {
         #[command(subcommand)]
@@ -824,6 +836,7 @@ async fn run(cli: Cli) -> i32 {
             GrillingCommand::Open(args) => open_grilling_under_wayfinder(args, cli.workspace).await,
         },
         Command::Task { command } => match command {
+            TaskCommand::Stack(args) => stacks::run(args, cli.workspace).await,
             TaskCommand::Open(args) => open_task(args, cli.workspace).await,
             TaskCommand::UnderSpec(args) => open_task_under_spec(args, cli.workspace).await,
             TaskCommand::UnderWayfinder(args) => {
@@ -1096,6 +1109,7 @@ fn render_assignment_result(result: Result<serde_json::Value, String>, json: boo
 async fn assignment(command: AssignmentCommand) -> i32 {
     let history = matches!(&command, AssignmentCommand::History(_));
     match command {
+        AssignmentCommand::Stack { url, json } => stacks::assignment(url, json).await,
         AssignmentCommand::Check { command } => assignment_check_commands::run(command).await,
         AssignmentCommand::Finding { command } => assignment_finding_commands::run(command).await,
         AssignmentCommand::Outcome { file, json } => {

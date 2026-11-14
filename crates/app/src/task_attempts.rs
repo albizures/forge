@@ -65,6 +65,7 @@ impl Application {
                             let work = self.record_work_state(task.id)?;
                             let observed = self.observe_task_evidence(task.id);
                             self.records.reconcile_task_evidence(task.id, &observed)?;
+                            self.verify_stack_completion(task.id)?;
                             repository.complete_task_check_acceptance(
                                 task.id,
                                 work.generation,

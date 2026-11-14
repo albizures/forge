@@ -26,6 +26,7 @@ mod outcome_findings;
 mod outcomes;
 mod record_workspaces;
 mod schema_compatibility;
+mod stacks;
 mod task_attempts;
 mod task_progress;
 mod workspace_dispatch;
@@ -250,6 +251,7 @@ impl SqliteProjectRepository {
         workspaces::initialize(connection)?;
         record_workspaces::initialize(connection)?;
         workspace_dispatch::initialize(connection)?;
+        stacks::schema(connection)?;
         Ok(())
     }
 }
@@ -680,6 +682,34 @@ impl ManagedWorktreeRepository for SqliteProjectRepository {
 }
 
 impl RecordRepository for SqliteProjectRepository {
+    fn task_stack(
+        &self,
+        record: u64,
+    ) -> Result<Option<forge_app::stacks::TaskStack>, RegistrationError> {
+        self.stack_show(record)
+    }
+    fn configure_task_stack(
+        &self,
+        record: u64,
+        source: &forge_app::stacks::StackSource,
+    ) -> Result<forge_app::stacks::TaskStack, RegistrationError> {
+        self.stack_configure(record, source)
+    }
+    fn pin_task_stack(
+        &self,
+        expected: &forge_app::stacks::TaskStack,
+        commit: &str,
+    ) -> Result<forge_app::stacks::TaskStack, RegistrationError> {
+        self.stack_pin(expected, commit)
+    }
+    fn record_stack_publication(
+        &self,
+        expected: &forge_app::stacks::TaskStack,
+        publication: &forge_app::stacks::Publication,
+        assignment: Option<&str>,
+    ) -> Result<forge_app::stacks::TaskStack, RegistrationError> {
+        self.stack_publish(expected, publication, assignment)
+    }
     fn show_check_template(
         &self,
         project: &str,
@@ -1517,6 +1547,15 @@ impl RecordRepository for SqliteProjectRepository {
             RecordRelationshipKind::GeneratedBy => "generated-by",
             RecordRelationshipKind::Initiative => "initiative",
         };
+        if kind == RecordRelationshipKind::DependsOn
+            && stacks::load(&transaction, child_id)?
+                .is_some_and(|s| s.predecessor == Some(parent_id))
+        {
+            return Err(RegistrationError::new(
+                "stack-blocked",
+                "a Stack Predecessor dependency cannot be removed independently",
+            ));
+        }
         let deleted = transaction
             .execute(
                 "DELETE FROM record_relationships WHERE from_id = ?1 AND to_id = ?2 AND kind = ?3",
@@ -4009,6 +4048,9 @@ fn storage_error(error: rusqlite::Error) -> RegistrationError {
 
 #[cfg(test)]
 mod tests {
+    mod stack_tests {
+        include!("stack_tests.rs");
+    }
     mod finding_tests {
         include!("finding_tests.rs");
     }

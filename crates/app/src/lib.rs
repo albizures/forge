@@ -13,6 +13,7 @@ pub mod checks;
 pub mod findings;
 pub mod outcomes;
 mod profile_catalog;
+pub mod stacks;
 mod task_attempts;
 mod workspaces;
 pub use workspaces::{Workspace, WorkspaceRepository};
@@ -474,6 +475,52 @@ pub struct ManagedWorktreeInfo {
 
 /// Persistence operations for generic Records.
 pub trait RecordRepository: ProjectRepository {
+    /// Read explicit stack membership.
+    /// # Errors
+    /// Returns scope or storage failures.
+    fn task_stack(&self, _record: u64) -> Result<Option<stacks::TaskStack>, RegistrationError> {
+        Ok(None)
+    }
+    /// Atomically configure membership, implied dependency and history.
+    /// # Errors
+    /// Rejects incompatible Checks, invalid scope, cycles, forks and prepared suffixes.
+    fn configure_task_stack(
+        &self,
+        _record: u64,
+        _source: &stacks::StackSource,
+    ) -> Result<stacks::TaskStack, RegistrationError> {
+        Err(RegistrationError::new(
+            "unsupported",
+            "Task stacks unavailable",
+        ))
+    }
+    /// Pin the Base Commit against an unchanged stack snapshot.
+    /// # Errors
+    /// Rejects stale configuration, unready predecessors and incompatible evidence.
+    fn pin_task_stack(
+        &self,
+        _expected: &stacks::TaskStack,
+        _commit: &str,
+    ) -> Result<stacks::TaskStack, RegistrationError> {
+        Err(RegistrationError::new(
+            "unsupported",
+            "Task stacks unavailable",
+        ))
+    }
+    /// Persist independently observed publication against current evidence and ownership.
+    /// # Errors
+    /// Rejects stale observations, incomplete reviews and unauthorized publication attempts.
+    fn record_stack_publication(
+        &self,
+        _expected: &stacks::TaskStack,
+        _publication: &stacks::Publication,
+        _assignment: Option<&str>,
+    ) -> Result<stacks::TaskStack, RegistrationError> {
+        Err(RegistrationError::new(
+            "unsupported",
+            "Task stacks unavailable",
+        ))
+    }
     /// Read current Project criteria and bounded attributed replacement history.
     ///
     /// # Errors
@@ -2319,6 +2366,7 @@ fn authorize_assignment_operation<R: AgentDispatchRepository + ?Sized>(
 
 /// The application boundary for operations shared by all transports.
 pub struct Application {
+    stack_hosting: Option<std::sync::Arc<dyn stacks::StackHosting>>,
     workspaces: Option<Box<dyn WorkspaceRepository>>,
     records: Box<dyn RecordRepository>,
     managed_worktrees: Option<Box<dyn ManagedWorktreeRepository>>,
@@ -2383,6 +2431,7 @@ impl Application {
     ) -> Self {
         Self {
             records,
+            stack_hosting: None,
             workspaces: None,
             managed_worktrees: None,
             worktree_adapter: None,
@@ -2403,6 +2452,7 @@ impl Application {
     ) -> Self {
         Self {
             records,
+            stack_hosting: None,
             workspaces: None,
             managed_worktrees: Some(managed_worktrees),
             worktree_adapter: Some(worktree_adapter),
@@ -2423,6 +2473,7 @@ impl Application {
     ) -> Self {
         Self {
             records,
+            stack_hosting: None,
             workspaces: None,
             managed_worktrees: None,
             worktree_adapter: None,
@@ -2445,6 +2496,7 @@ impl Application {
     ) -> Self {
         Self {
             records,
+            stack_hosting: None,
             workspaces: None,
             managed_worktrees: Some(managed_worktrees),
             worktree_adapter: Some(worktree_adapter),
@@ -2463,6 +2515,7 @@ impl Application {
     /// Returns a user-facing error for missing or unsupported Workspace selection.
     pub fn records_in_workspace(&self, workspace: &str) -> Result<Self, RegistrationError> {
         Ok(Self {
+            stack_hosting: self.stack_hosting.clone(),
             records: self.records.records_in_workspace(workspace)?,
             workspaces: None,
             managed_worktrees: None,
@@ -3023,6 +3076,7 @@ impl Application {
     ) -> Result<WorktreeClaim, RegistrationError> {
         let managed = self.managed_worktrees()?;
         validate_task_dispatch_mode(&managed.show_record(record_id)?)?;
+        self.prepare_task_stack(record_id)?;
         let base = managed.task_base_commit(record_id)?.ok_or_else(|| {
             let error = RegistrationError::new(
                 "task-base-commit-unavailable",
@@ -3054,6 +3108,15 @@ impl Application {
     ) -> Result<WorktreeClaim, RegistrationError> {
         let managed = self.managed_worktrees()?;
         let adapter = self.worktree_adapter()?;
+        if let Some(stack) = self.prepare_task_stack(record_id)?
+            && (branch != stacks::task_branch(record_id)
+                || stack.base_commit.as_deref() != Some(base))
+        {
+            return Err(RegistrationError::new(
+                "stack-blocked",
+                "stack worktree must use its deterministic branch and pinned Base Commit",
+            ));
+        }
         let record = managed.show_record(record_id)?;
         if !is_worktree_eligible(&record) {
             return Err(RegistrationError::new(
@@ -3615,6 +3678,7 @@ impl Application {
                 "completion resolution must not be blank",
             ));
         }
+        self.verify_stack_completion(id)?;
         self.records.done_record(id, completion_resolution)
     }
 

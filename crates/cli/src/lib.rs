@@ -488,6 +488,40 @@ pub async fn request_task_check_acceptance(
         .map_err(|error| format!("controlled Task Check acceptance failed: {error}"))
 }
 
+/// Operate an explicitly selected Task stack.
+/// # Errors
+/// Returns routing, policy, hosting or storage failures.
+pub async fn request_task_stack(
+    endpoint: impl Into<RecordEndpoint>,
+    request: forge_rpc::TaskStackRequest,
+) -> Result<Option<forge_rpc::TaskStack>, String> {
+    record_client(endpoint)?
+        .task_stack(request)
+        .await
+        .map_err(record_error("task stack"))
+}
+
+/// Read own stack or verify publication using protected Assignment delivery.
+/// # Errors
+/// Returns redacted authentication, policy or hosting failures.
+pub async fn assignment_stack(url: Option<String>) -> Result<Option<forge_rpc::TaskStack>, String> {
+    use forge_rpc::AssignmentApiClient;
+    let assignment_id = env::var("FORGE_ASSIGNMENT_ID").map_err(|_| "missing Assignment ID")?;
+    let endpoint =
+        env::var("FORGE_ASSIGNMENT_DAEMON_URL").map_err(|_| "missing Assignment daemon URL")?;
+    let file = env::var_os("FORGE_ASSIGNMENT_CAPABILITY_SECRET_FILE")
+        .ok_or("missing Assignment secret file")?;
+    let secret = read_assignment_secret(file)?;
+    client(&format!("{}/rpc", endpoint.trim_end_matches('/')))?
+        .stack(forge_rpc::AssignmentStackRequest {
+            assignment_id,
+            secret,
+            url,
+        })
+        .await
+        .map_err(|_| "Assignment stack operation rejected; reread context and attempt state".into())
+}
+
 /// Submit a JSON outcome using protected Assignment delivery; credentials never enter arguments.
 /// # Errors
 /// Returns redacted delivery or outcome validation failures.

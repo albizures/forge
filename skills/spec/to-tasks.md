@@ -43,7 +43,17 @@ Each Task body must carry the information a fresh agent needs:
 - Verification steps and the expected evidence or deliverable.
 - Its immediate predecessor, if any, and the expectation that it builds on completed predecessor results.
 
-Keep supporting detail local to the Task rather than copying the whole Spec. Before publication, verify that every Spec acceptance criterion and required domain change is covered, every Task is verifiable, and the order is one linear plan. A dependency chain serializes workflow readiness; it does not itself integrate Git changes or guarantee conflict-free merges. Execution policy belongs outside this mode.
+Keep supporting detail local to the Task rather than copying the whole Spec. Before publication, verify that every Spec acceptance criterion and required domain change is covered, every Task is verifiable, and the order is one linear plan.
+
+For code-producing Tasks, also plan an explicit Stack by default. Inspect the
+Project Check Template: its final Check must be named `Publication`, after
+Implementation and reviews, with a valid pinned profile for Dispatched execution.
+Resolve the GitHub repository, push remote and starting branch from explicit
+context; ask before writing if any is ambiguous. The starting branch may be any
+feature or release branch, not only the repository default. If the template is
+incompatible, stop and request operator configuration before opening Tasks; this
+planning mode does not rewrite templates or existing Check pins. Non-code Tasks
+retain ordinary dependency behavior.
 
 ## 3. Publish without another approval round
 
@@ -59,10 +69,31 @@ After creating each Task after the first, immediately add its dependency on the 
 forge record relate 45 --kind depends-on --to 44
 ```
 
-Task creation and dependency creation are separate operations. If a write fails, an unexpected child appears, or concurrent execution prevents adding an edge, stop and report the exact created IDs, relationships, and incomplete plan. Do not dispatch work or attempt recovery through this mode; any subsequent repair is outside its one-shot boundary.
+For the first code-producing Task, configure the Stack root using the resolved
+destination. Link every subsequent code-producing Task to the actual ID of the
+preceding code-producing Task, even when non-code Tasks intervene. For example:
+
+```sh
+forge task stack root 44 --repository acme/widgets --remote origin --base feature/payments
+forge task stack after 49 --predecessor 44
+```
+
+Substitute the inspected destination and returned IDs. Stack links imply a
+dependency, but preserve the immediate-predecessor dependencies for the entire
+plan as well. Record IDs are opaque; never infer predecessors with `N-1`.
+
+Task creation, ordinary dependency creation and Stack configuration are separate
+operations. If a write fails, an unexpected child appears, or concurrent execution
+prevents adding an edge, stop and report the exact created IDs, relationships,
+Stack configuration and incomplete plan. Do not dispatch work or attempt recovery through this mode; any subsequent repair is outside its one-shot boundary.
 
 ## 4. Verify and report
 
 Read back the created Tasks and relationships. Confirm that all planned Tasks are direct children of the Spec and every Task after the first depends on its immediate predecessor, with no branching.
 
-Report the ordered Task IDs, concise outcomes, and dependency chain. Leave the Spec's lifecycle unchanged and stop; implementation is a separate request and workflow.
+Read back each code-producing Task with `forge task stack show <task-id> --json`.
+Confirm the root destination and linear Stack Predecessor links independently
+of the ordinary dependency chain. Leave preparation, worktrees and publication
+Checks to execution.
+
+Report the ordered Task IDs, concise outcomes, dependency chain and Stack. Leave the Spec's lifecycle unchanged and stop; implementation is a separate request and workflow.
