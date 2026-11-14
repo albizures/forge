@@ -33,7 +33,7 @@ fn acceptance_claim_snapshots_first_unpassed_check_and_pinned_profile_atomically
     std::fs::create_dir_all(root.join(".agents/profiles")).unwrap();
     std::fs::write(
         root.join(".agents/profiles/work.md"),
-        "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\ntools: [read]\n---\nWork",
+        "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\nthinkingLevel: low\ntools: [read]\n---\nWork",
     )
     .unwrap();
     let path = root.join("store.sqlite");
@@ -55,8 +55,10 @@ fn acceptance_claim_snapshots_first_unpassed_check_and_pinned_profile_atomically
     let pinned = store
         .register_agent_profile("test", RecordType::Task, &policy)
         .unwrap();
+    let mut later_policy = policy.clone();
+    later_policy.thinking_level = Some(forge_app::agent_profiles::ThinkingLevel::Xhigh);
     let drift = store
-        .register_agent_profile("test", RecordType::Task, &policy)
+        .register_agent_profile("test", RecordType::Task, &later_policy)
         .unwrap();
     store
         .select_workspace_profile("test", RecordType::Task, Some(drift.revision))
@@ -148,6 +150,25 @@ fn acceptance_claim_snapshots_first_unpassed_check_and_pinned_profile_atomically
     assert_eq!(claims[0].0, claims[1].0);
     let assignment = claims[0].0.clone();
     assert_eq!(assignment.profile.revision, pinned.revision);
+    assert_eq!(assignment.profile.launch_policy.as_ref(), Some(&policy));
+    // Editing the source and registering a later revision cannot change the
+    // immutable Check pin or the already bound Assignment, even after restart.
+    std::fs::write(root.join(".agents/profiles/work.md"), "changed source").unwrap();
+    let later = store
+        .register_agent_profile("test", RecordType::Task, &later_policy)
+        .unwrap();
+    assert_ne!(later.revision, pinned.revision);
+    assert_eq!(store.list_record_checks(task.id).unwrap(), checks);
+    assert_eq!(
+        SqliteProjectRepository::open(&path)
+            .unwrap()
+            .agent_assignment(&assignment.id)
+            .unwrap()
+            .profile
+            .launch_policy
+            .as_ref(),
+        Some(&policy)
+    );
     let attempt = store
         .assignment_check_attempt("attempt-1")
         .unwrap()

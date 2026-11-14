@@ -83,7 +83,7 @@ async fn preview_registration_and_explicit_selections_are_isolated_immutable_and
         "---\nname: example\ndescription: fixture\n---\n",
     )
     .unwrap();
-    let document = "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\ntools: [read]\nskills: [{name: example}]\nextensions: []\nmcpServers: []\n---\nBEHAVIOR_SENTINEL\n";
+    let document = "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\nthinkingLevel: low\ntools: [read]\nskills: [{name: example}]\nextensions: []\nmcpServers: []\n---\nBEHAVIOR_SENTINEL\n";
     std::fs::write(&source, document).unwrap();
     store.create_workspace("one", "One", &root).unwrap();
     let app = Application::with_agent_dispatch(
@@ -133,6 +133,7 @@ async fn preview_registration_and_explicit_selections_are_isolated_immutable_and
     let preview = success(output);
     assert_eq!(preview["workspace"], "one");
     assert_eq!(preview["policy"]["model"], "openai/gpt-5");
+    assert_eq!(preview["policy"]["thinking_level"], "low");
     assert_eq!(
         preview["policy"]["skills"][0]["path"],
         skill
@@ -177,6 +178,39 @@ async fn preview_registration_and_explicit_selections_are_isolated_immutable_and
         }
         command.output().unwrap()
     };
+    for field in [
+        "",
+        "thinkingLevel: null\n",
+        "thinkingLevel: 3\n",
+        "thinkingLevel: []\n",
+        "thinkingLevel: {}\n",
+        "thinkingLevel: HIGH\n",
+        "thinkingLevel: unsupported\n",
+    ] {
+        std::fs::write(&source, document.replace("thinkingLevel: low\n", field)).unwrap();
+        for operation in ["preview", "register"] {
+            let output = cli(
+                "one",
+                &[
+                    "agent-profile",
+                    operation,
+                    ".agents/profiles/example.md",
+                    "--record-type",
+                    "task",
+                ],
+                true,
+            );
+            assert!(!output.status.success(), "{operation}: {field}");
+            let error = String::from_utf8(output.stderr).unwrap();
+            assert!(error.contains("thinkingLevel"), "{error}");
+            assert!(
+                error.contains("off, minimal, low, medium, high, xhigh"),
+                "{error}"
+            );
+            assert!(!error.contains("BEHAVIOR_SENTINEL"));
+        }
+    }
+    std::fs::write(&source, &document).unwrap();
     // Both production operations enforce the new authoring boundary without
     // consuming revisions or exposing source contents in errors.
     let legacy = skill.join("forge-agent.md");
@@ -207,6 +241,7 @@ async fn preview_registration_and_explicit_selections_are_isolated_immutable_and
     let text = String::from_utf8(readable.stdout).unwrap();
     assert!(text.contains("Preview only; registration and selection unchanged."));
     assert!(text.contains("SHA-256"));
+    assert!(text.contains("Thinking level: low"));
     assert!(text.contains("No OS/same-user isolation"));
     assert!(!text.contains("CREDENTIAL_SENTINEL"));
     assert!(!text.contains("BEHAVIOR_SENTINEL"));
@@ -317,6 +352,7 @@ async fn preview_registration_and_explicit_selections_are_isolated_immutable_and
         &source,
         document
             .replace("openai/gpt-5", "anthropic/claude")
+            .replace("thinkingLevel: low", "thinkingLevel: xhigh")
             .replace("BEHAVIOR_SENTINEL", "NEW_BEHAVIOR"),
     )
     .unwrap();
@@ -332,6 +368,17 @@ async fn preview_registration_and_explicit_selections_are_isolated_immutable_and
         true,
     ));
     assert_eq!(newer["revision"], 3);
+    assert_eq!(newer["policy"]["thinking_level"], "xhigh");
+    assert_eq!(
+        frozen
+            .launch_policy
+            .as_ref()
+            .unwrap()
+            .thinking_level
+            .unwrap()
+            .as_str(),
+        "low"
+    );
     std::fs::remove_file(&source).unwrap();
     assert_eq!(
         fixture
@@ -387,7 +434,7 @@ async fn preview_registration_and_explicit_selections_are_isolated_immutable_and
     assert!(error.contains("select task or grilling"));
     std::fs::write(
         &source,
-        "---\nversion: 1\nsecret: CREDENTIAL_SENTINEL\n---\nBEHAVIOR_SENTINEL",
+        "---\nversion: 1\nthinkingLevel: low\nsecret: CREDENTIAL_SENTINEL\n---\nBEHAVIOR_SENTINEL",
     )
     .unwrap();
     let request = forge_rpc::AgentProfileDocumentRequest {
@@ -407,6 +454,29 @@ async fn preview_registration_and_explicit_selections_are_isolated_immutable_and
         store.agent_profile(RecordType::Task, 4).is_err(),
         "failed registration must not create revisions"
     );
+    for kind in ["task", "grilling"] {
+        for level in ["off", "minimal", "low", "medium", "high", "xhigh"] {
+            std::fs::write(
+                &source,
+                document.replace("thinkingLevel: low", &format!("thinkingLevel: {level}")),
+            )
+            .unwrap();
+            for operation in ["preview", "register"] {
+                let response = success(cli(
+                    "one",
+                    &[
+                        "agent-profile",
+                        operation,
+                        ".agents/profiles/example.md",
+                        "--record-type",
+                        kind,
+                    ],
+                    true,
+                ));
+                assert_eq!(response["policy"]["thinking_level"], level);
+            }
+        }
+    }
     assert!(!marker.exists());
     server.abort();
 }

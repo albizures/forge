@@ -2,7 +2,33 @@
 pub use crate::profile_catalog::{
     DirectResource, McpResource, ResolvedLaunchPolicy, ResourceCatalog,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+
+/// Pi reasoning effort requested by an immutable Agent Profile revision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThinkingLevel {
+    Off,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    Xhigh,
+}
+
+impl ThinkingLevel {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Xhigh => "xhigh",
+        }
+    }
+}
 
 pub(crate) fn validate_header(
     version: u32,
@@ -38,6 +64,7 @@ pub struct ProfileDocument {
     pub version: u32,
     pub runtime: String,
     pub model: String,
+    pub thinking_level: ThinkingLevel,
     pub tools: Vec<String>,
     #[serde(default)]
     pub skills: Vec<ResourceReference>,
@@ -78,6 +105,16 @@ impl ProfileDocument {
         }
         if !closed {
             return Err("unterminated YAML frontmatter".into());
+        }
+        // Validate separately so every missing, null or malformed choice has an
+        // actionable diagnostic without echoing potentially sensitive YAML values.
+        let fields: serde_yaml::Value = serde_yaml::from_str(&yaml)
+            .map_err(|_| "invalid Agent Profile frontmatter".to_string())?;
+        if fields
+            .get("thinkingLevel")
+            .is_none_or(|value| serde_yaml::from_value::<ThinkingLevel>(value.clone()).is_err())
+        {
+            return Err("thinkingLevel is required and must be one of: off, minimal, low, medium, high, xhigh".into());
         }
         let mut document: Self = serde_yaml::from_str(&yaml)
             .map_err(|_| "invalid Agent Profile frontmatter".to_string())?;
