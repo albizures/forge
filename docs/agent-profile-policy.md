@@ -38,6 +38,7 @@ Example `.agents/profiles/implementation.md`:
 version: 1
 runtime: herdr/pi
 model: openai/gpt-5
+thinkingLevel: low
 tools: [read, bash, edit, write]
 skills:
   - name: implementation
@@ -49,9 +50,22 @@ Read and follow the implementation skill before working.
 
 Frontmatter is strict: unknown/duplicate fields, other versions/runtimes,
 unqualified models, duplicate or non-built-in tools and malformed references are
-errors. Required fields are version/runtime/model/tools; omitted resource lists
-mean empty. An empty tools list means no built-ins. Lifecycle controls belong to
-Forge, never the document. References contain exactly one `name` or `path`.
+errors. Required fields are version/runtime/model/thinkingLevel/tools; omitted
+resource lists mean empty. An empty tools list means no built-ins. Lifecycle
+controls belong to Forge, never the document. References contain exactly one `name` or `path`.
+
+`thinkingLevel` is required for every newly previewed or registered document,
+regardless of role (Implementation, review, PR creation or Grilling). It must be
+exactly one of the strings `off`, `minimal`, `low`, `medium`, `high`, or `xhigh`.
+Omission, null, wrong types, YAML tags and unsupported spellings are rejected;
+there is no authoring default. The example explicitly requests `low`.
+
+This strict v1 authoring requirement does not apply retroactively to stored
+revisions. Historical persisted policies without `thinkingLevel` remain readable
+and launchable without a Forge-added thinking override; legacy revisions without
+a resolved policy also keep their previous launch behavior. Forge neither invents
+a value nor backfills stored policy. Re-previewing or re-registering an old source
+is new authoring and requires an explicit choice.
 
 `ResourceCatalog::discover(operator_root, workspace_root)` merges installed
 resources beneath two explicit absolute roots. The operator root is the home
@@ -103,9 +117,11 @@ Both require explicit `--workspace`, even from inside a Workspace. Relative
 Workspace root. The daemon's home directory supplies the operator catalog, not
 the client's home or cwd. Files must be available to the daemon.
 
-Readable and JSON responses report runtime/model/tools, canonical resource
-identities and SHA-256 digests, effective Forge-owned lifecycle policy, exact
-fingerprint coverage and limitations. They omit behavior and MCP configuration
+Readable and JSON responses report runtime, model, thinking level and tools,
+canonical resource identities and SHA-256 digests, effective Forge-owned lifecycle
+policy, exact fingerprint coverage and limitations. JSON policy responses expose
+this choice as `thinking_level` (the document field is `thinkingLevel`); historical
+policies without a choice omit it. They omit behavior and MCP configuration
 (including credentials). Preview has a null `revision`; registration returns the
 new revision and leaves all selections unchanged. Invalid documents/catalogs
 fail with redacted reasons; neither operation imports extensions, starts MCP
@@ -138,7 +154,7 @@ mkdir -p "$fixture/home" "$fixture/workspace/.agents/skills/example" \
 printf '%s\n' '---' 'name: example' 'description: Example skill' '---' \
   'Follow the assigned work.' > "$fixture/workspace/.agents/skills/example/SKILL.md"
 printf '%s\n' '---' 'version: 1' 'runtime: herdr/pi' 'model: openai/gpt-5' \
-  'tools: [read]' 'skills: [{name: example}]' '---' \
+  'thinkingLevel: low' 'tools: [read]' 'skills: [{name: example}]' '---' \
   'Read and follow the example skill before working.' \
   > "$fixture/workspace/.agents/profiles/example.md"
 HOME="$fixture/home" FORGE_STORE_PATH="$fixture/store.sqlite" \
@@ -200,6 +216,11 @@ For registered policies the adapter:
 - Validates the stored policy's direct inputs before provider allocation and
   checks them again immediately before launch.
 - Splits the stored provider-qualified model into `--provider` and `--model`.
+- Passes `--thinking <level>` with exactly the registered revision's
+  `thinkingLevel`, through the shared Task/Grilling argument builder. Historical
+  stored policies without this field receive no `--thinking` argument, preserving
+  their previous reliance on Pi settings/defaults. This requests Pi's thinking
+  level; it does not guarantee model-internal reasoning or provider support.
 - Passes `--no-approve`, overriding ambient saved/default project trust. It does
   not pass `--no-context-files`: repository and ancestor instructions remain
   available. Instructions are not a security boundary.
@@ -264,8 +285,9 @@ runtime; run it separately when changing the flag contract. Verified against Pi
 
 `ResolvedLaunchPolicy` is the shared application boundary for preview,
 registration, preflight and runtime adapters. It retains schema version, runtime,
-provider-qualified model, exact built-in allowlist, behavior, canonical selected
-file identities and SHA-256 digests. MCP entries retain canonical catalog source
+provider-qualified model, thinking level (when present in the stored revision),
+exact built-in allowlist, behavior, canonical selected file identities and SHA-256
+digests. MCP entries retain canonical catalog source
 identity and the selected persisted launch configuration with its SHA-256 digest.
 MCP configuration can contain credentials: adapters must redact it from previews,
 audits and diagnostics rather than serializing the full persistence payload.
@@ -279,9 +301,13 @@ copy `launch_policy_json` unchanged; old revisions are not mutated. Legacy rows
 retain `launch_policy: None` without fabricating historical policy.
 
 The profile source is not a runtime dependency. Editing or deleting it cannot alter
-stored behavior/configuration. `validate_direct_inputs` validates policy and
-compares only selected SKILL.md/extension entry bytes and persisted MCP
-configuration. Supporting files/imports/dependencies are not recursively hashed.
+stored behavior/configuration, including thinking level. Later registrations do
+not mutate prior revisions, Assignment bindings or Task Check pins. Source edits
+alone never reconfigure an existing Assignment or Check. Adoption requires new
+registration and explicit selection; Task routing additionally requires Project
+Check Template pins for future Tasks, not a rewrite of existing pins.
+`validate_direct_inputs` validates policy and compares only selected
+SKILL.md/extension entry bytes and persisted MCP configuration. Supporting files/imports/dependencies are not recursively hashed.
 After source changes an explicit new resolution/registration is required; changes
 to the original MCP catalog do not replace a registered configuration.
 
