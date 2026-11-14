@@ -192,7 +192,7 @@ async fn exercise_launch() {
     )
     .unwrap();
     std::fs::create_dir_all(workspace.join(".agents/profiles")).unwrap();
-    std::fs::write(workspace.join(".agents/profiles/grilling.md"), "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\ntools: []\n---\nFROZEN GRILLING BEHAVIOR").unwrap();
+    std::fs::write(workspace.join(".agents/profiles/grilling.md"), "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\nthinkingLevel: low\ntools: []\n---\nFROZEN GRILLING BEHAVIOR").unwrap();
     let policy = forge_app::agent_profiles::ResourceCatalog::discover(&fixture.0, &workspace)
         .unwrap()
         .resolve(&workspace, ".agents/profiles/grilling.md")
@@ -288,6 +288,12 @@ async fn exercise_launch() {
     };
     assert_eq!(cwd, workspace.to_str().unwrap());
     assert!(!args.to_string().contains("FROZEN GRILLING BEHAVIOR"));
+    assert!(
+        args.as_array()
+            .unwrap()
+            .windows(2)
+            .any(|pair| pair == [serde_json::json!("--thinking"), serde_json::json!("low")])
+    );
     assert_eq!(env["FORGE_ASSIGNMENT_ID"], assignment);
     let cli = Path::new(env["FORGE_ASSIGNMENT_FORGE_CLI"].as_str().unwrap()).to_owned();
     let environment = env.as_object().unwrap().clone();

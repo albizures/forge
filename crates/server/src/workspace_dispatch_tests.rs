@@ -444,7 +444,7 @@ fn registered_profile_blocker_is_durable_redacted_and_clears_on_input_repair() {
     )
     .unwrap();
     std::fs::create_dir_all(fixture.root.join("one/.agents/profiles")).unwrap();
-    std::fs::write(fixture.root.join("one/.agents/profiles/entry.md"), "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\ntools: []\nskills: [{name: entry}]\n---\nPRIVATE_BEHAVIOR\n").unwrap();
+    std::fs::write(fixture.root.join("one/.agents/profiles/entry.md"), "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\nthinkingLevel: low\ntools: []\nskills: [{name: entry}]\n---\nPRIVATE_BEHAVIOR\n").unwrap();
     let profile = app
         .register_agent_profile(
             "one",

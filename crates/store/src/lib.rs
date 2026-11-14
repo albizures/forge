@@ -5923,6 +5923,7 @@ mod tests {
                         version: 1,
                         runtime: "herdr/pi".into(),
                         model: "openai/test".into(),
+                        thinking_level: None,
                         tools: vec![],
                         behavior: String::new(),
                         skills: vec![],

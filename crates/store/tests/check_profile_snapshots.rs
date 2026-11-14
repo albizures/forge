@@ -58,7 +58,7 @@ fn pinned_configuration_survives_template_selection_changes_and_restart_without_
     .unwrap();
     std::fs::create_dir_all(workspace.join(".agents/profiles")).unwrap();
     let document = workspace.join(".agents/profiles/verify.md");
-    std::fs::write(&document, "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\ntools: [read]\n---\nVerify the deliverables.\n").unwrap();
+    std::fs::write(&document, "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\nthinkingLevel: low\ntools: [read]\n---\nVerify the deliverables.\n").unwrap();
     let policy = ResourceCatalog::discover(&root.join("operator"), &workspace)
         .unwrap()
         .resolve(&workspace, ".agents/profiles/verify.md")

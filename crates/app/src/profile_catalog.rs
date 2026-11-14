@@ -42,6 +42,9 @@ pub struct ResolvedLaunchPolicy {
     pub version: u32,
     pub runtime: String,
     pub model: String,
+    /// Absent only on historical registered revisions; never infer a default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_level: Option<super::agent_profiles::ThinkingLevel>,
     pub tools: Vec<String>,
     pub behavior: String,
     pub skills: Vec<DirectResource>,
@@ -53,6 +56,7 @@ impl std::fmt::Debug for ResolvedLaunchPolicy {
         f.debug_struct("ResolvedLaunchPolicy")
             .field("version", &self.version)
             .field("runtime", &self.runtime)
+            .field("thinking_level", &self.thinking_level)
             .field("skills", &self.skills)
             .field("extensions", &self.extensions)
             .field("mcp_servers", &self.mcp_servers)
@@ -256,6 +260,7 @@ impl ResourceCatalog {
             version: document.version,
             runtime: document.runtime,
             model: document.model,
+            thinking_level: Some(document.thinking_level),
             tools: document.tools,
             behavior: document.behavior,
             skills: resolve_files(&document.skills, &self.skills)?,
