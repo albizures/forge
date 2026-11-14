@@ -1,0 +1,28 @@
+#!/usr/bin/env python3
+"""Deterministic process boundary for Forgeup orchestration tests; no application SQL."""
+import json
+import pathlib
+import shutil
+import sys
+
+if sys.argv[1:] == ["--build-info", "--json"]:
+    print(json.dumps(dict(commit="0123456789012345678901234567890123456789", dirty=False,
+                          management_protocol_revision=1, version="test")))
+    sys.exit()
+operation = sys.argv[2]
+if operation == "capabilities":
+    print(json.dumps(dict(interface_version=1, target_schema=8, supported_sources=[7, 8])))
+    sys.exit()
+path = pathlib.Path(sys.argv[3])
+
+def inspect(store):
+    text = store.read_text()
+    return dict(schema=(None if not text else int(text[0])), fingerprint=text,
+                pristine=not text, blockers=[], tables=[])
+
+if operation == "snapshot":
+    shutil.copyfile(path, sys.argv[4])
+    path = pathlib.Path(sys.argv[4])
+if operation == "migrate":
+    path.write_text("8" + path.read_text()[1:])
+print(json.dumps(inspect(path)))

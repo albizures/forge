@@ -14,6 +14,7 @@ pub mod findings;
 pub mod outcomes;
 mod profile_catalog;
 pub mod stacks;
+pub mod storage_upgrade;
 mod task_attempts;
 mod workspaces;
 pub use workspaces::{Workspace, WorkspaceRepository};

@@ -9,6 +9,9 @@ by migrations—not just the initial `CREATE TABLE` statements.
 - [`src/lib.rs`](src/lib.rs): `SqliteProjectRepository::from_connection`,
   `migrate_*` functions, profile seeds, and repository operations.
 - [`src/workspaces.rs`](src/workspaces.rs): Workspace ownership and Project identity.
+- [`src/upgrade.rs`](src/upgrade.rs): explicit offline schema 7 → 8 conversion,
+  frozen contract validation, consistent snapshots, and preservation inventories.
+  See [Revision State upgrades](../../docs/state-upgrades.md) for orchestration.
 - [`src/record_workspaces.rs`](src/record_workspaces.rs): Record ownership,
   cross-Workspace guards, and update-history migration.
 - [`src/checks.rs`](src/checks.rs): Task Checks, Assessments, Invalidations,
@@ -40,8 +43,10 @@ is documented separately in [Records](../../docs/records.md),
   numbered separately per Workspace.
 - Foreign keys use SQLite's default delete behavior unless stated otherwise.
   Most references do **not** cascade.
-- Only the current marked schema revision is supported. Triggers and repository
-  validation also enforce invariants; incompatible stores require a fresh store.
+- Ordinary repository opening accepts only the current marked schema revision.
+  Triggers and repository validation also enforce invariants. Explicit managed
+  copy-and-upgrade supports schema 7 → 8 and same-schema transfers; unsupported
+  stores are rejected without automatic conversion or reset.
 
 ## Entity Relationship Diagrams
 

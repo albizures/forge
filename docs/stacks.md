@@ -97,7 +97,8 @@ block preparation or publication; Forge does not rebase, force-push, merge, reta
 or continuously monitor already-completed stacks. Operators investigate and restore
 the required verified state before retrying; uncertain state is not accepted as success.
 
-Storage revision 8 adds stack persistence. Earlier marked stores are rejected
-without migration or rewriting their markers. Use the normal revision-isolated
-installation workflow; do not point this revision at a live older store expecting
-conversion. No CLI invocation in this document installs or activates a revision.
+Storage revision 8 adds stack persistence. Ordinary opening rejects earlier
+marked stores without conversion or marker rewrites. The explicit
+[Revision State upgrade](state-upgrades.md) workflow can copy schema 7 into a new
+revision and migrate it to 8, preserving existing Tasks as non-stacked. Do not
+point this revision at a live older store expecting automatic conversion. No CLI invocation in this document installs or activates a revision.

@@ -608,8 +608,10 @@ Workspace/cwd envelope. Replacement contains `expected_version`, ordered `criter
 `actor` and `message`. Show returns `{version, criteria, history, next_cursor}`;
 set returns `{version, criteria}`. Project ownership is checked in the repository
 and selectors are qualified within the selected Workspace before application work.
-Assignment capabilities have no template mutation operation. These additions
-require fresh development stores; no migration or Task backfill is provided.
+Assignment capabilities have no template mutation operation. Stores predating the
+schema-7 contracts require fresh development stores; no legacy Task backfill is
+provided. The separate [Revision State upgrade](state-upgrades.md) workflow can
+preserve schema-7 records when upgrading to schema 8.
 
 ## Workflow readiness
 

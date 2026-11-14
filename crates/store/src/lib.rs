@@ -29,6 +29,7 @@ mod schema_compatibility;
 mod stacks;
 mod task_attempts;
 mod task_progress;
+pub mod upgrade;
 mod workspace_dispatch;
 mod workspaces;
 

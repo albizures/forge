@@ -88,6 +88,16 @@ the manual-daemon path: it only inspects that explicit endpoint and prints a
 `manual` result. It neither registers, activates, starts, stops, nor otherwise
 alters a manually launched daemon.
 
+## Carry state into a new Revision
+
+Revision selection does not transfer records. Use the explicit
+[Revision State upgrade workflow](../../docs/state-upgrades.md) to plan, snapshot,
+migrate, validate, and publish a database copy before separately activating it.
+Schema 7 → 8 and same-schema transfers are supported initially. Both daemons must
+be stopped and agent/resource ownership resolved. Preparation upgrades the manager
+registry to schema 2 so older managers cannot bypass recovery and lineage guards;
+see the guide before using older clients or attempting rollback.
+
 ## State and removal
 
 Each canonical selector has isolated Revision State: a database, runtime
@@ -139,7 +149,8 @@ forgeup doctor
 Forgeup creates and verifies owner-private locations on Unix. It locks the
 registry across processes, writes it atomically, backs up schema-0 registries
 as `registry.toml.bak` during migration, and refuses a registry created by a
-newer schema. Do not hand-edit the registry or managed-daemon runtime record.
+newer schema. Registry schemas 1 and 2 are readable; only explicit state-upgrade
+preparation advances schema 1 to 2. Do not hand-edit the registry or managed-daemon runtime record.
 If `daemon status` reports `ambiguous`, or start/stop reports that ownership
 could not be proved, inspect the paths from `forgeup logs` and resolve the
 process manually; Forgeup deliberately retains ambiguous state rather than

@@ -482,6 +482,7 @@ dependencies = [
  "forge-app",
  "rusqlite",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -489,6 +490,7 @@ name = "forgeup"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "forge-app",
  "fs4",
  "serde",
  "serde_json",
