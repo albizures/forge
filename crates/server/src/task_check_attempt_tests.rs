@@ -20,7 +20,7 @@ async fn check_bound_rpc_context_outcome_and_normal_dispatch_share_same_owner() 
     std::fs::create_dir_all(workspace.root.join(".agents/profiles")).unwrap();
     std::fs::write(
         workspace.root.join(".agents/profiles/work.md"),
-        "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\ntools: [read]\n---\nWork",
+        "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\nthinkingLevel: low\ntools: [read]\n---\nWork",
     )
     .unwrap();
     let policy = forge_app::agent_profiles::ResourceCatalog::discover(

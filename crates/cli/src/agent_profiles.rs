@@ -107,6 +107,9 @@ fn render(value: &AgentProfileDocumentResponse) {
         value.policy.model,
         value.policy.tools.join(", ")
     );
+    if let Some(level) = value.policy.thinking_level {
+        println!("Thinking level: {}", level.as_str());
+    }
     for (category, resources) in [
         ("skill", &value.policy.skills),
         ("extension", &value.policy.extensions),

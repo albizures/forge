@@ -79,6 +79,9 @@ pub(super) fn pi_launch_arguments(
     .into_iter()
     .map(str::to_owned)
     .collect();
+    if let Some(level) = policy.thinking_level {
+        args.extend(["--thinking".into(), level.as_str().into()]);
+    }
     if policy.tools.is_empty() {
         args.push("--no-tools".into());
     } else {
@@ -1124,6 +1127,7 @@ mod tests {
             version: 1,
             runtime: "herdr/pi".into(),
             model: "openai/gpt-5".into(),
+            thinking_level: None,
             tools: vec![],
             behavior: "behavior".into(),
             skills: vec![],
@@ -1337,6 +1341,7 @@ mod tests {
                     version: 1,
                     runtime: "herdr/pi".into(),
                     model: "openai/gpt-5".into(),
+                    thinking_level: Some(forge_app::agent_profiles::ThinkingLevel::High),
                     tools: vec![],
                     behavior: "private registered behavior".into(),
                     skills: vec![],
@@ -1534,6 +1539,8 @@ mod tests {
                             "",
                             "--append-system-prompt",
                             "",
+                            "--thinking",
+                            "high",
                             "--no-tools",
                             "--"
                         ])
