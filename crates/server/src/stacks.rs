@@ -43,6 +43,32 @@ fn github_repository(url: &str) -> Option<&str> {
 }
 
 impl StackHosting for GitHubStackHosting {
+    fn checkout(
+        &self,
+        root: &Path,
+    ) -> Result<forge_app::stacks::CheckoutObservation, RegistrationError> {
+        let commit = output(root, "git", &["rev-parse", "--verify", "HEAD^{commit}"])?;
+        let status = output(
+            root,
+            "git",
+            &[
+                "--no-optional-locks",
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+                "--ignore-submodules=none",
+            ],
+        )?;
+        let after = output(root, "git", &["rev-parse", "--verify", "HEAD^{commit}"])?;
+        if after != commit {
+            return Err(error("checkout moved during observation"));
+        }
+        Ok(forge_app::stacks::CheckoutObservation {
+            commit,
+            clean: status.is_empty(),
+        })
+    }
+
     fn fetch_branch(
         &self,
         root: &Path,

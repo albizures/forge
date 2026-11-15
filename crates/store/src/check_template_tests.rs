@@ -34,6 +34,96 @@ fn profile_revision_is_snapshotted_including_the_implementation_binding() {
 }
 
 #[test]
+fn stack_template_preflight_is_read_only_and_checks_every_pin() {
+    let repository = SqliteProjectRepository::in_memory().unwrap();
+    repository.register(&project("alpha", "/stack-preflight")).unwrap();
+    let baseline = repository.show_check_template("alpha", None, 10).unwrap();
+    assert!(baseline.stack_preflight.unwrap().blockers.iter().any(|b| b.contains("Publication")));
+    let mut input = replacement(0, &["Review", "Publication"]);
+    for criterion in &mut input.criteria {
+        criterion.profile_revision = Some(1);
+    }
+    repository.replace_check_template("alpha", &input).unwrap();
+    let before = repository.show_check_template("alpha", None, 10).unwrap();
+    assert_eq!(before.stack_preflight.as_ref().unwrap().blockers.len(), 3);
+    let policy = forge_app::agent_profiles::ResolvedLaunchPolicy {
+        version: 1, runtime: "herdr/pi".into(), model: "test/model".into(), tools: vec![],
+        behavior: "Verify".into(), skills: vec![], extensions: vec![], mcp_servers: vec![],
+    };
+    repository.register_agent_profile("test", RecordType::Task, &policy).unwrap();
+    input.expected_version = 1;
+    for criterion in &mut input.criteria {
+        criterion.profile_revision = Some(2);
+    }
+    repository.replace_check_template("alpha", &input).unwrap();
+    let good = repository.show_check_template("alpha", None, 10).unwrap();
+    assert!(good.stack_preflight.as_ref().unwrap().blockers.is_empty());
+    assert_eq!(repository.show_check_template("alpha", None, 10).unwrap(), good);
+    input.expected_version = 2;
+    input.criteria[1].profile_revision = Some(999);
+    repository.replace_check_template("alpha", &input).unwrap();
+    let missing = repository.show_check_template("alpha", None, 10).unwrap();
+    assert_eq!(missing.stack_preflight.unwrap().blockers, vec!["Review pinned Task profile is unavailable"]);
+    assert!(repository.show_check_template("missing", None, 10).is_err());
+}
+
+#[test]
+fn preflight_then_cumulative_plan_readback_and_start_uses_returned_ids() {
+    let repository = SqliteProjectRepository::in_memory().unwrap();
+    repository.register(&project("alpha", "/planning-sequence")).unwrap();
+    let parent = repository.open_typed_record(&NewTypedRecord {
+        record_type: RecordType::Spec, project_slugs: vec!["alpha".into()],
+        body: "Plan".into(), generated_by_ids: vec![],
+    }).unwrap();
+    let children = || repository.show_record(parent.id).unwrap().relationships;
+    let before = children();
+    // A planner stops before its first Task write when preflight is incompatible.
+    let bad = repository.show_check_template("alpha", None, 10).unwrap();
+    assert!(!bad.stack_preflight.unwrap().blockers.is_empty());
+    assert_eq!(children(), before);
+    let policy = forge_app::agent_profiles::ResolvedLaunchPolicy {
+        version: 1, runtime: "herdr/pi".into(), model: "test/model".into(), tools: vec![],
+        behavior: "Verify".into(), skills: vec![], extensions: vec![], mcp_servers: vec![],
+    };
+    let profile = repository.register_agent_profile("test", RecordType::Task, &policy).unwrap();
+    let mut input = replacement(0, &["Publication"]);
+    for criterion in &mut input.criteria {
+        criterion.profile_revision = Some(profile.revision);
+    }
+    repository.replace_check_template("alpha", &input).unwrap();
+    let good = repository.show_check_template("alpha", None, 10).unwrap();
+    assert!(good.stack_preflight.unwrap().blockers.is_empty());
+    let first = repository.open_task_under_spec("Implementation", parent.id, vec![]).unwrap();
+    let root = forge_app::stacks::StackSource::Root {
+        destination: forge_app::stacks::StackDestination {
+            repository: "acme/widgets".into(), remote: "origin".into(), branch: "feature/input".into(),
+        },
+    };
+    repository.configure_task_stack(first.id, &root).unwrap();
+    // An unrelated Record makes arithmetic predecessor selection observably wrong.
+    repository.open_record(&NewRecord { body: "Interleaving writer".into(), project_slugs: vec![], generated_by_ids: vec![] }).unwrap();
+    let review = repository.open_task_under_spec("Review without edits", parent.id, vec![]).unwrap();
+    assert!(review.id > first.id + 1);
+    repository.relate_records(review.id, first.id, RecordRelationshipKind::DependsOn).unwrap();
+    // Missing Stack configuration is a partial plan, not an ordering-only exception.
+    assert_eq!(repository.start_record(parent.id).unwrap_err().code, "invalid-spec-plan");
+    assert_eq!(repository.show_record(parent.id).unwrap().status, RecordStatus::Open);
+    repository.configure_task_stack(review.id, &forge_app::stacks::StackSource::Predecessor { record_id: first.id }).unwrap();
+    for id in [first.id, review.id] {
+        let record = repository.show_record(id).unwrap();
+        assert!(record.relationships.iter().any(|r| r.kind == RecordRelationshipKind::ParentChild && r.parent_id == parent.id));
+        let checks = repository.list_record_checks(id).unwrap();
+        assert_eq!(checks.last().unwrap().name, "Publication");
+        assert!(checks.iter().all(|c| c.profile_revision == Some(profile.revision)));
+    }
+    assert_eq!(repository.task_stack(first.id).unwrap().unwrap().predecessor, None);
+    assert_eq!(repository.task_stack(review.id).unwrap().unwrap().predecessor, Some(first.id));
+    assert_eq!(repository.start_record(parent.id).unwrap().status, RecordStatus::InProgress);
+    assert_eq!(repository.show_record(review.id).unwrap().status, RecordStatus::Open);
+    assert_eq!(repository.show_check_template("alpha", None, 10).unwrap().version, good.version);
+}
+
+#[test]
 fn templates_require_an_explicit_implementation_baseline() {
     let repository = super::SqliteProjectRepository::in_memory().unwrap();
     repository.register(&project("alpha", "/baseline-template")).unwrap();
@@ -200,6 +290,7 @@ fn templates_snapshot_all_task_deliverables_paths_and_selected_projects_without_
         spec_updates
     );
     for body in ["Implement a feature", "Research an API", "Review work", "Build a prototype"] {
+        let execution_spec = open(RecordType::Spec, vec!["alpha".into()], "Execution plan");
         let tasks = [
             (
                 repository
@@ -218,7 +309,7 @@ fn templates_snapshot_all_task_deliverables_paths_and_selected_projects_without_
             ),
             (
                 repository
-                    .open_task_under_spec("Spec task", spec.id, vec![])
+                    .open_task_under_spec("Spec task", execution_spec.id, vec![])
                     .unwrap(),
                 vec!["Implementation", "Review", "Tests"],
             ),
@@ -245,6 +336,7 @@ fn templates_snapshot_all_task_deliverables_paths_and_selected_projects_without_
             ),
             (open(RecordType::Task, vec![], body), vec!["Implementation"]),
         ];
+        repository.start_record(execution_spec.id).unwrap();
         for (task, names) in tasks {
             let checks = repository.list_record_checks(task.id).unwrap();
             assert_eq!(
@@ -308,6 +400,7 @@ fn templates_snapshot_all_task_deliverables_paths_and_selected_projects_without_
     let checks = repository.list_record_checks(task.id).unwrap();
     assert_eq!(checks.len(), 3);
     super::check_tests::manual(&repository, task.id);
+    repository.start_record(spec.id).unwrap();
     repository.start_record(task.id).unwrap();
     for check in checks {
         super::check_tests::assess_check(&repository, task.id, check.id, forge_app::checks::Verdict::Pass);

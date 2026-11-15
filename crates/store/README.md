@@ -9,7 +9,7 @@ by migrations—not just the initial `CREATE TABLE` statements.
 - [`src/lib.rs`](src/lib.rs): `SqliteProjectRepository::from_connection`,
   `migrate_*` functions, profile seeds, and repository operations.
 - [`src/workspaces.rs`](src/workspaces.rs): Workspace ownership and Project identity.
-- [`src/upgrade.rs`](src/upgrade.rs): explicit offline schema 7 → 8 conversion,
+- [`src/upgrade.rs`](src/upgrade.rs): explicit offline schema 7 → 8 → 9 → 10 conversion,
   frozen contract validation, consistent snapshots, and preservation inventories.
   See [Revision State upgrades](../../docs/state-upgrades.md) for orchestration.
 - [`src/record_workspaces.rs`](src/record_workspaces.rs): Record ownership,
@@ -45,8 +45,47 @@ is documented separately in [Records](../../docs/records.md),
   Most references do **not** cascade.
 - Ordinary repository opening accepts only the current marked schema revision.
   Triggers and repository validation also enforce invariants. Explicit managed
-  copy-and-upgrade supports schema 7 → 8 and same-schema transfers; unsupported
+  copy-and-upgrade targets revision 10 from revisions 7, 8, 9, or 10; unsupported
   stores are rejected without automatic conversion or reset.
+
+## Ordering-only dependencies (revision 9)
+
+`ordering_only_dependencies` persists explicit intent without changing ordinary
+`record_relationships` rows or readiness ordering:
+
+| Column | Type / constraint |
+| --- | --- |
+| `from_id` | INTEGER, composite PK; blocked Record |
+| `to_id` | INTEGER, composite PK; prerequisite Record |
+| `kind` | TEXT, constrained to `depends-on` |
+
+The composite FK `(from_id, to_id, kind)` references `record_relationships` and
+uses `ON DELETE CASCADE`, so removal cannot leave orphaned designations. Absence
+means no explicit exception, not code inheritance. Creation validates normal
+dependency scope and lifecycle, rejects Stack Predecessor contradictions, and
+records Relationship updates plus designation comments atomically. Changing
+intent uses supported dependency removal and recreation while Open; a Stack
+Predecessor dependency cannot be removed independently. Upgrades add an empty
+table and preserve all old tables and pins without inventing designations.
+
+## Unchanged publication results (revision 10)
+
+`task_unchanged_results` adds an alternative to PR-shaped `task_stacks.publication_json`:
+
+| Column | Type / constraint |
+| --- | --- |
+| `record_id` | INTEGER, PK and FK to `task_stacks(record_id)` |
+| `evidence_json` | TEXT; serialized `UnchangedResult` with repository evidence and generation |
+
+Only one current publication alternative is retained per Task. Acceptance validates
+exact prepared/output commit equality, generation, all preceding Checks and Manual
+ownership or the bound final Check Assignment in one transaction with audit history.
+The application independently observes a clean checkout before recording unchanged
+evidence and again at completion. Verification does not itself pass a Check: the
+ordinary evidence-bound Publication outcome is still required. Invalidation makes
+old evidence unusable; re-verification in a later generation replaces current
+publication evidence while retaining audit history. Upgrade adds an empty table,
+without inventing results or rewriting existing PR evidence, Checks, or pins.
 
 ## Entity Relationship Diagrams
 

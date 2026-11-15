@@ -171,23 +171,43 @@ impl AuthenticatedAssignment<'_> {
     ) -> Result<Option<crate::stacks::TaskStack>, RegistrationError> {
         let assignment = self.authenticate()?;
         if let Some(url) = url {
-            let attempt = self
-                .application
-                .dispatch()?
-                .assignment_check_attempt(&assignment.id)?
-                .ok_or_else(denied)?;
-            let checks = self.application.list_record_checks(assignment.record_id)?;
-            if !checks.last().is_some_and(|c| {
-                c.id == attempt.check_id && c.name == crate::stacks::PUBLICATION_CHECK
-            }) {
-                return Err(denied());
-            }
+            self.authorize_stack_publication(&assignment)?;
             self.application
                 .publish_task_stack(assignment.record_id, url, Some(&assignment.id))
                 .map(Some)
         } else {
             self.application.task_stack(assignment.record_id)
         }
+    }
+
+    fn authorize_stack_publication(
+        &self,
+        assignment: &AgentAssignment,
+    ) -> Result<(), RegistrationError> {
+        let attempt = self
+            .application
+            .dispatch()?
+            .assignment_check_attempt(&assignment.id)?
+            .ok_or_else(denied)?;
+        let checks = self.application.list_record_checks(assignment.record_id)?;
+        if !checks
+            .last()
+            .is_some_and(|c| c.id == attempt.check_id && c.name == crate::stacks::PUBLICATION_CHECK)
+        {
+            return Err(denied());
+        }
+        Ok(())
+    }
+
+    /// Verify unchanged output only under this Assignment's bound final Check authority.
+    /// # Errors
+    /// Rejects unauthorized, stale, dirty or changed output.
+    pub fn stack_unchanged(&self) -> Result<Option<crate::stacks::TaskStack>, RegistrationError> {
+        let assignment = self.authenticate()?;
+        self.authorize_stack_publication(&assignment)?;
+        self.application
+            .publish_unchanged_task_stack(assignment.record_id, Some(&assignment.id))
+            .map(Some)
     }
 
     /// Submit only this Assignment's immutable attempt, replacing caller attribution.
@@ -601,11 +621,7 @@ impl AuthenticatedAssignment<'_> {
             own.id,
             allowed,
         )?;
-        if own.status == crate::RecordStatus::InProgress {
-            Ok(own)
-        } else {
-            repository.start_owned_record(own.id, &assignment.id)
-        }
+        repository.start_owned_record(own.id, &assignment.id)
     }
 
     /// Adds a nonblank Comment only to the assigned Record.

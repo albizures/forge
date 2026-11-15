@@ -160,6 +160,36 @@ all resources reconciled, clean current evidence/freshness, all current passes,
 no blockers/holds and satisfied dependencies. Managed Worktrees/branches remain
 retained after completion; no automatic Git integration or cleanup occurs.
 
+## Spec parent and inheritance rejections
+
+An Open Spec is planning-only: its child Tasks cannot start, claim an attempt or
+launch. Finish the plan and explicitly start the Spec after validation. An In
+Progress legacy Spec is revalidated too; lifecycle status alone does not establish
+required Stack links or exact predecessor evidence. `invalid-spec-plan` identifies
+missing inheritance; `stack-blocked` identifies unprepared, mismatched or stale
+Base Commit/predecessor evidence. Neither diagnostic authorizes a checkout reset,
+merge, rebase, Check repin or deletion of retained evidence.
+
+Inspect the Record relationships, `forge task stack show <task-id>`, Checks/work state,
+Assignment info and worktree info first. Retire/reconcile old ownership as above;
+unknown resources, retained resources, capacity, holds and freshness still gate
+replacement. Ordinary Stack/dependency edits remain forbidden after Spec start.
+There is **no supported in-place conversion** of a started legacy plan missing
+Stack configuration, nor a supported repin of a wrong prepared Base Commit.
+Stop and retain that evidence for an explicitly designed operator recovery; do
+not edit SQLite or reopen the Spec to bypass structural protection.
+
+If configuration and immutable pins are already correct, a safe checkout/evidence
+correction need not replan the Spec. After confirming retirement and resources,
+inspect and correct deliverables deliberately outside automatic dispatch, then
+use the existing explicit work invalidation operation with current generation,
+verified Repository evidence and attribution. This advances freshness, invalidates
+current passes and closes stale attempts while retaining historical outcomes,
+Checks, Findings and pins. It does not clear a hold or retry budget. Clear the hold
+separately only after investigation; the next claim rechecks all execution gates.
+An initially wrong checkout is rejected without recording a new attempt. Never
+claim a correction succeeded merely because a hold was cleared.
+
 ## Verification and deployment limits
 
 This runbook is not proof of a published release, verified installation, successful

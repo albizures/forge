@@ -6,6 +6,8 @@ use std::{fmt::Write as _, io::Read};
 pub enum CheckTemplateCommand {
     /// Show current criteria and a bounded ascending replacement history page.
     Show(ShowArgs),
+    /// Read-only preflight for future Dispatched cumulative Stack Tasks; fails on blockers.
+    Preflight(ShowArgs),
     /// Replace future Task criteria, starting with the mandatory Implementation entry.
     Set(SetArgs),
 }
@@ -58,14 +60,17 @@ fn read_message(message: Option<String>, file: Option<String>) -> Result<String,
 
 pub async fn run(command: CheckTemplateCommand, workspace: Option<String>) -> i32 {
     let (url, json) = match &command {
-        CheckTemplateCommand::Show(a) => (a.server_url.clone(), a.json),
+        CheckTemplateCommand::Show(a) | CheckTemplateCommand::Preflight(a) => {
+            (a.server_url.clone(), a.json)
+        }
         CheckTemplateCommand::Set(a) => (a.server_url.clone(), a.json),
     };
     let result: Result<(serde_json::Value, String), String> = async {
         let url = super::resolve_managed_endpoint(url.as_deref()).await?;
         let endpoint = (url.as_str(), workspace.as_deref());
+        let preflight = matches!(&command, CheckTemplateCommand::Preflight(_));
         match command {
-            CheckTemplateCommand::Show(a) => {
+            CheckTemplateCommand::Show(a) | CheckTemplateCommand::Preflight(a) => {
                 let page = forge_cli::request_project_check_template_show(
                     endpoint,
                     CheckTemplateShowRequest {
@@ -75,7 +80,13 @@ pub async fn run(command: CheckTemplateCommand, workspace: Option<String>) -> i3
                     },
                 )
                 .await?;
+                if preflight {
+                    require_stack_preflight(&page)?;
+                }
                 let mut text = render_template(page.version, &page.criteria);
+                if let Some(preflight) = &page.stack_preflight {
+                    let _ = write!(text, "\nStack preflight blockers: {:?}", preflight.blockers);
+                }
                 for change in &page.history {
                     let _ = write!(
                         text,
@@ -145,6 +156,19 @@ pub async fn run(command: CheckTemplateCommand, workspace: Option<String>) -> i3
         }
     }
 }
+fn require_stack_preflight(page: &forge_rpc::TemplatePage) -> Result<(), String> {
+    let preflight = page.stack_preflight.as_ref().ok_or_else(|| {
+        "server does not expose Stack template preflight; update Forge before planning".to_string()
+    })?;
+    if !preflight.blockers.is_empty() {
+        return Err(format!(
+            "Stack template preflight failed: {}",
+            preflight.blockers.join("; ")
+        ));
+    }
+    Ok(())
+}
+
 fn render_template(version: u64, criteria: &[forge_rpc::CheckCriterion]) -> String {
     let mut text = format!("Check Template version {version} (Implementation is always required)");
     for criterion in criteria {
@@ -155,4 +179,32 @@ fn render_template(version: u64, criteria: &[forge_rpc::CheckCriterion]) -> Stri
         );
     }
     text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preflight_rejects_older_servers_and_reports_blockers() {
+        let mut page: forge_rpc::TemplatePage = serde_json::from_value(serde_json::json!({
+            "version": 0, "criteria": [], "history": [], "next_cursor": null
+        }))
+        .unwrap();
+        assert!(
+            require_stack_preflight(&page)
+                .unwrap_err()
+                .contains("update Forge")
+        );
+        page.stack_preflight = Some(forge_app::check_templates::StackTemplatePreflight {
+            blockers: vec!["final Check must be Publication".into()],
+        });
+        assert!(
+            require_stack_preflight(&page)
+                .unwrap_err()
+                .contains("Publication")
+        );
+        page.stack_preflight.as_mut().unwrap().blockers.clear();
+        assert!(require_stack_preflight(&page).is_ok());
+    }
 }

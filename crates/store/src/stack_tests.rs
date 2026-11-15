@@ -8,6 +8,15 @@ use forge_app::{Application, ExecutionMode, RepositoryInspector,
     stacks::{Publication, PullRequestObservation, StackDestination, StackHosting, StackSource, TaskStack, task_branch}};
 use std::collections::HashMap;
 
+#[path = "spec_plan_tests.rs"]
+mod spec_plans;
+#[path = "unchanged_stack_tests.rs"]
+mod unchanged;
+#[path = "cumulative_stack_tests.rs"]
+mod cumulative;
+#[path = "cumulative_gate_tests.rs"]
+mod cumulative_gates;
+
 fn fixture() -> SqliteProjectRepository {
     let store = super::SqliteProjectRepository::in_memory().unwrap();
     store.register(&project("alpha", "/stack-project")).unwrap();
@@ -35,12 +44,18 @@ fn pin(store: &SqliteProjectRepository, id: u64, commit: &str) -> TaskStack {
 fn outcome(store: &SqliteProjectRepository, id: u64, position: usize, commit: &str) -> OutcomeInput {
     let check = store.list_record_checks(id).unwrap()[position].clone();
     let work = store.record_work_state(id).unwrap();
-    let evidence = Evidence::Repository { repository: "/stack-project".into(), commit: commit.into() };
+    let evidence = Evidence::Repository { repository: store.project("alpha").unwrap().project_root.display().to_string(), commit: commit.into() };
     let input = OutcomeInput { attempt_id: format!("task-{id}-check-{position}-{}", work.generation), generation: work.generation,
         evidence: evidence.clone(), verdict: forge_app::checks::Verdict::Pass, actor: "operator".into(),
         message: "Verified".into(), disposition: OutcomeDisposition::Complete, findings: vec![], verifications: vec![], };
+    let starting_evidence = if position == 0 {
+        work.input.unwrap_or_else(|| Evidence::Repository {
+            repository: store.project("alpha").unwrap().project_root.display().to_string(),
+            commit: store.task_base_commit(id).unwrap().unwrap(),
+        })
+    } else { evidence };
     store.begin_record_attempt(id, &AttemptInput { id: input.attempt_id.clone(), check_id: check.id,
-        generation: work.generation, evidence, actor: "operator".into() }).unwrap();
+        generation: work.generation, evidence: starting_evidence, actor: "operator".into() }).unwrap();
     input
 }
 fn pass(store: &SqliteProjectRepository, id: u64, position: usize, commit: &str) {
@@ -59,6 +74,27 @@ fn complete(store: &SqliteProjectRepository, id: u64, commit: &str) {
     store.record_stack_publication(&stack, &publication(id, commit, &stack.base_branch), None).unwrap();
     pass(store, id, 2, commit);
     store.done_record(id, None).unwrap();
+}
+
+#[test]
+fn ordering_only_intent_and_stack_predecessors_are_mutually_exclusive() {
+    let store = fixture();
+    let first = task(&store);
+    let second = task(&store);
+    store.configure_task_stack(first, &root()).unwrap();
+    store.relate_ordering_only_records(second, first).unwrap();
+    let before = store.show_record(second).unwrap();
+    let updates = store.list_record_updates(second).unwrap();
+    assert!(store.configure_task_stack(second, &StackSource::Predecessor { record_id: first }).is_err());
+    assert_eq!(store.show_record(second).unwrap(), before);
+    assert_eq!(store.list_record_updates(second).unwrap(), updates);
+    assert!(store.task_stack(second).unwrap().is_none());
+    store.unrelate_records(second, first, RecordRelationshipKind::DependsOn).unwrap();
+    store.configure_task_stack(second, &StackSource::Predecessor { record_id: first }).unwrap();
+    let before = store.show_record(second).unwrap();
+    assert_eq!(store.relate_ordering_only_records(second, first).unwrap_err().code, "stack-blocked");
+    assert_eq!(store.show_record(second).unwrap(), before);
+    assert!(!before.relationships.iter().any(|r| r.ordering_only));
 }
 
 #[test]
@@ -121,7 +157,7 @@ fn publication_is_required_and_stale_evidence_never_completes() {
     assert_eq!(saved.publication, Some(pr));
     store.submit_record_outcome(id, &input).unwrap();
     store.invalidate_record_work(id, &forge_app::outcomes::WorkInvalidationInput {
-        generation: 1, evidence: Evidence::Repository { repository: "/stack-project".into(), commit: "a".repeat(40) }, actor: "operator".into(), message: "Recheck".into(),
+        generation: 1, evidence: Evidence::Repository { repository: store.project("alpha").unwrap().project_root.display().to_string(), commit: "a".repeat(40) }, actor: "operator".into(), message: "Recheck".into(),
     }).unwrap();
     assert!(store.done_record(id, None).is_err());
 }
@@ -157,8 +193,12 @@ fn stale_preparation_is_atomic_and_preserves_the_current_destination() {
 struct Hosting {
     branches: Arc<Mutex<HashMap<String, String>>>,
     prs: Arc<Mutex<HashMap<String, PullRequestObservation>>>,
+    checkout: Arc<Mutex<Option<forge_app::stacks::CheckoutObservation>>>,
 }
 impl StackHosting for Hosting {
+    fn checkout(&self, _: &Path) -> Result<forge_app::stacks::CheckoutObservation, RegistrationError> {
+        self.checkout.lock().unwrap().clone().ok_or_else(|| RegistrationError::new("test", "checkout unavailable"))
+    }
     fn fetch_branch(&self, _: &Path, _: &StackDestination, branch: &str) -> Result<String, RegistrationError> {
         self.branches.lock().unwrap().get(branch).cloned().ok_or_else(|| RegistrationError::new("hosting-test", "branch unavailable"))
     }

@@ -149,6 +149,10 @@ impl Application {
             ));
         }
         crate::validate_task_dispatch_mode(&task)?;
+        repository.validate_task_execution_plan(record)?;
+        // Re-observe external predecessor publication before claiming; the store
+        // repeats persisted lineage checks in the writer transaction.
+        self.prepare_task_stack(record)?;
         if let Some(latest) = repository
             .list_agent_assignments(record)?
             .into_iter()

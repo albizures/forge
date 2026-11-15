@@ -13,9 +13,11 @@ pub mod checks;
 pub mod findings;
 pub mod outcomes;
 mod profile_catalog;
+pub mod spec_plans;
 pub mod stacks;
 pub mod storage_upgrade;
 mod task_attempts;
+pub mod task_inspection;
 mod workspaces;
 pub use workspaces::{Workspace, WorkspaceRepository};
 mod workspace_dispatch;
@@ -65,6 +67,8 @@ pub enum RecordRelationshipKind {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecordRelationship {
     pub kind: RecordRelationshipKind,
+    /// Explicit non-inheritance intent, valid only for a dependency.
+    pub ordering_only: bool,
     /// The directional source. For `DependsOn`, this is the blocked Record; for
     /// `GeneratedBy`, this is the generated Record.
     pub from_id: u64,
@@ -522,6 +526,20 @@ pub trait RecordRepository: ProjectRepository {
             "Task stacks unavailable",
         ))
     }
+    /// Persist independently observed unchanged output against current ownership and evidence.
+    /// # Errors
+    /// Rejects stale evidence, incomplete reviews and unauthorized publication attempts.
+    fn record_stack_unchanged(
+        &self,
+        _expected: &stacks::TaskStack,
+        _result: &stacks::UnchangedResult,
+        _assignment: Option<&str>,
+    ) -> Result<stacks::TaskStack, RegistrationError> {
+        Err(RegistrationError::new(
+            "unsupported",
+            "Task stacks unavailable",
+        ))
+    }
     /// Read current Project criteria and bounded attributed replacement history.
     ///
     /// # Errors
@@ -816,8 +834,19 @@ pub trait RecordRepository: ProjectRepository {
             "Check invalidation is unavailable",
         ))
     }
+    /// Read-only bounded Task activity projection; never contacts a provider.
+    /// # Errors
+    /// Returns scope, storage or unsupported-inspection errors.
+    fn task_activity(
+        &self,
+        _record_id: u64,
+    ) -> Result<task_inspection::TaskActivity, RegistrationError> {
+        Err(RegistrationError::new(
+            "task-inspection-unavailable",
+            "Task activity inspection is unavailable",
+        ))
+    }
     /// Returns a request-local repository confined to an existing Workspace.
-    ///
     /// # Errors
     /// Returns an error when Workspace selection is unsupported or invalid.
     fn records_in_workspace(
@@ -987,6 +1016,21 @@ pub trait RecordRepository: ProjectRepository {
         to_id: u64,
         kind: RecordRelationshipKind,
     ) -> Result<Record, RegistrationError>;
+    /// Creates a dependency explicitly requiring ordering without code inheritance.
+    ///
+    /// # Errors
+    /// Returns an error if the repository does not support this designation.
+    fn relate_ordering_only_records(
+        &self,
+        _from_id: u64,
+        _to_id: u64,
+    ) -> Result<Record, RegistrationError> {
+        Err(RegistrationError::new(
+            "unsupported-relationship-intent",
+            "repository does not support ordering-only dependencies",
+        ))
+    }
+
     /// Removes a typed directional Relationship from `from_id` to `to_id`.
     ///
     /// # Errors
@@ -1246,7 +1290,7 @@ fn safe_adapter_detail(message: &str) -> String {
                 | "tab.close"
                 | "pane.close"
         )
-        && matches!(
+        && (matches!(
             code,
             "not_found"
                 | "not-found"
@@ -1257,7 +1301,18 @@ fn safe_adapter_detail(message: &str) -> String {
                 | "timeout"
                 | "temporarily_unavailable"
                 | "unknown"
-        )
+        ) || method == "agent.start"
+            && matches!(
+                code,
+                "invalid_agent_name"
+                    | "unsupported_agent_kind"
+                    | "invalid_agent_argument"
+                    | "invalid_agent_timeout"
+                    | "agent_pane_not_found"
+                    | "agent_pane_unavailable"
+                    | "agent_start_input_failed"
+                    | "agent_not_ready"
+            ))
     {
         return format!("Herdr {method}: {code}");
     }
@@ -1432,6 +1487,14 @@ fn reconcile_assignment<A: AgentDispatchAdapter + ?Sized>(
         | AgentAssignmentState::Blocked
         | AgentAssignmentState::Unknown => adapter.observe(&context),
     };
+    if let Err(error) = &observed {
+        let operation = if assignment.state == AgentAssignmentState::Provisioning {
+            "provision"
+        } else {
+            "observe"
+        };
+        log_adapter_failure(assignment, operation, error);
+    }
     // Both Tasks and Grillings require authenticated bootstrap. Failed launches with
     // retained intent still require conservative recovery for either kind.
     if assignment.state == AgentAssignmentState::Provisioning
@@ -1448,12 +1511,6 @@ fn reconcile_assignment<A: AgentDispatchAdapter + ?Sized>(
     let observation = match observed {
         Ok(observation) => observation,
         Err(error) => {
-            let operation = if assignment.state == AgentAssignmentState::Provisioning {
-                "provision"
-            } else {
-                "observe"
-            };
-            log_adapter_failure(assignment, operation, &error);
             return Ok(AssignmentReconciliation::Retained(match error {
                 AgentAdapterError::Endpoint(_) => AdapterRetention::Endpoint,
                 AgentAdapterError::Transient(_) => AdapterRetention::Transient,
@@ -1933,6 +1990,12 @@ pub trait AgentDispatchRepository: RecordRepository + WorkspaceDispatchRepositor
         assignment_id: &str,
         selection: Option<&DispatchPreflightSelection>,
     ) -> Result<(AgentAssignment, bool), RegistrationError>;
+    /// Read-only parent/plan preflight before observations or provider work.
+    /// Final claims must repeat this against authoritative transactional state.
+    fn validate_task_execution_plan(&self, _record: u64) -> Result<(), RegistrationError> {
+        Ok(())
+    }
+
     /// Validate eligibility, dependencies, holds, ownership and capacity before Git preparation.
     fn validate_task_check_preparation(&self, _record: u64) -> Result<(), RegistrationError> {
         Err(task_dispatch_unsupported())
@@ -2291,11 +2354,7 @@ pub fn assignment_start_task<R: AgentDispatchRepository + ?Sized>(
         task_id,
         allowed,
     )?;
-    if task.status == RecordStatus::Open {
-        repository.start_owned_record(task_id, assignment_id)
-    } else {
-        Ok(task)
-    }
+    repository.start_owned_record(task_id, assignment_id)
 }
 
 /// Authorizes capability-authenticated completion of its bound Task and records its decision.
@@ -2610,6 +2669,7 @@ impl Application {
         }
         if record.record_type == RecordType::Task {
             validate_task_dispatch_mode(&record)?;
+            dispatch.validate_task_execution_plan(record_id)?;
             if !matches!(record.status, RecordStatus::Open | RecordStatus::InProgress) {
                 return Err(RegistrationError::new(
                     "record-not-ready",
@@ -3697,6 +3757,18 @@ impl Application {
         self.records.relate_records(from_id, to_id, kind)
     }
 
+    /// Creates an explicitly ordering-only dependency.
+    ///
+    /// # Errors
+    /// Returns a user-facing error for invalid dependency changes.
+    pub fn relate_ordering_only_records(
+        &self,
+        from_id: u64,
+        to_id: u64,
+    ) -> Result<Record, RegistrationError> {
+        self.records.relate_ordering_only_records(from_id, to_id)
+    }
+
     /// Removes a typed directional Relationship.
     ///
     /// # Errors
@@ -3885,6 +3957,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn launch_diagnostics_only_allow_exact_reviewed_start_codes() {
+        for code in [
+            "invalid_agent_name",
+            "unsupported_agent_kind",
+            "invalid_agent_argument",
+            "invalid_agent_timeout",
+            "agent_pane_not_found",
+            "agent_pane_unavailable",
+            "agent_start_input_failed",
+            "agent_not_ready",
+        ] {
+            let detail = format!("Herdr agent.start: {code}");
+            assert_eq!(safe_adapter_detail(&detail), detail);
+            for unsafe_detail in [
+                format!("{detail} PRIVATE-CAPABILITY"),
+                format!("{detail}\nPRIVATE-CAPABILITY"),
+                format!("Herdr tab.create: {code}"),
+                format!("Herdr unknown.method: {code}"),
+            ] {
+                assert_eq!(
+                    safe_adapter_detail(&unsafe_detail),
+                    "details withheld; adapter message is not allowlisted"
+                );
+            }
+        }
+    }
+
     struct Repository {
         records: Mutex<Vec<Record>>,
         comments: Mutex<Vec<RecordComment>>,
@@ -3972,6 +4072,7 @@ mod tests {
             let mut records = self.records.lock().unwrap();
             let task_id = (records.len() + 1) as u64;
             let relationship = RecordRelationship {
+                ordering_only: false,
                 kind: RecordRelationshipKind::ParentChild,
                 from_id: task_id,
                 to_id: spec_id,
@@ -4031,6 +4132,7 @@ mod tests {
             let mut records = self.records.lock().unwrap();
             let task_id = (records.len() + 1) as u64;
             let relationship = RecordRelationship {
+                ordering_only: false,
                 kind: RecordRelationshipKind::ParentChild,
                 from_id: task_id,
                 to_id: wayfinder_id,
@@ -4096,6 +4198,7 @@ mod tests {
             let mut records = self.records.lock().unwrap();
             let grilling_id = (records.len() + 1) as u64;
             let relationship = RecordRelationship {
+                ordering_only: false,
                 kind: RecordRelationshipKind::ParentChild,
                 from_id: grilling_id,
                 to_id: wayfinder_id,
@@ -4298,6 +4401,7 @@ mod tests {
                     ));
                 }
                 let relationship = RecordRelationship {
+                    ordering_only: false,
                     kind,
                     from_id: child_id,
                     to_id: parent_id,
@@ -4353,6 +4457,7 @@ mod tests {
                 );
             }
             let relationship = RecordRelationship {
+                ordering_only: false,
                 kind: RecordRelationshipKind::ParentChild,
                 from_id: child_id,
                 to_id: parent_id,

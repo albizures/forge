@@ -180,8 +180,13 @@ publication. It does not configure membership or expand related-Record visibilit
 `forge assignment stack --url <actual-pr-url> --json` is restricted to the live,
 bootstrapped final Publication Check Assignment. Forge independently verifies the
 open non-draft PR and remote branch, then transactionally rechecks bound ownership,
-attempt freshness and output evidence before recording publication. Operator
-publication requires Manual Execution Mode and safe ownership. No capability
+attempt freshness and output evidence before recording publication.
+`forge assignment stack --unchanged --json` uses the same final-Check authority
+but independently verifies a clean Managed Worktree at the exact prepared input
+commit instead of observing a PR. `--url` and `--unchanged` are mutually exclusive.
+Both paths still require the ordinary bound Publication outcome; verification does
+not itself pass a Check. Operator publication requires Manual Execution Mode and
+safe ownership. No capability
 secret belongs in command arguments or diagnostics. See [Task stacks](stacks.md)
 for setup and retry behavior.
 

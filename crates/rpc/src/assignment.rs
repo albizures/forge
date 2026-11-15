@@ -8,8 +8,10 @@ use serde::{Deserialize, Serialize};
 pub struct AssignmentStackRequest {
     pub assignment_id: String,
     pub secret: String,
-    /// None reads the own Task's stack; Some verifies its publication.
+    /// None reads the own Task's stack unless unchanged verification is requested.
     pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unchanged: bool,
 }
 
 #[derive(Deserialize, Serialize)]

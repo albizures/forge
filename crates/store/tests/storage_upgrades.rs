@@ -1,4 +1,4 @@
-//! Schema-7's contract is schema-8 without `task_stacks`: no Task backfill is allowed.
+//! Explicit upgrades preserve historical tables; no Task or intent backfill is allowed.
 use forge_app::{NewTypedRecord, RecordRepository, RecordType, WorkspaceRepository};
 use forge_store::{SqliteProjectRepository, upgrade};
 use rusqlite::Connection;
@@ -38,10 +38,18 @@ impl Fixture {
             .unwrap();
         drop(repo);
         let c = Connection::open(&source).unwrap();
-        if schema == 7 {
-            c.execute_batch("DROP TABLE task_stacks; PRAGMA user_version = 7;")
+        if schema < 10 {
+            c.execute_batch("DROP TABLE task_unchanged_results;")
                 .unwrap();
         }
+        if schema < 9 {
+            c.execute_batch("DROP TABLE ordering_only_dependencies;")
+                .unwrap();
+        }
+        if schema == 7 {
+            c.execute_batch("DROP TABLE task_stacks;").unwrap();
+        }
+        c.pragma_update(None, "user_version", schema).unwrap();
         drop(c);
         Self { root, source }
     }
@@ -78,7 +86,7 @@ fn frozen_historical_schema_seven_fixture_upgrades_without_current_initializers(
 }
 
 #[test]
-fn explicit_seven_to_eight_preserves_every_old_table_and_source_bytes() {
+fn explicit_seven_to_ten_preserves_every_old_table_and_source_bytes() {
     let f = Fixture::new(7);
     let original = fs::read(&f.source).unwrap();
     let before = upgrade::inspect(&f.source).unwrap();
@@ -90,7 +98,7 @@ fn explicit_seven_to_eight_preserves_every_old_table_and_source_bytes() {
     let copy = f.root.join("snapshot.db");
     assert_eq!(upgrade::snapshot(&f.source, &copy).unwrap(), before);
     let after = upgrade::migrate(&copy).unwrap();
-    assert_eq!(after.schema, Some(8));
+    assert_eq!(after.schema, Some(10));
     for table in before.tables {
         assert!(after.tables.contains(&table), "lost {}", table.name);
     }
@@ -113,8 +121,69 @@ fn explicit_seven_to_eight_preserves_every_old_table_and_source_bytes() {
 }
 
 #[test]
-fn same_schema_copy_keeps_ids_comments_and_history() {
+fn explicit_eight_to_ten_preserves_all_old_facts_without_inventing_intent() {
     let f = Fixture::new(8);
+    let c = Connection::open(&f.source).unwrap();
+    c.execute_batch("INSERT INTO records(id,record_type,body,status,workspace_id) VALUES(42,'task','Prerequisite','done','personal');
+        INSERT INTO record_relationships(from_id,to_id,kind) VALUES(1,42,'depends-on');").unwrap();
+    drop(c);
+    let bytes = fs::read(&f.source).unwrap();
+    let before = upgrade::inspect(&f.source).unwrap();
+    assert!(SqliteProjectRepository::open(&f.source).is_err());
+    assert_eq!(fs::read(&f.source).unwrap(), bytes);
+    let copy = f.root.join("nine.db");
+    upgrade::snapshot(&f.source, &copy).unwrap();
+    let after = upgrade::migrate(&copy).unwrap();
+    assert_eq!(after.schema, Some(10));
+    for table in before.tables {
+        assert!(after.tables.contains(&table), "changed {}", table.name);
+    }
+    assert_eq!(
+        after
+            .tables
+            .iter()
+            .find(|t| t.name == "ordering_only_dependencies")
+            .unwrap()
+            .rows,
+        0
+    );
+    let repo = SqliteProjectRepository::open(&copy).unwrap();
+    let record = repo.show_record(1).unwrap();
+    assert_eq!(record.relationships.len(), 1);
+    assert!(!record.relationships[0].ordering_only);
+    assert_eq!(record.relationships[0].to_id, 42);
+    assert_eq!(fs::read(&f.source).unwrap(), bytes);
+}
+
+#[test]
+fn nine_to_ten_preserves_every_table_without_inventing_unchanged_results() {
+    let f = Fixture::new(9);
+    let bytes = fs::read(&f.source).unwrap();
+    let before = upgrade::inspect(&f.source).unwrap();
+    assert!(SqliteProjectRepository::open(&f.source).is_err());
+    let copy = f.root.join("ten.db");
+    upgrade::snapshot(&f.source, &copy).unwrap();
+    let after = upgrade::migrate(&copy).unwrap();
+    assert_eq!(after.schema, Some(10));
+    for table in before.tables {
+        assert!(after.tables.contains(&table));
+    }
+    assert_eq!(
+        after
+            .tables
+            .iter()
+            .find(|t| t.name == "task_unchanged_results")
+            .unwrap()
+            .rows,
+        0
+    );
+    assert_eq!(fs::read(&f.source).unwrap(), bytes);
+    drop(SqliteProjectRepository::open(&copy).unwrap());
+}
+
+#[test]
+fn same_schema_copy_keeps_ids_comments_and_history() {
+    let f = Fixture::new(10);
     let before = upgrade::inspect(&f.source).unwrap();
     let copy = f.root.join("copy.db");
     upgrade::snapshot(&f.source, &copy).unwrap();
@@ -127,7 +196,7 @@ fn same_schema_copy_keeps_ids_comments_and_history() {
 
 #[test]
 fn unknown_newer_foreign_and_falsely_stamped_schemas_are_read_only_failures() {
-    for version in [0, 6, 9, 1000] {
+    for version in [0, 6, 11, 1000] {
         let f = Fixture::new(8);
         Connection::open(&f.source)
             .unwrap()

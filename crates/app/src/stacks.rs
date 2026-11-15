@@ -32,6 +32,20 @@ pub struct Publication {
     pub generation: u64,
 }
 
+/// Independently observed, unchanged repository output at a particular generation.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct UnchangedResult {
+    pub evidence: Evidence,
+    pub generation: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CheckoutObservation {
+    pub commit: String,
+    pub clean: bool,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TaskStack {
     pub record_id: u64,
@@ -40,6 +54,48 @@ pub struct TaskStack {
     pub base_branch: String,
     pub base_commit: Option<String>,
     pub publication: Option<Publication>,
+    #[serde(default)]
+    pub unchanged_result: Option<UnchangedResult>,
+}
+
+impl TaskStack {
+    /// Resolve retained completion evidence against the current work generation.
+    /// # Errors
+    /// Rejects missing, conflicting, stale or contradictory repository results.
+    pub fn verified_commit<'a>(
+        &'a self,
+        work: &crate::outcomes::WorkState,
+    ) -> Result<&'a str, RegistrationError> {
+        let commit = match (&self.publication, &self.unchanged_result) {
+            (Some(publication), None) if publication.generation == work.generation => {
+                &publication.head_commit
+            }
+            (None, Some(result))
+                if result.generation == work.generation
+                    && work.output.as_ref() == Some(&result.evidence) =>
+            {
+                let Evidence::Repository { commit, .. } = &result.evidence else {
+                    return Err(error("unchanged result is not repository evidence"));
+                };
+                if self.base_commit.as_ref() != Some(commit) {
+                    return Err(error("unchanged result differs from prepared input"));
+                }
+                commit
+            }
+            _ => {
+                return Err(error(
+                    "verified predecessor result is missing, conflicting or stale",
+                ));
+            }
+        };
+        if !matches!(&work.output, Some(Evidence::Repository { commit: output, .. }) if output == commit)
+        {
+            return Err(error(
+                "verified predecessor result differs from current output",
+            ));
+        }
+        Ok(commit)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -57,6 +113,12 @@ pub struct PullRequestObservation {
 /// Git/hosting observations are outside persistence transactions. Implementations must
 /// validate remote identity and avoid modifying the main checkout or rewriting branches.
 pub trait StackHosting: Send + Sync {
+    /// Observe a Manual Task's registered Project checkout without modifying it.
+    /// # Errors
+    /// Rejects unavailable or invalid repositories. Unsupported observers fail closed.
+    fn checkout(&self, _root: &Path) -> Result<CheckoutObservation, RegistrationError> {
+        Err(error("checkout observation is unavailable"))
+    }
     /// Fetch a branch without changing the main checkout.
     /// # Errors
     /// Rejects unsupported hosts, remote identity mismatches and unavailable branches.
@@ -224,35 +286,108 @@ impl Application {
     }
 
     fn verify_predecessor(&self, stack: &TaskStack, root: &Path) -> Result<(), RegistrationError> {
-        let Some(predecessor) = stack.predecessor else {
+        self.verify_predecessor_lineage(stack, root)
+            .map_err(|failure| {
+                RegistrationError::new(
+                    failure.code,
+                    format!(
+                        "Task {}, Stack Predecessor {:?}, Base Branch {}, pinned commit {:?}: {}",
+                        stack.record_id,
+                        stack.predecessor,
+                        stack.base_branch,
+                        stack.base_commit,
+                        failure.message
+                    ),
+                )
+            })
+    }
+
+    fn verify_predecessor_lineage(
+        &self,
+        stack: &TaskStack,
+        root: &Path,
+    ) -> Result<(), RegistrationError> {
+        if stack.predecessor.is_none() {
             return Ok(());
-        };
-        if self.records.show_record(predecessor)?.status != RecordStatus::Done {
-            return Err(error("Stack Predecessor is not Done"));
         }
-        let previous = self
-            .task_stack(predecessor)?
-            .ok_or_else(|| error("predecessor is not stacked"))?;
-        let publication = previous
-            .publication
-            .ok_or_else(|| error("predecessor has no verified publication"))?;
-        let observed =
-            self.hosting()?
-                .pull_request(root, &publication.repository, &publication.url)?;
-        verify_pr(
-            &previous.destination.repository,
-            &publication.head_branch,
-            &publication.head_commit,
-            &publication.base_branch,
-            &observed,
-        )?;
-        let commit = self
+        let mut cursor = stack.predecessor;
+        let mut expected = stack.base_commit.clone();
+        let mut visited = std::collections::HashSet::from([stack.record_id]);
+        while let Some(predecessor) = cursor {
+            if !visited.insert(predecessor) {
+                return Err(error("stack cycle"));
+            }
+            if self.records.show_record(predecessor)?.status != RecordStatus::Done {
+                return Err(error(format!(
+                    "Stack Predecessor {predecessor} is not Done"
+                )));
+            }
+            let previous = self
+                .task_stack(predecessor)?
+                .ok_or_else(|| error("predecessor is not stacked"))?;
+            let work = self.record_work_state(predecessor)?;
+            let commit = previous.verified_commit(&work).map_err(|failure| {
+                error(format!(
+                    "Stack Predecessor {predecessor}, generation {}, observed output {:?}: {}",
+                    work.generation, work.output, failure.message
+                ))
+            })?;
+            if expected.as_ref().is_some_and(|expected| expected != commit) {
+                return Err(error(format!(
+                    "Stack Predecessor {predecessor}: expected commit {}, verified {commit}",
+                    expected.as_deref().unwrap_or_default()
+                )));
+            }
+            expected = Some(commit.to_owned());
+            if let Some(publication) = &previous.publication {
+                let observed = self.hosting()?.pull_request(
+                    root,
+                    &publication.repository,
+                    &publication.url,
+                )?;
+                verify_pr(
+                    &previous.destination.repository,
+                    &task_branch(predecessor),
+                    commit,
+                    &previous.base_branch,
+                    &observed,
+                )?;
+                if stack.base_branch != publication.head_branch {
+                    return Err(error(
+                        "retained publication base contradicts predecessor lineage",
+                    ));
+                }
+                break;
+            }
+            if stack.base_branch != previous.base_branch {
+                return Err(error(
+                    "unchanged predecessor has contradictory base lineage",
+                ));
+            }
+            cursor = previous.predecessor;
+        }
+        let observed = self
             .hosting()?
-            .fetch_branch(root, &stack.destination, &stack.base_branch)?;
-        if commit != publication.head_commit {
-            return Err(error(
-                "predecessor branch moved from its verified completed commit",
-            ));
+            .fetch_branch(root, &stack.destination, &stack.base_branch)
+            .map_err(|failure| {
+                RegistrationError::new(
+                    failure.code,
+                    format!(
+                        "expected commit {:?}; branch observation unavailable: {}",
+                        expected, failure.message
+                    ),
+                )
+            })?;
+        if expected
+            .as_ref()
+            .is_some_and(|expected| expected != &observed)
+        {
+            return Err(error(format!(
+                "Stack Predecessor {:?}, branch {}: expected commit {}, observed {observed}",
+                stack.predecessor,
+                stack.base_branch,
+                expected.as_deref().unwrap_or_default()
+            )));
         }
         Ok(())
     }
@@ -266,19 +401,36 @@ impl Application {
         };
         let root = self.stack_root(record)?;
         self.verify_predecessor(&stack, &root)?;
-        if stack.base_commit.is_some() {
-            return Ok(Some(stack));
-        }
         let commit = self
             .hosting()?
-            .fetch_branch(&root, &stack.destination, &stack.base_branch)?;
+            .fetch_branch(&root, &stack.destination, &stack.base_branch)
+            .map_err(|failure| {
+                RegistrationError::new(
+                    failure.code,
+                    format!(
+                        "Task {record}, Base Branch {}, pinned commit {:?}: {}",
+                        stack.base_branch, stack.base_commit, failure.message
+                    ),
+                )
+            })?;
+        if let Some(expected) = &stack.base_commit {
+            if expected != &commit {
+                return Err(error(format!(
+                    "prepared branch {}: expected commit {expected}, observed {commit}",
+                    stack.base_branch
+                )));
+            }
+            return Ok(Some(stack));
+        }
         if let Some(predecessor) = stack.predecessor {
             let previous = self
                 .task_stack(predecessor)?
-                .and_then(|s| s.publication)
-                .ok_or_else(|| error("predecessor publication missing"))?;
-            if commit != previous.head_commit {
-                return Err(error("predecessor branch moved during preparation"));
+                .ok_or_else(|| error("predecessor is not stacked"))?;
+            let work = self.record_work_state(predecessor)?;
+            if commit != previous.verified_commit(&work)? {
+                return Err(error(format!(
+                    "Stack Predecessor {predecessor} branch moved during preparation"
+                )));
             }
         }
         self.records.pin_task_stack(&stack, &commit).map(Some)
@@ -330,11 +482,72 @@ impl Application {
             .record_stack_publication(&stack, &publication, assignment)
     }
 
+    fn unchanged_evidence(&self, record: u64) -> Result<Evidence, RegistrationError> {
+        let task = self.records.show_record(record)?;
+        if task.execution_mode == crate::ExecutionMode::Dispatched {
+            return self.observe_task_evidence(record);
+        }
+        let root = self.stack_root(record)?;
+        let observed = self.hosting()?.checkout(&root)?;
+        if !observed.clean {
+            return Err(error("unchanged publication requires a clean checkout"));
+        }
+        let evidence = Evidence::Repository {
+            repository: root.display().to_string(),
+            commit: observed.commit,
+        };
+        evidence.validate()?;
+        Ok(evidence)
+    }
+
+    /// Independently verify unchanged output; this records evidence, not a Check verdict.
+    /// The bound Publication attempt must still submit its ordinary passing outcome.
+    /// # Errors
+    /// Rejects dirty, changed, stale, unreviewed or unauthorized work.
+    pub fn publish_unchanged_task_stack(
+        &self,
+        record: u64,
+        assignment: Option<&str>,
+    ) -> Result<TaskStack, RegistrationError> {
+        let stack = self
+            .task_stack(record)?
+            .ok_or_else(|| error("Task is not stacked"))?;
+        self.verify_predecessor(&stack, &self.stack_root(record)?)?;
+        let work = self.record_work_state(record)?;
+        let evidence = self.unchanged_evidence(record)?;
+        if work.output.as_ref() != Some(&evidence)
+            || !matches!(&evidence, Evidence::Repository { commit, .. } if Some(commit) == stack.base_commit.as_ref())
+        {
+            return Err(error(
+                "observed output must exactly equal the prepared input commit",
+            ));
+        }
+        self.records.record_stack_unchanged(
+            &stack,
+            &UnchangedResult {
+                evidence,
+                generation: work.generation,
+            },
+            assignment,
+        )
+    }
+
     /// Observe again before completion; persistence separately rechecks pinned evidence.
     pub(crate) fn verify_stack_completion(&self, record: u64) -> Result<(), RegistrationError> {
         let Some(stack) = self.task_stack(record)? else {
             return Ok(());
         };
+        if let Some(result) = &stack.unchanged_result {
+            self.verify_predecessor(&stack, &self.stack_root(record)?)?;
+            let work = self.record_work_state(record)?;
+            if result.generation != work.generation
+                || work.output.as_ref() != Some(&result.evidence)
+                || self.unchanged_evidence(record)? != result.evidence
+            {
+                return Err(error("unchanged publication evidence is stale"));
+            }
+            return Ok(());
+        }
         let publication = stack
             .publication
             .as_ref()
@@ -377,9 +590,16 @@ fn verify_pr(
         || observed.head_commit != commit
         || observed.base_branch != base
     {
-        return Err(error(
-            "expected an open non-draft PR with the exact repository, head branch/commit and base branch",
-        ));
+        return Err(error(format!(
+            "expected an open non-draft PR in {repository} with head {head} at {commit} and base {base}; observed repository {}, head repository {}, head {} at {}, base {}, open {}, draft {}",
+            observed.repository,
+            observed.head_repository,
+            observed.head_branch,
+            observed.head_commit,
+            observed.base_branch,
+            observed.open,
+            observed.draft
+        )));
     }
     Ok(())
 }

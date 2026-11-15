@@ -15,8 +15,10 @@ fn frozen_contracts_and_advertised_target_match_ordinary_initialization() {
 fn failed_schema_stamp_rolls_back_ddl_and_all_existing_data() {
     let repo = SqliteProjectRepository::in_memory().unwrap();
     let mut c = repo.connection.lock().unwrap();
-    c.execute_batch("DROP TABLE task_stacks; PRAGMA user_version=7")
-        .unwrap();
+    c.execute_batch(
+        "DROP TABLE task_unchanged_results; DROP TABLE ordering_only_dependencies; DROP TABLE task_stacks; PRAGMA user_version=7",
+    )
+    .unwrap();
     let before = inspection(&c).unwrap();
     c.authorizer(Some(|context: AuthContext<'_>| match context.action {
         AuthAction::Pragma {
@@ -39,11 +41,51 @@ fn failed_schema_stamp_rolls_back_ddl_and_all_existing_data() {
 }
 
 #[test]
+fn failed_nine_stamp_rolls_back_designation_schema_without_rewriting_old_tables() {
+    let mut c = reference(8).unwrap();
+    c.execute_batch("PRAGMA application_id=1179603527; PRAGMA user_version=8;")
+        .unwrap();
+    let before = inspection(&c).unwrap();
+    c.authorizer(Some(|context: AuthContext<'_>| match context.action {
+        AuthAction::Pragma {
+            pragma_name: "user_version",
+            pragma_value: Some("9"),
+        } => Authorization::Deny,
+        _ => Authorization::Allow,
+    }))
+    .unwrap();
+    assert!(migrate_connection(&mut c).is_err());
+    c.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+        .unwrap();
+    assert_eq!(inspection(&c).unwrap(), before);
+}
+
+#[test]
+fn failed_ten_stamp_rolls_back_unchanged_schema_without_rewriting_history() {
+    let mut c = reference(9).unwrap();
+    c.pragma_update(None, "application_id", APPLICATION_ID)
+        .unwrap();
+    let before = inspection(&c).unwrap();
+    c.authorizer(Some(|context: AuthContext<'_>| match context.action {
+        AuthAction::Pragma {
+            pragma_name: "user_version",
+            pragma_value: Some("10"),
+        } => Authorization::Deny,
+        _ => Authorization::Allow,
+    }))
+    .unwrap();
+    assert!(migrate_connection(&mut c).is_err());
+    c.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+        .unwrap();
+    assert_eq!(inspection(&c).unwrap(), before);
+}
+
+#[test]
 fn unresolved_execution_resources_block_snapshot_and_migration() {
     let repo = SqliteProjectRepository::in_memory().unwrap();
     let mut c = repo.connection.lock().unwrap();
     // Active leases are retained, not reset as an incidental migration effect.
-    c.execute_batch("DROP TABLE task_stacks; PRAGMA user_version=7; INSERT INTO agent_dispatch_configuration(singleton, scan_lease_owner, scan_lease_until_millis) VALUES(1,'old-daemon',9223372036854775807)").unwrap();
+    c.execute_batch("DROP TABLE task_unchanged_results; DROP TABLE ordering_only_dependencies; DROP TABLE task_stacks; PRAGMA user_version=7; INSERT INTO agent_dispatch_configuration(singleton, scan_lease_owner, scan_lease_until_millis) VALUES(1,'old-daemon',9223372036854775807)").unwrap();
     let before = inspection(&c).unwrap();
     assert!(
         before

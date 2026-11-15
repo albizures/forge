@@ -26,6 +26,24 @@ execution, with no Manual fallback. `task-dispatch-unsupported-contract` remains
 a fail-closed diagnostic for unsupported persistence or unbound provisioning
 Assignments; legacy ownership is not converted into Check-bound execution.
 
+### Spec authorization and inspection
+
+An Open Spec is planning-only. Its children cannot start, claim Check attempts or
+launch until validated Spec start. In Progress legacy plans are revalidated;
+lifecycle alone does not prove cumulative inheritance. Execution gates recheck
+parent status, plan structure and exact predecessor evidence transactionally.
+See [Spec rules](records.md#relationships-and-lifecycle) and
+[inheritance recovery](assignment-recovery.md#spec-parent-and-inheritance-rejections).
+Planning starts the validated Spec but never dispatches agents or rolls out profiles.
+
+Task `record show`/`list` distinguish lifecycle, persisted Assignment activity,
+Dispatch Hold and remaining Checks. A historical Working state on a closed attempt
+is not active work; uncertain retained resources do not establish safe absence.
+Inspection is read-only and does not clear holds, retire resources or resume work.
+Open, In Progress and Done remain the only lifecycle statuses. Unchanged stacked
+output still requires every Check and exact-commit Publication verification, but
+no empty PR; see [Stacks](stacks.md#unchanged-repository-output).
+
 ### Check attempts and controlled acceptance
 
 For explicit acceptance testing only, `forge dispatcher task-check-acceptance

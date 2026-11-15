@@ -289,10 +289,12 @@ enum TaskCommand {
 }
 #[derive(Debug, Subcommand)]
 enum AssignmentCommand {
-    /// Read this Task's stack, or verify its non-draft PR using --url.
+    /// Read this Task's stack, or verify --url / clean unchanged output with --unchanged.
     Stack {
-        #[arg(long)]
+        #[arg(long, conflicts_with = "unchanged")]
         url: Option<String>,
+        #[arg(long)]
+        unchanged: bool,
         #[arg(long)]
         json: bool,
     },
@@ -649,7 +651,8 @@ struct DoneRecordArgs {
 #[derive(Args, Debug)]
 struct RelationshipArgs {
     from_id: u64,
-    #[arg(long, value_parser = ["child-of", "depends-on", "generated-by", "initiative"])]
+    /// Use ordering-only-depends-on to explicitly wait without inheriting code.
+    #[arg(long, value_parser = ["child-of", "depends-on", "ordering-only-depends-on", "generated-by", "initiative"])]
     kind: String,
     #[arg(long = "to")]
     to_id: u64,
@@ -1109,7 +1112,11 @@ fn render_assignment_result(result: Result<serde_json::Value, String>, json: boo
 async fn assignment(command: AssignmentCommand) -> i32 {
     let history = matches!(&command, AssignmentCommand::History(_));
     match command {
-        AssignmentCommand::Stack { url, json } => stacks::assignment(url, json).await,
+        AssignmentCommand::Stack {
+            url,
+            unchanged,
+            json,
+        } => stacks::assignment(url, unchanged, json).await,
         AssignmentCommand::Check { command } => assignment_check_commands::run(command).await,
         AssignmentCommand::Finding { command } => assignment_finding_commands::run(command).await,
         AssignmentCommand::Outcome { file, json } => {
@@ -2218,6 +2225,11 @@ mod tests {
             ("workspaces.md", include_str!("../../../docs/workspaces.md")),
             ("projects.md", include_str!("../../../docs/projects.md")),
             ("records.md", include_str!("../../../docs/records.md")),
+            ("stacks.md", include_str!("../../../docs/stacks.md")),
+            (
+                "profiles/publication.md",
+                include_str!("../../../docs/profiles/publication.md"),
+            ),
             ("worktrees.md", include_str!("../../../docs/worktrees.md")),
             ("dispatch.md", include_str!("../../../docs/dispatch.md")),
             (
@@ -2329,6 +2341,47 @@ mod tests {
         let json = serde_json::to_value(forge_build_info::current()).unwrap();
         assert!(json["commit"].is_string());
         assert!(json["management_protocol_revision"].is_u64());
+    }
+
+    #[test]
+    fn unchanged_publication_commands_are_explicit_and_reject_conflicting_pr_input() {
+        assert!(
+            Cli::try_parse_from([
+                "forge",
+                "task",
+                "stack",
+                "publish-unchanged",
+                "42",
+                "--json"
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from(["forge", "assignment", "stack", "--unchanged", "--json"]).is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "forge",
+                "assignment",
+                "stack",
+                "--unchanged",
+                "--url",
+                "https://github.com/acme/widgets/pull/1"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "forge",
+                "task",
+                "stack",
+                "publish-unchanged",
+                "42",
+                "--commit",
+                "asserted"
+            ])
+            .is_err()
+        );
     }
 
     #[test]

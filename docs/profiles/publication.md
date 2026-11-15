@@ -23,7 +23,28 @@ commit and that every earlier Check passed at this evidence.
 A non-stacked Task uses its explicit project instructions and Task context for
 destination selection; block on ambiguity. Do not opt it into a Stack here.
 
-## Publish or reuse
+## Verify unchanged or publish
+
+For a stacked Task, compare the final full HEAD with its pinned `base_commit`.
+When they are identical, verify unchanged output before any push or PR creation:
+
+```sh
+forge assignment stack --unchanged --json
+```
+
+Forge independently observes the bound checkout: clean including untracked files,
+exact prepared/current evidence commit, current generation and prior passing
+Checks are required. Equal trees at different commits do not qualify. Failure is
+a blocker, not permission to create an empty PR. Success records an unchanged
+result, not a PR and not a passing Check. Submit the ordinary Publication outcome
+below with the verified full commit and unchanged result in the message.
+
+Every changed commit, even a review-only commit or empty commit, requires normal
+publication. Use the returned `base_branch`: unchanged predecessors carry the
+nearest published Task Branch (or original starting branch) through without
+inventing a new publication branch. Do not substitute the immediate predecessor's
+deterministic branch when that Task never published. Repository commits do not
+transfer external files or state.
 
 Push the verified Task branch without force using the resolved remote. Inspect
 existing open PRs in the selected repository with the exact head owner/branch and
@@ -49,8 +70,9 @@ Check. Report any push/PR effects without claiming publication acceptance.
 
 Create an outcome JSON file outside the checkout. Copy the bound attempt ID,
 numeric generation and evidence exactly. Use `pass` / `complete` only after
-publication (and stack verification when applicable) succeeds. Include the verified
-PR URL and full commit in the outcome message. The actor is supplied by the CLI.
+publication (and stack verification when applicable), or exact-commit unchanged
+verification for a stacked Task, succeeds. Include the verified PR URL when
+published and the full commit in the outcome message. The actor is supplied by the CLI.
 Use empty `findings` and `verifications` unless this Check has substantive review
 Findings to raise or verify through the established outcome protocol.
 

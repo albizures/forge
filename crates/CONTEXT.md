@@ -93,15 +93,15 @@ The immutable starting revision from which a Task's Task Branch is created. For 
 _Avoid_: dispatch base, checkout evidence
 
 **Stack**:
-An explicitly configured linear chain of Tasks in one Project whose changes build on one another and whose PRs target the preceding Task's branch. Its first Task starts from and targets the Stack's selected branch, which need not be the repository default branch.
+An explicitly configured linear chain of Tasks in one Project whose repository results build on one another. Each successor inherits its immediate predecessor's verified final commit. Changed results require verified publication; unchanged results carry forward the applicable publication base. The Stack's selected starting branch need not be the repository default branch.
 _Avoid_: dependency chain, consecutive Record IDs
 
 **Stack Predecessor**:
-The Task whose completed changes a successor builds upon and whose Task Branch its PR targets. It is also a prerequisite, but an ordinary prerequisite does not imply stack membership.
+The Task whose verified completed repository result a successor builds upon. It is also a prerequisite, but an ordinary prerequisite does not imply Stack membership. An unchanged predecessor passes through its verified commit without requiring its own pull request.
 _Avoid_: previous Record, previous ID
 
 **Base Branch**:
-The branch supplying a stacked Task's starting changes: the selected starting branch for the first Task, or its Stack Predecessor's Task Branch.
+The branch supplying a stacked Task's prepared starting changes and publication base: the Stack's selected starting branch or the applicable verified published Task Branch carried through any unchanged predecessors. It is distinct from the exact Base Commit.
 _Avoid_: Base Commit, default branch
 
 **PR Base Branch**:
@@ -109,7 +109,7 @@ The branch targeted by a Task's pull request. In a Stack it is the Task's Base B
 _Avoid_: target commit, main
 
 **Publication Check**:
-The final required Check on a stacked Task, establishing publication of the checked changes as an open, non-draft pull request with the expected head and base. Passing publication does not imply approval or merge.
+The final required Check on a stacked Task, establishing either verified publication of changed repository results as an open, non-draft pull request with the expected head and base, or a verified unchanged result at the Task's prepared input commit. Passing it does not imply pull-request approval or merge.
 _Avoid_: merge gate, PR creation Task
 
 **Worktree Root**:
@@ -157,11 +157,11 @@ A Record-level policy distinguishing Dispatched execution through Forge-owned Ag
 _Avoid_: task mode, dispatch status, ownership inferred from lifecycle
 
 **Spec**:
-A Record type that defines planned work for exactly one Project and may parent Tasks.
+A Record type that defines planned work for exactly one Project and may parent Tasks. While Open, its Task plan may be incomplete and its children cannot begin execution. Starting it validates its initial Task plan and enables child execution subject to each Task's readiness; In Progress does not imply that an Agent is running or that the plan is inherently immutable.
 _Avoid_: specification, issue
 
 **Task**:
-A leaf Record type that represents a unit of work with exactly one Project when opened under a Project-scoped Wayfinder, selected from that Wayfinder's Project Scope; a Projectless Wayfinder's Task remains Projectless. It may also be opened under one Spec, from which it receives its Project Scope, or opened without a parent. Its membership and scope are immutable after opening. A Task may explicitly join a Stack, which adds branch inheritance and verified pull-request publication to its completion requirements.
+A leaf Record type that represents a unit of work with exactly one Project when opened under a Project-scoped Wayfinder, selected from that Wayfinder's Project Scope; a Projectless Wayfinder's Task remains Projectless. It may also be opened under one Spec, from which it receives its Project Scope, or opened without a parent. Its membership and scope are immutable after opening. A Task may explicitly join a Stack, which adds verified repository-result inheritance and publication or unchanged-result verification to its completion requirements. Stack membership does not depend on whether the Task edits code.
 _Avoid_: subtask, to-do
 
 **Check Template**:
@@ -193,7 +193,7 @@ A non-hierarchical Record Relationship attaching a Spec or Wayfinder to one Init
 _Avoid_: parentage, dependency
 
 **Workflow Readiness**:
-The eligibility of an Open Task, explicitly included Grilling, or planning Record to proceed once its direct prerequisites are Done. It is independent of dispatch configuration and provider availability.
+The eligibility of work to proceed under its lifecycle, parent execution gate, direct prerequisites, and required Task inheritance configuration. For a Spec child Task, an Open parent disables execution even when its direct prerequisites are Done. Workflow Readiness remains independent of dispatch configuration and provider availability.
 _Avoid_: dispatchability, provider readiness
 
 **Wayfinder**:
@@ -294,6 +294,10 @@ _Avoid_: link
 **Dependency Relationship**:
 A directed Record Relationship from a Blocked Record to a Prerequisite Record. A Blocked Record cannot become In Progress until every prerequisite is Done; an agent-owned In Progress Task cannot gain a new dependency.
 _Avoid_: blocker, prerequisite link
+
+**Ordering-Only Dependency**:
+A Dependency Relationship explicitly designated to require prerequisite completion without inheriting that prerequisite's repository result. The designation belongs to that relationship, not to the dependent Task as a whole.
+_Avoid_: non-code Task, implicit no-stack exception
 
 **Generated-By Relationship**:
 A directed, many-to-many provenance Record Relationship across Project Scopes within one Forge Workspace, from a generated Record to the Record whose work or output caused its creation; any Record Types may participate. It does not imply parenthood, dependency, or lifecycle control.

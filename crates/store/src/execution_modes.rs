@@ -41,6 +41,9 @@ impl SqliteProjectRepository {
             .map_err(storage_error)?;
         self.ensure_record_workspace(&tx, id)?;
         let record = load_record(&tx, id)?;
+        if record.record_type == RecordType::Spec && record.status == RecordStatus::Open {
+            super::spec_plans::validate(&tx, id)?;
+        }
         if let Some(assignment) = assignment {
             let owned: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM agent_assignments WHERE id = ?1 AND record_id = ?2 AND closed_at_millis IS NULL)", params![assignment, id.cast_signed()], |r| r.get(0)).map_err(storage_error)?;
             if !owned {
@@ -49,6 +52,7 @@ impl SqliteProjectRepository {
                     "a matching open Assignment is required",
                 ));
             }
+            super::spec_plans::assignment_execution(&tx, assignment)?;
         } else if record.record_type == RecordType::Task {
             if record.execution_mode == ExecutionMode::Dispatched {
                 return Err(RegistrationError::new(
@@ -58,15 +62,15 @@ impl SqliteProjectRepository {
             }
             safe_ownership(&tx, id)?;
         }
-        if super::stacks::load(&tx, id)?.is_some_and(|s| s.base_commit.is_none()) {
-            return Err(RegistrationError::new(
-                "stack-blocked",
-                "prepare the Task stack before starting",
-            ));
+        if record.record_type == RecordType::Task {
+            super::spec_plans::authorize(&tx, id, None)?;
         }
         let unfinished = super::unfinished_prerequisite_ids(&tx, id)?;
         if !unfinished.is_empty() {
             return Err(super::dependencies_not_done_error(&unfinished));
+        }
+        if assignment.is_some() && record.status == RecordStatus::InProgress {
+            return Ok(record);
         }
         if tx
             .execute(

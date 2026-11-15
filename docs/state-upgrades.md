@@ -5,8 +5,12 @@ another. It preserves the source database and upgrades a consistent copy. Ordina
 repository opening still rejects incompatible schemas before initialization writes;
 it never migrates, resets, or rewrites an older store's marker.
 
-Initially supported: schema **7 → 8**, and **8 → 8** transfers. Schema 8 adds an
-empty `task_stacks` table; existing Tasks remain non-stacked. Earlier, newer,
+Supported transfers target schema **10** from schema **7**, **8**, **9**, or **10**.
+The 7 → 8 step adds an empty `task_stacks` table; the 8 → 9 step adds an empty
+`ordering_only_dependencies` table; the 9 → 10 step adds an empty
+`task_unchanged_results` table. Upgrades invent no Stack membership, ordering-only
+designations, or unchanged results. Existing publication evidence and Check pins
+are preserved. Earlier, newer,
 foreign, corrupt, and structurally inconsistent stores are rejected. A same-schema
 application update still needs state transfer because Revision State is isolated.
 
@@ -195,7 +199,7 @@ python3 -m unittest discover -s tests -p 'test_state_upgrades.py'
 The subprocess test defaults to `target/release` (`FORGE_TEST_BIN_DIR` overrides it).
 It waits for real persisted dispatch leases to expire rather than resetting them.
 Debug binaries can exceed its command timeout due to hashing large unoptimized
-artifacts. Tests cover schema 7 → 8, same-schema transfer, real Record/comment/history
+artifacts. Tests cover schema 7 → 10, 8 → 10, and 9 → 10, same-schema transfer, real Record/comment/history
 preservation, managed startup rejection, and rollback acknowledgement. Rust tests
 add transaction failure injection, WAL snapshots, structural incompatibility,
 concurrent ownership, interrupted journal phases, stale source acceptance,

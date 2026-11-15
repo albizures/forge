@@ -39,12 +39,16 @@ Use the Record Body for Markdown work content, including research, prototype, an
 ## Operate records
 
 1. Inspect the Record, its Comments, and Update Log before changing it.
-2. Preserve dependencies with `record relate --kind depends-on`; `--to` names the prerequisite. `generated-by` records provenance, not a dependency or parent.
+2. Preserve dependencies with `record relate --kind depends-on`; `--to` names the prerequisite. For same-Spec repository consumers, configure explicit cumulative Stack links, including unchanged review/verification Tasks. Use `--kind ordering-only-depends-on` only for intentional wait-only edges; prose is not persisted intent. `generated-by` records provenance, not a dependency or parent.
 3. For manual work, advance Open → In Progress with `record start`. An assigned Task or Grilling instead starts through its assignment bootstrap below.
 4. Record substantive outcomes with `record comment --message`. Comments are immutable; revise a non-Done Record's canonical content with `record edit --body`.
 5. Complete In Progress work with `record done`. Completion Resolution is optional free text, not a required slug. Complete a parent only after its children are Done.
 
-`record list --status open` is a Workspace-local inventory, not a readiness guarantee. Use `ready` for executable workflow state, adding `--planning`, `--include-hitl`, or `--blocked` as needed. Workflow readiness is separate from provider dispatchability. Cross-Workspace scope, membership, dependency and provenance changes are rejected. This CLI does not expose `next` or store-management commands. If a required capability is absent, report that gap rather than inventing a command or editing persistence directly.
+Specs remain Open while planning; validated `record start` authorizes child execution only after the complete persisted plan passes validation. Structural Task/dependency/Stack edits are initially restricted after start. Legacy In Progress Specs are revalidated, not grandfathered. Open → In Progress → Done remain the three lifecycle statuses.
+
+Normal Task show/list expose Checks, persisted Assignment activity and Dispatch Holds separately. A closed historical Working Assignment is not active; uncertain retained resources are not proof of safe absence. Inspection does not launch or resume work. For a wrong checkout or legacy inheritance rejection, inspect the expected/verified Stack evidence and Assignment recovery facts, establish agent absence and safe resources, then use supported operator recovery. Clearing a hold or changing lifecycle alone does not repair lineage.
+
+`record list --status open` is a Workspace-local inventory, not a readiness guarantee. `ready` filters Open work by direct prerequisites only; it does not check the parent-Spec or inheritance gates. Add `--planning`, `--include-hitl`, or `--blocked` as needed, and inspect parent status and Stack evidence separately. Authoritative execution operations revalidate those gates. Workflow readiness is separate from provider dispatchability. Cross-Workspace scope, membership, dependency and provenance changes are rejected. This CLI does not expose `next` or store-management commands. If a required capability is absent, report that gap rather than inventing a command or editing persistence directly.
 
 ## Assigned agents
 
@@ -68,7 +72,7 @@ Agent Profiles configure launch policy and role-specific behavior; Skills provid
 
 Author profiles as `.md` files beneath the selected Forge Workspace's `.agents/profiles/` directory; nested folders are allowed. Preview and registration enforce canonical containment and reject symlink escapes and legacy skill-directory sources. The profiles directory and its `.agents` parent must not redirect elsewhere. Document arguments resolve from the Workspace root, while resource references resolve from the document directory and retain catalog membership rules.
 
-Inspect `forge help agent-profile --all` before authoring or registration. Preview first, then register with explicit `--workspace` and `--record-type task|grilling`. Registration creates an immutable revision without selecting it; explicitly select the returned revision with `dispatcher config set task-profile|grilling-profile`. Inspect selections with `dispatcher profile --kind task|grilling` and provider readiness with `dispatcher status`; registration and selection do not certify dispatchability. Task execution uses Check-pinned revisions: configure the Project Check Template before opening Tasks, rather than assuming the Workspace Task selection routes existing Checks.
+Inspect `forge help agent-profile --all` before authoring or registration. Preview first, then register with explicit `--workspace` and `--record-type task|grilling`. Registration creates an immutable revision without selecting it; explicitly select the returned revision with `dispatcher config set task-profile|grilling-profile`. Inspect selections with `dispatcher profile --kind task|grilling` and provider readiness with `dispatcher status`; registration and selection do not certify dispatchability. Task execution uses Check-pinned revisions: configure the Project Check Template before opening Tasks, rather than assuming the Workspace Task selection routes existing Checks. Planning uses read-only `forge project check-template preflight <project> --json` before its first Task write; failure requests operator configuration, not automatic template/profile mutation.
 
 Existing registered revisions and Task Check pins remain usable when source files move or disappear. Changed profiles require new registration and explicit selection; Check Template changes affect future Tasks only. Do not rewrite existing pins or migrate live legacy sources until a Forge Revision supporting standalone profiles is installed and active.
 
@@ -76,8 +80,20 @@ Forge owns managed local worktrees, dispatch state, and explicit Task stacks.
 Use `forge task stack --help` for stack configuration and `forge assignment stack`
 for own-Task destination reads and publication verification. Stack branches use
 `feat/forge-<record-id>`; links identify predecessors explicitly, never by ID
-arithmetic. A final `Publication` Check verifies an open non-draft PR before Done;
-merge is not required. Agents use `git`/`gh` to push and create/reuse PRs, while
-Forge independently validates their stack evidence. Non-stacked Tasks retain
+arithmetic. The final `Publication` Check requires either verified changed output
+in an open non-draft PR, or independently verified clean output at exactly the
+prepared input commit. For unchanged output, use:
+
+```sh
+forge assignment stack --unchanged --json
+```
+
+Then submit the ordinary bound passing Publication outcome; verification alone
+neither passes the Check nor completes the Task. Changed commits require normal
+publication even with identical trees: agents use `git`/`gh` to push and
+create/reuse PRs, while Forge independently validates their stack evidence.
+Merge is not required. Unchanged predecessors carry their verified commit and
+the applicable publication base without empty PRs. Stack handoff transfers Git
+commits only; report external files and state separately. Non-stacked Tasks retain
 existing behavior. Integration and recovery remain operator responsibilities;
 never edit Forge persistence by hand.

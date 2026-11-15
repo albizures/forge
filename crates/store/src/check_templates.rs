@@ -2,7 +2,8 @@ use super::{SqliteProjectRepository, now_millis, storage_error};
 use forge_app::{
     RegistrationError,
     check_templates::{
-        CheckCriterion, CheckTemplate, TemplateChange, TemplatePage, TemplateReplacement,
+        CheckCriterion, CheckTemplate, StackTemplatePreflight, TemplateChange, TemplatePage,
+        TemplateReplacement,
     },
 };
 use rusqlite::{Connection, OptionalExtension, params};
@@ -73,6 +74,32 @@ pub(super) fn provision(
             params![task.cast_signed(), criterion.name, criterion.description, i64::try_from(index).map_err(template_storage_error)?, criterion.profile_revision]).map_err(storage_error)?;
     }
     Ok(())
+}
+
+fn stack_preflight(
+    connection: &Connection,
+    criteria: &[CheckCriterion],
+) -> Result<StackTemplatePreflight, RegistrationError> {
+    let mut blockers = forge_app::check_templates::stack_template_blockers(criteria);
+    for criterion in criteria {
+        if let Some(revision) = criterion.profile_revision {
+            match super::load_agent_profile(connection, forge_app::RecordType::Task, revision) {
+                Ok(profile) if profile.launch_policy.is_some() => {}
+                Ok(_) => blockers.push(format!(
+                    "{} profile has no registered launch policy",
+                    criterion.name
+                )),
+                Err(error) if error.code == "agent-profile-not-found" => {
+                    blockers.push(format!(
+                        "{} pinned Task profile is unavailable",
+                        criterion.name
+                    ));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    Ok(StackTemplatePreflight { blockers })
 }
 
 impl SqliteProjectRepository {
@@ -147,11 +174,13 @@ impl SqliteProjectRepository {
         } else {
             None
         };
+        let stack_preflight = Some(stack_preflight(&transaction, &template.criteria)?);
         Ok(TemplatePage {
             version: template.version,
             criteria: template.criteria,
             history,
             next_cursor,
+            stack_preflight,
         })
     }
     pub(super) fn replace_template(

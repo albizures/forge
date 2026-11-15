@@ -33,6 +33,8 @@ enum StackCommand {
     },
     /// Fetch authoritative branch state and pin the starting commit without creating a worktree.
     Prepare { id: u64 },
+    /// Verify clean output at the exact prepared commit; submit the Publication outcome separately.
+    PublishUnchanged { id: u64 },
     /// Independently verify an existing open non-draft PR for this Task.
     Publish {
         id: u64,
@@ -72,6 +74,7 @@ pub async fn run(args: StackArgs, workspace: Option<String>) -> i32 {
                 },
             ),
             StackCommand::Prepare { id } => (id, TaskStackAction::Prepare),
+            StackCommand::PublishUnchanged { id } => (id, TaskStackAction::PublishUnchanged),
             StackCommand::Publish { id, url } => (id, TaskStackAction::Publish { url }),
         };
         forge_cli::request_task_stack(
@@ -84,8 +87,8 @@ pub async fn run(args: StackArgs, workspace: Option<String>) -> i32 {
     render(result, args.json)
 }
 
-pub async fn assignment(url: Option<String>, json: bool) -> i32 {
-    render(forge_cli::assignment_stack(url).await, json)
+pub async fn assignment(url: Option<String>, unchanged: bool, json: bool) -> i32 {
+    render(forge_cli::assignment_stack(url, unchanged).await, json)
 }
 
 fn render(result: Result<Option<forge_rpc::TaskStack>, String>, json: bool) -> i32 {
@@ -107,8 +110,17 @@ fn render(result: Result<Option<forge_rpc::TaskStack>, String>, json: bool) -> i
                     stack.base_branch,
                     stack.destination.repository
                 );
+                if let Some(predecessor) = stack.predecessor {
+                    println!("Stack Predecessor: {predecessor}");
+                }
                 if let Some(commit) = stack.base_commit {
                     println!("Base Commit: {commit}");
+                }
+                if let Some(result) = stack.unchanged_result {
+                    println!(
+                        "Verified unchanged result: {:?} (generation {})",
+                        result.evidence, result.generation
+                    );
                 }
                 if let Some(pr) = stack.publication {
                     println!("PR: {} at {}", pr.url, pr.head_commit);

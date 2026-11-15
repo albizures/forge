@@ -1,6 +1,15 @@
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn check_bound_rpc_context_outcome_and_normal_dispatch_share_same_owner() {
+    check_bound_outcome_inspection(false).await;
+}
+
+#[tokio::test]
+async fn task_inspection_after_accepted_human_input_and_clean_retirement() {
+    check_bound_outcome_inspection(true).await;
+}
+
+#[allow(clippy::too_many_lines)]
+async fn check_bound_outcome_inspection(human_input: bool) {
     use forge_app::{ManagedWorktreeRepository, WorkspaceDispatchRepository, WorkspaceRepository};
     let (fixture, _, _) = assignment_test_daemon_scoped(true);
     let store = SqliteProjectRepository::open(&fixture.database_path).unwrap();
@@ -70,14 +79,16 @@ async fn check_bound_rpc_context_outcome_and_normal_dispatch_share_same_owner() 
     store
         .set_project_task_concurrency_limit("alpha", Some(10))
         .unwrap();
-    let task = store
+    let parent = store
         .open_typed_record(&NewTypedRecord {
-            record_type: RecordType::Task,
-            body: "Deliver".into(),
+            record_type: RecordType::Spec,
+            body: "Validated execution plan".into(),
             project_slugs: vec!["alpha".into()],
             generated_by_ids: vec![],
         })
         .unwrap();
+    let task = store.open_task_under_spec("Deliver", parent.id, vec![]).unwrap();
+    store.start_record(parent.id).unwrap();
     let check = store.list_record_checks(task.id).unwrap().remove(0);
     let checkout = store.reserve_worktree_claim(task.id).unwrap();
     let repository = workspace.root.join("alpha");
@@ -147,10 +158,10 @@ async fn check_bound_rpc_context_outcome_and_normal_dispatch_share_same_owner() 
         attempt_id: "bound-check".into(),
         generation: 1,
         evidence: output,
-        verdict: forge_app::checks::Verdict::Pass,
+        verdict: if human_input { forge_app::checks::Verdict::Fail } else { forge_app::checks::Verdict::Pass },
         actor: "spoofed".into(),
         message: "Delivered".into(),
-        disposition: forge_app::outcomes::OutcomeDisposition::Complete,
+        disposition: if human_input { forge_app::outcomes::OutcomeDisposition::HumanInput } else { forge_app::outcomes::OutcomeDisposition::Complete },
         findings: vec![],
         verifications: vec![],
     };
@@ -196,10 +207,41 @@ async fn check_bound_rpc_context_outcome_and_normal_dispatch_share_same_owner() 
         accepted["result"]["attempt"]["actor"], "bound-check",
         "{accepted}"
     );
-    assert_eq!(
-        accepted["result"]["check"]["latest_assessment"]["assignment_id"], "bound-check",
-        "{accepted}"
-    );
+    if human_input {
+        assert!(accepted["result"]["check"]["latest_assessment"].is_null());
+        // Persist the clean retirement facts; no external provider is needed by inspection.
+        for resource in store.list_agent_assignment_resources("bound-check").unwrap() {
+            store.retire_agent_assignment_resource("bound-check", &resource.resource_kind, &resource.resource_id).unwrap();
+        }
+        store.close_agent_assignment("bound-check", forge_app::AgentAssignmentClosureReason::Retired).unwrap();
+        let before = store.agent_assignment_info("bound-check").unwrap();
+        assert_eq!(before.assignment.state, forge_app::AgentAssignmentState::Working);
+        let selection = forge_rpc::RecordSelection { workspace: Some("test".into()), ..Default::default() };
+        let shown = forge_rpc::RecordApiServer::show(&daemon, forge_rpc::SelectedRecordRequest {
+            selection: selection.clone(), record: forge_rpc::RecordIdRequest { id: task.id },
+        }).await.unwrap();
+        let listed = forge_rpc::RecordApiServer::list(&daemon, forge_rpc::SelectedRecordRequest {
+            selection,
+            record: forge_rpc::ListRecordsRequest { project_slug: None, status: None, record_type: Some("task".into()) },
+        }).await.unwrap();
+        assert_eq!(listed.records.iter().find(|r| r.id == task.id), Some(&shown));
+        assert_eq!(shown.status, "in_progress");
+        let activity = shown.activity.as_ref().unwrap();
+        assert_eq!(activity.state, forge_rpc::TaskActivityState::Closed);
+        assert_eq!(activity.retained_resources, 0);
+        assert!(activity.dispatch_hold.as_ref().unwrap().contains("Human input required"));
+        assert!(shown.checks.as_ref().unwrap().iter().all(|c| c.verdict().is_none()));
+        let json = serde_json::to_string(&shown).unwrap();
+        for secret in ["check-secret", "prompt_template", "launch_policy", "resource_id"] {
+            assert!(!json.contains(secret), "{json}");
+        }
+        assert_eq!(store.agent_assignment_info("bound-check").unwrap(), before);
+    } else {
+        assert_eq!(
+            accepted["result"]["check"]["latest_assessment"]["assignment_id"], "bound-check",
+            "{accepted}"
+        );
+    }
     assert_eq!(
         assignment_rpc(daemon.clone(), "assignment.outcomeSubmit", request.clone()).await["result"],
         accepted["result"]

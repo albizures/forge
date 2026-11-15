@@ -3,7 +3,7 @@ use super::{SqliteProjectRepository, checks, insert_update, load_record, outcome
 use forge_app::{
     ExecutionMode, RecordStatus, RecordUpdateKind, RegistrationError,
     outcomes::Evidence,
-    stacks::{Publication, StackSource, TaskStack, task_branch},
+    stacks::{Publication, StackSource, TaskStack, UnchangedResult, task_branch},
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
@@ -25,12 +25,63 @@ pub(super) fn schema(c: &Connection) -> Result<(), RegistrationError> {
         CHECK(predecessor IS NULL OR predecessor != record_id)
     );",
     )
+    .map_err(storage_error)?;
+    c.execute_batch(
+        "CREATE TABLE IF NOT EXISTS task_unchanged_results (
+    record_id INTEGER PRIMARY KEY REFERENCES task_stacks(record_id),
+    evidence_json TEXT NOT NULL
+);",
+    )
     .map_err(storage_error)
 }
 
 type StoredStackRow = (Option<i64>, String, Option<String>, Option<String>);
 
+#[derive(Clone, Copy)]
+enum ObservedResult<'a> {
+    Published(&'a Publication),
+    Unchanged(&'a UnchangedResult),
+}
+
 pub(super) fn load(c: &Connection, record: u64) -> Result<Option<TaskStack>, RegistrationError> {
+    let mut lineage = Vec::new();
+    let mut visited = std::collections::HashSet::new();
+    let mut cursor = Some(record);
+    while let Some(id) = cursor {
+        if !visited.insert(id) {
+            return Err(error("stack cycle"));
+        }
+        let predecessor: Option<Option<i64>> = c
+            .query_row(
+                "SELECT predecessor FROM task_stacks WHERE record_id = ?1",
+                [id.cast_signed()],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(storage_error)?;
+        let Some(predecessor) = predecessor else {
+            return if id == record {
+                Ok(None)
+            } else {
+                Err(error("predecessor is not stacked"))
+            };
+        };
+        lineage.push(id);
+        cursor = predecessor.map(i64::cast_unsigned);
+    }
+    // Resolve from the root iteratively: long linear plans must not consume call stack.
+    let mut previous = None;
+    for id in lineage.into_iter().rev() {
+        previous = load_member(c, id, previous.as_ref())?;
+    }
+    Ok(previous)
+}
+
+fn load_member(
+    c: &Connection,
+    record: u64,
+    previous: Option<&TaskStack>,
+) -> Result<Option<TaskStack>, RegistrationError> {
     let row: Option<StoredStackRow> = c.query_row(
         "SELECT predecessor, source_json, base_commit, publication_json FROM task_stacks WHERE record_id = ?1",
         [record.cast_signed()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
@@ -38,40 +89,94 @@ pub(super) fn load(c: &Connection, record: u64) -> Result<Option<TaskStack>, Reg
     let Some((predecessor, source, base_commit, publication)) = row else {
         return Ok(None);
     };
-    let mut source: StackSource = serde_json::from_str(&source).map_err(json_error)?;
-    let mut visited = std::collections::HashSet::from([record]);
-    let destination = loop {
-        match source {
-            StackSource::Root { destination } => break destination,
-            StackSource::Predecessor { record_id } => {
-                if !visited.insert(record_id) {
-                    return Err(error("stack cycle"));
-                }
-                let json: String = c
-                    .query_row(
-                        "SELECT source_json FROM task_stacks WHERE record_id = ?1",
-                        [record_id.cast_signed()],
-                        |r| r.get(0),
-                    )
-                    .map_err(storage_error)?;
-                source = serde_json::from_str(&json).map_err(json_error)?;
-            }
+    let source: StackSource = serde_json::from_str(&source).map_err(json_error)?;
+    let (destination, base_branch) = match source {
+        StackSource::Root { destination } if predecessor.is_none() => {
+            let branch = destination.branch.clone();
+            (destination, branch)
         }
+        StackSource::Predecessor { record_id } if predecessor == Some(record_id.cast_signed()) => {
+            let previous = previous
+                .filter(|p| p.record_id == record_id)
+                .ok_or_else(|| error("predecessor is not stacked"))?;
+            let branch = if previous.unchanged_result.is_some() {
+                previous.base_branch.clone()
+            } else {
+                task_branch(record_id)
+            };
+            (previous.destination.clone(), branch)
+        }
+        _ => return Err(error("contradictory stored Stack Predecessor")),
     };
-    let base_branch = predecessor.map_or_else(
-        || destination.branch.clone(),
-        |id| task_branch(id.cast_unsigned()),
-    );
+    // Older schemas are inspected before their explicit copy-and-upgrade.
+    let has_unchanged: bool = c
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name = 'task_unchanged_results')",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(storage_error)?;
+    let unchanged: Option<String> = if has_unchanged {
+        c.query_row(
+            "SELECT evidence_json FROM task_unchanged_results WHERE record_id = ?1",
+            [record.cast_signed()],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(storage_error)?
+    } else {
+        None
+    };
+    if unchanged.is_some() && publication.is_some() {
+        return Err(error("conflicting stored publication alternatives"));
+    }
     Ok(Some(TaskStack {
         record_id: record,
         predecessor: predecessor.map(i64::cast_unsigned),
         destination,
         base_branch,
         base_commit,
+        unchanged_result: unchanged
+            .map(|s| serde_json::from_str(&s).map_err(json_error))
+            .transpose()?,
         publication: publication
             .map(|p| serde_json::from_str(&p).map_err(json_error))
             .transpose()?,
     }))
+}
+
+fn predecessor_gate(
+    c: &Connection,
+    stack: &TaskStack,
+    commit: &str,
+) -> Result<(), RegistrationError> {
+    let mut cursor = stack.predecessor;
+    while let Some(id) = cursor {
+        if load_record(c, id)?.status != RecordStatus::Done {
+            return Err(error(format!("Stack Predecessor {id} is not Done")));
+        }
+        let previous = required(c, id)?;
+        let work = outcomes::state(c, id)?;
+        if previous.verified_commit(&work)? != commit {
+            return Err(error(format!(
+                "Base Commit differs from Stack Predecessor {id} verified result"
+            )));
+        }
+        let branch = if previous.unchanged_result.is_some() {
+            previous.base_branch.clone()
+        } else {
+            task_branch(id)
+        };
+        if stack.base_branch != branch {
+            return Err(error("Base Branch differs from predecessor lineage"));
+        }
+        cursor = if previous.unchanged_result.is_some() {
+            previous.predecessor
+        } else {
+            None
+        };
+    }
+    Ok(())
 }
 
 fn audit(tx: &Transaction<'_>, record: u64, message: &str) -> Result<(), RegistrationError> {
@@ -98,7 +203,7 @@ fn unprepared(c: &Connection, record: u64) -> Result<(), RegistrationError> {
     Ok(())
 }
 
-fn compatible(c: &Connection, record: u64) -> Result<(), RegistrationError> {
+pub(super) fn compatible(c: &Connection, record: u64) -> Result<(), RegistrationError> {
     let task = load_record(c, record)?;
     let last: Option<i64> = c
         .query_row(
@@ -154,6 +259,7 @@ impl SqliteProjectRepository {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(storage_error)?;
         let task = self.check_task(&tx, record)?;
+        super::spec_plans::editable_stack_suffix(&tx, record)?;
         unprepared(&tx, record)?;
         compatible(&tx, record)?;
         let predecessor = match source {
@@ -163,6 +269,11 @@ impl SqliteProjectRepository {
                 let previous = load_record(&tx, *record_id)?;
                 forge_app::stacks::validate_stack_predecessor(&task, &previous)?;
                 required(&tx, *record_id)?;
+                if super::ordering_dependencies::designated(&tx, record, *record_id)? {
+                    return Err(error(
+                        "an ordering-only dependency cannot be a Stack Predecessor",
+                    ));
+                }
                 let cycle: bool = tx.query_row("WITH RECURSIVE suffix(id) AS (SELECT ?1 UNION SELECT record_id FROM task_stacks JOIN suffix ON predecessor = suffix.id) SELECT EXISTS(SELECT 1 FROM suffix WHERE id = ?2)", params![record.cast_signed(), record_id.cast_signed()], |r| r.get(0)).map_err(storage_error)?;
                 if cycle {
                     return Err(error("stack cannot form a cycle"));
@@ -239,12 +350,7 @@ impl SqliteProjectRepository {
         if !super::unfinished_prerequisite_ids(&tx, expected.record_id)?.is_empty() {
             return Err(error("Task has unresolved prerequisites"));
         }
-        if let Some(predecessor) = expected.predecessor {
-            let previous = required(&tx, predecessor)?;
-            if previous.publication.is_none_or(|p| p.head_commit != commit) {
-                return Err(error("Base Commit differs from predecessor publication"));
-            }
-        }
+        predecessor_gate(&tx, expected, commit)?;
         tx.execute(
             "UPDATE task_stacks SET base_commit = ?2 WHERE record_id = ?1",
             params![expected.record_id.cast_signed(), commit],
@@ -267,6 +373,26 @@ impl SqliteProjectRepository {
         publication: &Publication,
         assignment: Option<&str>,
     ) -> Result<TaskStack, RegistrationError> {
+        self.stack_accept_result(expected, ObservedResult::Published(publication), assignment)
+    }
+
+    pub(super) fn stack_unchanged(
+        &self,
+        expected: &TaskStack,
+        result: &UnchangedResult,
+        assignment: Option<&str>,
+    ) -> Result<TaskStack, RegistrationError> {
+        self.stack_accept_result(expected, ObservedResult::Unchanged(result), assignment)
+    }
+
+    // Keep authorization, freshness, evidence and required audit in one writer transaction.
+    #[allow(clippy::too_many_lines)]
+    fn stack_accept_result(
+        &self,
+        expected: &TaskStack,
+        observed: ObservedResult<'_>,
+        assignment: Option<&str>,
+    ) -> Result<TaskStack, RegistrationError> {
         let mut c = self
             .connection
             .lock()
@@ -282,17 +408,27 @@ impl SqliteProjectRepository {
         if &required(&tx, record)? != expected {
             return Err(error("stack changed during publication; reread"));
         }
+        predecessor_gate(
+            &tx,
+            expected,
+            expected.base_commit.as_deref().unwrap_or_default(),
+        )?;
         let work = outcomes::state(&tx, record)?;
         let Some(Evidence::Repository { commit, .. }) = work.output.as_ref() else {
             return Err(error("repository output missing"));
         };
-        if work.generation != publication.generation
-            || commit != &publication.head_commit
-            || publication.repository != expected.destination.repository
-            || publication.head_branch != task_branch(record)
-            || publication.base_branch != expected.base_branch
-        {
-            return Err(error("publication evidence changed"));
+        match observed {
+            ObservedResult::Published(p)
+                if work.generation == p.generation
+                    && commit == &p.head_commit
+                    && p.repository == expected.destination.repository
+                    && p.head_branch == task_branch(record)
+                    && p.base_branch == expected.base_branch => {}
+            ObservedResult::Unchanged(u)
+                if work.generation == u.generation
+                    && work.output.as_ref() == Some(&u.evidence)
+                    && expected.base_commit.as_ref() == Some(commit) => {}
+            _ => return Err(error("publication evidence changed")),
         }
         let last: i64 = tx
             .query_row(
@@ -327,26 +463,116 @@ impl SqliteProjectRepository {
             }
             super::execution_modes::safe_ownership(&tx, record)?;
         }
+        // Exact retries do not add history; conflicting evidence requires explicit invalidation.
+        if let Some(existing) = &expected.unchanged_result
+            && existing.generation == work.generation
+        {
+            if !matches!(observed, ObservedResult::Unchanged(u) if u == existing) {
+                return Err(error("conflicting publication retry"));
+            }
+            return Ok(expected.clone());
+        }
+        if let Some(existing) = &expected.publication
+            && existing.generation == work.generation
+        {
+            if !matches!(observed, ObservedResult::Published(p) if p == existing) {
+                return Err(error("conflicting publication retry"));
+            }
+            return Ok(expected.clone());
+        }
+        // Keep historical verification in audit; only the current generation authorizes outcomes.
         tx.execute(
-            "UPDATE task_stacks SET publication_json = ?2 WHERE record_id = ?1",
-            params![
-                record.cast_signed(),
-                serde_json::to_string(publication).map_err(json_error)?
-            ],
+            "DELETE FROM task_unchanged_results WHERE record_id = ?1",
+            [record.cast_signed()],
         )
         .map_err(storage_error)?;
-        audit(
-            &tx,
-            record,
-            &format!(
-                "Verified non-draft publication: {} at {} (generation {})",
-                publication.url, publication.head_commit, publication.generation
-            ),
-        )?;
+        tx.execute(
+            "UPDATE task_stacks SET publication_json = NULL WHERE record_id = ?1",
+            [record.cast_signed()],
+        )
+        .map_err(storage_error)?;
+        match observed {
+            ObservedResult::Published(p) => {
+                tx.execute(
+                    "UPDATE task_stacks SET publication_json = ?2 WHERE record_id = ?1",
+                    params![
+                        record.cast_signed(),
+                        serde_json::to_string(p).map_err(json_error)?
+                    ],
+                )
+                .map_err(storage_error)?;
+                audit(
+                    &tx,
+                    record,
+                    &format!(
+                        "Verified non-draft publication: {} at {} (generation {})",
+                        p.url, p.head_commit, p.generation
+                    ),
+                )?;
+            }
+            ObservedResult::Unchanged(u) => {
+                tx.execute(
+                    "INSERT INTO task_unchanged_results(record_id, evidence_json) VALUES (?1, ?2)",
+                    params![
+                        record.cast_signed(),
+                        serde_json::to_string(u).map_err(json_error)?
+                    ],
+                )
+                .map_err(storage_error)?;
+                audit(
+                    &tx,
+                    record,
+                    &format!(
+                        "Verified unchanged result at {commit} (generation {})",
+                        u.generation
+                    ),
+                )?;
+            }
+        }
         let result = required(&tx, record)?;
         tx.commit().map_err(storage_error)?;
         Ok(result)
     }
+}
+
+/// Persisted inheritance is rechecked at authorization, including legacy prepared Tasks.
+pub(super) fn execution_gate(
+    c: &Connection,
+    record: u64,
+    evidence: Option<&Evidence>,
+) -> Result<(), RegistrationError> {
+    let Some(stack) = load(c, record)? else {
+        return Ok(());
+    };
+    let base = stack
+        .base_commit
+        .as_deref()
+        .ok_or_else(|| error(format!("Task {record}: prepare the Stack before execution")))?;
+    let pinned: Option<String> = c
+        .query_row(
+            "SELECT base_commit FROM task_base_commits WHERE record_id = ?1",
+            [record.cast_signed()],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(storage_error)?;
+    if pinned.as_deref() != Some(base) {
+        return Err(error(format!(
+            "Task {record}: retained Base Commit differs from Stack; preserve checkout and use explicit operator recovery"
+        )));
+    }
+    predecessor_gate(c, &stack, base)?;
+    let work = outcomes::state(c, record)?;
+    if work.input.is_none()
+        && work.output.is_none()
+        && evidence
+            .is_some_and(|e| !matches!(e, Evidence::Repository { commit, .. } if commit == base))
+    {
+        return Err(error(format!(
+            "Task {record}: initial attempt must use exact Stack Base Commit {base}; preserve the checkout and investigate, do not reset or repin"
+        )));
+    }
+    Ok(())
 }
 
 pub(super) fn publication_gate(
@@ -358,6 +584,20 @@ pub(super) fn publication_gate(
     let Some(stack) = load(c, record)? else {
         return Ok(());
     };
+    let base = stack
+        .base_commit
+        .as_deref()
+        .ok_or_else(|| error("Stack is not prepared"))?;
+    predecessor_gate(c, &stack, base)?;
+    if let Some(u) = stack.unchanged_result {
+        if u.generation == generation
+            && &u.evidence == evidence
+            && matches!(evidence, Evidence::Repository { commit, .. } if Some(commit) == stack.base_commit.as_ref())
+        {
+            return Ok(());
+        }
+        return Err(error("unchanged publication evidence is stale"));
+    }
     let Some(p) = stack.publication else {
         return Err(error("verified non-draft publication required"));
     };

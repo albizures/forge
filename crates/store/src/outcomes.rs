@@ -305,6 +305,11 @@ impl SqliteProjectRepository {
             ));
         }
         mutable(&tx, record)?;
+        super::spec_plans::authorize(&tx, record, Some(&input.evidence))?;
+        let unfinished = super::unfinished_prerequisite_ids(&tx, record)?;
+        if !unfinished.is_empty() {
+            return Err(super::dependencies_not_done_error(&unfinished));
+        }
         let work = state(&tx, record)?;
         generation(work.generation, input.generation)?;
         ordered(&tx, record, input.check_id)?;

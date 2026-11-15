@@ -4,6 +4,9 @@ use forge_rpc::{AssignmentApiClient, StackDestination as Destination, TaskStackA
 
 struct Hosting;
 impl StackHosting for Hosting {
+    fn checkout(&self, _: &Path) -> Result<forge_app::stacks::CheckoutObservation, RegistrationError> {
+        Ok(forge_app::stacks::CheckoutObservation { commit: "a".repeat(40), clean: true })
+    }
     fn fetch_branch(&self, _: &Path, _: &StackDestination, branch: &str) -> Result<String, RegistrationError> {
         assert_eq!(branch, "release/2.x");
         Ok("a".repeat(40))
@@ -52,8 +55,26 @@ async fn stack_configuration_and_preparation_round_trip_through_scoped_rpc() {
     assert!(client.task_stack(forge_rpc::SelectedRecordRequest::selected("missing", Request { record_id: task.id, action: Action::Show })).await.is_err());
     assert!(client.task_stack(selected(task.id, Action::Publish { url: "https://github.com/acme/widgets/pull/1".into() })).await.is_err());
     let secret = "must-not-appear-in-response";
-    let denied = client.stack(forge_rpc::AssignmentStackRequest { assignment_id: "unknown".into(), secret: secret.into(), url: None }).await.unwrap_err().to_string();
+    let denied = client.stack(forge_rpc::AssignmentStackRequest { assignment_id: "unknown".into(), secret: secret.into(), url: None, unchanged: false }).await.unwrap_err().to_string();
     assert!(!denied.contains(secret));
+    assert!(client.task_stack(selected(task.id, Action::PublishUnchanged)).await.is_err());
+    forge_rpc::RecordApiClient::start(&client, forge_rpc::SelectedRecordRequest::selected("test", forge_rpc::RecordIdRequest { id: task.id })).await.unwrap();
+    let checks = client.record_check_list(forge_rpc::SelectedRecordRequest::selected("test", forge_rpc::RecordCheckListRequest { record: task.id, compare_revision: None })).await.unwrap();
+    for (position, check) in checks.iter().enumerate() {
+        let evidence = forge_app::outcomes::Evidence::Repository { repository: root.display().to_string(), commit: "a".repeat(40) };
+        let attempt = forge_app::outcomes::AttemptInput { id: format!("rpc-{position}"), check_id: check.id, generation: 1, evidence: evidence.clone(), actor: "operator".into() };
+        client.record_attempt_begin(forge_rpc::SelectedRecordRequest::selected("test", forge_rpc::RecordAttemptBeginRequest { record: task.id, attempt: attempt.clone() })).await.unwrap();
+        if position == 1 {
+            let verified = client.task_stack(selected(task.id, Action::PublishUnchanged)).await.unwrap().unwrap();
+            assert!(verified.publication.is_none());
+            assert!(verified.unchanged_result.is_some());
+        }
+        let outcome = forge_app::outcomes::OutcomeInput { attempt_id: attempt.id, generation: 1, evidence,
+            verdict: forge_app::checks::Verdict::Pass, actor: "operator".into(), message: "Checked".into(),
+            disposition: forge_app::outcomes::OutcomeDisposition::Complete, findings: vec![], verifications: vec![] };
+        client.record_outcome_submit(forge_rpc::SelectedRecordRequest::selected("test", forge_rpc::RecordOutcomeSubmitRequest { record: task.id, outcome })).await.unwrap();
+    }
+    forge_rpc::RecordApiClient::done(&client, forge_rpc::SelectedRecordRequest::selected("test", forge_rpc::DoneRecordRequest { id: task.id, completion_resolution: None })).await.unwrap();
     server.abort();
     let _ = server.await;
     std::fs::remove_dir_all(root).unwrap();

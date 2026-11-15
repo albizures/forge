@@ -23,7 +23,16 @@ impl Drop for Fixture {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
-struct Checkout;
+struct Head(Arc<Mutex<String>>);
+impl forge_app::RepositoryInspector for Head {
+    fn inspect(&self, root: &Path) -> Result<Project, RegistrationError> {
+        forge_app::RepositoryInspector::inspect(&adapters::Local, root)
+    }
+    fn head_commit(&self, _: &Path) -> Result<String, RegistrationError> {
+        Ok(self.0.lock().unwrap().clone())
+    }
+}
+struct Checkout(Arc<AtomicBool>);
 impl ManagedWorktreeAdapter for Checkout {
     fn create(&self, _: &Path, path: &Path, _: &str, _: &str) -> Result<(), RegistrationError> {
         std::fs::create_dir_all(path).unwrap();
@@ -33,7 +42,15 @@ impl ManagedWorktreeAdapter for Checkout {
         unreachable!()
     }
     fn assess(&self, path: &Path) -> WorktreeSafetyAssessment {
-        adapters::Local.assess(path)
+        if self.0.load(std::sync::atomic::Ordering::Relaxed) {
+            WorktreeSafetyAssessment {
+                facts: vec!["dirty".into()],
+                blockers: vec![],
+                removable: false,
+            }
+        } else {
+            adapters::Local.assess(path)
+        }
     }
     fn run_setup_hook(
         &self,
@@ -48,7 +65,7 @@ impl ManagedWorktreeAdapter for Checkout {
     }
 }
 #[derive(Clone)]
-struct Hosting(Arc<Mutex<Vec<PullRequestObservation>>>);
+struct Hosting(Arc<Mutex<Vec<PullRequestObservation>>>, String);
 impl StackHosting for Hosting {
     fn fetch_branch(
         &self,
@@ -57,7 +74,7 @@ impl StackHosting for Hosting {
         branch: &str,
     ) -> Result<String, RegistrationError> {
         if branch == "feature/payments" {
-            return Ok("b".repeat(40));
+            return Ok(self.1.clone());
         }
         self.0
             .lock()
@@ -84,8 +101,17 @@ impl StackHosting for Hosting {
 }
 
 #[test]
-#[allow(clippy::too_many_lines)]
 fn dispatched_stack_restarts_between_checks_and_completes_only_after_bound_publication() {
+    dispatched_publication(false);
+}
+
+#[test]
+fn dispatched_unchanged_result_restarts_and_requires_bound_final_attempt() {
+    dispatched_publication(true);
+}
+
+#[allow(clippy::too_many_lines)]
+fn dispatched_publication(unchanged: bool) {
     let root = std::env::temp_dir().join(format!(
         "forge-stack-dispatch-{}-{}",
         std::process::id(),
@@ -153,7 +179,7 @@ fn dispatched_stack_restarts_between_checks_and_completes_only_after_bound_publi
             },
         )
         .unwrap();
-    let tasks: Vec<_> = (0..2)
+    let tasks: Vec<_> = (0..if unchanged { 1 } else { 2 })
         .map(|_| {
             let task = store
                 .open_typed_record(&NewTypedRecord {
@@ -181,14 +207,16 @@ fn dispatched_stack_restarts_between_checks_and_completes_only_after_bound_publi
             },
         )
         .unwrap();
-    store
-        .configure_task_stack(
-            tasks[1],
-            &StackSource::Predecessor {
-                record_id: tasks[0],
-            },
-        )
-        .unwrap();
+    if !unchanged {
+        store
+            .configure_task_stack(
+                tasks[1],
+                &StackSource::Predecessor {
+                    record_id: tasks[0],
+                },
+            )
+            .unwrap();
+    }
     let prs: Vec<_> = tasks
         .iter()
         .enumerate()
@@ -207,19 +235,24 @@ fn dispatched_stack_restarts_between_checks_and_completes_only_after_bound_publi
             head_repository: "acme/widgets".into(),
         })
         .collect();
-    let hosting = Hosting(Arc::new(Mutex::new(prs.clone())));
+    let hosting = Hosting(
+        Arc::new(Mutex::new(if unchanged { vec![] } else { prs.clone() })),
+        if unchanged { "a" } else { "b" }.repeat(40),
+    );
+    let head = Arc::new(Mutex::new("a".repeat(40)));
+    let dirty = Arc::new(AtomicBool::new(false));
     let launches = Arc::new(Mutex::new(Vec::new()));
     let application = || {
         Application::with_managed_worktrees_and_agent_dispatch(
             Box::new(SqliteProjectRepository::open(&path).unwrap()),
             Box::new(SqliteProjectRepository::open(&path).unwrap()),
-            Box::new(Checkout),
+            Box::new(Checkout(dirty.clone())),
             Box::new(SqliteProjectRepository::open(&path).unwrap()),
             Box::new(adapters::Provider {
                 unavailable: Arc::new(AtomicBool::new(false)),
                 launches: launches.clone(),
             }),
-            Box::new(adapters::Local),
+            Box::new(Head(head.clone())),
         )
         .with_workspace_repository(Box::new(SqliteProjectRepository::open(&path).unwrap()))
         .with_stack_hosting(Box::new(hosting.clone()))
@@ -231,12 +264,13 @@ fn dispatched_stack_restarts_between_checks_and_completes_only_after_bound_publi
         }
         assert_eq!(
             store.task_base_commit(*task).unwrap(),
-            Some(if index == 0 {
+            Some(if index == 0 && !unchanged {
                 "b".repeat(40)
             } else {
                 "a".repeat(40)
             })
         );
+        *head.lock().unwrap() = store.task_base_commit(*task).unwrap().unwrap();
         for position in 0..2 {
             // Recompose the daemon for every attempt: pins and publication survive restart.
             let app = application();
@@ -254,10 +288,15 @@ fn dispatched_stack_restarts_between_checks_and_completes_only_after_bound_publi
             session.start().unwrap();
             session.context().unwrap();
             assert_eq!(session.stack(None).unwrap().unwrap().record_id, *task);
+            // Implementation starts at the exact base, then reports the changed output.
+            *head.lock().unwrap() = "a".repeat(40);
             let outcome = OutcomeInput {
                 attempt_id: attempt.id,
                 generation: attempt.generation,
-                evidence: attempt.evidence,
+                evidence: forge_app::outcomes::Evidence::Repository {
+                    repository: root.display().to_string(),
+                    commit: "a".repeat(40),
+                },
                 verdict: Verdict::Pass,
                 actor: "ignored".into(),
                 message: "Checked".into(),
@@ -266,6 +305,7 @@ fn dispatched_stack_restarts_between_checks_and_completes_only_after_bound_publi
                 verifications: vec![],
             };
             if position == 0 {
+                assert!(session.stack_unchanged().is_err());
                 assert!(session.stack(Some(&prs[index].url)).is_err());
             } else {
                 assert_eq!(
@@ -281,7 +321,19 @@ fn dispatched_stack_restarts_between_checks_and_completes_only_after_bound_publi
                     app.publish_task_stack(*task, &prs[index].url, None)
                         .is_err()
                 );
-                session.stack(Some(&prs[index].url)).unwrap();
+                if unchanged {
+                    assert!(app.publish_unchanged_task_stack(*task, None).is_err());
+                    dirty.store(true, std::sync::atomic::Ordering::Relaxed);
+                    assert!(session.stack_unchanged().is_err());
+                    dirty.store(false, std::sync::atomic::Ordering::Relaxed);
+                    let saved = session.stack_unchanged().unwrap().unwrap();
+                    assert_eq!(session.stack_unchanged().unwrap(), Some(saved));
+                } else {
+                    if index == 0 {
+                        assert!(session.stack_unchanged().is_err());
+                    }
+                    session.stack(Some(&prs[index].url)).unwrap();
+                }
             }
             let accepted = session.submit_outcome(&outcome).unwrap();
             assert_eq!(session.submit_outcome(&outcome).unwrap(), accepted);
@@ -294,16 +346,26 @@ fn dispatched_stack_restarts_between_checks_and_completes_only_after_bound_publi
             .reconcile_agent_dispatch("stack-restart", 800_000)
             .unwrap();
         assert_eq!(store.show_record(*task).unwrap().status, RecordStatus::Done);
-        let publication = store
-            .task_stack(*task)
-            .unwrap()
-            .unwrap()
-            .publication
-            .unwrap();
-        assert_eq!(publication.url, prs[index].url);
-        assert_eq!(publication.base_branch, prs[index].base_branch);
+        let stack = store.task_stack(*task).unwrap().unwrap();
+        if unchanged {
+            assert!(stack.publication.is_none());
+            assert_eq!(
+                stack.unchanged_result.unwrap().evidence,
+                forge_app::outcomes::Evidence::Repository {
+                    repository: root.display().to_string(),
+                    commit: "a".repeat(40),
+                }
+            );
+        } else {
+            let publication = stack.publication.unwrap();
+            assert_eq!(publication.url, prs[index].url);
+            assert_eq!(publication.base_branch, prs[index].base_branch);
+        }
     }
-    assert_eq!(launches.lock().unwrap().len(), 4);
+    assert_eq!(
+        launches.lock().unwrap().len(),
+        if unchanged { 2 } else { 4 }
+    );
     drop(store);
     drop(fixture);
 }
