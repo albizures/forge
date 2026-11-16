@@ -1791,7 +1791,7 @@ impl RecordApiServer for Daemon {
             record: request,
         } = request;
         let application = self.record_application(&selection, &mut [])?;
-        let (record, already_done) = if request.force {
+        let (record, already_done, dependency_consequences) = if request.force {
             let result = application
                 .force_done_record(
                     request.id,
@@ -1799,17 +1799,23 @@ impl RecordApiServer for Daemon {
                     "operator",
                 )
                 .map_err(rpc_error)?;
-            (result.record, result.already_done)
+            (
+                result.record,
+                result.already_done,
+                result.dependency_consequences,
+            )
         } else {
             (
                 application
                     .done_record(request.id, request.completion_resolution.as_deref())
                     .map_err(rpc_error)?,
                 false,
+                None,
             )
         };
         let mut response = RecordResponse::from(record);
         response.already_done = already_done;
+        response.dependency_consequences = dependency_consequences;
         response.forced_completion = application
             .forced_completion(request.id)
             .map_err(rpc_error)?;

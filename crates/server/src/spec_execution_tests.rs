@@ -26,6 +26,37 @@ fn open_parent_explicit_acceptance_and_automatic_dispatch_never_allocate() {
 }
 
 #[test]
+fn forced_prerequisite_reports_workflow_eligibility_without_bypassing_normal_dispatch() {
+    let fixture = Fixture::new();
+    let app = fixture.app();
+    let provider = Provider::new(fixture.root.join("herdr.sock"));
+    fixture.configure(&app, &provider, "one");
+    let store = fixture.store();
+    let open = |body: &str| store.open_typed_record(&NewTypedRecord {
+        record_type: RecordType::Task, body: body.into(),
+        project_slugs: vec!["one/api".into()], generated_by_ids: vec![],
+    }).unwrap();
+    let prerequisite = open("Obsolete prerequisite");
+    let dependent = open("Still needs dispatch configuration");
+    store.relate_records(dependent.id, prerequisite.id, forge_app::RecordRelationshipKind::DependsOn).unwrap();
+    let checks = store.list_record_checks(dependent.id).unwrap();
+    provider.reset();
+    let result = app.force_done_record(prerequisite.id, Some("Superseded"), "operator").unwrap();
+    assert_eq!(result.dependency_consequences.unwrap().newly_eligible_record_ids, vec![dependent.id]);
+    assert!(provider.state.lock().unwrap().calls.is_empty());
+    assert!(store.list_agent_assignments(dependent.id).unwrap().is_empty());
+    assert!(store.worktree_claim(dependent.id).unwrap().is_none());
+    // Existing fixture has no pinned executable Check profile: reconciliation still
+    // refuses allocation, despite workflow eligibility and selected provider settings.
+    app.reconcile_agent_dispatch("after-force", 1).unwrap();
+    provider.no_provisioning();
+    assert!(store.list_agent_assignments(dependent.id).unwrap().is_empty());
+    assert!(store.worktree_claim(dependent.id).unwrap().is_none());
+    assert_eq!(store.list_record_checks(dependent.id).unwrap(), checks);
+    assert_eq!(store.show_record(dependent.id).unwrap().status, forge_app::RecordStatus::Open);
+}
+
+#[test]
 fn legacy_started_plan_missing_inheritance_blocks_before_git_or_provider_work() {
     let fixture = Fixture::new();
     let app = fixture.app();

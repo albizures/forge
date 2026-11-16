@@ -91,6 +91,26 @@ async fn operator_force_is_noninteractive_inspectable_and_idempotent_for_every_t
             if started {
                 store.start_record(record.id).unwrap();
             }
+            let dependent = if kind == RecordType::Task {
+                let dependent = store
+                    .open_typed_record(&NewTypedRecord {
+                        record_type: RecordType::Task,
+                        body: "Ordinary dependent".into(),
+                        project_slugs: vec![],
+                        generated_by_ids: vec![],
+                    })
+                    .unwrap();
+                store
+                    .relate_records(
+                        dependent.id,
+                        record.id,
+                        forge_app::RecordRelationshipKind::DependsOn,
+                    )
+                    .unwrap();
+                Some(dependent.id)
+            } else {
+                None
+            };
             let id = record.id.to_string();
             let before = store.list_record_updates(record.id).unwrap();
             assert!(
@@ -133,6 +153,24 @@ async fn operator_force_is_noninteractive_inspectable_and_idempotent_for_every_t
             );
             let done: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
             assert_eq!(done["status"], "done");
+            assert_eq!(
+                done["dependency_consequences"]["newly_eligible_record_ids"],
+                serde_json::json!(dependent.into_iter().collect::<Vec<_>>())
+            );
+            assert!(
+                done["dependency_consequences"]["warning"]
+                    .as_str()
+                    .unwrap()
+                    .contains("may dispatch")
+            );
+            let response: forge_rpc::RecordResponse = serde_json::from_value(done.clone()).unwrap();
+            let readable_result = forge_cli::render_record(&response);
+            assert!(readable_result.contains("Warning: Normal reconciliation may dispatch"));
+            assert!(readable_result.contains(if dependent.is_some() {
+                "Newly workflow-eligible dependent IDs:"
+            } else {
+                "No newly workflow-eligible dependents."
+            }));
             assert_eq!(done["forced_completion"]["actor"], "operator");
             assert_eq!(
                 done["forced_completion"]["resolution"],
@@ -156,6 +194,8 @@ async fn operator_force_is_noninteractive_inspectable_and_idempotent_for_every_t
             assert!(retry.status.success());
             let retry: serde_json::Value = serde_json::from_slice(&retry.stdout).unwrap();
             assert_eq!(retry["already_done"], true);
+            assert!(retry.get("dependency_consequences").is_none());
+            assert!(show.get("dependency_consequences").is_none());
             assert_eq!(retry["forced_completion"], done["forced_completion"]);
             assert_eq!(
                 store.list_record_updates(record.id).unwrap().len(),

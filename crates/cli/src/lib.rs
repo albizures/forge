@@ -1571,6 +1571,18 @@ fn record_error(operation: &'static str) -> impl FnOnce(jsonrpsee::core::client:
 }
 fn render_completion(record: &RecordResponse, text: &mut String) {
     use std::fmt::Write as _;
+    if let Some(consequences) = &record.dependency_consequences {
+        if consequences.newly_eligible_record_ids.is_empty() {
+            text.push_str("\nNo newly workflow-eligible dependents.");
+        } else {
+            let _ = write!(
+                text,
+                "\nNewly workflow-eligible dependent IDs: {:?}",
+                consequences.newly_eligible_record_ids
+            );
+        }
+        let _ = write!(text, "\nWarning: {}", consequences.warning);
+    }
     if record.already_done {
         text.push_str("\nAlready Done; completion evidence unchanged.");
     }
@@ -1930,6 +1942,7 @@ mod tests {
     fn record_list_renders_records_in_response_order() {
         let records = ListRecordsResponse {
             records: vec![RecordResponse {
+                dependency_consequences: None,
                 already_done: false,
                 forced_completion: None,
                 activity: None,
@@ -1982,6 +1995,7 @@ mod tests {
     fn record_output_identifies_the_new_record() {
         assert_eq!(
             render_record_opened(&RecordResponse {
+                dependency_consequences: None,
                 already_done: false,
                 forced_completion: None,
                 activity: None,
