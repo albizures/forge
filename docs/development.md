@@ -96,6 +96,17 @@ served HTMX and refreshes when the user selects **Refresh status**. Its fragment
 route is `/status`; the JSON-RPC endpoint is `POST /rpc`. Managed daemon ports
 are allocated by Forgeup rather than fixed at 45003.
 
+Open `/records` (or use the status page's **Records** link) for the read-only
+Records dashboard. Select a Forge Workspace and submit **View / Refresh**;
+`/records?workspace=<workspace-id>` reproduces the selection. No Workspace is
+selected implicitly, and no cross-Workspace inventory is shown. Cards include
+all Record Types and Projectless work, ordered by latest Record Update timestamp
+(descending), then Record Identifier (ascending). Dates are UTC; missing historical
+Updates are labeled unknown and sort last, never backfilled. This initial slice
+has no filters, pagination, alternative sorts, or Record detail links.
+See [dashboard verification](records-dashboard-verification.md) for evidence and
+current limitations.
+
 CLI status calls `system.status` over JSON-RPC/HTTP and reports failures on
 stderr, with a request timeout of at most 10 seconds.
 

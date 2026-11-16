@@ -123,7 +123,7 @@ fn dispatched_publication(unchanged: bool) {
     let fixture = Fixture(root.clone());
     std::fs::create_dir_all(root.join(".agents/profiles")).unwrap();
     std::fs::create_dir_all(root.join("secrets")).unwrap();
-    std::fs::write(root.join(".agents/profiles/work.md"), "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\ntools: [read, bash]\n---\nDeliver the bound Check.").unwrap();
+    std::fs::write(root.join(".agents/profiles/work.md"), "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\nthinkingLevel: medium\ntools: [read, bash]\n---\nDeliver the bound Check.").unwrap();
     let path = root.join("store.sqlite");
     let store = SqliteProjectRepository::open(&path).unwrap();
     store.create_workspace("test", "Test", &root).unwrap();

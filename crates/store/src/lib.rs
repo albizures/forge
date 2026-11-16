@@ -25,6 +25,7 @@ mod findings;
 mod ordering_dependencies;
 mod outcome_findings;
 mod outcomes;
+mod record_browsing;
 mod record_workspaces;
 mod schema_compatibility;
 mod spec_plans;
@@ -1236,6 +1237,13 @@ impl RecordRepository for SqliteProjectRepository {
         let grilling = load_record(&transaction, grilling_id)?;
         transaction.commit().map_err(storage_error)?;
         Ok(grilling)
+    }
+
+    fn record_dates(
+        &self,
+        id: u64,
+    ) -> Result<forge_app::record_browsing::RecordDates, RegistrationError> {
+        record_browsing::record_dates(self, id)
     }
 
     fn list_records(&self, filter: &RecordListFilter) -> Result<Vec<Record>, RegistrationError> {

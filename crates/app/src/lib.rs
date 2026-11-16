@@ -27,6 +27,7 @@ pub use workspace_dispatch::{
 };
 mod projects;
 pub use projects::{ProjectReference, canonical_project_root};
+pub mod record_browsing;
 mod record_planning;
 pub use record_planning::RecordReadiness;
 
@@ -480,6 +481,16 @@ pub struct ManagedWorktreeInfo {
 
 /// Persistence operations for generic Records.
 pub trait RecordRepository: ProjectRepository {
+    /// Read opening and latest Record Update timestamps without loading the Update Log.
+    /// # Errors
+    /// Returns scope, storage, or unsupported-operation failures.
+    fn record_dates(&self, _id: u64) -> Result<record_browsing::RecordDates, RegistrationError> {
+        Err(RegistrationError::new(
+            "unsupported",
+            "Record dates unavailable",
+        ))
+    }
+
     /// Read explicit stack membership.
     /// # Errors
     /// Returns scope or storage failures.
