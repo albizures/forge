@@ -21,12 +21,12 @@ impl RepositoryInspector for Inspector {
     }
 }
 
-struct Fixture {
-    root: std::path::PathBuf,
-    store: SqliteProjectRepository,
+pub(super) struct Fixture {
+    pub(super) root: std::path::PathBuf,
+    pub(super) store: SqliteProjectRepository,
 }
 impl Fixture {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let root = std::env::temp_dir().join(format!(
             "forge-browser-{}-{}",
             std::process::id(),
@@ -43,7 +43,7 @@ impl Fixture {
         }
         Self { root, store }
     }
-    fn app(&self) -> Application {
+    pub(super) fn app(&self) -> Application {
         Application::new(
             Box::new(SqliteProjectRepository::open(&self.root.join("store.sqlite")).unwrap()),
             Box::new(Inspector),
@@ -52,10 +52,10 @@ impl Fixture {
             SqliteProjectRepository::open(&self.root.join("store.sqlite")).unwrap(),
         ))
     }
-    fn connection(&self) -> rusqlite::Connection {
+    pub(super) fn connection(&self) -> rusqlite::Connection {
         rusqlite::Connection::open(self.root.join("store.sqlite")).unwrap()
     }
-    async fn page(&self, uri: &str) -> (u16, String) {
+    pub(super) async fn page(&self, uri: &str) -> (u16, String) {
         let response = crate::router(crate::Daemon::new(self.app()))
             .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
             .await
