@@ -102,7 +102,15 @@ pub(super) fn load(c: &Connection, record: u64) -> Result<Option<TaskStack>, Reg
             .optional()
             .map_err(storage_error)?;
         let Some(predecessor) = predecessor else {
-            return if id == record {
+            let canonical: bool = c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name = 'builds_on_dependencies')",
+                [], |r| r.get(0),
+            ).map_err(storage_error)?;
+            let participates = canonical && c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM builds_on_dependencies WHERE from_id = ?1 OR to_id = ?1)",
+                [id.cast_signed()], |r| r.get::<_, bool>(0),
+            ).map_err(storage_error)?;
+            return if id == record && !participates {
                 Ok(None)
             } else {
                 Err(error(format!(
@@ -272,13 +280,38 @@ pub(super) fn compatible(c: &Connection, record: u64) -> Result<(), Registration
         .map(|id| checks::load(c, record, id.cast_unsigned()))
         .transpose()?;
     forge_app::stacks::validate_stack_member(&task, last.as_ref())?;
-    let profile = last.and_then(|c| c.profile_revision);
     if task.execution_mode == ExecutionMode::Dispatched {
-        let revision =
-            profile.ok_or_else(|| error("Publication Check requires a pinned profile"))?;
-        let profile = super::load_agent_profile(c, forge_app::RecordType::Task, revision)?;
-        if profile.launch_policy.is_none() {
-            return Err(error("Publication profile has no registered launch policy"));
+        let mut statement = c.prepare(
+            "SELECT id, name, profile_revision FROM record_checks WHERE record_id = ?1 ORDER BY position",
+        ).map_err(storage_error)?;
+        let checks = statement
+            .query_map([record.cast_signed()], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<u32>>(2)?,
+                ))
+            })
+            .map_err(storage_error)?;
+        for check in checks {
+            let (id, name, revision) = check.map_err(storage_error)?;
+            let revision = revision.ok_or_else(|| {
+                error(format!(
+                    "Task {record}, Check {id} ({name}) requires a pinned profile"
+                ))
+            })?;
+            let profile = super::load_agent_profile(c, forge_app::RecordType::Task, revision)
+                .map_err(|failure| {
+                    error(format!(
+                        "Task {record}, Check {id} ({name}): {}",
+                        failure.message
+                    ))
+                })?;
+            if profile.launch_policy.is_none() {
+                return Err(error(format!(
+                    "Task {record}, Check {id} ({name}) profile has no registered launch policy"
+                )));
+            }
         }
     }
     Ok(())
@@ -608,6 +641,7 @@ pub(super) fn execution_gate(
     let Some(stack) = load(c, record)? else {
         return Ok(());
     };
+    compatible(c, record)?;
     let base = stack
         .base_commit
         .as_deref()

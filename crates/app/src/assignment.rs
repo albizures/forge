@@ -623,6 +623,7 @@ impl AuthenticatedAssignment<'_> {
             own.id,
             allowed,
         )?;
+        self.application.verify_stack_execution(own.id)?;
         repository.start_owned_record(own.id, &assignment.id)
     }
 

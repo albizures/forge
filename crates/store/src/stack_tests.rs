@@ -18,6 +18,8 @@ mod cumulative;
 mod cumulative_gates;
 #[path = "builds_on_tests.rs"]
 mod builds_on;
+#[path = "derived_execution_tests.rs"]
+mod derived_execution;
 
 fn fixture() -> SqliteProjectRepository {
     let store = super::SqliteProjectRepository::in_memory().unwrap();

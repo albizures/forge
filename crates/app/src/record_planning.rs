@@ -5,6 +5,7 @@ use crate::{Application, Record, RecordStatus, RecordType, RegistrationError};
 pub struct RecordReadiness {
     pub record: Record,
     pub blocked_by: Vec<u64>,
+    pub execution_blockers: Vec<String>,
 }
 impl Application {
     /// Lists the selected Workspace's executable frontier, optionally including planning,
@@ -40,8 +41,27 @@ impl Application {
                 }
             }
             blocked_by.sort_unstable();
-            if blocked || blocked_by.is_empty() {
-                frontier.push(RecordReadiness { record, blocked_by });
+            let mut execution_blockers = Vec::new();
+            if record.record_type == RecordType::Task {
+                match self.records.validate_task_execution_plan(record.id) {
+                    Ok(()) => {}
+                    Err(error)
+                        if matches!(
+                            error.code,
+                            "spec-execution-blocked" | "invalid-spec-plan" | "stack-blocked"
+                        ) =>
+                    {
+                        execution_blockers.push(format!("{}: {}", error.code, error.message));
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            if blocked || (blocked_by.is_empty() && execution_blockers.is_empty()) {
+                frontier.push(RecordReadiness {
+                    record,
+                    blocked_by,
+                    execution_blockers,
+                });
             }
         }
         Ok(frontier)

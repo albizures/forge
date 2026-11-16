@@ -23,7 +23,9 @@ Implementation and any reviews. For Dispatched Tasks it must pin a registered Ta
 Agent Profile with a launch policy. Checks are immutable: configure the template
 before opening Tasks. Open plans may declare relationships and root configuration
 before execution is complete; preparation and Spec start reject incompatible Checks
-without rewriting their immutable definitions. Read-only
+without rewriting their immutable definitions. Every Dispatched Check, not only
+Publication, must retain a registered Task profile with a launch policy. Standalone
+chains use the same configuration gates as Spec children. Read-only
 `forge project check-template preflight <project> --json` checks the future
 Dispatched Task criteria and every pinned Task profile's registered launch policy.
 It fails on blockers or an older server without preflight support, without changing
@@ -92,7 +94,19 @@ nearest published Task's PR must remain open and non-draft and its branch must
 still identify the exact inherited commit. An all-unchanged prefix instead retains
 the selected starting branch at that commit. Missing, contradictory, stale or moved
 evidence blocks; there is no fallback to Project Root. Repeated preparation checks
-the retained pin and reports drift without changing it.
+the retained pin and reports drift without changing it. Manual start, authenticated
+Assignment start (including idempotent retries), and dispatched Check entry observe
+required predecessor hosting evidence again; a successful earlier preparation is
+not continuing authorization. Writer transactions separately recheck persisted
+lineage, immutable Checks, pins and current result generations.
+
+Workflow `ready` excludes Tasks with disabled Spec execution, missing root
+configuration, incompatible Checks or stale retained predecessor results. With
+`--blocked`, these diagnostics appear in `execution_blockers`, separately from
+unfinished prerequisite IDs in `blocked_by`. This is an additive readiness response
+field; older responses default to no configuration diagnostics. Readiness is not a
+hosting observation or provider-dispatchability guarantee: execution still performs
+the authoritative external checks.
 
 ## Publication and completion
 

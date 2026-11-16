@@ -1125,6 +1125,8 @@ pub struct ReadyRecordsRequest {
 pub struct ReadyRecordResponse {
     pub record: RecordResponse,
     pub blocked_by: Vec<u64>,
+    #[serde(default)]
+    pub execution_blockers: Vec<String>,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ReadyRecordsResponse {

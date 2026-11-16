@@ -202,6 +202,16 @@ fn assert_inspected_lineage(app: &Application, id: u64, predecessor: Option<u64>
     assert!(inspected.problem.is_none());
 }
 
+fn starting_source() -> StackSource {
+    StackSource::Root {
+        destination: StackDestination {
+            repository: "acme/widgets".into(),
+            remote: "origin".into(),
+            branch: "starting".into(),
+        },
+    }
+}
+
 #[test]
 fn cumulative_exact_git_input_and_publication_lineage_survive_database_reopen() {
     let (fixture, store, commits) = fixture();
@@ -228,17 +238,18 @@ fn cumulative_exact_git_input_and_publication_lineage_survive_database_reopen() 
                 "Manual fixture",
             )
             .unwrap();
-        let source = ids.last().map_or_else(
-            || StackSource::Root {
-                destination: StackDestination {
-                    repository: "acme/widgets".into(),
-                    remote: "origin".into(),
-                    branch: "starting".into(),
-                },
-            },
-            |id| StackSource::Predecessor { record_id: *id },
-        );
-        app.configure_task_stack(task.id, &source).unwrap();
+        if let Some(predecessor) = ids.last() {
+            store
+                .relate_records(
+                    task.id,
+                    *predecessor,
+                    forge_app::RecordRelationshipKind::BuildsOn,
+                )
+                .unwrap();
+        } else {
+            app.configure_task_stack(task.id, &starting_source())
+                .unwrap();
+        }
         ids.push(task.id);
     }
     for (index, id) in ids.iter().copied().enumerate() {

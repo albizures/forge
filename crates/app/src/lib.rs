@@ -521,6 +521,14 @@ pub struct ManagedWorktreeInfo {
 
 /// Persistence operations for generic Records.
 pub trait RecordRepository: ProjectRepository {
+    /// Validate complete Task configuration before preparation or execution.
+    /// Persistence repeats this at the writer boundary authorizing effects.
+    /// # Errors
+    /// Rejects incomplete plans, incompatible Checks and disabled Spec execution.
+    fn validate_task_execution_plan(&self, _record: u64) -> Result<(), RegistrationError> {
+        Ok(())
+    }
+
     /// Read opening and latest Record Update timestamps without loading the Update Log.
     /// # Errors
     /// Returns scope, storage, or unsupported-operation failures.
@@ -2068,10 +2076,6 @@ pub trait AgentDispatchRepository: RecordRepository + WorkspaceDispatchRepositor
     ) -> Result<(AgentAssignment, bool), RegistrationError>;
     /// Read-only parent/plan preflight before observations or provider work.
     /// Final claims must repeat this against authoritative transactional state.
-    fn validate_task_execution_plan(&self, _record: u64) -> Result<(), RegistrationError> {
-        Ok(())
-    }
-
     /// Validate eligibility, dependencies, holds, ownership and capacity before Git preparation.
     fn validate_task_check_preparation(&self, _record: u64) -> Result<(), RegistrationError> {
         Err(task_dispatch_unsupported())
@@ -3775,6 +3779,7 @@ impl Application {
     ///
     /// Returns a user-facing error when the transition is invalid.
     pub fn start_record(&self, id: u64) -> Result<Record, RegistrationError> {
+        self.verify_stack_execution(id)?;
         self.records.start_record(id)
     }
 

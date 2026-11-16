@@ -690,6 +690,16 @@ impl ManagedWorktreeRepository for SqliteProjectRepository {
 }
 
 impl RecordRepository for SqliteProjectRepository {
+    fn validate_task_execution_plan(&self, record: u64) -> Result<(), RegistrationError> {
+        let mut c = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "storage lock poisoned"))?;
+        let tx = c.transaction().map_err(storage_error)?;
+        self.ensure_record_workspace(&tx, record)?;
+        spec_plans::execution_plan(&tx, record)
+    }
+
     fn task_stack(
         &self,
         record: u64,
@@ -2334,16 +2344,6 @@ impl AgentDispatchRepository for SqliteProjectRepository {
         let profile = load_agent_profile(&transaction, RecordType::Task, revision)?;
         transaction.commit().map_err(storage_error)?;
         Ok(profile)
-    }
-
-    fn validate_task_execution_plan(&self, record: u64) -> Result<(), RegistrationError> {
-        let mut c = self
-            .connection
-            .lock()
-            .map_err(|_| RegistrationError::new("storage", "storage lock poisoned"))?;
-        let tx = c.transaction().map_err(storage_error)?;
-        self.ensure_record_workspace(&tx, record)?;
-        spec_plans::execution_plan(&tx, record)
     }
 
     fn validate_task_check_preparation(&self, record: u64) -> Result<(), RegistrationError> {

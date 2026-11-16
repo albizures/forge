@@ -100,6 +100,81 @@ impl StackHosting for Hosting {
     }
 }
 
+fn reject_unpinned_implementation(store: &SqliteProjectRepository, revision: u32) {
+    let criteria = |implementation| {
+        ["Implementation", "Publication"]
+            .map(|name| CheckCriterion {
+                name: name.into(),
+                description: name.into(),
+                profile_revision: if name == "Implementation" {
+                    implementation
+                } else {
+                    Some(revision)
+                },
+            })
+            .into()
+    };
+    store
+        .replace_check_template(
+            "test/api",
+            &TemplateReplacement {
+                expected_version: 1,
+                actor: "operator".into(),
+                message: "Incomplete plan fixture".into(),
+                criteria: criteria(None),
+            },
+        )
+        .unwrap();
+    let parent = store
+        .open_typed_record(&NewTypedRecord {
+            record_type: RecordType::Spec,
+            project_slugs: vec!["test/api".into()],
+            body: "Incomplete pins".into(),
+            generated_by_ids: vec![],
+        })
+        .unwrap();
+    let child = store
+        .open_task_under_spec("Incomplete implementation pin", parent.id, vec![])
+        .unwrap();
+    store
+        .configure_task_stack(
+            child.id,
+            &StackSource::Root {
+                destination: StackDestination {
+                    repository: "acme/widgets".into(),
+                    remote: "origin".into(),
+                    branch: "feature/payments".into(),
+                },
+            },
+        )
+        .unwrap();
+    let checks = store.list_record_checks(child.id).unwrap();
+    let history = store.list_record_updates(parent.id).unwrap();
+    let error = store.start_record(parent.id).unwrap_err();
+    assert_eq!(error.code, "invalid-spec-plan");
+    assert!(error.message.contains("Implementation"));
+    assert!(error.message.contains("pinned profile"));
+    assert_eq!(store.list_record_checks(child.id).unwrap(), checks);
+    assert_eq!(store.list_record_updates(parent.id).unwrap(), history);
+    assert_eq!(
+        store.show_record(parent.id).unwrap().status,
+        RecordStatus::Open
+    );
+    // Restoring the template does not repair this Task's immutable pins.
+    store
+        .replace_check_template(
+            "test/api",
+            &TemplateReplacement {
+                expected_version: 2,
+                actor: "operator".into(),
+                message: "Restore complete template".into(),
+                criteria: criteria(Some(revision)),
+            },
+        )
+        .unwrap();
+    assert!(store.start_record(parent.id).is_err());
+}
+
 #[test]
 fn dispatched_stack_restarts_between_checks_and_completes_only_after_bound_publication() {
     dispatched_publication(false);
@@ -179,7 +254,8 @@ fn dispatched_publication(unchanged: bool) {
             },
         )
         .unwrap();
-    let tasks: Vec<_> = (0..if unchanged { 1 } else { 2 })
+    reject_unpinned_implementation(&store, profile.revision);
+    let tasks: Vec<_> = (0..if unchanged { 1 } else { 4 })
         .map(|_| {
             let task = store
                 .open_typed_record(&NewTypedRecord {
@@ -207,13 +283,12 @@ fn dispatched_publication(unchanged: bool) {
             },
         )
         .unwrap();
-    if !unchanged {
+    for pair in tasks.windows(2) {
         store
-            .configure_task_stack(
-                tasks[1],
-                &StackSource::Predecessor {
-                    record_id: tasks[0],
-                },
+            .relate_records(
+                pair[1],
+                pair[0],
+                forge_app::RecordRelationshipKind::BuildsOn,
             )
             .unwrap();
     }
@@ -224,7 +299,7 @@ fn dispatched_publication(unchanged: bool) {
             repository: "acme/widgets".into(),
             url: format!("https://github.com/acme/widgets/pull/{id}"),
             head_branch: task_branch(*id),
-            head_commit: "a".repeat(40),
+            head_commit: if index == 3 { "c" } else { "a" }.repeat(40),
             base_branch: if index == 0 {
                 "feature/payments".into()
             } else {
@@ -236,7 +311,11 @@ fn dispatched_publication(unchanged: bool) {
         })
         .collect();
     let hosting = Hosting(
-        Arc::new(Mutex::new(if unchanged { vec![] } else { prs.clone() })),
+        Arc::new(Mutex::new(if unchanged {
+            vec![]
+        } else {
+            vec![prs[0].clone(), prs[3].clone()]
+        })),
         if unchanged { "a" } else { "b" }.repeat(40),
     );
     let head = Arc::new(Mutex::new("a".repeat(40)));
@@ -259,6 +338,8 @@ fn dispatched_publication(unchanged: bool) {
     };
 
     for (index, task) in tasks.iter().enumerate() {
+        let unchanged_output = unchanged || matches!(index, 1 | 2);
+        let output_commit = if index == 3 { "c" } else { "a" }.repeat(40);
         if store.worktree_claim(*task).unwrap().is_none() {
             application().prepare_dispatch_worktree(*task).unwrap();
         }
@@ -285,17 +366,31 @@ fn dispatched_publication(unchanged: bool) {
                 .assignment(&secret_root, &assignment.id, "secret")
                 .unwrap();
             session.acknowledge().unwrap();
+            if index > 0 && position == 0 {
+                let history = store.list_record_updates(*task).unwrap();
+                let retained = hosting.0.lock().unwrap().remove(0);
+                assert!(session.start().is_err());
+                assert!(app.execute_task_check_acceptance(*task).is_err());
+                assert_eq!(store.list_record_updates(*task).unwrap(), history);
+                hosting.0.lock().unwrap().insert(0, retained);
+            }
             session.start().unwrap();
             session.context().unwrap();
-            assert_eq!(session.stack(None).unwrap().unwrap().record_id, *task);
-            // Implementation starts at the exact base, then reports the changed output.
-            *head.lock().unwrap() = "a".repeat(40);
+            let stack = session.stack(None).unwrap().unwrap();
+            assert_eq!(stack.record_id, *task);
+            assert_eq!(stack.predecessor, index.checked_sub(1).map(|i| tasks[i]));
+            if index > 1 {
+                // Deriving ancestry never widens bounded Record access.
+                assert!(session.record(tasks[0]).is_err());
+            }
+            // Read-only Tasks retain their exact inherited commit; C changes it.
+            head.lock().unwrap().clone_from(&output_commit);
             let outcome = OutcomeInput {
                 attempt_id: attempt.id,
                 generation: attempt.generation,
                 evidence: forge_app::outcomes::Evidence::Repository {
                     repository: root.display().to_string(),
-                    commit: "a".repeat(40),
+                    commit: output_commit.clone(),
                 },
                 verdict: Verdict::Pass,
                 actor: "ignored".into(),
@@ -321,7 +416,7 @@ fn dispatched_publication(unchanged: bool) {
                     app.publish_task_stack(*task, &prs[index].url, None)
                         .is_err()
                 );
-                if unchanged {
+                if unchanged_output {
                     assert!(app.publish_unchanged_task_stack(*task, None).is_err());
                     dirty.store(true, std::sync::atomic::Ordering::Relaxed);
                     assert!(session.stack_unchanged().is_err());
@@ -337,6 +432,12 @@ fn dispatched_publication(unchanged: bool) {
             }
             let accepted = session.submit_outcome(&outcome).unwrap();
             assert_eq!(session.submit_outcome(&outcome).unwrap(), accepted);
+            if index > 0 {
+                let retained = hosting.0.lock().unwrap().remove(0);
+                // An accepted exact replay remains replay-only despite later drift.
+                assert_eq!(session.submit_outcome(&outcome).unwrap(), accepted);
+                hosting.0.lock().unwrap().insert(0, retained);
+            }
             assert_eq!(
                 store.show_record(*task).unwrap().status,
                 RecordStatus::InProgress
@@ -347,7 +448,7 @@ fn dispatched_publication(unchanged: bool) {
             .unwrap();
         assert_eq!(store.show_record(*task).unwrap().status, RecordStatus::Done);
         let stack = store.task_stack(*task).unwrap().unwrap();
-        if unchanged {
+        if unchanged_output {
             assert!(stack.publication.is_none());
             assert_eq!(
                 stack.unchanged_result.unwrap().evidence,
@@ -364,7 +465,7 @@ fn dispatched_publication(unchanged: bool) {
     }
     assert_eq!(
         launches.lock().unwrap().len(),
-        if unchanged { 2 } else { 4 }
+        if unchanged { 2 } else { 8 }
     );
     drop(store);
     drop(fixture);
