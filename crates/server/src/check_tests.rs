@@ -145,7 +145,8 @@ async fn checks_round_trip_over_typed_rpc_and_preserve_workspace_bounds() {
         client
             .done(selected(DoneRecordRequest {
                 id: task.id,
-                completion_resolution: None
+                completion_resolution: None,
+                force: false,
             }))
             .await
             .is_err()
@@ -265,19 +266,21 @@ async fn checks_round_trip_over_typed_rpc_and_preserve_workspace_bounds() {
         client
             .done(selected(DoneRecordRequest {
                 id: task.id,
-                completion_resolution: None
+                completion_resolution: None,
+                force: false,
             }))
             .await
             .is_err()
     );
     let passed = manual_pass(&client, task.id, check.id, 2, "rpc-second").await;
     assert_eq!(client.show(selected(RecordIdRequest { id: task.id })).await.unwrap().status, "in_progress");
-    let unauthorized = client.done(SelectedRecordRequest::selected("missing", DoneRecordRequest { id: task.id, completion_resolution: None })).await;
+    let unauthorized = client.done(SelectedRecordRequest::selected("missing", DoneRecordRequest { id: task.id, completion_resolution: None, force: false })).await;
     assert!(unauthorized.is_err());
     client
         .done(selected(DoneRecordRequest {
             id: task.id,
             completion_resolution: None,
+            force: false,
         }))
         .await
         .unwrap();

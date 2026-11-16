@@ -1664,6 +1664,9 @@ impl RecordApiServer for Daemon {
         let application = self.record_application(&selection, &mut [])?;
         let record = application.show_record(request.id).map_err(rpc_error)?;
         let mut response = RecordResponse::from(record);
+        response.forced_completion = application
+            .forced_completion(request.id)
+            .map_err(rpc_error)?;
         if response.record_type == "task" {
             response.activity = Some(
                 application
@@ -1703,6 +1706,9 @@ impl RecordApiServer for Daemon {
             .into_iter()
             .map(|record| {
                 let mut response = RecordResponse::from(record);
+                response.forced_completion = application
+                    .forced_completion(response.id)
+                    .map_err(rpc_error)?;
                 if response.record_type == "task" {
                     response.activity = Some(
                         application
@@ -1784,10 +1790,30 @@ impl RecordApiServer for Daemon {
             selection,
             record: request,
         } = request;
-        self.record_application(&selection, &mut [])?
-            .done_record(request.id, request.completion_resolution.as_deref())
-            .map(Into::into)
-            .map_err(rpc_error)
+        let application = self.record_application(&selection, &mut [])?;
+        let (record, already_done) = if request.force {
+            let result = application
+                .force_done_record(
+                    request.id,
+                    request.completion_resolution.as_deref(),
+                    "operator",
+                )
+                .map_err(rpc_error)?;
+            (result.record, result.already_done)
+        } else {
+            (
+                application
+                    .done_record(request.id, request.completion_resolution.as_deref())
+                    .map_err(rpc_error)?,
+                false,
+            )
+        };
+        let mut response = RecordResponse::from(record);
+        response.already_done = already_done;
+        response.forced_completion = application
+            .forced_completion(request.id)
+            .map_err(rpc_error)?;
+        Ok(response)
     }
 
     async fn relate(
@@ -4763,6 +4789,7 @@ mod tests {
             .done(selected(DoneRecordRequest {
                 id: record.id,
                 completion_resolution: Some("complete".into()),
+                force: false,
             }))
             .await
             .unwrap();

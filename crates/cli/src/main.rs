@@ -18,17 +18,16 @@ use forge_cli::{
     render_record_comments, render_record_list, render_record_opened, render_record_updates,
     request_add_record_comment, request_agent_dispatch_profile, request_agent_dispatch_reconcile,
     request_agent_dispatch_status, request_delete_record_comment, request_dispatch_record,
-    request_done_record, request_edit_record, request_list_records,
-    request_managed_worktree_create, request_managed_worktree_doctor,
-    request_managed_worktree_info, request_managed_worktree_list, request_managed_worktree_recover,
-    request_managed_worktree_remove, request_open_grilling_under_wayfinder, request_open_record,
-    request_open_spec, request_open_task, request_open_task_under_spec,
-    request_open_task_under_wayfinder, request_open_wayfinder, request_project_setup_hook,
-    request_record_comments, request_record_updates, request_register_project_selected,
-    request_relate_record, request_reopen_dispatch_task, request_resume_dispatch_task,
-    request_retire_agent_assignment, request_select_project, request_show_record,
-    request_start_record, request_status, request_unrelate_record,
-    resolve_endpoint as resolve_managed_endpoint,
+    request_edit_record, request_list_records, request_managed_worktree_create,
+    request_managed_worktree_doctor, request_managed_worktree_info, request_managed_worktree_list,
+    request_managed_worktree_recover, request_managed_worktree_remove,
+    request_open_grilling_under_wayfinder, request_open_record, request_open_spec,
+    request_open_task, request_open_task_under_spec, request_open_task_under_wayfinder,
+    request_open_wayfinder, request_project_setup_hook, request_record_comments,
+    request_record_updates, request_register_project_selected, request_relate_record,
+    request_reopen_dispatch_task, request_resume_dispatch_task, request_retire_agent_assignment,
+    request_select_project, request_show_record, request_start_record, request_status,
+    request_unrelate_record, resolve_endpoint as resolve_managed_endpoint,
 };
 use std::io::Read;
 
@@ -641,6 +640,9 @@ struct EditRecordArgs {
 #[derive(Args, Debug)]
 struct DoneRecordArgs {
     id: u64,
+    /// Close despite unmet workflow gates, never unsafe execution. Requires a nonblank resolution unless already Done.
+    #[arg(long)]
+    force: bool,
     #[arg(long)]
     resolution: Option<String>,
     #[arg(long, value_name = "URL")]
@@ -914,10 +916,11 @@ async fn run_record(command: RecordCommand, workspace: Option<String>) -> i32 {
         RecordCommand::Done(args) => record_result(
             "done",
             args.json,
-            request_done_record(
+            forge_cli::request_record_completion(
                 selected_record_endpoint(args.server_url.as_deref(), workspace.as_deref()).await,
                 args.id,
                 args.resolution,
+                args.force,
             )
             .await,
         ),

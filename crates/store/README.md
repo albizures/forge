@@ -9,7 +9,7 @@ by migrations—not just the initial `CREATE TABLE` statements.
 - [`src/lib.rs`](src/lib.rs): `SqliteProjectRepository::from_connection`,
   `migrate_*` functions, profile seeds, and repository operations.
 - [`src/workspaces.rs`](src/workspaces.rs): Workspace ownership and Project identity.
-- [`src/upgrade.rs`](src/upgrade.rs): explicit offline schema 7 → 8 → 9 → 10 conversion,
+- [`src/upgrade.rs`](src/upgrade.rs): explicit offline schema 7 → 8 → 9 → 10 → 11 conversion,
   frozen contract validation, consistent snapshots, and preservation inventories.
   See [Revision State upgrades](../../docs/state-upgrades.md) for orchestration.
 - [`src/record_workspaces.rs`](src/record_workspaces.rs): Record ownership,
@@ -45,8 +45,28 @@ is documented separately in [Records](../../docs/records.md),
   Most references do **not** cascade.
 - Ordinary repository opening accepts only the current marked schema revision.
   Triggers and repository validation also enforce invariants. Explicit managed
-  copy-and-upgrade targets revision 10 from revisions 7, 8, 9, or 10; unsupported
+  copy-and-upgrade targets revision 11 from revisions 7, 8, 9, 10, or 11; unsupported
   stores are rejected without automatic conversion or reset.
+
+## Forced completion evidence (revision 11)
+
+`src/completion.rs` adds `forced_completions` without rewriting historical Records:
+
+| Column | Type / constraint |
+| --- | --- |
+| `record_id` | INTEGER PK, FK → `records(id)` |
+| `update_id` | INTEGER UNIQUE, FK → `record_updates(id)` |
+| `actor` | nonblank TEXT; existing operator authority attribution |
+| `resolution` | nonblank TEXT; supplied Completion Resolution |
+| `bypassed_gates_json` | TEXT; array of transaction-time `{code, message}` workflow denials |
+
+The row's presence is the explicit forced marker. The linked Update supplies its
+immutable timestamp and original status transition. Status, resolution, Update,
+and evidence insert commit together under an immediate writer transaction.
+Ordinary/historical completions have no row; already-Done force creates none.
+Revision 11 adds this table through explicit copy-and-upgrade, preserving every
+old table and frozen schema contract without backfilling completion evidence.
+Ordinary opening rejects older stores before initialization writes.
 
 ## Ordering-only dependencies (revision 9)
 

@@ -93,6 +93,62 @@ pub(super) fn load(
     Ok(check)
 }
 
+/// Observe all independent completion gates, without short-circuiting on publication.
+pub(super) fn completion_bypasses(
+    connection: &Connection,
+    task: u64,
+    gates: &mut Vec<forge_app::completion::BypassedGate>,
+) -> Result<(), RegistrationError> {
+    if super::stacks::load(connection, task)?.is_some() {
+        let work = super::outcomes::state(connection, task)?;
+        let result = work
+            .output
+            .as_ref()
+            .ok_or_else(|| RegistrationError::new("stack-blocked", "repository output missing"))
+            .and_then(|e| super::stacks::publication_gate(connection, task, e, work.generation));
+        if let Err(e) = result {
+            if e.code != "stack-blocked" {
+                return Err(e);
+            }
+            gates.push(forge_app::completion::BypassedGate {
+                code: e.code.into(),
+                message: e.message,
+            });
+        }
+    }
+    let mut statement = connection
+        .prepare("SELECT id FROM record_checks WHERE record_id = ?1 ORDER BY id")
+        .map_err(storage_error)?;
+    let ids = statement
+        .query_map([task.cast_signed()], |r| r.get::<_, i64>(0))
+        .map_err(storage_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(storage_error)?;
+    let mut blocked = Vec::new();
+    for id in &ids {
+        if load(connection, task, id.cast_unsigned())?.verdict() != Some(Verdict::Pass) {
+            blocked.push(*id);
+        }
+    }
+    if ids.is_empty() || !blocked.is_empty() {
+        gates.push(forge_app::completion::BypassedGate {
+            code: "checks-not-passed".into(),
+            message: format!(
+                "pending or failed Check IDs: {blocked:?}; provisioned Check count: {}",
+                ids.len()
+            ),
+        });
+    }
+    let findings = super::findings::blockers(connection, task)?;
+    if !findings.is_empty() {
+        gates.push(forge_app::completion::BypassedGate {
+            code: "completion-blocked".into(),
+            message: format!("unresolved blocking Finding IDs: {findings:?}"),
+        });
+    }
+    Ok(())
+}
+
 pub(super) fn gate(connection: &Connection, task: u64) -> Result<(), RegistrationError> {
     if super::stacks::load(connection, task)?.is_some() {
         let work = super::outcomes::state(connection, task)?;

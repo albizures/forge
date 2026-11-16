@@ -1447,10 +1447,24 @@ pub async fn request_done_record(
     id: u64,
     completion_resolution: Option<String>,
 ) -> Result<RecordResponse, String> {
+    request_record_completion(url, id, completion_resolution, false).await
+}
+
+/// Operator-only explicit completion override; never used by Assignment transport.
+///
+/// # Errors
+/// Returns endpoint, validation, or mandatory execution safety errors.
+pub async fn request_record_completion(
+    url: impl Into<RecordEndpoint>,
+    id: u64,
+    completion_resolution: Option<String>,
+    force: bool,
+) -> Result<RecordResponse, String> {
     record_client(url)?
         .done(DoneRecordRequest {
             id,
             completion_resolution,
+            force,
         })
         .await
         .map_err(record_error("done"))
@@ -1555,6 +1569,23 @@ pub async fn request_record_updates(
 fn record_error(operation: &'static str) -> impl FnOnce(jsonrpsee::core::client::Error) -> String {
     move |error| format!("could not {operation} Record through Forge daemon: {error}")
 }
+fn render_completion(record: &RecordResponse, text: &mut String) {
+    use std::fmt::Write as _;
+    if record.already_done {
+        text.push_str("\nAlready Done; completion evidence unchanged.");
+    }
+    if let Some(evidence) = &record.forced_completion {
+        let _ = write!(
+            text,
+            "\nForced completion by {} (update {}): {}",
+            evidence.actor, evidence.update_id, evidence.resolution
+        );
+        for gate in &evidence.bypassed_gates {
+            let _ = write!(text, "\nBypassed {}: {}", gate.code, gate.message);
+        }
+    }
+}
+
 #[must_use]
 pub fn render_record(record: &RecordResponse) -> String {
     use std::fmt::Write as _;
@@ -1566,6 +1597,7 @@ pub fn render_record(record: &RecordResponse) -> String {
         record.execution_mode.as_str(),
         record.body
     );
+    render_completion(record, &mut text);
     for relationship in &record.relationships {
         let _ = write!(
             text,
@@ -1898,6 +1930,8 @@ mod tests {
     fn record_list_renders_records_in_response_order() {
         let records = ListRecordsResponse {
             records: vec![RecordResponse {
+                already_done: false,
+                forced_completion: None,
                 activity: None,
                 execution_mode: forge_rpc::ExecutionMode::Manual,
                 checks: None,
@@ -1948,6 +1982,8 @@ mod tests {
     fn record_output_identifies_the_new_record() {
         assert_eq!(
             render_record_opened(&RecordResponse {
+                already_done: false,
+                forced_completion: None,
                 activity: None,
                 execution_mode: forge_rpc::ExecutionMode::Manual,
                 checks: None,
