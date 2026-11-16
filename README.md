@@ -9,7 +9,11 @@ SQLite; the `forge` CLI operates on that shared state.
 - **Dispatch agents:** run Pi through Herdr with durable assignments and explicit
   recovery controls.
 
-The browser interface currently provides read-only daemon status.
+The daemon serves a read-only [Records dashboard](docs/development.md#browser-and-rpc)
+at `/records`, with Workspace selection, type/status filters, date sorting,
+pagination, safe Markdown details, and explicit Refresh. Browsing state stays in
+the URL; there are no browser mutations or live updates. Daemon status remains
+at `/` (with its `/status` fragment).
 
 ## Quickstart
 

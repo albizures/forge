@@ -7,7 +7,10 @@
   <style>
     body { font: 1rem/1.5 system-ui, sans-serif; margin: 1rem auto; padding: 0 1rem; max-width: 65rem; overflow-wrap: anywhere; }
     dt { font-weight: bold; } dd { margin: 0 0 .5rem; }
+    nav { display: flex; flex-wrap: wrap; gap: 1rem; }
     pre { overflow-x: auto; } img { max-width: 100%; }
+    .body { min-width: 0; }
+    .body table { display: block; max-width: 100%; overflow-x: auto; }
     .resolution { white-space: pre-wrap; }
     :focus-visible { outline: 3px solid #1769aa; outline-offset: 3px; }
   </style>
@@ -25,7 +28,7 @@
       <dt>Created (UTC)</dt><dd>{{ created }}</dd>
       <dt>Last updated (UTC)</dt><dd>{{ updated }}</dd>
     </dl>
-    <section aria-label="Record Body">{{ body|safe }}</section>
+    <section class="body" aria-label="Record Body">{{ body|safe }}</section>
     {% if let Some(text) = resolution %}
     <section aria-label="Completion Resolution"><h2>Completion Resolution</h2><p class="resolution">{{ text }}</p></section>
     {% endif %}

@@ -42,7 +42,18 @@ fn load(application: &Application, id: u64, query: &DashboardQuery) -> Response 
                 resolution: resolution.as_deref(),
                 back: &query.url(query.page),
             })
-            .into_response()
+            .map_or_else(
+                |_| {
+                    super::error::page(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Record unavailable",
+                        "Unable to render this Record. Try again.",
+                        &url(id, query),
+                        &query.url(query.page),
+                    )
+                },
+                IntoResponse::into_response,
+            )
         }
         Err(error) => {
             warn!(?error, "failed to load Record detail");
@@ -62,15 +73,13 @@ fn load(application: &Application, id: u64, query: &DashboardQuery) -> Response 
                     "Unable to load this Record. Try again.",
                 )
             };
-            (
+            super::error::page(
                 status,
-                render(&DetailErrorTemplate {
-                    heading,
-                    message,
-                    back: &query.url(query.page),
-                }),
+                heading,
+                message,
+                &url(id, query),
+                &query.url(query.page),
             )
-                .into_response()
         }
     }
 }
@@ -149,17 +158,6 @@ struct DetailTemplate<'a> {
     updated: &'a str,
     body: &'a str,
     resolution: Option<&'a str>,
-    back: &'a str,
-}
-
-#[derive(Template)]
-#[template(
-    source = "<!doctype html><html lang=\"en\"><title>{{ heading }}</title><main><h1>{{ heading }}</h1><p>{{ message }}</p><a href=\"{{ back }}\">Return to Records</a></main></html>",
-    ext = "html"
-)]
-struct DetailErrorTemplate<'a> {
-    heading: &'a str,
-    message: &'a str,
     back: &'a str,
 }
 

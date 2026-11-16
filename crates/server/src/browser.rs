@@ -14,6 +14,7 @@ use forge_app::{
     record_browsing::{DatedRecord, RecordSort},
 };
 mod detail;
+mod error;
 mod query;
 use query::{Choice, DashboardQuery, SORTS, STATUSES, TYPES};
 use tracing::warn;
@@ -73,23 +74,52 @@ pub(super) fn router(application: Arc<Application>) -> Router {
 }
 
 fn invalid_query(message: &str) -> Response {
-    (StatusCode::BAD_REQUEST, format!("Invalid Records query: {message}. Return to /records and apply selections to start at page one.")).into_response()
+    error::page(
+        StatusCode::BAD_REQUEST,
+        "Invalid Records query",
+        message,
+        "/records",
+        "/records",
+    )
 }
 
 fn dashboard(application: &Application, query: &DashboardQuery) -> Response {
-    match dashboard_page(application, query) {
+    dashboard_response(dashboard_page(application, query), query)
+}
+
+fn dashboard_response(
+    result: Result<Html<String>, RegistrationError>,
+    query: &DashboardQuery,
+) -> Response {
+    match result {
         Ok(page) => page.into_response(),
         Err(error) => {
             warn!(?error, "failed to load Records dashboard");
             if error.code == "invalid-page" {
-                return invalid_query(&error.message);
+                return error::page(
+                    StatusCode::BAD_REQUEST,
+                    "Invalid Records query",
+                    &error.message,
+                    &query.url(query.page),
+                    &query.url(1),
+                );
             }
             let status = if error.code == "workspace-not-found" {
                 StatusCode::NOT_FOUND
             } else {
                 StatusCode::INTERNAL_SERVER_ERROR
             };
-            (status, Html("<!doctype html><html lang=\"en\"><title>Records unavailable</title><main><h1>Records unavailable</h1><p>Unable to load the selected Workspace. Check the selection or try again.</p><a href=\"/records\">Choose a Workspace</a> <a href=\"/\">Daemon status</a></main></html>".to_owned())).into_response()
+            error::page(
+                status,
+                "Records unavailable",
+                if status == StatusCode::NOT_FOUND {
+                    "The selected Workspace is not registered. Choose a Workspace."
+                } else {
+                    "Unable to load Records. Try again; this is not an empty result."
+                },
+                &query.url(query.page),
+                &query.url(1),
+            )
         }
     }
 }
@@ -288,6 +318,8 @@ struct DashboardTemplate<'a> {
     date_label: &'a str,
 }
 
+#[cfg(test)]
+mod accessibility_tests;
 #[cfg(test)]
 mod browsing_tests;
 #[cfg(test)]
