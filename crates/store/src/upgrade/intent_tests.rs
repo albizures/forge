@@ -130,6 +130,88 @@ fn mixed_twelve_topology_retains_canonical_links_and_absorbs_legacy_links() {
 }
 
 #[test]
+fn incomplete_open_chains_survive_conversion_and_same_schema_snapshot_transfer() {
+    for schema in [12, 13] {
+        for missing in ["record_id=1", "record_id=2", "1=1"] {
+            let mut c = fixture(12);
+            migrate_decisions(
+                &mut c,
+                &[WaitsForDecision {
+                    from_id: 4,
+                    to_id: 1,
+                }],
+            )
+            .unwrap();
+            c.execute(&format!("DELETE FROM task_stacks WHERE {missing}"), [])
+                .unwrap();
+            c.pragma_update(None, "user_version", schema).unwrap();
+            let dir = std::env::temp_dir().join(format!(
+                "forge-incomplete-upgrade-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            fs::create_dir(&dir).unwrap();
+            let source = dir.join("source.sqlite");
+            let target = dir.join("target.sqlite");
+            c.backup(rusqlite::MAIN_DB, &source, None).unwrap();
+            let bytes = fs::read(&source).unwrap();
+            let before = inspect(&source).unwrap();
+            assert!(before.blockers.is_empty());
+            assert_eq!(snapshot(&source, &target).unwrap(), before);
+            let after = migrate(&target).unwrap();
+            assert_eq!(after.schema, Some(13));
+            assert_eq!(after.tables, before.tables);
+            assert_eq!(migrate(&target).unwrap(), after);
+            assert_eq!(fs::read(&source).unwrap(), bytes);
+            let upgraded = Connection::open(&target).unwrap();
+            assert_eq!(kind(&upgraded, 2, 1), Some(PrerequisiteKind::BuildsOn));
+            // Upgrade permits planning, not execution or evidence invention.
+            assert!(stacks::load(&upgraded, 3).is_err());
+            drop(upgraded);
+            fs::remove_dir_all(dir).unwrap();
+        }
+    }
+}
+
+#[test]
+fn incomplete_lineage_cannot_hide_preparation_results_or_invalid_configuration() {
+    for schema in [12, 13] {
+        for invalid in [
+            "UPDATE task_stacks SET base_commit='pinned' WHERE record_id=3",
+            "UPDATE task_stacks SET publication_json='{}' WHERE record_id=3",
+            "UPDATE task_stacks SET source_json='invalid' WHERE record_id=3",
+            "UPDATE records SET status='in_progress' WHERE id=3",
+            "INSERT INTO task_unchanged_results VALUES(3,'{}')",
+            "INSERT INTO record_work(record_id,output_json) VALUES(3,'{}')",
+        ] {
+            let mut c = fixture(12);
+            migrate_decisions(
+                &mut c,
+                &[WaitsForDecision {
+                    from_id: 4,
+                    to_id: 1,
+                }],
+            )
+            .unwrap();
+            c.execute_batch("DELETE FROM task_stacks WHERE record_id=1")
+                .unwrap();
+            c.execute_batch(invalid).unwrap();
+            c.pragma_update(None, "user_version", schema).unwrap();
+            let before = inventory(&c).unwrap();
+            assert!(inspection(&c).is_err(), "schema {schema}: {invalid}");
+            assert!(
+                migrate_connection(&mut c).is_err(),
+                "schema {schema}: {invalid}"
+            );
+            assert_eq!(inventory(&c).unwrap(), before);
+        }
+    }
+}
+
+#[test]
 fn semantic_stamp_failure_rolls_back_all_converted_rows_and_retry_is_exact() {
     let mut c = fixture(11);
     let before = inspection(&c).unwrap();

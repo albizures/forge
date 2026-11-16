@@ -74,6 +74,16 @@ The three transformed tables (`task_stacks`, `ordering_only_dependencies`,
 decoded Stack equivalence. Every other pre-existing table has an exact preservation
 inventory. No preparation or fabricated execution evidence is permitted.
 
+Incomplete Open Builds-On plans remain valid during both schema conversion and
+same-schema transfer. Missing root or successor execution configuration is not
+unresolved relationship intent. Inspection validates their topology and any
+stored source configuration without requiring execution completeness. This
+exception is limited to Open lineage without prepared commit pins or result
+evidence; started work, retained publication/unchanged results, and prepared
+chains still require complete configuration and the ordinary evidence checks.
+Upgrade never fills missing configuration, and execution authorization remains
+responsible for rejecting an incomplete plan.
+
 The inventory hashes each typed stored value, independently of row order and page
 layout, and includes row counts and schema definitions. It is not a substitute for
 migration-specific domain tests. Schema 13 intentionally normalizes legacy

@@ -17,8 +17,11 @@ use forge_app::{
 use rusqlite::{Connection, OpenFlags, TransactionBehavior, types::ValueRef};
 use sha2::{Digest, Sha256};
 
-use super::{stacks, storage_error};
+#[cfg(test)]
+use super::stacks;
+use super::storage_error;
 
+mod incomplete_plans;
 mod prerequisite_intent;
 mod v007_to_v008;
 
@@ -226,7 +229,7 @@ fn inspection(c: &Connection) -> Result<StoreInspection, RegistrationError> {
         let id = id.map_err(storage_error)?.cast_unsigned();
         super::load_record(c, id)?;
         if schema >= 8 {
-            stacks::load(c, id)?;
+            incomplete_plans::load(c, id)?;
         }
     }
     validate_workspace_ownership(c)?;

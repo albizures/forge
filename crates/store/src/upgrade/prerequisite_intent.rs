@@ -68,11 +68,7 @@ pub(super) fn validate(c: &Connection) -> Result<(), RegistrationError> {
         ));
     }
     for &(from, to) in &builds {
-        stacks::load(c, from)?.ok_or_else(|| {
-            error(format!(
-                "Builds-On Record {from} lacks retained execution configuration"
-            ))
-        })?;
+        super::incomplete_plans::load(c, from)?;
         forge_app::stacks::validate_stack_predecessor(&load_record(c, from)?, &load_record(c, to)?)
             .map_err(|e| error(format!("Records {from} -> {to}: {}", e.message)))?;
     }
@@ -85,7 +81,10 @@ pub(super) fn validate(c: &Connection) -> Result<(), RegistrationError> {
         .map_err(storage_error)?;
     for id in ids {
         let id = id.cast_unsigned();
-        let stack = stacks::load(c, id)?.ok_or_else(|| error("missing retained Stack"))?;
+        let Some(stack) = super::incomplete_plans::load(c, id)? else {
+            // Structurally valid Open lineage with no execution evidence.
+            continue;
+        };
         let record = load_record(c, id)?;
         stack.destination.validate()?;
         if let Some(publication) = &stack.publication
@@ -141,7 +140,7 @@ fn plan(
             .collect();
     let before = legacy
         .iter()
-        .map(|&(id, _)| Ok((id, stacks::load(c, id)?)))
+        .map(|&(id, _)| Ok((id, super::incomplete_plans::load(c, id)?)))
         .collect::<Result<Vec<_>, RegistrationError>>()?;
     for &(from, to) in &legacy {
         if let Some((&other, _)) = topology
@@ -259,7 +258,7 @@ pub(super) fn apply(
         .map_err(storage_error)?;
     }
     for (id, old) in before {
-        if stacks::load(c, id)? != old {
+        if super::incomplete_plans::load(c, id)? != old {
             return Err(error(format!(
                 "conversion changed retained Stack evidence for Record {id}"
             )));

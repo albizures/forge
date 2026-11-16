@@ -109,6 +109,12 @@ Comments, immutable Checks, attempts, work results, forced completions, ownershi
 retry counters and Dispatch Holds. Failure rolls back the entire staging chain;
 Forgeup never publishes or activates an unvalidated copy. External hosting is not
 queried offline: normal authorization still re-observes it before execution.
+Incomplete Open Builds-On lineage without preparation or result evidence may
+retain missing root/successor configuration through conversion and same-schema
+transfer. Offline inspection validates topology and stored source configuration,
+not execution completeness for such plans. It never supplies missing execution
+configuration or relaxes ordinary execution authorization; started or evidenced
+lineage still requires complete configuration and retained-evidence validation.
 
 ## Forced completion evidence (revision 11)
 

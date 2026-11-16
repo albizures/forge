@@ -89,6 +89,18 @@ class StateUpgradeTests(unittest.TestCase):
                                 (101,100,100,101,'parent-child'),(102,100,100,102,'parent-child');
                                 INSERT INTO record_relationships(from_id,to_id,kind) VALUES(101,102,'depends-on');
                             """)
+                        if schema in (12, 13):
+                            # Valid incomplete Open planning state: canonical lineage
+                            # exists before either Task has execution configuration.
+                            connection.execute("INSERT INTO projects VALUES('planned',?,'git@example:planned','personal','planned')", (str(self.workspace / 'planned'),))
+                            connection.executescript("""
+                                INSERT INTO records(id,record_type,body,status,workspace_id) VALUES
+                                (201,'task','Planned successor','open','personal'),
+                                (202,'task','Unconfigured root','open','personal');
+                                INSERT INTO record_projects VALUES(201,'planned'),(202,'planned');
+                                INSERT INTO record_relationships(from_id,to_id,kind) VALUES(201,202,'depends-on');
+                                INSERT INTO builds_on_dependencies(from_id,to_id) VALUES(201,202);
+                            """)
                     # A stopped dispatcher can retain an unexpired scan lease.
                     # Synchronize to its recorded expiry rather than resetting evidence.
                     with sqlite3.connect(source) as connection:
@@ -118,6 +130,9 @@ class StateUpgradeTests(unittest.TestCase):
                     with sqlite3.connect(destination) as connection:
                         self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 13)
                         self.assertEqual(connection.execute("SELECT COUNT(*) FROM forced_completions").fetchone()[0], 0)
+                        if schema in (12, 13):
+                            self.assertEqual(connection.execute("SELECT from_id,to_id FROM builds_on_dependencies").fetchall(), [(201, 202)])
+                            self.assertEqual(connection.execute("SELECT COUNT(*) FROM task_stacks").fetchone()[0], 0)
                     self.assertEqual(source.read_bytes(), source_bytes)
                     self.command("forgeup", "use", "new", success=False)
                     self.command("forgeup", "upgrade", "activate", "--to", "new", "--confirm-agents-stopped")
