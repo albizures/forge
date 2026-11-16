@@ -68,6 +68,74 @@ async fn production_assignment_routes_authenticate_and_reject_spoofed_fields() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+// Exercise the production deserialization boundary for both capability kinds, including
+// replay after retirement; neither a top-level nor nested override may reach policy.
+#[tokio::test]
+async fn assignment_force_inputs_and_closed_replays_are_rejected_without_mutation() {
+    for kind in [RecordType::Task, RecordType::Grilling] {
+        let (fixture, task_assignment, _) = assignment_test_daemon();
+        let store = SqliteProjectRepository::open(&fixture.database_path).unwrap();
+        let assignment = if kind == RecordType::Task {
+            task_assignment
+        } else {
+            let grilling = store.open_typed_record(&NewTypedRecord {
+                record_type: kind, body: "Decision".into(),
+                project_slugs: vec!["alpha".into()], generated_by_ids: vec![],
+            }).unwrap();
+            store.create_agent_assignment(&NewAgentAssignment {
+                id: "force-grill".into(), record_id: grilling.id,
+                project_slug: "alpha".into(), profile_revision: 1,
+            }).unwrap();
+            "force-grill".into()
+        };
+        let root = fixture.database_path.with_extension("force-secrets");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join(&assignment), "fixture-secret").unwrap();
+        let mut daemon = fixture.daemon();
+        daemon.capability_secret_root = Some(root.clone());
+        let owner = store.agent_assignment(&assignment).unwrap().record_id;
+        let done = serde_json::json!({"assignmentId":assignment, "secret":"fixture-secret",
+            "resolution":"Obsolete", "human":{"confirmed":true,
+                "confirmation":"Explicit yes", "agreed_outcome":"Close decision"}});
+        let outcome = serde_json::json!({"assignmentId":assignment, "secret":"fixture-secret",
+            "outcome":{"attempt_id":assignment, "generation":1,
+                "evidence":{"kind":"artifact", "uri":"urn:fixture:output", "sha256":"a".repeat(64)},
+                "verdict":"pass", "actor":"worker", "message":"Complete"}});
+        for closed in [false, true] {
+            if closed {
+                store.close_agent_assignment(&assignment, forge_app::AgentAssignmentClosureReason::Retired).unwrap();
+            }
+            let record = store.show_record(owner).unwrap();
+            let updates = store.list_record_updates(owner).unwrap();
+            let assignments = store.list_agent_assignments(owner).unwrap();
+            let checks = if kind == RecordType::Task {
+                store.list_record_checks(owner).unwrap()
+            } else { vec![] };
+            for field in ["force", "forced", "forceCompletion", "forced_completion", "override"] {
+                let mut forced_done = done.clone();
+                forced_done[field] = true.into();
+                let mut forced_outcome = outcome.clone();
+                forced_outcome[field] = true.into();
+                let mut nested = outcome.clone();
+                nested["outcome"][field] = true.into();
+                for (method, input) in [("assignment.done", forced_done),
+                    ("assignment.outcomeSubmit", forced_outcome), ("assignment.outcomeSubmit", nested)] {
+                    let response = assignment_rpc(daemon.clone(), method, input).await;
+                    assert_eq!(response["error"]["code"], -32602, "{kind:?}, closed={closed}: {response}");
+                }
+            }
+            assert_eq!(store.show_record(owner).unwrap(), record);
+            assert_eq!(store.list_record_updates(owner).unwrap(), updates);
+            assert_eq!(store.list_agent_assignments(owner).unwrap(), assignments);
+            assert!(store.forced_completion(owner).unwrap().is_none());
+            if kind == RecordType::Task {
+                assert_eq!(store.list_record_checks(owner).unwrap(), checks);
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
 fn verify_assignment_graph(
     session: &forge_app::assignment::AuthenticatedAssignment<'_>,
     readable: Vec<u64>,
