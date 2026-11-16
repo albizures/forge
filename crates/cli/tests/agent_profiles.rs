@@ -185,6 +185,8 @@ async fn preview_registration_and_explicit_selections_are_isolated_immutable_and
         "thinkingLevel: !low\n",
         "thinkingLevel: !low low\n",
         "thinkingLevel: !custom low\n",
+        "thinkingLevel: !!str low\n",
+        "thinkingLevel: !<tag:yaml.org,2002:str> low\n",
         "thinkingLevel: 3\n",
         "thinkingLevel: []\n",
         "thinkingLevel: {}\n",
@@ -192,26 +194,28 @@ async fn preview_registration_and_explicit_selections_are_isolated_immutable_and
         "thinkingLevel: unsupported\n",
     ] {
         std::fs::write(&source, document.replace("thinkingLevel: low\n", field)).unwrap();
-        for operation in ["preview", "register"] {
-            let output = cli(
-                "one",
-                &[
-                    "agent-profile",
-                    operation,
-                    ".agents/profiles/example.md",
-                    "--record-type",
-                    "task",
-                ],
-                true,
-            );
-            assert!(!output.status.success(), "{operation}: {field}");
-            let error = String::from_utf8(output.stderr).unwrap();
-            assert!(error.contains("thinkingLevel"), "{error}");
-            assert!(
-                error.contains("off, minimal, low, medium, high, xhigh"),
-                "{error}"
-            );
-            assert!(!error.contains("BEHAVIOR_SENTINEL"));
+        for kind in ["task", "grilling"] {
+            for operation in ["preview", "register"] {
+                let output = cli(
+                    "one",
+                    &[
+                        "agent-profile",
+                        operation,
+                        ".agents/profiles/example.md",
+                        "--record-type",
+                        kind,
+                    ],
+                    true,
+                );
+                assert!(!output.status.success(), "{kind} {operation}: {field}");
+                let error = String::from_utf8(output.stderr).unwrap();
+                assert!(error.contains("thinkingLevel"), "{error}");
+                assert!(
+                    error.contains("off, minimal, low, medium, high, xhigh"),
+                    "{error}"
+                );
+                assert!(!error.contains("BEHAVIOR_SENTINEL"));
+            }
         }
     }
     std::fs::write(&source, &document).unwrap();

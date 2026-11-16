@@ -84,6 +84,72 @@ pub enum ResourceReference {
     Path { path: String },
 }
 
+const THINKING_LEVEL_ERROR: &str =
+    "thinkingLevel is required and must be one of: off, minimal, low, medium, high, xhigh";
+
+// serde_yaml erases standard tags such as `!!str` before exposing a Value.
+// Inspect syntax first, including aliased scalars, without rejecting comments,
+// quoted tag-like text, or tags on unrelated fields. Typed validation stays below.
+fn reject_tagged_thinking_level(yaml: &str) -> Result<(), String> {
+    use yaml_rust2::parser::{Event, Parser};
+
+    let mut parser = Parser::new_from_str(yaml);
+    let mut depth = 0_usize;
+    let mut pending_key = None;
+    let mut anchors = std::collections::HashMap::new();
+    loop {
+        let (event, _) = parser
+            .next_token()
+            .map_err(|_| "invalid Agent Profile frontmatter".to_string())?;
+        let scalar = match &event {
+            Event::Scalar(value, _, anchor, tag) => {
+                let scalar = (value.clone(), tag.is_some());
+                if *anchor != 0 {
+                    anchors.insert(*anchor, scalar.clone());
+                }
+                Some(scalar)
+            }
+            Event::Alias(anchor) => anchors.get(anchor).cloned(),
+            _ => None,
+        };
+        if depth == 1 {
+            match &event {
+                Event::Scalar(..)
+                | Event::Alias(..)
+                | Event::MappingStart(..)
+                | Event::SequenceStart(..) => {
+                    if let Some(thinking) = pending_key.take() {
+                        let tagged = match &event {
+                            Event::MappingStart(_, tag) | Event::SequenceStart(_, tag) => {
+                                tag.is_some()
+                            }
+                            _ => scalar.as_ref().is_some_and(|(_, tagged)| *tagged),
+                        };
+                        if thinking && tagged {
+                            return Err(THINKING_LEVEL_ERROR.into());
+                        }
+                    } else {
+                        let thinking = scalar
+                            .as_ref()
+                            .is_some_and(|(key, _)| key == "thinkingLevel");
+                        if thinking && scalar.as_ref().is_some_and(|(_, tagged)| *tagged) {
+                            return Err(THINKING_LEVEL_ERROR.into());
+                        }
+                        pending_key = Some(thinking);
+                    }
+                }
+                _ => {}
+            }
+        }
+        match event {
+            Event::MappingStart(..) | Event::SequenceStart(..) => depth += 1,
+            Event::MappingEnd | Event::SequenceEnd => depth -= 1,
+            Event::StreamEnd => return Ok(()),
+            _ => {}
+        }
+    }
+}
+
 impl ProfileDocument {
     /// Parse strict v1 YAML frontmatter and retain behavioral Markdown verbatim.
     ///
@@ -106,6 +172,7 @@ impl ProfileDocument {
         if !closed {
             return Err("unterminated YAML frontmatter".into());
         }
+        reject_tagged_thinking_level(&yaml)?;
         // Validate separately so every missing, null or malformed choice has an
         // actionable diagnostic without echoing potentially sensitive YAML values.
         let fields: serde_yaml::Value = serde_yaml::from_str(&yaml)
@@ -116,7 +183,7 @@ impl ProfileDocument {
             !matches!(value, serde_yaml::Value::String(_))
                 || serde_yaml::from_value::<ThinkingLevel>(value.clone()).is_err()
         }) {
-            return Err("thinkingLevel is required and must be one of: off, minimal, low, medium, high, xhigh".into());
+            return Err(THINKING_LEVEL_ERROR.into());
         }
         let mut document: Self = serde_yaml::from_str(&yaml)
             .map_err(|_| "invalid Agent Profile frontmatter".to_string())?;
