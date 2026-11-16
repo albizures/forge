@@ -58,6 +58,60 @@ fn derived_chain_prepares_non_default_root_and_carries_multiple_unchanged_result
 }
 
 #[test]
+fn manual_attempt_reobserves_predecessor_hosting_after_successful_start() {
+    let store = fixture();
+    let hosting = Hosting::default();
+    let app = app(&store, &hosting);
+    let [a, b] = std::array::from_fn(|_| task(&store));
+    store.configure_task_stack(a, &root()).unwrap();
+    store.relate_records(b, a, RecordRelationshipKind::BuildsOn).unwrap();
+    pin(&store, a, &"1".repeat(40));
+    complete(&store, a, &"a".repeat(40));
+    let publication = store.task_stack(a).unwrap().unwrap().publication.unwrap();
+    hosting.branches.lock().unwrap().insert(task_branch(a), "a".repeat(40));
+    hosting.prs.lock().unwrap().insert(publication.url.clone(), observation(&publication));
+    let prepared = app.prepare_task_stack(b).unwrap().unwrap();
+    app.start_record(b).unwrap();
+    let before = store.record_work_state(b).unwrap();
+    let history = store.list_record_updates(b).unwrap();
+    let input = AttemptInput {
+        id: "manual-after-start".into(),
+        check_id: store.list_record_checks(b).unwrap()[0].id,
+        generation: before.generation,
+        evidence: Evidence::Repository {
+            repository: store.project("alpha").unwrap().project_root.display().to_string(),
+            commit: "a".repeat(40),
+        },
+        actor: "operator".into(),
+    };
+    for drift in ["deleted-branch", "moved-branch", "missing-pr", "closed-pr", "draft-pr"] {
+        hosting.branches.lock().unwrap().insert(task_branch(a), "a".repeat(40));
+        hosting.prs.lock().unwrap().insert(publication.url.clone(), observation(&publication));
+        match drift {
+            "deleted-branch" => { hosting.branches.lock().unwrap().remove(&task_branch(a)); }
+            "moved-branch" => { hosting.branches.lock().unwrap().insert(task_branch(a), "b".repeat(40)); }
+            "missing-pr" => { hosting.prs.lock().unwrap().remove(&publication.url); }
+            "closed-pr" => { hosting.prs.lock().unwrap().get_mut(&publication.url).unwrap().open = false; }
+            "draft-pr" => { hosting.prs.lock().unwrap().get_mut(&publication.url).unwrap().draft = true; }
+            _ => unreachable!(),
+        }
+        let error = app.begin_record_attempt(b, &input).expect_err(drift);
+        assert!(matches!(error.code, "stack-blocked" | "hosting-test"), "{drift}: {error:?}");
+        assert!(error.message.contains("Stack Predecessor"), "{drift}: {error:?}");
+        assert_eq!(store.record_work_state(b).unwrap(), before);
+        assert_eq!(store.list_record_updates(b).unwrap(), history);
+        assert_eq!(store.task_stack(b).unwrap(), Some(prepared.clone()));
+        let attempts: i64 = store.connection.lock().unwrap().query_row(
+            "SELECT COUNT(*) FROM record_attempts WHERE record_id=?1",
+            [b.cast_signed()], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(attempts, 0);
+    }
+    hosting.prs.lock().unwrap().insert(publication.url.clone(), observation(&publication));
+    app.begin_record_attempt(b, &input).unwrap();
+}
+
+#[test]
 fn missing_root_blocks_both_endpoints_without_fallback_or_partial_preparation() {
     let store = fixture();
     let hosting = Hosting::default();

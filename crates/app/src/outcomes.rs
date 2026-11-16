@@ -175,6 +175,10 @@ impl Application {
         record: u64,
         input: &AttemptInput,
     ) -> Result<Attempt, RegistrationError> {
+        // Manual start is not continuing authorization for later Check attempts.
+        // Observe hosting outside the writer transaction; persistence rechecks
+        // the retained plan, pins and result generations when admitting the attempt.
+        self.verify_stack_execution(record)?;
         self.records.begin_record_attempt(record, input)
     }
     /// Atomically accept an outcome or return its original durable result on exact replay.
