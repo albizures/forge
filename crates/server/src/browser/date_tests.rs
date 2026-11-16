@@ -73,6 +73,29 @@ async fn date_labels_unknowns_default_order_and_fresh_navigation() {
     );
 }
 
+// Relationship mutations update both endpoints with independently sampled
+// clocks. Derive their relative order from durable Updates, not an assumed
+// same-millisecond tie. Comments update only the target.
+fn mutation_update_times(scoped: &Application, ids: [u64; 3], operation: &str) -> [(u64, u64); 3] {
+    let [_, target, third] = ids;
+    ids.map(|id| {
+        let latest = scoped
+            .list_record_updates(id)
+            .unwrap()
+            .iter()
+            .map(|update| update.created_at_millis)
+            .max()
+            .unwrap();
+        let changed = id == target || (id == third && operation.ends_with("relationship"));
+        if changed {
+            assert!(latest > 1000, "{operation}: Record {id} must move");
+        } else {
+            assert_eq!(latest, 1000, "{operation}: Record {id} unchanged");
+        }
+        (id, latest)
+    })
+}
+
 #[test]
 fn each_comment_and_relationship_change_can_move_updated_order() {
     for operation in [
@@ -134,14 +157,31 @@ fn each_comment_and_relationship_change_can_move_updated_order() {
             }
             _ => unreachable!(),
         }
-        let recent = app
-            .browse_records("a", &filters, RecordSort::RecentlyUpdated, 1)
-            .unwrap();
-        assert_eq!(recent.records[0].record.id, target.id, "{operation}");
-        let least = app
-            .browse_records("a", &filters, RecordSort::LeastRecentlyUpdated, 1)
-            .unwrap();
-        assert_eq!(least.records[0].record.id, first.id, "{operation}");
+        let mut expected =
+            mutation_update_times(&scoped, [first.id, target.id, third.id], operation);
+        for sort in [
+            RecordSort::RecentlyUpdated,
+            RecordSort::LeastRecentlyUpdated,
+        ] {
+            expected.sort_by(|&(left_id, left_time), &(right_id, right_time)| {
+                let dates = if sort == RecordSort::RecentlyUpdated {
+                    right_time.cmp(&left_time)
+                } else {
+                    left_time.cmp(&right_time)
+                };
+                dates.then(left_id.cmp(&right_id))
+            });
+            let result = app.browse_records("a", &filters, sort, 1).unwrap();
+            assert_eq!(
+                result
+                    .records
+                    .iter()
+                    .map(|r| r.record.id)
+                    .collect::<Vec<_>>(),
+                expected.map(|(id, _)| id),
+                "{operation}: {sort:?}"
+            );
+        }
         let created_after = app
             .browse_records("a", &filters, RecordSort::NewestCreated, 1)
             .unwrap()

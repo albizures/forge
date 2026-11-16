@@ -95,6 +95,25 @@ and a Clippy needless-pass-by-value warning, all corrected before these final
 passes. No ignored test was newly introduced. These are local checks, not
 publication, release, installation or migration verification.
 
+### Review correction: Relationship operation clocks (Finding #2)
+
+The review observed a parallel browser-test failure: Relationship endpoints can
+receive different millisecond timestamps, so the target need not sort first.
+`date_tests.rs` now derives exact expected updated orders independently from
+public Update Logs, using timestamp direction and ascending identifier ties for
+both updated sorts. It asserts that both Relationship endpoints (only the target
+for Comments) receive newer Updates, unchanged Records retain their timestamps,
+and opening dates/creation ordering remain unchanged. No production behavior or
+operation clocks were changed; controlled fixture ties remain covered separately.
+
+Correction verification: `cargo fmt --check`,
+`cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`
+(460 passed, 0 failed, 1 ignored; default parallel execution), three consecutive
+`cargo test -p forge-server browser` runs (9 passed each), and `git diff --check`
+passed. Intermediate Clippy runs flagged test function length; extracting the
+Update Log assertion helper and sharing the two order assertions corrected that
+before the final gates. No interactive browser session was run.
+
 ## Historical initial-slice evidence (Task #10)
 
 ## Behavior and boundaries
