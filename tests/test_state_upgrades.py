@@ -30,7 +30,7 @@ class StateUpgradeTests(unittest.TestCase):
         return result
 
     def test_preserves_real_records_across_schema_and_same_schema_upgrades(self):
-        for schema in (7, 8):
+        for schema in (7, 8, 9, 10, 11):
             with self.subTest(schema=schema), tempfile.TemporaryDirectory(prefix="forge-upgrade-e2e-") as temporary:
                 self.workspace = Path(temporary).resolve()
                 home = self.workspace / "forgeup"
@@ -53,16 +53,28 @@ class StateUpgradeTests(unittest.TestCase):
                     record = json.loads(self.command("forge", "record", "open", "--workspace", "personal", "--no-projects", "--body", "Preserve my record", "--json").stdout)
                     identity = str(record["id"])
                     self.command("forge", "record", "comment", identity, "--workspace", "personal", "--message", "Preserve my comment")
+                    self.command("forge", "record", "start", identity, "--workspace", "personal")
+                    self.command("forge", "record", "done", identity, "--workspace", "personal", "--resolution", "Ordinary historical closure")
                     before = self.command("forge", "record", "show", identity, "--workspace", "personal", "--json").stdout
+                    self.assertNotIn("forced_completion", json.loads(before))
                     history = self.command("forge", "record", "updates", identity, "--workspace", "personal", "--json").stdout
                     comments = self.command("forge", "record", "comments", identity, "--workspace", "personal", "--json").stdout
                     # Running managed daemons must block execution even if the DB is otherwise eligible.
                     self.command("forgeup", "upgrade", "prepare", "--from", "old", "--to", "new", "--confirm-agents-stopped", success=False)
                     self.command("forgeup", "daemon", "stop")
                     source = home / "data/state" / selectors["old"] / "forge.db"
-                    if schema == 7:
-                        with sqlite3.connect(source) as connection:
-                            connection.executescript("DROP TABLE task_stacks; PRAGMA user_version=7;")
+                    # Construct historical fixtures only in this private test store.
+                    # Remove each additive table so the marker matches its full contract.
+                    with sqlite3.connect(source) as connection:
+                        for introduced, table in (
+                            (11, "forced_completions"),
+                            (10, "task_unchanged_results"),
+                            (9, "ordering_only_dependencies"),
+                            (8, "task_stacks"),
+                        ):
+                            if schema < introduced:
+                                connection.execute(f"DROP TABLE {table}")
+                        connection.execute(f"PRAGMA user_version={schema}")
                     # A stopped dispatcher can retain an unexpired scan lease.
                     # Synchronize to its recorded expiry rather than resetting evidence.
                     with sqlite3.connect(source) as connection:
@@ -71,8 +83,12 @@ class StateUpgradeTests(unittest.TestCase):
                     source_bytes = source.read_bytes()
                     plan = json.loads(self.command("forgeup", "upgrade", "plan", "--from", "old", "--to", "new").stdout)
                     self.assertEqual(plan["blockers"], [])
-                    self.assertEqual(plan["migrations"], [[7, 8]] if schema == 7 else [])
+                    self.assertEqual(plan["migrations"], [[version, version + 1] for version in range(schema, 11)])
                     self.command("forgeup", "upgrade", "prepare", "--from", "old", "--to", "new", "--confirm-agents-stopped")
+                    destination = home / "data/state" / selectors["new"] / "forge.db"
+                    with sqlite3.connect(destination) as connection:
+                        self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 11)
+                        self.assertEqual(connection.execute("SELECT COUNT(*) FROM forced_completions").fetchone()[0], 0)
                     self.assertEqual(source.read_bytes(), source_bytes)
                     self.command("forgeup", "use", "new", success=False)
                     self.command("forgeup", "upgrade", "activate", "--to", "new", "--confirm-agents-stopped")

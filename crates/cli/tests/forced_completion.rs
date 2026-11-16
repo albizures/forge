@@ -14,6 +14,10 @@ async fn operator_force_is_noninteractive_inspectable_and_idempotent_for_every_t
     let database = root.path().join("forge.sqlite");
     let store = SqliteProjectRepository::open(&database).unwrap();
     store.create_workspace("test", "Test", root.path()).unwrap();
+    let other_root = tempfile::tempdir().unwrap();
+    store
+        .create_workspace("other", "Other", other_root.path())
+        .unwrap();
     let store = store.in_record_workspace("test").unwrap();
     store
         .register(&Project {
@@ -112,23 +116,30 @@ async fn operator_force_is_noninteractive_inspectable_and_idempotent_for_every_t
                 None
             };
             let id = record.id.to_string();
+            let before_record = store.show_record(record.id).unwrap();
             let before = store.list_record_updates(record.id).unwrap();
-            assert!(
-                !run(&[
-                    "--workspace",
-                    "missing",
-                    "record",
-                    "done",
-                    &id,
-                    "--force",
-                    "--resolution",
-                    "Wrong scope",
-                    "--json"
-                ])
-                .status
-                .success()
-            );
-            assert_eq!(store.list_record_updates(record.id).unwrap(), before);
+            // An existing foreign Workspace must not grant access by global Record ID,
+            // even when retrying a completion. A missing Workspace also stays rejected.
+            for workspace in ["missing", "other"] {
+                assert!(
+                    !run(&[
+                        "--workspace",
+                        workspace,
+                        "record",
+                        "done",
+                        &id,
+                        "--force",
+                        "--resolution",
+                        "Wrong scope",
+                        "--json"
+                    ])
+                    .status
+                    .success()
+                );
+                assert_eq!(store.show_record(record.id).unwrap(), before_record);
+                assert_eq!(store.list_record_updates(record.id).unwrap(), before);
+                assert!(store.forced_completion(record.id).unwrap().is_none());
+            }
             for resolution in [None, Some(" \t")] {
                 let mut args = vec!["record", "done", &id, "--force", "--json"];
                 if let Some(resolution) = resolution {
@@ -189,6 +200,19 @@ async fn operator_force_is_noninteractive_inspectable_and_idempotent_for_every_t
                 String::from_utf8(readable.stdout)
                     .unwrap()
                     .contains("Forced completion by operator")
+            );
+            assert!(
+                !run(&[
+                    "--workspace",
+                    "other",
+                    "record",
+                    "done",
+                    &id,
+                    "--force",
+                    "--json"
+                ])
+                .status
+                .success()
             );
             let retry = run(&["record", "done", &id, "--force", "--json"]);
             assert!(retry.status.success());
