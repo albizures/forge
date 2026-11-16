@@ -103,15 +103,32 @@ Selections within a filter are ORed; filters are ANDed; no selections mean all.
 The default order is Recently updated. Least recently updated, Newest created,
 and Oldest created are also available. Equal dates use ascending Record Identifier;
 unknown historical dates sort last in every order and are never backfilled.
-Cards show the relevant UTC date. No Workspace is selected implicitly, and no
+Cards show the relevant UTC date: creation is the opening Record Update;
+last update is the latest Record Update, including Comment additions/deletions and
+Relationship changes. Unknown historical dates are labeled, not guessed. No Workspace is selected implicitly, and no
 cross-Workspace inventory is shown. All Record Types and Projectless work are
 included before filtering. Matching results are counted and paginated at 50 cards.
 Normal GET URLs preserve Workspace, repeated `type`/`status` parameters, `sort`,
 and `page` (omitted values use defaults). Previous/Next and Refresh preserve
 selections; applying the form resets page one. Refresh reads current data without
 polling. Invalid query/page input returns 400; missing Workspaces return 404 and
-read failures return 500, never a successful empty inventory. There are not yet
-Record detail links.
+read/render failures return 500, never a successful empty inventory. No registered
+Workspaces, no selected Workspace, no matching Records, and unavailable data have
+distinct messages. Valid-query error pages retain a retry URL and a return URL;
+an out-of-range page offers return to page one with selections preserved. Malformed
+queries offer a clean dashboard entry rather than guessing the intended selections.
+
+Open a card title to visit `/records/{id}`. Details show the full safely rendered
+Markdown Body, identifier, type/status, Project Scope, UTC creation/update dates,
+and optional Completion Resolution. Embedded HTML is displayed as text and unsafe
+link/image schemes are disabled. **Return to Records** restores the originating
+Workspace, filters, sort and page. Missing/foreign Records return a non-disclosing
+404; failures return 500 with retry/return navigation. Browser Back and reload use
+the ordinary GET URLs; no application-specific JavaScript is required. Cards become
+one column on narrow screens; controls have visible labels and keyboard focus.
+Long code blocks scroll within the detail view. Browser access is read-only, but
+the shared unauthenticated listener also exposes mutating operator RPC: restrict
+it to trusted clients as described in [Security](../README.md#security).
 See [dashboard verification](records-dashboard-verification.md) for evidence and
 current limitations.
 

@@ -1,4 +1,76 @@
-# Workspace Records dashboard (Tasks #10–12)
+# Workspace Records dashboard (Tasks #10–13)
+
+## Accessibility, recovery and documentation (Task #13)
+
+Built on Task #12's verified Stack commit
+`0a9a7fbcb8015582d8e0ccfeaa23291040aa8979`; its explicit dependency is retained.
+The sections below record earlier slices, including their then-current limitations.
+For current routes and user behavior see [Browser and RPC](development.md#browser-and-rpc).
+
+### Changes and boundary regression coverage
+
+- Cards explicitly become one column below 40rem. Fieldsets may shrink, checkbox
+  labels wrap as usable units, and long text cannot force the filter controls off
+  screen. Detail navigation wraps; long code blocks scroll internally. Visible
+  labels, legends, native controls, textual type/status and focus outlines remain.
+- Shared error pages now have viewport metadata, focus styling and labeled recovery
+  navigation. Valid-query failures preserve selections/page in **Try again**, and
+  provide dashboard return navigation. Out-of-range list pages offer page one with
+  filters/sort preserved. Malformed queries offer a clean `/records` entry; they
+  are not interpreted partially. Missing Records stay 404, operational/render
+  failures stay 500, and successful empty/no-Workspace states remain distinct.
+- `browser/accessibility_tests.rs` covers labeled HTML, long titles/Body/Project
+  Scope, textual type/status, responsive/focus rules, missing and invalid states,
+  and escaped stateful error links. An isolated failed-result seam injects backend
+  and rendering failures without process-wide flags or live-store changes. Existing
+  isolated SQLite failure tests and read-only/security regressions remain intact.
+- README and development guidance now describe actual list/detail/status routes,
+  filter/sort/page/return/refresh behavior, durable Update date semantics, and the
+  unchanged trusted-client, unauthenticated loopback-by-default boundary.
+
+### Actual browser execution
+
+Firefox 157.0.1, headless Linux, driven through GeckoDriver 0.37.1 against a
+source-built Manual Daemon on a private loopback test port and disposable SQLite
+store (not the active daemon). The fixture had 55 Generic/Open Records with
+500-character unbroken titles, long Body paragraphs/code and raw script text.
+
+- Desktop 1280 CSS-pixel window width (900 outer height): keyboard-only Tab,
+  arrows, Space and Enter selected Workspace, Generic Record, Open, Oldest created,
+  applied the GET form, reached page two, opened details, returned and refreshed.
+  All passed. Three grid columns; no horizontal document overflow. Back/Forward
+  restored exact detail/list URLs; reload and Refresh retained page/selections.
+  A direct external fixture edit appeared after Refresh. Raw script text did not
+  execute. Desktop and narrow screenshots were inspected.
+- Firefox clamps ordinary window widths to 500px, so a separate real browser
+  iframe viewport measured exactly **390 × 844 CSS pixels** was used for the phone
+  layout check (not mobile-device emulation). One grid column and no horizontal
+  document overflow on list or long-Body/code details; controls remained visible.
+  Tab focus had a computed solid outline. Keyboard detail/return/Refresh retained
+  page two and selections. Missing-Record and empty-filter states stayed readable.
+- Actual browser no-registered-Workspaces, zero matches, missing Record, invalid
+  page, and backend failure presentations were distinct. Keyboard error return
+  preserved page two for missing details, or offered page one for invalid paging.
+  Dropping only the disposable fixture's Update table produced unavailable list
+  and detail pages rather than empty results; this failure check used the 500px
+  narrow window. HTML regressions separately cover escaping/recovery on render
+  failures and long Project Scope; no screen-reader or physical phone audit ran.
+
+The initial driver startup was retried; early harness attempts exposed native
+select/navigation timing and Firefox's width clamp, not product failures. Browser
+scripts/screenshots were temporary verification artifacts, not a new frontend or
+shipped automation dependency.
+
+### Task #13 verification
+
+`cargo test -p forge-server browser::` passed 14 tests. Required gates passed:
+`cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo test --workspace` (466 passed, 0 failed, 1 pre-existing ignored), and
+`git diff --check`. An initial Clippy map/unwrap style diagnostic was corrected
+before rerunning. Route names and examples were checked against the router/query
+parser and the actual browser flow. No dependency, RPC/CLI, schema, listener,
+authentication, mutation or live-update expansion was introduced. No push, PR,
+installation or integration is part of this Implementation Check.
 
 ## Safe Record details (Task #12)
 
