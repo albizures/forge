@@ -37,6 +37,9 @@ fn tagged_thinking_levels_are_not_exact_string_choices() {
             format!("!{level}"),
             format!("!{level} null"),
             format!("!{level} {level}"),
+            format!("!!str {level}"),
+            format!("!<tag:yaml.org,2002:str> {level}"),
+            format!("&choice !!str {level}"),
         ] {
             let text = format!(
                 "---\nversion: 1\nruntime: herdr/pi\nmodel: test/model\nthinkingLevel: {value}\ntools: []\n---\nBehavior"
@@ -47,6 +50,34 @@ fn tagged_thinking_levels_are_not_exact_string_choices() {
                 "{value}: {error}"
             );
         }
+    }
+}
+
+#[test]
+fn untagged_yaml_syntax_remains_valid() {
+    for value in [
+        "low",
+        "'low'",
+        "\"low\"",
+        "&choice low",
+        "low # !!str is only a comment",
+    ] {
+        let text = format!(
+            "---\nversion: 1\nruntime: herdr/pi\nmodel: test/model\nthinkingLevel: {value}\ntools: []\n---\nBehavior with !!str low"
+        );
+        assert_eq!(
+            ProfileDocument::parse(&text)
+                .unwrap()
+                .thinking_level
+                .as_str(),
+            "low"
+        );
+    }
+    for (anchor, valid) in [("&choice low", true), ("&choice !!str low", false)] {
+        let text = format!(
+            "---\nversion: 1\nruntime: herdr/pi\nmodel: test/model\ntools: []\nskills: [{{name: {anchor}}}]\nthinkingLevel: *choice\n---\nBehavior"
+        );
+        assert_eq!(ProfileDocument::parse(&text).is_ok(), valid);
     }
 }
 
