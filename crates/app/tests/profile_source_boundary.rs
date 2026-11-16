@@ -1,7 +1,7 @@
 use forge_app::agent_profiles::ResourceCatalog;
 use std::fs;
 
-const DOCUMENT: &str = "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\ntools: []\nskills: []\n---\nRole instructions";
+const DOCUMENT: &str = "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\nthinkingLevel: low\ntools: []\nskills: []\n---\nRole instructions";
 
 #[test]
 fn accepts_standalone_nested_markdown_and_only_explicit_skills() {

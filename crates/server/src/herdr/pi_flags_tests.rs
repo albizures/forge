@@ -39,7 +39,7 @@ impl Fixture {
             "---\nname: chosen\ndescription: chosen-description\n---\nSKILL_BODY_NOT_PRELOADED\n",
         );
         self.write("catalog/.agents/profiles/chosen.md", &format!(
-            "---\nversion: 1\nruntime: herdr/pi\nmodel: forge-test/fixture\ntools: {tools}\n{resources}---\nPRIVATE_REGISTERED_BEHAVIOR\n"
+            "---\nversion: 1\nruntime: herdr/pi\nmodel: forge-test/fixture\nthinkingLevel: low\ntools: {tools}\n{resources}---\nPRIVATE_REGISTERED_BEHAVIOR\n"
         ));
         self.write("catalog/.pi/extensions/chosen.mjs", &format!(
             "import {{writeFileSync}} from 'node:fs'; export default function() {{writeFileSync({}, 'loaded');}}",
@@ -67,6 +67,41 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn thinking_flags_apply_to_both_record_types_and_preserve_historical_launches() {
+    let fixture = Fixture::new();
+    let historical = r#"{"version":1,"runtime":"herdr/pi","model":"test/model","tools":[],"behavior":"old","skills":[],"extensions":[],"mcpServers":[]}"#;
+    for kind in [RecordType::Task, RecordType::Grilling] {
+        let mut profile = fixture.profile(false);
+        profile.record_type = kind;
+        for level in ["off", "minimal", "low", "medium", "high", "xhigh"] {
+            profile.launch_policy.as_mut().unwrap().thinking_level =
+                Some(serde_json::from_value(serde_json::json!(level)).unwrap());
+            let args = pi_launch_arguments(&profile, "protected bootstrap").unwrap();
+            assert_eq!(args.iter().filter(|arg| *arg == "--thinking").count(), 1);
+            assert!(args.windows(2).any(|pair| pair == ["--thinking", level]));
+            assert_eq!(&args[args.len() - 2..], ["--", "protected bootstrap"]);
+            assert!(
+                !args
+                    .iter()
+                    .any(|arg| arg.contains("PRIVATE_REGISTERED_BEHAVIOR"))
+            );
+        }
+        profile.launch_policy = Some(serde_json::from_str(historical).unwrap());
+        assert!(
+            !pi_launch_arguments(&profile, "bootstrap")
+                .unwrap()
+                .iter()
+                .any(|arg| arg == "--thinking")
+        );
+        profile.launch_policy = None;
+        assert_eq!(
+            pi_launch_arguments(&profile, "bootstrap").unwrap(),
+            ["--model", "forge-test/fixture", "bootstrap"]
+        );
+    }
+}
+
+#[test]
 fn pi_flags_drift_and_unsupported_mcp_fail_before_provider_or_provision_intent() {
     use forge_app::{AgentDispatchAdapter, NewAgentAssignment, NewTypedRecord, RecordRepository};
     for mcp in [false, true] {
@@ -74,7 +109,7 @@ fn pi_flags_drift_and_unsupported_mcp_fail_before_provider_or_provision_intent()
         let mut profile = fixture.profile(true);
         if mcp {
             fixture.write("catalog/.pi/mcp.json", r#"{"mcpServers":{"selected":{"command":"unused","env":{"KEY":"CREDENTIAL_SENTINEL"}}}}"#);
-            fixture.write("catalog/.agents/profiles/chosen.md", "---\nversion: 1\nruntime: herdr/pi\nmodel: forge-test/fixture\ntools: []\nmcpServers: [{name: selected}]\n---\nPRIVATE_REGISTERED_BEHAVIOR\n");
+            fixture.write("catalog/.agents/profiles/chosen.md", "---\nversion: 1\nruntime: herdr/pi\nmodel: forge-test/fixture\nthinkingLevel: low\ntools: []\nmcpServers: [{name: selected}]\n---\nPRIVATE_REGISTERED_BEHAVIOR\n");
             profile.launch_policy = Some(
                 forge_app::agent_profiles::ResourceCatalog::discover(
                     &fixture.0.join("home"),

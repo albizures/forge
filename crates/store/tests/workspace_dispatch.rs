@@ -30,7 +30,7 @@ fn registered_policy_survives_reopen_and_lifecycle_revision_without_selection() 
     .unwrap();
     std::fs::create_dir_all(workspace.join(".agents/profiles")).unwrap();
     let source = workspace.join(".agents/profiles/entry.md");
-    std::fs::write(&source, "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\ntools: [read]\nskills: [{name: entry}]\nextensions: [{name: entry}]\nmcpServers: [{name: local}]\n---\nUse entry.\n").unwrap();
+    std::fs::write(&source, "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\nthinkingLevel: low\ntools: [read]\nskills: [{name: entry}]\nextensions: [{name: entry}]\nmcpServers: [{name: local}]\n---\nUse entry.\n").unwrap();
     let policy = ResourceCatalog::discover(&fixture.0.join("two"), &workspace)
         .unwrap()
         .resolve(&workspace, ".agents/profiles/entry.md")
@@ -109,6 +109,53 @@ fn registered_policy_survives_reopen_and_lifecycle_revision_without_selection() 
             .agent_profile(RecordType::Task, registered.revision)
             .unwrap(),
         registered
+    );
+}
+
+#[test]
+fn thinking_levels_survive_registration_reload_and_historical_storage() {
+    use forge_app::agent_profiles::ResolvedLaunchPolicy;
+    let fixture = Fixture::new();
+    let historical = r#"{"version":1,"runtime":"herdr/pi","model":"test/model","tools":[],"behavior":"old","skills":[],"extensions":[],"mcpServers":[]}"#;
+    let mut policy: ResolvedLaunchPolicy = serde_json::from_str(historical).unwrap();
+    let store = fixture.open();
+    fixture.register(&store);
+    let mut revisions = Vec::new();
+    for kind in [RecordType::Task, RecordType::Grilling] {
+        for level in ["off", "minimal", "low", "medium", "high", "xhigh"] {
+            policy.thinking_level = Some(serde_json::from_value(serde_json::json!(level)).unwrap());
+            let registered = store.register_agent_profile("one", kind, &policy).unwrap();
+            revisions.push((kind, registered.revision, level));
+        }
+    }
+    drop(store);
+    let reopened = fixture.open();
+    for (kind, revision, level) in revisions {
+        let loaded = reopened.agent_profile(kind, revision).unwrap();
+        assert_eq!(
+            loaded
+                .launch_policy
+                .unwrap()
+                .thinking_level
+                .unwrap()
+                .as_str(),
+            level
+        );
+    }
+    drop(reopened);
+    // Emulate an actual pre-feature persisted revision, not a newly authored document.
+    let connection = rusqlite::Connection::open(fixture.0.join("store.sqlite")).unwrap();
+    connection.execute("UPDATE agent_profiles SET launch_policy_json = ?1 WHERE record_type = 'task' AND revision = 2", [historical]).unwrap();
+    drop(connection);
+    let reopened = fixture.open();
+    let loaded = reopened.agent_profile(RecordType::Task, 2).unwrap();
+    assert_eq!(loaded.launch_policy.unwrap().thinking_level, None);
+    assert!(
+        reopened
+            .agent_profile(RecordType::Task, 1)
+            .unwrap()
+            .launch_policy
+            .is_none()
     );
 }
 

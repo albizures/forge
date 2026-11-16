@@ -29,7 +29,7 @@ async fn check_bound_outcome_inspection(human_input: bool) {
     std::fs::create_dir_all(workspace.root.join(".agents/profiles")).unwrap();
     std::fs::write(
         workspace.root.join(".agents/profiles/work.md"),
-        "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\ntools: [read]\n---\nWork",
+        "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\nthinkingLevel: low\ntools: [read]\n---\nWork",
     )
     .unwrap();
     let policy = forge_app::agent_profiles::ResourceCatalog::discover(

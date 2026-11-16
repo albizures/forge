@@ -16,14 +16,14 @@ fn resolves_workspace_catalog_and_checks_only_selected_direct_inputs() {
     }
     fs::create_dir_all(workspace.join(".agents/profiles")).unwrap();
     let document = workspace.join(".agents/profiles/implementation.md");
-    fs::write(&document, "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\ntools: []\nskills: [{name: entry}]\n---\nBehavior").unwrap();
+    fs::write(&document, "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\nthinkingLevel: low\ntools: []\nskills: [{name: entry}]\n---\nBehavior").unwrap();
     let catalog = ResourceCatalog::discover(&operator, &workspace).unwrap();
     assert!(
         catalog
             .resolve(&workspace, ".agents/profiles/implementation.md")
             .is_err()
     );
-    fs::write(&document, "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\ntools: []\nskills: [{path: ../skills/entry/SKILL.md}]\n---\nBehavior").unwrap();
+    fs::write(&document, "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\nthinkingLevel: low\ntools: []\nskills: [{path: ../skills/entry/SKILL.md}]\n---\nBehavior").unwrap();
     let policy = catalog
         .resolve(&workspace, ".agents/profiles/implementation.md")
         .unwrap();
@@ -68,7 +68,7 @@ fn catalog_membership_is_canonical_and_cannot_be_granted_by_a_path() {
     )
     .unwrap();
     let document = format!(
-        "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\ntools: []\nskills: [{{path: '{}'}}]\n---\nBehavior",
+        "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\nthinkingLevel: low\ntools: []\nskills: [{{path: '{}'}}]\n---\nBehavior",
         outside.display()
     );
     fs::write(workspace.join(".agents/profiles/external.md"), document).unwrap();
@@ -91,7 +91,7 @@ fn catalog_membership_is_canonical_and_cannot_be_granted_by_a_path() {
             policy.skills[0].path,
             outside.join("SKILL.md").canonicalize().unwrap()
         );
-        fs::write(workspace.join(".agents/profiles/external.md"), "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\ntools: []\nskills: [{name: external}]\n---\nBehavior").unwrap();
+        fs::write(workspace.join(".agents/profiles/external.md"), "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\nthinkingLevel: low\ntools: []\nskills: [{name: external}]\n---\nBehavior").unwrap();
         assert_eq!(
             catalog
                 .resolve(&workspace, ".agents/profiles/external.md")
@@ -121,7 +121,7 @@ fn freezes_mcp_configuration_but_detects_extension_entry_drift() {
     )
     .unwrap();
     fs::create_dir_all(root.path().join(".agents/profiles")).unwrap();
-    fs::write(root.path().join(".agents/profiles/mcp.md"), "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\ntools: []\nextensions: [{name: entry}]\nmcpServers: [{name: local}]\n---\nBehavior").unwrap();
+    fs::write(root.path().join(".agents/profiles/mcp.md"), "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\nthinkingLevel: low\ntools: []\nextensions: [{name: entry}]\nmcpServers: [{name: local}]\n---\nBehavior").unwrap();
     let policy = ResourceCatalog::discover(root.path(), root.path())
         .unwrap()
         .resolve(root.path(), ".agents/profiles/mcp.md")
@@ -155,7 +155,7 @@ fn extension_directories_select_the_entry_not_supporting_modules() {
         "support",
     )
     .unwrap();
-    let document = "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\ntools: []\nextensions: [{name: plugin}]\n---\nBehavior";
+    let document = "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\nthinkingLevel: low\ntools: []\nextensions: [{name: plugin}]\n---\nBehavior";
     fs::create_dir_all(root.path().join(".agents/profiles")).unwrap();
     let source = root.path().join(".agents/profiles/extensions.md");
     fs::write(&source, document).unwrap();
@@ -187,7 +187,7 @@ fn extension_directories_select_the_entry_not_supporting_modules() {
 
 #[test]
 fn parses_closed_policy_and_rejects_ambiguous_authoring() {
-    let valid = "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\ntools: []\n---\nUse the entry skill.\n";
+    let valid = "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\nthinkingLevel: low\ntools: []\n---\nUse the entry skill.\n";
     let parsed = ProfileDocument::parse(valid).unwrap();
     assert!(parsed.tools.is_empty());
     assert!(parsed.skills.is_empty());

@@ -33,6 +33,8 @@ pub struct AgentProfilePolicyResponse {
     pub version: u32,
     pub runtime: String,
     pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_level: Option<forge_app::agent_profiles::ThinkingLevel>,
     pub tools: Vec<String>,
     pub skills: Vec<AgentProfileResourceResponse>,
     pub extensions: Vec<AgentProfileResourceResponse>,
@@ -44,6 +46,7 @@ impl From<&ResolvedLaunchPolicy> for AgentProfilePolicyResponse {
             version: value.version,
             runtime: value.runtime.clone(),
             model: value.model.clone(),
+            thinking_level: value.thinking_level,
             tools: value.tools.clone(),
             skills: value.skills.iter().map(Into::into).collect(),
             extensions: value.extensions.iter().map(Into::into).collect(),
@@ -112,6 +115,25 @@ impl AgentProfileDocumentResponse {
         }
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn policy_inspection_exposes_exact_thinking_choice_and_omits_historical_absence() {
+        let historical = r#"{"version":1,"runtime":"herdr/pi","model":"test/model","tools":[],"behavior":"private","skills":[],"extensions":[],"mcpServers":[]}"#;
+        let mut policy: ResolvedLaunchPolicy = serde_json::from_str(historical).unwrap();
+        let response = serde_json::to_value(AgentProfilePolicyResponse::from(&policy)).unwrap();
+        assert!(response.get("thinking_level").is_none());
+        for level in ["off", "minimal", "low", "medium", "high", "xhigh"] {
+            policy.thinking_level = Some(serde_json::from_value(serde_json::json!(level)).unwrap());
+            let response = serde_json::to_value(AgentProfilePolicyResponse::from(&policy)).unwrap();
+            assert_eq!(response["thinking_level"], level);
+            assert!(!response.to_string().contains("private"));
+        }
+    }
+}
+
 #[rpc(client, server, namespace = "agent_profile")]
 pub trait AgentProfileApi {
     #[method(name = "preview")]
