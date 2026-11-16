@@ -5,6 +5,7 @@
 
 mod agent_profiles;
 mod herdr;
+mod stacks;
 #[cfg(test)]
 mod test_projects;
 #[cfg(all(test, unix))]
@@ -847,6 +848,7 @@ fn application_from_config_with_cli(
         }),
         Box::new(GitInspector),
     )
+    .with_stack_hosting(Box::new(stacks::GitHubStackHosting))
     .with_workspace_repository(Box::new(workspaces)))
 }
 
@@ -1288,6 +1290,27 @@ impl WorktreeApiServer for Daemon {
 
 #[async_trait]
 impl RecordApiServer for Daemon {
+    async fn task_stack(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<forge_rpc::TaskStackRequest>,
+    ) -> RpcResult<Option<forge_app::stacks::TaskStack>> {
+        let app = self.record_application(&request.selection, &mut [])?;
+        let id = request.record.record_id;
+        match request.record.action {
+            forge_rpc::TaskStackAction::Show => app.task_stack(id),
+            forge_rpc::TaskStackAction::Configure { source } => {
+                app.configure_task_stack(id, &source).map(Some)
+            }
+            forge_rpc::TaskStackAction::Prepare => app.prepare_task_stack(id),
+            forge_rpc::TaskStackAction::PublishUnchanged => {
+                app.publish_unchanged_task_stack(id, None).map(Some)
+            }
+            forge_rpc::TaskStackAction::Publish { url } => {
+                app.publish_task_stack(id, &url, None).map(Some)
+            }
+        }
+        .map_err(rpc_error)
+    }
     async fn project_check_template_show(
         &self,
         request: forge_rpc::SelectedRecordRequest<forge_rpc::CheckTemplateShowRequest>,
@@ -1643,6 +1666,12 @@ impl RecordApiServer for Daemon {
         let record = application.show_record(request.id).map_err(rpc_error)?;
         let mut response = RecordResponse::from(record);
         if response.record_type == "task" {
+            response.activity = Some(
+                application
+                    .task_activity(request.id)
+                    .map_err(rpc_error)?
+                    .into(),
+            );
             response.checks = Some(
                 application
                     .list_record_checks(request.id)
@@ -1668,12 +1697,30 @@ impl RecordApiServer for Daemon {
             .as_deref()
             .map(record_type)
             .transpose()?;
-        application
+        let records = application
             .list_records(request.project_slug, status, record_type)
-            .map(|records| ListRecordsResponse {
-                records: records.into_iter().map(Into::into).collect(),
+            .map_err(rpc_error)?;
+        let records = records
+            .into_iter()
+            .map(|record| {
+                let mut response = RecordResponse::from(record);
+                if response.record_type == "task" {
+                    response.activity = Some(
+                        application
+                            .task_activity(response.id)
+                            .map_err(rpc_error)?
+                            .into(),
+                    );
+                    response.checks = Some(
+                        application
+                            .list_record_checks(response.id)
+                            .map_err(rpc_error)?,
+                    );
+                }
+                Ok(response)
             })
-            .map_err(rpc_error)
+            .collect::<RpcResult<Vec<_>>>()?;
+        Ok(ListRecordsResponse { records })
     }
 
     async fn edit(
@@ -1752,11 +1799,17 @@ impl RecordApiServer for Daemon {
             selection,
             record: request,
         } = request;
-        let kind = relationship_kind(&request.kind)?;
-        self.record_application(&selection, &mut [])?
-            .relate_records(request.from_id, request.to_id, kind)
-            .map(Into::into)
-            .map_err(rpc_error)
+        let application = self.record_application(&selection, &mut [])?;
+        let result = if request.kind == "ordering-only-depends-on" {
+            application.relate_ordering_only_records(request.from_id, request.to_id)
+        } else {
+            application.relate_records(
+                request.from_id,
+                request.to_id,
+                relationship_kind(&request.kind)?,
+            )
+        };
+        result.map(Into::into).map_err(rpc_error)
     }
 
     async fn unrelate(
@@ -1928,12 +1981,14 @@ fn record_type(record_type: &str) -> RpcResult<RecordType> {
 fn relationship_kind(kind: &str) -> RpcResult<forge_app::RecordRelationshipKind> {
     match kind {
         "child-of" => Ok(forge_app::RecordRelationshipKind::ParentChild),
-        "depends-on" => Ok(forge_app::RecordRelationshipKind::DependsOn),
+        "depends-on" | "ordering-only-depends-on" => {
+            Ok(forge_app::RecordRelationshipKind::DependsOn)
+        }
         "generated-by" => Ok(forge_app::RecordRelationshipKind::GeneratedBy),
         "initiative" => Ok(forge_app::RecordRelationshipKind::Initiative),
         _ => Err(rpc_error(RegistrationError::new(
             "unsupported-relationship-kind",
-            "Relationship kind must be child-of, depends-on, generated-by, or initiative",
+            "Relationship kind must be child-of, depends-on, ordering-only-depends-on, generated-by, or initiative",
         ))),
     }
 }
@@ -2422,6 +2477,12 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
+    mod stack_tests {
+        include!("stack_tests.rs");
+    }
+    mod unchanged_checkout_tests {
+        include!("unchanged_checkout_tests.rs");
+    }
     mod check_tests {
         include!("check_tests.rs");
     }
@@ -2431,6 +2492,7 @@ mod tests {
     include!("assignment_finding_security_tests.rs");
     include!("assignment_context_tests.rs");
     include!("assignment_redaction_tests.rs");
+    include!("provisioning_diagnostics_tests.rs");
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
         path::{Path, PathBuf},
@@ -3848,9 +3910,12 @@ mod tests {
 
     #[tokio::test]
     async fn assignment_info_reports_persisted_evidence_without_prompts_or_secrets() {
-        let (fixture, assignment, _) = assignment_test_daemon();
+        let (fixture, assignment, prerequisite) = assignment_test_daemon();
         let store = SqliteProjectRepository::open(&fixture.database_path).unwrap();
         let task_id = store.agent_assignment(&assignment).unwrap().record_id;
+        store
+            .unrelate_records(task_id, prerequisite, RecordRelationshipKind::DependsOn)
+            .unwrap();
         store.edit_record(task_id, "PRIVATE TASK PROMPT").unwrap();
         store.begin_agent_launch(&assignment, 1000).unwrap();
         store
@@ -3948,9 +4013,13 @@ mod tests {
 
     #[tokio::test]
     async fn assignment_info_retains_closed_recovery_evidence_across_reopen() {
-        let (fixture, assignment, _) = assignment_test_daemon();
+        let (fixture, assignment, prerequisite) = assignment_test_daemon();
         {
             let store = SqliteProjectRepository::open(&fixture.database_path).unwrap();
+            let task = store.agent_assignment(&assignment).unwrap().record_id;
+            store
+                .unrelate_records(task, prerequisite, RecordRelationshipKind::DependsOn)
+                .unwrap();
             store.begin_agent_provision(&assignment).unwrap();
             store.hold_uncertain_agent_assignment(&assignment).unwrap();
             store

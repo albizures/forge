@@ -1,10 +1,18 @@
 use forge_server::{DaemonConfig, ManagedLaunchInputs, serve};
 use tracing_subscriber::EnvFilter;
 
+mod upgrade_command;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(build_info) = build_info_json(std::env::args().skip(1)) {
         println!("{build_info}");
+        return Ok(());
+    }
+
+    let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    if arguments.first().is_some_and(|a| a == "--state-upgrade") {
+        println!("{}", upgrade_command::run(&arguments[1..])?);
         return Ok(());
     }
 

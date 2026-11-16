@@ -38,6 +38,23 @@ impl Daemon {
 
 #[async_trait]
 impl AssignmentApiServer for Daemon {
+    async fn stack(
+        &self,
+        r: forge_rpc::AssignmentStackRequest,
+    ) -> RpcResult<Option<forge_app::stacks::TaskStack>> {
+        let session = self.assignment_session(&r.assignment_id, &r.secret)?;
+        if r.unchanged {
+            if r.url.is_some() {
+                return Err(rpc_error(forge_app::RegistrationError::new(
+                    "invalid-request",
+                    "url and unchanged are mutually exclusive",
+                )));
+            }
+            session.stack_unchanged().map_err(rpc_error)
+        } else {
+            session.stack(r.url.as_deref()).map_err(rpc_error)
+        }
+    }
     async fn outcome_submit(
         &self,
         r: forge_rpc::AssignmentOutcomeRequest,

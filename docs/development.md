@@ -148,7 +148,9 @@ deployment owner must apply the release policy rather than silently waive gates.
 
 Before opening an existing database with upgraded binaries, back it up under the
 normal operational policy. Incompatible stores fail with `fresh-store-required`
-before initialization; there is no automatic conversion or reset. Safely retire
+before initialization; there is no automatic conversion or reset. Explicit managed
+copy-and-upgrade is documented in [Revision State upgrades](state-upgrades.md),
+including its separate activation, compatibility fence, and recovery tests. Safely retire
 ownership and reconcile retained resources before any separate operator reset.
 Preserve recovery facts and never rewrite SQLite markers to bypass compatibility,
 ownership, or capacity checks.

@@ -97,6 +97,7 @@ dispatch_requests! {
     task_check_acceptance(forge_rpc::DispatchRecordRequest) -> forge_rpc::DispatchRecordResponse;
 }
 requests! {
+    task_stack(forge_rpc::TaskStackRequest) -> Option<forge_rpc::TaskStack>;
     project_check_template_show(forge_rpc::CheckTemplateShowRequest) -> forge_rpc::TemplatePage;
     project_check_template_set(forge_rpc::CheckTemplateSetRequest) -> forge_rpc::CheckTemplate;
     record_finding_list(forge_rpc::RecordFindingListRequest) -> forge_rpc::FindingList;

@@ -52,6 +52,183 @@ fn all() -> RecordListFilter {
     }
 }
 
+fn assert_prerequisites(fixture: &Fixture, id: u64, expected: &[u64]) {
+    let app = forge_app::Application::new(
+        Box::new(SqliteProjectRepository::open(&fixture.root.join("store.sqlite")).unwrap()),
+        Box::new(NoRepositoryInspector),
+    );
+    let readiness = app
+        .records_in_workspace("one")
+        .unwrap()
+        .ready_records(false, false, true)
+        .unwrap();
+    assert_eq!(
+        readiness
+            .iter()
+            .find(|r| r.record.id == id)
+            .unwrap()
+            .blocked_by,
+        expected
+    );
+}
+
+#[test]
+fn task_activity_inspection_respects_record_workspace_scope() {
+    let fixture = Fixture::new();
+    let one = fixture.store.in_record_workspace("one").unwrap();
+    let two = fixture.store.in_record_workspace("two").unwrap();
+    let task = one
+        .open_typed_record(&NewTypedRecord {
+            record_type: RecordType::Task,
+            body: "Inspect scope".into(),
+            project_slugs: vec![],
+            generated_by_ids: vec![],
+        })
+        .unwrap();
+    assert_eq!(
+        one.task_activity(task.id).unwrap().state(),
+        forge_app::task_inspection::TaskActivityState::Absent
+    );
+    assert!(two.task_activity(task.id).is_err());
+}
+
+#[test]
+fn ordering_only_dependencies_are_scoped_durable_ordered_and_removed_atomically() {
+    use forge_app::RecordRelationshipKind::DependsOn;
+    let fixture = Fixture::new();
+    let store = fixture.store.in_record_workspace("one").unwrap();
+    let open = |kind, body: &str| {
+        store
+            .open_typed_record(&NewTypedRecord {
+                record_type: kind,
+                body: body.into(),
+                project_slugs: vec![],
+                generated_by_ids: vec![],
+            })
+            .unwrap()
+    };
+    let blocked = open(
+        RecordType::Task,
+        "No Stack and ordering-only prose are not intent",
+    );
+    let ordinary = open(RecordType::Task, "code prerequisite");
+    let ordering = open(RecordType::Task, "ordering prerequisite");
+    let invalid = open(RecordType::Wayfinder, "invalid participant");
+    store
+        .relate_records(blocked.id, ordinary.id, DependsOn)
+        .unwrap();
+    assert!(!store.show_record(blocked.id).unwrap().relationships[0].ordering_only);
+    store
+        .relate_ordering_only_records(blocked.id, ordering.id)
+        .unwrap();
+    let before = store.show_record(blocked.id).unwrap();
+    assert_eq!(
+        before
+            .relationships
+            .iter()
+            .filter(|r| r.ordering_only)
+            .count(),
+        1
+    );
+    assert!(
+        store.start_record(blocked.id).is_err(),
+        "ordering-only must still block readiness"
+    );
+    assert_prerequisites(&fixture, blocked.id, &[ordinary.id, ordering.id]);
+    let updates = store.list_record_updates(blocked.id).unwrap();
+    for target in [blocked.id, invalid.id, ordinary.id] {
+        assert!(
+            store
+                .relate_ordering_only_records(blocked.id, target)
+                .is_err()
+        );
+        assert_eq!(store.show_record(blocked.id).unwrap(), before);
+        assert_eq!(store.list_record_updates(blocked.id).unwrap(), updates);
+    }
+    let other = fixture
+        .store
+        .in_record_workspace("two")
+        .unwrap()
+        .open_typed_record(&NewTypedRecord {
+            record_type: RecordType::Task,
+            body: "foreign".into(),
+            project_slugs: vec![],
+            generated_by_ids: vec![],
+        })
+        .unwrap();
+    assert!(
+        store
+            .relate_ordering_only_records(blocked.id, other.id)
+            .is_err()
+    );
+    assert_eq!(store.show_record(blocked.id).unwrap(), before);
+    let reopened = SqliteProjectRepository::open(&fixture.root.join("store.sqlite")).unwrap();
+    assert_eq!(reopened.show_record(blocked.id).unwrap(), before);
+    assert!(reopened.show_record(ordering.id).unwrap().relationships[0].ordering_only);
+    assert!(
+        store
+            .list_record_comments(blocked.id)
+            .unwrap()
+            .iter()
+            .any(|c| c.body.contains("Ordering-only dependency designated"))
+    );
+    store
+        .unrelate_records(blocked.id, ordering.id, DependsOn)
+        .unwrap();
+    assert!(
+        !reopened
+            .show_record(blocked.id)
+            .unwrap()
+            .relationships
+            .iter()
+            .any(|r| r.ordering_only)
+    );
+    // Recreating the same ordinary dependency must not resurrect designation metadata.
+    store
+        .relate_records(blocked.id, ordering.id, DependsOn)
+        .unwrap();
+    assert!(
+        !reopened
+            .show_record(blocked.id)
+            .unwrap()
+            .relationships
+            .iter()
+            .any(|r| r.ordering_only)
+    );
+}
+
+#[test]
+fn ordering_only_designation_rolls_back_when_required_audit_write_fails() {
+    let fixture = Fixture::new();
+    let store = fixture.store.in_record_workspace("one").unwrap();
+    let open = || {
+        store
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Task,
+                body: "work".into(),
+                project_slugs: vec![],
+                generated_by_ids: vec![],
+            })
+            .unwrap()
+    };
+    let from = open();
+    let to = open();
+    let connection = rusqlite::Connection::open(fixture.root.join("store.sqlite")).unwrap();
+    connection.execute_batch("CREATE TRIGGER reject_designation_audit BEFORE INSERT ON record_comments BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END;").unwrap();
+    let updates = store.list_record_updates(from.id).unwrap();
+    assert!(store.relate_ordering_only_records(from.id, to.id).is_err());
+    assert_eq!(store.show_record(from.id).unwrap(), from);
+    assert_eq!(store.show_record(to.id).unwrap(), to);
+    assert_eq!(store.list_record_updates(from.id).unwrap(), updates);
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM ordering_only_dependencies", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+}
+
 #[test]
 fn projectless_record_ownership_is_explicit_durable_and_blocks_removal() {
     let fixture = Fixture::new();

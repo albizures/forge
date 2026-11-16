@@ -488,6 +488,44 @@ pub async fn request_task_check_acceptance(
         .map_err(|error| format!("controlled Task Check acceptance failed: {error}"))
 }
 
+/// Operate an explicitly selected Task stack.
+/// # Errors
+/// Returns routing, policy, hosting or storage failures.
+pub async fn request_task_stack(
+    endpoint: impl Into<RecordEndpoint>,
+    request: forge_rpc::TaskStackRequest,
+) -> Result<Option<forge_rpc::TaskStack>, String> {
+    record_client(endpoint)?
+        .task_stack(request)
+        .await
+        .map_err(record_error("task stack"))
+}
+
+/// Read own stack or verify publication using protected Assignment delivery.
+/// # Errors
+/// Returns redacted authentication, policy or hosting failures.
+pub async fn assignment_stack(
+    url: Option<String>,
+    unchanged: bool,
+) -> Result<Option<forge_rpc::TaskStack>, String> {
+    use forge_rpc::AssignmentApiClient;
+    let assignment_id = env::var("FORGE_ASSIGNMENT_ID").map_err(|_| "missing Assignment ID")?;
+    let endpoint =
+        env::var("FORGE_ASSIGNMENT_DAEMON_URL").map_err(|_| "missing Assignment daemon URL")?;
+    let file = env::var_os("FORGE_ASSIGNMENT_CAPABILITY_SECRET_FILE")
+        .ok_or("missing Assignment secret file")?;
+    let secret = read_assignment_secret(file)?;
+    client(&format!("{}/rpc", endpoint.trim_end_matches('/')))?
+        .stack(forge_rpc::AssignmentStackRequest {
+            assignment_id,
+            secret,
+            url,
+            unchanged,
+        })
+        .await
+        .map_err(|_| "Assignment stack operation rejected; reread context and attempt state".into())
+}
+
 /// Submit a JSON outcome using protected Assignment delivery; credentials never enter arguments.
 /// # Errors
 /// Returns redacted delivery or outcome validation failures.
@@ -1528,7 +1566,75 @@ pub fn render_record(record: &RecordResponse) -> String {
         record.execution_mode.as_str(),
         record.body
     );
+    for relationship in &record.relationships {
+        let _ = write!(
+            text,
+            "\nRelationship {} {} -> {}{}",
+            relationship.kind,
+            relationship.from_id,
+            relationship.to_id,
+            if relationship.ordering_only {
+                " [ordering-only]"
+            } else {
+                ""
+            },
+        );
+    }
+    if let Some(activity) = &record.activity {
+        let state = match activity.state {
+            forge_rpc::TaskActivityState::Absent => "no assignment",
+            forge_rpc::TaskActivityState::Closed => {
+                "no active assignment (closed historical attempt)"
+            }
+            forge_rpc::TaskActivityState::Provisioning => "provisioning (persisted)",
+            forge_rpc::TaskActivityState::Working => "working (persisted)",
+            forge_rpc::TaskActivityState::Idle => "idle (persisted)",
+            forge_rpc::TaskActivityState::Blocked => "blocked (persisted)",
+            forge_rpc::TaskActivityState::Unknown => "unknown; agent absence not established",
+            forge_rpc::TaskActivityState::RetainedResources => {
+                "retained resources; agent absence not established"
+            }
+        };
+        let _ = write!(text, "\nAssignment activity: {state}");
+        if let Some(id) = &activity.assignment_id {
+            let _ = write!(
+                text,
+                "\nAssignment: {id} (inspect: forge dispatcher assignment-info {id})"
+            );
+        }
+        let _ = write!(
+            text,
+            "\nRetained resources: {}",
+            activity.retained_resources
+        );
+        if let Some(stack) = &activity.stack {
+            let _ = write!(
+                text,
+                "\nStack Predecessor: {:?}; expected input: {}; verified predecessor: {} (persisted)",
+                stack.predecessor,
+                stack.expected_commit.as_deref().unwrap_or("not prepared"),
+                stack
+                    .verified_predecessor_commit
+                    .as_deref()
+                    .unwrap_or("unavailable")
+            );
+            if let Some(problem) = &stack.problem {
+                let _ = write!(text, "\nStack evidence: {problem}");
+            }
+        }
+        if let Some(reason) = &activity.dispatch_hold {
+            let _ = write!(
+                text,
+                "\nDispatch Hold: {reason}\nIntervention required; inspect evidence before resuming"
+            );
+        }
+    }
     if let Some(checks) = &record.checks {
+        let remaining = checks
+            .iter()
+            .filter(|check| check.verdict() != Some(forge_rpc::Verdict::Pass))
+            .count();
+        let _ = write!(text, "\nChecks remaining: {remaining}/{}", checks.len());
         for check in checks {
             let verdict = match check.verdict() {
                 Some(forge_rpc::Verdict::Pass) => "pass",
@@ -1792,6 +1898,7 @@ mod tests {
     fn record_list_renders_records_in_response_order() {
         let records = ListRecordsResponse {
             records: vec![RecordResponse {
+                activity: None,
                 execution_mode: forge_rpc::ExecutionMode::Manual,
                 checks: None,
                 workspace_id: "test".into(),
@@ -1841,6 +1948,7 @@ mod tests {
     fn record_output_identifies_the_new_record() {
         assert_eq!(
             render_record_opened(&RecordResponse {
+                activity: None,
                 execution_mode: forge_rpc::ExecutionMode::Manual,
                 checks: None,
                 workspace_id: "test".into(),

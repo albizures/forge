@@ -27,7 +27,10 @@ forge worktree list --all --workspace personal
 
 All worktree commands accept `--json`. Explicit creation chooses branch and base;
 automatic dispatch uses the Task's persisted Base Commit and deterministic Task
-Branch `feat/forge-<record-id>`. Repeating creation returns the active claim,
+Branch `feat/forge-<record-id>`. Explicit [Task stacks](stacks.md) resolve their
+Base Commit at preparation from the selected root branch or completed predecessor;
+stacked worktrees require that pinned commit and deterministic branch even for
+explicit creation. Repeating creation returns the active claim,
 not a second checkout.
 
 Forge validates canonical existing ancestors before creating missing directories

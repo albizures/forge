@@ -271,6 +271,11 @@ impl Drop for Fixture {
         let _ = std::fs::remove_dir_all(&self.root);
     }
 }
+mod spec_execution {
+    use super::*;
+    include!("spec_execution_tests.rs");
+}
+
 mod recovery {
     use super::*;
     include!("workspace_recovery_tests.rs");

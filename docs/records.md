@@ -27,6 +27,37 @@ in different Workspaces do not mix records or relationships.
 Workspace selection is trusted-operator routing, not authentication or process
 isolation. Assignment capabilities retain their separate authorization rules.
 
+## Inspect Task activity
+
+`forge record show ID` and `forge record list` display Task lifecycle separately
+from persisted Assignment activity, Dispatch Holds and current Checks. A closed
+Assignment can retain historical `working` state: it is not an active worker.
+An unacknowledged launch or retained resource is not proof of agent absence.
+Human-input holds require investigation and explicit intervention, not automatic
+resume. The output links to Assignment inspection for deeper recovery evidence.
+
+Structured Record responses add an optional `activity` object on Task show/list:
+`state`, `assignment_id`, `historical_assignment_state`, `closed_at_millis`,
+`acknowledged_at_millis`, `retained_resources`, `dispatch_hold`, and `stack`.
+States are `absent`, `closed`, `provisioning`, `working`, `idle`, `blocked`,
+`unknown`, or `retained-resources`. Closure overrides historical state; resources
+retained by any attempt prevent claiming safe absence. `checks` contains current
+Check summaries on both Task show and list; null verdict means pending. Remaining
+Checks are those without a current Pass. Other Record/mutation responses may omit
+`activity`; missing activity means not inspected, not no assignment.
+
+`stack`, when present, reports predecessor ID, expected prepared input commit,
+verified predecessor commit and any evidence problem. These are persisted facts,
+not a new Git/hosting verification. Inspection is read-only: no provider calls,
+reconciliation, launches, hold clearing or resource retirement. Activity, hold,
+resource count and lineage share a storage read snapshot; lifecycle and Checks
+are separate reads, so the complete response is not an atomic execution snapshot.
+Profiles, capabilities and provider resource identities are not embedded.
+
+This is an additive wire change. Clients reading new responses must tolerate the
+new member; older responses without it still decode. Old clients that reject
+unknown fields need a matching CLI revision.
+
 ## Open work
 
 A Record has a nonblank Markdown body, an opaque numeric ID, immutable Workspace,
@@ -125,6 +156,54 @@ Project (or both may be Projectless). An agent-owned In Progress Task cannot gai
 a dependency. `generated-by` is provenance, independent of lifecycle ordering;
 it may cross Project scopes within one Workspace. Opening commands accept
 repeatable `--generated-by`; corrections require the generated Record to be Open.
+
+To explicitly require completion without inheriting a prerequisite's repository
+result, create an ordering-only dependency:
+
+```sh
+forge record relate 44 --kind ordering-only-depends-on --to 45 --workspace personal
+forge record show 44 --workspace personal --json
+forge record unrelate 44 --kind depends-on --to 45 --workspace personal
+```
+
+Inspection retains kind `depends-on` with `ordering_only: true`; human output
+labels it `[ordering-only]`. Ordinary dependencies have `ordering_only: false`.
+This is relationship-level intent, not a Task role, prose convention, or inferred
+absence of a Stack. It still blocks readiness until the prerequisite is Done.
+A Stack Predecessor cannot be designated ordering-only, and an ordering-only
+dependency cannot become a Stack link. To change intent while permitted, remove
+and recreate the dependency; removal also deletes its designation. Creation
+records normal Relationship updates and Forge-authored designation comments.
+This designation alone does not authorize execution.
+
+Starting a Spec validates its persisted initial Task plan in the same transaction
+as its Open → In Progress transition. Ordinary same-Spec Task dependencies require
+explicit cumulative Stack ancestry unless individually designated ordering-only.
+Missing configuration and Task prose are not exceptions. Independent Tasks,
+independent configured Stacks with ordering-only coordination, and prerequisites
+already included transitively in one Stack remain supported; Forge does not merge
+multiple code branches. Configured members must retain compatible Publication
+Checks and dispatched profiles. Invalid plans remain Open without transition history.
+
+Open Specs permit incomplete intermediate plans. Once a Spec starts, ordinary
+child Task creation, dependency addition/removal, Stack reconfiguration, and
+ordering-only changes are rejected transactionally. Comments and otherwise
+permitted Body edits remain available. Preparation and existing explicit
+ownership/evidence recovery operations are not structural replanning; they do not
+grant permission to rewrite a started plan. This initial product limitation does
+not make Spec plans inherently immutable. See
+[the Spec-start decision](../crates/docs/adr/0009-spec-start-gates-initial-plan-execution.md).
+
+Spec child Tasks execute only while their parent is In Progress. Manual start,
+Manual attempt begin, Assignment-bound start, automatic/explicit claims and
+Check-bound dispatch revalidate the persisted plan at authorization, including
+legacy In Progress plans. An Open parent reports `spec-execution-blocked`; missing
+required inheritance reports Task/prerequisite identities with `invalid-spec-plan`.
+Configured Stack execution also rechecks the pinned Base Commit and verified
+predecessor lineage; an initial attempt must bind the exact Stack input commit.
+Standalone Tasks and Wayfinder children have no Spec-parent gate. Planning and
+read-only operations remain available. See [safe recovery](assignment-recovery.md#spec-parent-and-inheritance-rejections)
+for retained legacy checkouts; changing lifecycle alone does not repair a plan.
 
 A Spec or Wayfinder may belong to one Initiative. Membership is non-hierarchical,
 independent of lifecycle, and explicitly detachable; it neither reparents Records
@@ -552,6 +631,7 @@ change their configuration.
 
 ```sh
 forge project check-template show personal/api --limit 50 --json
+forge project check-template preflight personal/api --json
 forge project check-template set personal/api --file criteria.json \
   --actor operator --message 'Require review and tests' --expected-version 0 --json
 forge project check-template show personal/api --after 1 --limit 50 --json
@@ -585,6 +665,18 @@ inspectable without preventing profile-less Manual work. Normal Task dispatch
 requires usable pins and all [dispatch safety gates](dispatch.md); Workspace
 selection is never a replacement for a missing Check pin.
 
+For sequential cumulative planning, run read-only `check-template preflight` before
+opening any Task. It requires Implementation first, Publication last, and a pinned
+registered Task profile with a launch policy for every future Dispatched Check.
+`show` adds optional `stack_preflight.blockers`; an empty list means compatible.
+Older servers omit the field; the preflight command fails closed on absence.
+This additive response leaves old responses decodable; strict clients that reject
+unknown fields need a matching revision. No schema or Management Protocol change
+is involved. The observation shares the template read transaction, does not mutate
+configuration or create Tasks, and does not certify hosting/provider readiness.
+Concurrent replacement can still change future pins: record/recheck the version
+and inspect actual created Checks before completing a plan.
+
 Read the observed `version` before replacement. An unconfigured template reads as
 version **0**, the profile-less Implementation baseline and empty history; its first replacement requires
 `--expected-version 0`. Every successful whole-set replacement (including clearing)
@@ -608,8 +700,10 @@ Workspace/cwd envelope. Replacement contains `expected_version`, ordered `criter
 `actor` and `message`. Show returns `{version, criteria, history, next_cursor}`;
 set returns `{version, criteria}`. Project ownership is checked in the repository
 and selectors are qualified within the selected Workspace before application work.
-Assignment capabilities have no template mutation operation. These additions
-require fresh development stores; no migration or Task backfill is provided.
+Assignment capabilities have no template mutation operation. Stores predating the
+schema-7 contracts require fresh development stores; no legacy Task backfill is
+provided. The separate [Revision State upgrade](state-upgrades.md) workflow can
+preserve schema-7 records when upgrading to schema 8.
 
 ## Workflow readiness
 
@@ -624,7 +718,14 @@ includes Grillings. `--blocked` includes blocked candidates and their direct
 unfinished prerequisite IDs in `blocked_by`. Ordering is newest first, like
 Record listing. Every result remains in the selected Workspace.
 
-This is workflow readiness, not provider dispatchability. Registration, records,
+The current `ready` command is a dependency-only frontier, not a complete
+execution preflight: it can include a Task under an Open Spec or one with invalid
+Stack inheritance. Inspect the parent and Stack evidence separately; authoritative
+start/attempt/dispatch operations enforce those gates. It also does not evaluate
+Dispatch Holds, Assignment ownership or Check progress; normal Task show/list
+exposes those facts separately.
+
+Workflow eligibility is distinct from provider dispatchability. Registration, records,
 planning and inspection work without dispatch profiles or a provider binding.
 [Dispatch readiness](dispatch.md#configure-dispatch) additionally requires both
 profiles, a verified provider binding and present availability; workflow readiness

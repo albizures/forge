@@ -114,9 +114,11 @@ Failed Implementation retains its failed Assessment and cannot advance reviews.
 
 ## Store and release boundary
 
-Only fresh stores and ordinary restart of the current marked schema revision are
-supported. Incompatible stores fail non-destructively with `fresh-store-required`.
-Do not migrate, delete, reset or rewrite schema markers to make this workflow work.
+Ordinary opening supports fresh stores and restart of the current marked schema.
+Incompatible stores fail non-destructively with `fresh-store-required`. The separate
+[Revision State upgrade](state-upgrades.md) workflow supports explicit schema 7 → 8
+and same-schema transfers; Manual commands never perform that upgrade implicitly.
+Do not delete, reset, or rewrite schema markers to make this workflow work.
 Any separate operator reset requires safe retirement and resource reconciliation.
 Restart preserves immutable Checks/profile bindings, Assessment and Finding history,
 freshness, accepted-outcome replay and ownership/resource safety facts.

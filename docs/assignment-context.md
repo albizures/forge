@@ -171,6 +171,25 @@ conversation. Reread context or the relevant Record to reconcile current state.
 Follow `nextCursor` with `--cursor` for the next bounded page. These examples
 require an existing launch and delivery.
 
+## Task stack reads and publication
+
+`forge assignment stack --json` reads only the bound Task's explicit stack,
+including its inherited destination, Base Branch, pinned Base Commit and verified
+publication. It does not configure membership or expand related-Record visibility.
+
+`forge assignment stack --url <actual-pr-url> --json` is restricted to the live,
+bootstrapped final Publication Check Assignment. Forge independently verifies the
+open non-draft PR and remote branch, then transactionally rechecks bound ownership,
+attempt freshness and output evidence before recording publication.
+`forge assignment stack --unchanged --json` uses the same final-Check authority
+but independently verifies a clean Managed Worktree at the exact prepared input
+commit instead of observing a PR. `--url` and `--unchanged` are mutually exclusive.
+Both paths still require the ordinary bound Publication outcome; verification does
+not itself pass a Check. Operator publication requires Manual Execution Mode and
+safe ownership. No capability
+secret belongs in command arguments or diagnostics. See [Task stacks](stacks.md)
+for setup and retry behavior.
+
 ## Subscription removal
 
 Record Update Subscriptions, their management RPCs, SSE endpoint, CLI commands,

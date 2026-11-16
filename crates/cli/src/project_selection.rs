@@ -71,7 +71,8 @@ pub async fn qualify(command: &mut Command, workspace: Option<&str>) -> Result<(
         Command::Project {
             command: ProjectCommand::CheckTemplate { command },
         } => match command {
-            super::check_templates::CheckTemplateCommand::Show(args) => {
+            super::check_templates::CheckTemplateCommand::Show(args)
+            | super::check_templates::CheckTemplateCommand::Preflight(args) => {
                 (vec![&mut args.project], args.server_url.as_deref())
             }
             super::check_templates::CheckTemplateCommand::Set(args) => {

@@ -43,6 +43,7 @@ impl SqliteProjectRepository {
                 "only Open Tasks may prepare a new Managed Worktree",
             ));
         }
+        super::spec_plans::execution_plan(&tx, record)?;
         execution_modes::safe_ownership(&tx, record)?;
         if tx
             .query_row(
@@ -304,6 +305,7 @@ impl SqliteProjectRepository {
             ));
         }
         forge_app::validate_task_dispatch_mode(&task)?;
+        super::spec_plans::authorize(&tx, record, Some(evidence))?;
         let existing: Option<String> = tx.query_row("SELECT id FROM agent_assignments WHERE record_id = ?1 AND closed_at_millis IS NULL", [record.cast_signed()], |r| r.get(0)).optional().map_err(storage_error)?;
         if let Some(existing) = existing {
             if binding(&tx, &existing)?.is_none() {

@@ -94,6 +94,14 @@ pub(super) fn load(
 }
 
 pub(super) fn gate(connection: &Connection, task: u64) -> Result<(), RegistrationError> {
+    if super::stacks::load(connection, task)?.is_some() {
+        let work = super::outcomes::state(connection, task)?;
+        let evidence = work
+            .output
+            .as_ref()
+            .ok_or_else(|| RegistrationError::new("stack-blocked", "repository output missing"))?;
+        super::stacks::publication_gate(connection, task, evidence, work.generation)?;
+    }
     let mut statement = connection.prepare("SELECT c.id FROM record_checks c WHERE c.record_id = ?1 AND COALESCE((SELECT CASE WHEN EXISTS (SELECT 1 FROM check_invalidations i WHERE i.assessment_id = a.id) THEN 'pending' ELSE a.verdict END FROM check_assessments a WHERE a.check_id = c.id ORDER BY a.id DESC LIMIT 1), 'pending') != 'pass' ORDER BY c.id").map_err(storage_error)?;
     let blocked = statement
         .query_map([task.cast_signed()], |row| {

@@ -23,7 +23,9 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-const REGISTRY_SCHEMA_VERSION: u32 = 1;
+pub mod upgrade;
+
+const REGISTRY_SCHEMA_VERSION: u32 = 2;
 const SUPPORTED_MANAGEMENT_PROTOCOL_REVISION: u32 = 1;
 const REGISTRY_FILE: &str = "registry.toml";
 const LOCK_FILE: &str = "registry.lock";
@@ -172,7 +174,7 @@ pub struct Registry {
 impl Registry {
     fn empty() -> Self {
         Self {
-            schema_version: REGISTRY_SCHEMA_VERSION,
+            schema_version: 1,
             installations: Vec::new(),
             active_selector: None,
         }
@@ -241,7 +243,7 @@ impl RegistryStore {
             }
         })?;
         match registry.schema_version {
-            REGISTRY_SCHEMA_VERSION => Ok(registry),
+            1..=REGISTRY_SCHEMA_VERSION => Ok(registry),
             version if version > REGISTRY_SCHEMA_VERSION => {
                 Err(ForgeupError::FutureSchema(version))
             }
@@ -265,7 +267,7 @@ impl RegistryStore {
             }
         })?;
         match registry.schema_version {
-            REGISTRY_SCHEMA_VERSION => Ok(registry),
+            1..=REGISTRY_SCHEMA_VERSION => Ok(registry),
             version if version > REGISTRY_SCHEMA_VERSION => {
                 Err(ForgeupError::FutureSchema(version))
             }
@@ -273,7 +275,7 @@ impl RegistryStore {
         }
     }
     pub fn save(&self, registry: &Registry) -> Result<(), ForgeupError> {
-        if registry.schema_version != REGISTRY_SCHEMA_VERSION {
+        if !(1..=REGISTRY_SCHEMA_VERSION).contains(&registry.schema_version) {
             return Err(ForgeupError::UnsupportedSchema(registry.schema_version));
         }
         let contents =
@@ -401,6 +403,7 @@ fn register_at(
     {
         return Err(ForgeupError::AliasConflict(alias.to_owned()));
     }
+    upgrade::check_mutation(paths, &selector)?;
     let state = paths.state(&selector);
     if options.purge_state {
         purge_state(&state)?;
@@ -523,12 +526,29 @@ pub fn use_revision(selector: &str) -> Result<Installation, ForgeupError> {
     use_revision_at(&paths, selector)
 }
 
+/// Select an old source deliberately, acknowledging that newer work is not reconciled.
+pub fn use_revision_acknowledging_divergence(selector: &str) -> Result<Installation, ForgeupError> {
+    select_revision_at(&ForgeupPaths::from_environment()?, selector, true)
+}
+
 fn use_revision_at(paths: &ForgeupPaths, selector: &str) -> Result<Installation, ForgeupError> {
+    select_revision_at(paths, selector, false)
+}
+
+fn select_revision_at(
+    paths: &ForgeupPaths,
+    selector: &str,
+    acknowledge: bool,
+) -> Result<Installation, ForgeupError> {
     let store = RegistryStore::open(paths.clone())?;
     let mut registry = store.load()?;
     reconcile_active_path(paths, &registry)?;
     let installation = resolve_in_registry(&registry, selector)?;
     validate_installation(&installation)?;
+    if acknowledge {
+        upgrade::acknowledge(paths, &installation.selector)?;
+    }
+    upgrade::check_start(paths, &installation.selector)?;
     // Persist desired state first: if the path update is interrupted, a later command repairs it.
     registry.active_selector = Some(installation.selector.clone());
     store.save(&registry)?;
@@ -564,6 +584,7 @@ fn remove_at(paths: &ForgeupPaths, selector: &str, purge: bool) -> Result<(), Fo
     if registry.active_selector.as_deref() == Some(&installation.selector) {
         return Err(ForgeupError::ActiveRemoval(installation.selector));
     }
+    upgrade::check_mutation(paths, &installation.selector)?;
     let destination = paths.installations().join(&installation.selector);
     if destination.exists() {
         fs::remove_dir_all(&destination).map_err(|source| ForgeupError::Io {
@@ -738,6 +759,7 @@ pub fn daemon_start() -> Result<String, ForgeupError> {
         .ok_or(ForgeupError::NoActiveRevision)?;
     let installation = resolve_in_registry(&registry, &selector)?;
     validate_installation(&installation)?;
+    upgrade::check_start(&paths, &selector)?;
     let state = paths.state(&selector);
     ensure_state(&state)?;
     let record_path = daemon_record_path(&paths, &selector);
@@ -1144,10 +1166,12 @@ pub enum ForgeupError {
     AmbiguousDaemonState(PathBuf),
     DaemonNotReady(PathBuf),
     UnsupportedDaemonPlatform(PathBuf),
+    UpgradeBlocked(String),
 }
 impl fmt::Display for ForgeupError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::UpgradeBlocked(message) => write!(f, "state upgrade blocked: {message}"),
             Self::InvalidLocation(m) => write!(f, "invalid Forgeup location: {m}"),
             Self::Io { path, source } => write!(f, "{}: {source}", path.display()),
             Self::UnsafePermissions(path) => {
@@ -1248,12 +1272,12 @@ fn attest_registration(
 }
 
 fn inspect_identity(path: &Path) -> Result<RevisionIdentity, ForgeupError> {
-    let output = Command::new(path)
-        .args(["--build-info", "--json"])
-        .output()
-        .map_err(|source| ForgeupError::Io {
-            path: path.to_path_buf(),
-            source,
+    let output =
+        offline_output(Command::new(path).args(["--build-info", "--json"])).map_err(|source| {
+            ForgeupError::Io {
+                path: path.to_path_buf(),
+                source,
+            }
         })?;
     if !output.status.success() {
         return Err(ForgeupError::CommandFailed(
@@ -1263,6 +1287,25 @@ fn inspect_identity(path: &Path) -> Result<RevisionIdentity, ForgeupError> {
     }
     serde_json::from_slice(&output.stdout)
         .map_err(|error| ForgeupError::CommandFailed(path.to_path_buf(), error.to_string()))
+}
+/// Retry only an exec refusal proving no child program started. In a multithreaded
+/// process, another fork can briefly inherit a candidate's write descriptor before
+/// CLOEXEC runs. Never replay wait failures or an executed upgrade's exit status.
+fn offline_output(command: &mut Command) -> io::Result<std::process::Output> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for attempt in 0..7 {
+        match command.spawn() {
+            Ok(child) => return child.wait_with_output(),
+            Err(error) if error.kind() == io::ErrorKind::ExecutableFileBusy => {
+                thread::sleep(Duration::from_millis(1 << attempt));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    command.spawn()?.wait_with_output()
 }
 fn validate_identity(identity: &RevisionIdentity) -> Result<(), ForgeupError> {
     if identity.commit.len() != 40 || !identity.commit.bytes().all(|byte| byte.is_ascii_hexdigit())

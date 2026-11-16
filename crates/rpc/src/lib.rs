@@ -2,8 +2,10 @@
 
 mod agent_profiles;
 mod assignment;
+mod task_inspection;
 pub use agent_profiles::*;
 pub use assignment::*;
+pub use task_inspection::*;
 mod workspaces;
 pub use workspaces::*;
 mod record_selection;
@@ -21,6 +23,7 @@ pub use forge_app::outcomes::{AcceptedOutcome, Attempt, WorkState};
 pub use record_selection::*;
 
 pub use forge_app::ExecutionMode;
+pub use forge_app::stacks::{StackDestination, StackSource, TaskStack};
 use forge_app::{
     AgentDispatchProjectStatus, AgentDispatchReconcileResult, AgentDispatchStatus, AgentProfile,
     ApplicationStatus, ManagedWorktreeInfo, Project, Record, RecordComment, RecordRelationshipKind,
@@ -28,6 +31,26 @@ use forge_app::{
 };
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
 use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum TaskStackAction {
+    Show,
+    Configure {
+        source: forge_app::stacks::StackSource,
+    },
+    Prepare,
+    PublishUnchanged,
+    Publish {
+        url: String,
+    },
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskStackRequest {
+    pub record_id: u64,
+    pub action: TaskStackAction,
+}
 
 pub const SYSTEM_STATUS_METHOD: &str = "system.status";
 pub const PROJECT_REGISTER_METHOD: &str = "project.register";
@@ -203,6 +226,11 @@ pub trait WorktreeApi {
 
 #[rpc(client, server, namespace = "record")]
 pub trait RecordApi {
+    #[method(name = "taskStack")]
+    async fn task_stack(
+        &self,
+        request: SelectedRecordRequest<TaskStackRequest>,
+    ) -> RpcResult<Option<forge_app::stacks::TaskStack>>;
     #[method(name = "openInitiative")]
     async fn open_initiative(
         &self,
@@ -1319,6 +1347,8 @@ pub struct DoneRecordRequest {
     pub completion_resolution: Option<String>,
 }
 /// Links or unlinks a typed directional Record Relationship.
+/// `ordering-only-depends-on` creates an explicitly designated dependency;
+/// inspection retains kind `depends-on` and exposes `ordering_only`.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RelateRecordRequest {
     pub from_id: u64,
@@ -1328,6 +1358,8 @@ pub struct RelateRecordRequest {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RecordRelationshipResponse {
     pub kind: String,
+    #[serde(default)]
+    pub ordering_only: bool,
     pub from_id: u64,
     pub to_id: u64,
     pub parent_id: u64,
@@ -1336,6 +1368,9 @@ pub struct RecordRelationshipResponse {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecordResponse {
+    /// Additive persisted activity summary on normal Task show/list; absent on other responses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<TaskActivityResponse>,
     /// Current Check summaries on Task inspection; no history is embedded.
     pub checks: Option<Vec<RecordCheck>>,
     pub execution_mode: forge_app::ExecutionMode,
@@ -1351,6 +1386,7 @@ pub struct RecordResponse {
 impl From<Record> for RecordResponse {
     fn from(record: Record) -> Self {
         Self {
+            activity: None,
             checks: None,
             execution_mode: record.execution_mode,
             workspace_id: record.workspace_id,
@@ -1366,6 +1402,7 @@ impl From<Record> for RecordResponse {
                 .relationships
                 .into_iter()
                 .map(|relationship| RecordRelationshipResponse {
+                    ordering_only: relationship.ordering_only,
                     kind: match relationship.kind {
                         RecordRelationshipKind::ParentChild => "parent-child",
                         RecordRelationshipKind::DependsOn => "depends-on",

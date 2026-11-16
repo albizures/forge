@@ -22,12 +22,17 @@ mod check_templates;
 mod checks;
 mod execution_modes;
 mod findings;
+mod ordering_dependencies;
 mod outcome_findings;
 mod outcomes;
 mod record_workspaces;
 mod schema_compatibility;
+mod spec_plans;
+mod stacks;
 mod task_attempts;
+mod task_inspection;
 mod task_progress;
+pub mod upgrade;
 mod workspace_dispatch;
 mod workspaces;
 
@@ -250,6 +255,8 @@ impl SqliteProjectRepository {
         workspaces::initialize(connection)?;
         record_workspaces::initialize(connection)?;
         workspace_dispatch::initialize(connection)?;
+        stacks::schema(connection)?;
+        ordering_dependencies::schema(connection)?;
         Ok(())
     }
 }
@@ -680,6 +687,43 @@ impl ManagedWorktreeRepository for SqliteProjectRepository {
 }
 
 impl RecordRepository for SqliteProjectRepository {
+    fn task_stack(
+        &self,
+        record: u64,
+    ) -> Result<Option<forge_app::stacks::TaskStack>, RegistrationError> {
+        self.stack_show(record)
+    }
+    fn configure_task_stack(
+        &self,
+        record: u64,
+        source: &forge_app::stacks::StackSource,
+    ) -> Result<forge_app::stacks::TaskStack, RegistrationError> {
+        self.stack_configure(record, source)
+    }
+    fn pin_task_stack(
+        &self,
+        expected: &forge_app::stacks::TaskStack,
+        commit: &str,
+    ) -> Result<forge_app::stacks::TaskStack, RegistrationError> {
+        self.stack_pin(expected, commit)
+    }
+    fn record_stack_publication(
+        &self,
+        expected: &forge_app::stacks::TaskStack,
+        publication: &forge_app::stacks::Publication,
+        assignment: Option<&str>,
+    ) -> Result<forge_app::stacks::TaskStack, RegistrationError> {
+        self.stack_publish(expected, publication, assignment)
+    }
+
+    fn record_stack_unchanged(
+        &self,
+        expected: &forge_app::stacks::TaskStack,
+        result: &forge_app::stacks::UnchangedResult,
+        assignment: Option<&str>,
+    ) -> Result<forge_app::stacks::TaskStack, RegistrationError> {
+        self.stack_unchanged(expected, result, assignment)
+    }
     fn show_check_template(
         &self,
         project: &str,
@@ -801,6 +845,14 @@ impl RecordRepository for SqliteProjectRepository {
     ) -> Result<forge_app::checks::RecordCheck, RegistrationError> {
         self.invalidate_check(task, check, input, Some(assignment))
     }
+    fn task_activity(
+        &self,
+        record_id: u64,
+    ) -> Result<forge_app::task_inspection::TaskActivity, RegistrationError> {
+        self.record_workspace(record_id)?;
+        self.inspect_task_activity(record_id)
+    }
+
     fn records_in_workspace(
         &self,
         workspace: &str,
@@ -955,6 +1007,7 @@ impl RecordRepository for SqliteProjectRepository {
         self.ensure_record_workspace(&transaction, spec_id)?;
         let workspace = record_workspaces::owner(&transaction, spec_id)?;
         let spec = load_record(&transaction, spec_id)?;
+        spec_plans::editable_spec(&transaction, spec_id)?;
         if spec.record_type != RecordType::Spec {
             return Err(RegistrationError::new(
                 "invalid-parent-type",
@@ -1420,42 +1473,15 @@ impl RecordRepository for SqliteProjectRepository {
         parent_id: u64,
         kind: RecordRelationshipKind,
     ) -> Result<Record, RegistrationError> {
-        if child_id == parent_id {
-            return Err(RegistrationError::new(
-                "invalid-relationship",
-                "a Record cannot relate to itself",
-            ));
-        }
-        let mut connection = self
-            .connection
-            .lock()
-            .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
-        let transaction = connection.transaction().map_err(storage_error)?;
-        let child = load_record(&transaction, child_id)?;
-        let parent = load_record(&transaction, parent_id)?;
-        self.ensure_record_workspace(&transaction, child_id)?;
-        self.ensure_record_workspace(&transaction, parent_id)?;
-        record_workspaces::same_workspace(&transaction, child_id, parent_id)?;
-        insert_relationship(&transaction, &child, &parent, kind)?;
-        insert_update(
-            &transaction,
-            child_id,
-            RecordUpdateKind::RelationshipAdded {
-                related_record_id: parent_id,
-                relationship_kind: Some(kind),
-            },
-        )?;
-        insert_update(
-            &transaction,
-            parent_id,
-            RecordUpdateKind::RelationshipAdded {
-                related_record_id: child_id,
-                relationship_kind: Some(kind),
-            },
-        )?;
-        let record = load_record(&transaction, child_id)?;
-        transaction.commit().map_err(storage_error)?;
-        Ok(record)
+        self.relate_with_intent(child_id, parent_id, kind, false)
+    }
+
+    fn relate_ordering_only_records(
+        &self,
+        from_id: u64,
+        to_id: u64,
+    ) -> Result<Record, RegistrationError> {
+        self.relate_with_intent(from_id, to_id, RecordRelationshipKind::DependsOn, true)
     }
 
     fn unrelate_records(
@@ -1470,7 +1496,12 @@ impl RecordRepository for SqliteProjectRepository {
             .connection
             .lock()
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
-        let transaction = connection.transaction().map_err(storage_error)?;
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        if kind == RecordRelationshipKind::DependsOn {
+            spec_plans::editable_task(&transaction, child_id)?;
+        }
         let child = load_record(&transaction, child_id)?;
         let parent = load_record(&transaction, parent_id)?;
         match kind {
@@ -1517,6 +1548,15 @@ impl RecordRepository for SqliteProjectRepository {
             RecordRelationshipKind::GeneratedBy => "generated-by",
             RecordRelationshipKind::Initiative => "initiative",
         };
+        if kind == RecordRelationshipKind::DependsOn
+            && stacks::load(&transaction, child_id)?
+                .is_some_and(|s| s.predecessor == Some(parent_id))
+        {
+            return Err(RegistrationError::new(
+                "stack-blocked",
+                "a Stack Predecessor dependency cannot be removed independently",
+            ));
+        }
         let deleted = transaction
             .execute(
                 "DELETE FROM record_relationships WHERE from_id = ?1 AND to_id = ?2 AND kind = ?3",
@@ -2271,6 +2311,16 @@ impl AgentDispatchRepository for SqliteProjectRepository {
         Ok(profile)
     }
 
+    fn validate_task_execution_plan(&self, record: u64) -> Result<(), RegistrationError> {
+        let mut c = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "storage lock poisoned"))?;
+        let tx = c.transaction().map_err(storage_error)?;
+        self.ensure_record_workspace(&tx, record)?;
+        spec_plans::execution_plan(&tx, record)
+    }
+
     fn validate_task_check_preparation(&self, record: u64) -> Result<(), RegistrationError> {
         self.validate_check_preparation(record)
     }
@@ -2331,8 +2381,11 @@ impl AgentDispatchRepository for SqliteProjectRepository {
             .connection
             .lock()
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
-        let transaction = connection.transaction().map_err(storage_error)?;
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
         let record = load_record(&transaction, assignment.record_id)?;
+        spec_plans::authorize(&transaction, assignment.record_id, None)?;
         if !matches!(
             record.record_type,
             RecordType::Spec | RecordType::Task | RecordType::Grilling
@@ -2398,6 +2451,7 @@ impl AgentDispatchRepository for SqliteProjectRepository {
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(storage_error)?;
         let record = load_record(&transaction, record_id)?;
+        spec_plans::authorize(&transaction, record_id, None)?;
         if !matches!(record.record_type, RecordType::Task | RecordType::Grilling) {
             return Err(RegistrationError::new(
                 "unsupported-record-type",
@@ -2638,8 +2692,25 @@ impl AgentDispatchRepository for SqliteProjectRepository {
             if used >= limit {
                 return Ok(None);
             }
-            let record_id = connection.query_row("SELECT record.id FROM records record JOIN record_projects scope ON scope.record_id = record.id WHERE record.record_type = 'task' AND record.status = 'open' AND scope.project_slug = ?1 AND (SELECT COUNT(*) FROM record_projects only_scope WHERE only_scope.record_id = record.id) = 1 AND NOT EXISTS (SELECT 1 FROM dispatch_holds hold WHERE hold.record_id = record.id) AND NOT EXISTS (SELECT 1 FROM agent_assignments assignment WHERE assignment.record_id = record.id AND (assignment.closed_at_millis IS NULL OR EXISTS (SELECT 1 FROM agent_assignment_resources resource WHERE resource.assignment_id = assignment.id AND resource.retired_at_millis IS NULL))) AND NOT EXISTS (SELECT 1 FROM record_relationships dependency JOIN records prerequisite ON prerequisite.id = dependency.to_id WHERE dependency.from_id = record.id AND dependency.kind = 'depends-on' AND prerequisite.status != 'done') ORDER BY record.id LIMIT 1", [project_slug], |row| row.get::<_, i64>(0).map(i64::cast_unsigned)).optional().map_err(storage_error)?;
-            let Some(record_id) = record_id else {
+            let candidates = connection.prepare("SELECT record.id FROM records record JOIN record_projects scope ON scope.record_id = record.id WHERE record.record_type = 'task' AND record.status = 'open' AND scope.project_slug = ?1 AND (SELECT COUNT(*) FROM record_projects only_scope WHERE only_scope.record_id = record.id) = 1 AND NOT EXISTS (SELECT 1 FROM dispatch_holds hold WHERE hold.record_id = record.id) AND NOT EXISTS (SELECT 1 FROM agent_assignments assignment WHERE assignment.record_id = record.id AND (assignment.closed_at_millis IS NULL OR EXISTS (SELECT 1 FROM agent_assignment_resources resource WHERE resource.assignment_id = assignment.id AND resource.retired_at_millis IS NULL))) AND NOT EXISTS (SELECT 1 FROM record_relationships dependency JOIN records prerequisite ON prerequisite.id = dependency.to_id WHERE dependency.from_id = record.id AND dependency.kind = 'depends-on' AND prerequisite.status != 'done') ORDER BY record.id").map_err(storage_error)?
+                .query_map([project_slug], |row| row.get::<_, i64>(0).map(i64::cast_unsigned)).map_err(storage_error)?
+                .collect::<Result<Vec<_>, _>>().map_err(storage_error)?;
+            let mut eligible = None;
+            for candidate in candidates {
+                match spec_plans::authorize(&connection, candidate, None) {
+                    Ok(()) => {
+                        eligible = Some(candidate);
+                        break;
+                    }
+                    Err(error)
+                        if matches!(
+                            error.code,
+                            "spec-execution-blocked" | "invalid-spec-plan" | "stack-blocked"
+                        ) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            let Some(record_id) = eligible else {
                 return Ok(None);
             };
             if let Some(selection) = selection {
@@ -2792,13 +2863,18 @@ impl AgentDispatchRepository for SqliteProjectRepository {
         assignment_id: &str,
         now_millis: u64,
     ) -> Result<bool, RegistrationError> {
-        let connection = self
+        let mut connection = self
             .connection
             .lock()
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        let connection = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        spec_plans::assignment_execution(&connection, assignment_id)?;
         let now = i64::try_from(now_millis)
             .map_err(|_| RegistrationError::new("invalid-time", "launch time is out of range"))?;
         let changed = connection.execute("UPDATE agent_assignments SET launch_started_at_millis = ?2, acknowledgement_deadline_millis = ?2 + (SELECT acknowledgement_timeout_millis FROM agent_profiles WHERE record_type = profile_record_type AND revision = profile_revision) WHERE id = ?1 AND closed_at_millis IS NULL AND state = 'provisioning' AND launch_started_at_millis IS NULL AND ?2 <= 9223372036854775807 - (SELECT acknowledgement_timeout_millis FROM agent_profiles WHERE record_type = profile_record_type AND revision = profile_revision)", params![assignment_id, now]).map_err(storage_error)?;
+        connection.commit().map_err(storage_error)?;
         Ok(changed == 1)
     }
 
@@ -2856,14 +2932,19 @@ impl AgentDispatchRepository for SqliteProjectRepository {
     }
 
     fn begin_agent_provision(&self, assignment_id: &str) -> Result<bool, RegistrationError> {
-        let connection = self
+        let mut connection = self
             .connection
             .lock()
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
+        let connection = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        spec_plans::assignment_execution(&connection, assignment_id)?;
         let changed = connection.execute(
             "INSERT OR IGNORE INTO agent_assignment_resources (assignment_id, resource_kind, resource_id, created_at_millis) SELECT id, 'provision-intent', 'once', ?2 FROM agent_assignments WHERE id = ?1 AND closed_at_millis IS NULL",
             params![assignment_id, now_millis()?],
         ).map_err(storage_error)?;
+        connection.commit().map_err(storage_error)?;
         Ok(changed == 1)
     }
 
@@ -3431,6 +3512,7 @@ fn insert_relationship(
             transaction.execute("INSERT INTO record_relationships (from_id, to_id, parent_id, child_id, kind) VALUES (?1, ?2, ?2, ?1, 'parent-child')", params![child.id.cast_signed(), parent.id.cast_signed()]).map_err(|error| if matches!(error.sqlite_error_code(), Some(ErrorCode::ConstraintViolation)) { RegistrationError::new("child-already-related", "a child Record can have only one parent") } else { storage_error(error) })?;
         }
         RecordRelationshipKind::DependsOn => {
+            spec_plans::editable_task(transaction, child.id)?;
             if child.status == RecordStatus::Done {
                 return Err(RegistrationError::new(
                     "blocked-record-not-open",
@@ -3893,10 +3975,10 @@ fn load_record(connection: &Connection, id: u64) -> Result<Record, RegistrationE
         })
         .map_err(storage_error)?
         .map(|row| match row.map_err(storage_error)? {
-            (from_id, to_id, Some(parent_id), Some(child_id), kind) if kind == "parent-child" => Ok(RecordRelationship { kind: RecordRelationshipKind::ParentChild, from_id, to_id, parent_id, child_id }),
-            (from_id, to_id, None, None, kind) if kind == "depends-on" => Ok(RecordRelationship { kind: RecordRelationshipKind::DependsOn, from_id, to_id, parent_id: 0, child_id: 0 }),
-            (from_id, to_id, None, None, kind) if kind == "generated-by" => Ok(RecordRelationship { kind: RecordRelationshipKind::GeneratedBy, from_id, to_id, parent_id: 0, child_id: 0 }),
-            (from_id, to_id, None, None, kind) if kind == "initiative" => Ok(RecordRelationship { kind: RecordRelationshipKind::Initiative, from_id, to_id, parent_id: 0, child_id: 0 }),
+            (from_id, to_id, Some(parent_id), Some(child_id), kind) if kind == "parent-child" => Ok(RecordRelationship { ordering_only: false, kind: RecordRelationshipKind::ParentChild, from_id, to_id, parent_id, child_id }),
+            (from_id, to_id, None, None, kind) if kind == "depends-on" => Ok(RecordRelationship { ordering_only: ordering_dependencies::designated(connection, from_id, to_id)?, kind: RecordRelationshipKind::DependsOn, from_id, to_id, parent_id: 0, child_id: 0 }),
+            (from_id, to_id, None, None, kind) if kind == "generated-by" => Ok(RecordRelationship { ordering_only: false, kind: RecordRelationshipKind::GeneratedBy, from_id, to_id, parent_id: 0, child_id: 0 }),
+            (from_id, to_id, None, None, kind) if kind == "initiative" => Ok(RecordRelationship { ordering_only: false, kind: RecordRelationshipKind::Initiative, from_id, to_id, parent_id: 0, child_id: 0 }),
             _ => Err(RegistrationError::new("storage", "stored Record has an invalid Relationship kind")),
         })
         .collect::<Result<Vec<_>, RegistrationError>>()?;
@@ -4009,6 +4091,9 @@ fn storage_error(error: rusqlite::Error) -> RegistrationError {
 
 #[cfg(test)]
 mod tests {
+    mod stack_tests {
+        include!("stack_tests.rs");
+    }
     mod finding_tests {
         include!("finding_tests.rs");
     }
@@ -5165,6 +5250,85 @@ mod tests {
             store.dispatch_hold(grilling.id).unwrap().unwrap().reason,
             "waiting for operator"
         );
+    }
+
+    #[test]
+    fn task_inspection_distinguishes_absence_provisioning_working_closed_and_uncertainty() {
+        use forge_app::{AgentAssignmentState, task_inspection::TaskActivityState as State};
+        let store = SqliteProjectRepository::in_memory().unwrap();
+        store.register(&project("alpha", "/repos/alpha")).unwrap();
+        let task = store
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Task,
+                body: "Inspect".into(),
+                project_slugs: vec!["alpha".into()],
+                generated_by_ids: vec![],
+            })
+            .unwrap();
+        assert_eq!(store.task_activity(task.id).unwrap().state(), State::Absent);
+        assert!(store.task_activity(u64::MAX).is_err());
+        store
+            .create_agent_assignment(&NewAgentAssignment {
+                id: "inspect".into(),
+                record_id: task.id,
+                project_slug: "alpha".into(),
+                profile_revision: 1,
+            })
+            .unwrap();
+        let provisioning = store.task_activity(task.id).unwrap();
+        assert_eq!(provisioning.state(), State::Provisioning);
+        assert_eq!(
+            provisioning.assignment.unwrap().acknowledged_at_millis,
+            None
+        );
+        // No acknowledgement is not evidence that the worker is absent.
+        store
+            .compare_and_set_agent_assignment_state(
+                "inspect",
+                AgentAssignmentState::Provisioning,
+                AgentAssignmentState::Working,
+            )
+            .unwrap();
+        assert_eq!(
+            store.task_activity(task.id).unwrap().state(),
+            State::Working
+        );
+        store
+            .add_agent_assignment_resource(&NewAgentAssignmentResource {
+                assignment_id: "inspect".into(),
+                resource_kind: "provision-intent".into(),
+                resource_id: "sensitive-provider-resource".into(),
+            })
+            .unwrap();
+        store
+            .hold_dispatch(task.id, "operator intervention required")
+            .unwrap();
+        store
+            .close_agent_assignment("inspect", forge_app::AgentAssignmentClosureReason::Retired)
+            .unwrap();
+        let before = store.agent_assignment_info("inspect").unwrap();
+        let retained = store.task_activity(task.id).unwrap();
+        assert_eq!(retained.state(), State::RetainedResources);
+        assert_eq!(retained.retained_resources, 1);
+        assert_eq!(
+            retained.dispatch_hold.as_deref(),
+            Some("operator intervention required")
+        );
+        assert_eq!(store.agent_assignment_info("inspect").unwrap(), before);
+        store
+            .retire_agent_assignment_resource(
+                "inspect",
+                "provision-intent",
+                "sensitive-provider-resource",
+            )
+            .unwrap();
+        let closed = store.task_activity(task.id).unwrap();
+        assert_eq!(closed.state(), State::Closed);
+        assert_eq!(
+            closed.assignment.unwrap().state,
+            AgentAssignmentState::Working
+        );
+        assert!(closed.dispatch_hold.is_some());
     }
 
     #[test]
@@ -6671,6 +6835,7 @@ mod tests {
         let sibling = store
             .open_task_under_spec("sibling", spec.id, vec![])
             .unwrap();
+        store.start_record(spec.id).unwrap();
         store
             .create_agent_assignment(&NewAgentAssignment {
                 id: "attempt".into(),
@@ -6729,6 +6894,7 @@ mod tests {
             .open_task_under_spec("sibling", spec.id, vec![])
             .unwrap();
         check_tests::manual(&store, task.id);
+        store.start_record(spec.id).unwrap();
         store.start_record(task.id).unwrap();
         check_tests::assess(&store, task.id, forge_app::checks::Verdict::Pass);
         store

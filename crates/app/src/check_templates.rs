@@ -31,6 +31,33 @@ pub struct TemplatePage {
     pub criteria: Vec<CheckCriterion>,
     pub history: Vec<TemplateChange>,
     pub next_cursor: Option<u64>,
+    /// Absent on older servers; absence is not a successful planning preflight.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stack_preflight: Option<StackTemplatePreflight>,
+}
+/// Read-only compatibility observation for future default Dispatched Stack Tasks.
+/// This does not certify hosting/provider readiness or reserve the template version.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct StackTemplatePreflight {
+    pub blockers: Vec<String>,
+}
+
+/// Check the criteria shape required by sequential cumulative planning.
+#[must_use]
+pub fn stack_template_blockers(criteria: &[CheckCriterion]) -> Vec<String> {
+    let mut blockers = Vec::new();
+    if criteria.first().is_none_or(|c| c.name != "Implementation") {
+        blockers.push("first Check must be Implementation".into());
+    }
+    if criteria.last().is_none_or(|c| c.name != "Publication") {
+        blockers.push("final Check must be Publication".into());
+    }
+    for criterion in criteria {
+        if criterion.profile_revision.is_none() {
+            blockers.push(format!("{} requires a pinned Task profile", criterion.name));
+        }
+    }
+    blockers
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TemplateReplacement {

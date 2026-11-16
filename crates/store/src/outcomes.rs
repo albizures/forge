@@ -305,6 +305,11 @@ impl SqliteProjectRepository {
             ));
         }
         mutable(&tx, record)?;
+        super::spec_plans::authorize(&tx, record, Some(&input.evidence))?;
+        let unfinished = super::unfinished_prerequisite_ids(&tx, record)?;
+        if !unfinished.is_empty() {
+            return Err(super::dependencies_not_done_error(&unfinished));
+        }
         let work = state(&tx, record)?;
         generation(work.generation, input.generation)?;
         ordered(&tx, record, input.check_id)?;
@@ -529,6 +534,18 @@ impl SqliteProjectRepository {
             tx.execute("UPDATE record_attempts SET closed = 1, outcome_json = ?2, result_json = ?3 WHERE id = ?1", params![input.attempt_id, serde_json::to_string(input).map_err(json_error)?, serde_json::to_string(&result).map_err(json_error)?]).map_err(storage_error)?;
             tx.commit().map_err(storage_error)?;
             return Ok(result);
+        }
+        if input.verdict == Verdict::Pass {
+            let last: i64 = tx
+                .query_row(
+                    "SELECT MAX(position) FROM record_checks WHERE record_id = ?1",
+                    [record.cast_signed()],
+                    |r| r.get(0),
+                )
+                .map_err(storage_error)?;
+            if check.position == last.cast_unsigned() {
+                super::stacks::publication_gate(&tx, record, &input.evidence, work.generation)?;
+            }
         }
         let revision = match &input.evidence {
             Evidence::Repository { commit, .. } => Some(commit.as_str()),
