@@ -47,9 +47,10 @@ Cycles (including mixed prerequisite kinds), forks and multiple code inputs are
 rejected. The predecessor may already be running or Done. Successors inherit the
 root's repository and remote rather than choosing competing starting inputs.
 
-`stack after`, ordinary dependencies, and historical Stack links remain transitional
-compatibility paths during implementation; new plans should use canonical Relationships.
-Historical intent is not automatically converted.
+Legacy `task stack after`, `depends-on` and `ordering-only-depends-on` declarations
+are rejected with replacement guidance. Use `builds-on` for repository inheritance
+and `waits-for` for completion only. Historical intent is converted only through the
+explicit validated [Revision State upgrade](state-upgrades.md), never by ordinary opening.
 
 Changes to a destination or predecessor are permitted only while every affected
 Task is Open and unprepared. Preparation pins the Base Commit even if subsequent
@@ -179,9 +180,12 @@ block preparation or publication; Forge does not rebase, force-push, merge, reta
 or continuously monitor already-completed stacks. Operators investigate and restore
 the required verified state before retrying; uncertain state is not accepted as success.
 
-Storage revision 8 adds stack persistence; revision 10 adds unchanged-result
-persistence. Ordinary opening rejects incompatible marked stores without conversion
-or marker rewrites. The explicit [Revision State upgrade](state-upgrades.md) workflow
-can copy schemas 7, 8, or 9 into a new revision and migrate to 10, preserving
-existing Tasks, PR evidence and Check pins without inventing unchanged results. Do not
-point this revision at a live older store expecting automatic conversion. No CLI invocation in this document installs or activates a revision.
+Storage revision 13 requires canonical prerequisite intent. Ordinary opening rejects
+incompatible marked stores before writes, without conversion or marker rewrites.
+The explicit [Revision State upgrade](state-upgrades.md) workflow supports schemas
+7–13, preserving Tasks, history, PR evidence and immutable Check/commit pins.
+Ambiguous same-Spec legacy dependencies require explicit operator resolution;
+failed conversion leaves source state untouched and no partial target active.
+Conversion creates no branches or execution evidence. Local tests do not establish
+release or operator recovery readiness. No CLI invocation in this document installs
+or activates a revision.

@@ -60,6 +60,7 @@ pub enum RecordStatus {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RecordRelationshipKind {
     ParentChild,
+    /// Historical audit/storage representation, rejected by public declarations.
     DependsOn,
     /// Completion-only prerequisite; stored using the supported explicit-intent representation.
     WaitsFor,
@@ -71,7 +72,7 @@ pub enum RecordRelationshipKind {
 }
 
 /// Prerequisite policy shared by readiness and inheritance validation.
-/// Legacy dependencies remain distinct until explicit historical conversion.
+/// Historical dependencies remain distinct for explicit offline conversion.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PrerequisiteKind {
     WaitsFor,
@@ -97,10 +98,10 @@ pub struct RecordRelationship {
     pub kind: RecordRelationshipKind,
     /// Explicit non-inheritance intent, valid only for a dependency.
     pub ordering_only: bool,
-    /// The directional source. For `DependsOn`, this is the blocked Record; for
+    /// The directional source. For prerequisites, this is the blocked Record; for
     /// `GeneratedBy`, this is the generated Record.
     pub from_id: u64,
-    /// The directional target. For `DependsOn`, this is the prerequisite Record;
+    /// The directional target. For prerequisites, this is the prerequisite Record;
     /// for `GeneratedBy`, this is the generator Record.
     pub to_id: u64,
     /// Hierarchy compatibility field, populated only for `ParentChild`.
@@ -1100,21 +1101,6 @@ pub trait RecordRepository: ProjectRepository {
         to_id: u64,
         kind: RecordRelationshipKind,
     ) -> Result<Record, RegistrationError>;
-    /// Creates a dependency explicitly requiring ordering without code inheritance.
-    ///
-    /// # Errors
-    /// Returns an error if the repository does not support this designation.
-    fn relate_ordering_only_records(
-        &self,
-        _from_id: u64,
-        _to_id: u64,
-    ) -> Result<Record, RegistrationError> {
-        Err(RegistrationError::new(
-            "unsupported-relationship-intent",
-            "repository does not support ordering-only dependencies",
-        ))
-    }
-
     /// Removes a typed directional Relationship from `from_id` to `to_id`.
     ///
     /// # Errors
@@ -3862,19 +3848,8 @@ impl Application {
         to_id: u64,
         kind: RecordRelationshipKind,
     ) -> Result<Record, RegistrationError> {
+        reject_legacy_prerequisite_declaration(kind)?;
         self.records.relate_records(from_id, to_id, kind)
-    }
-
-    /// Creates an explicitly ordering-only dependency.
-    ///
-    /// # Errors
-    /// Returns a user-facing error for invalid dependency changes.
-    pub fn relate_ordering_only_records(
-        &self,
-        from_id: u64,
-        to_id: u64,
-    ) -> Result<Record, RegistrationError> {
-        self.records.relate_ordering_only_records(from_id, to_id)
     }
 
     /// Removes a typed directional Relationship.
@@ -3888,6 +3863,7 @@ impl Application {
         to_id: u64,
         kind: RecordRelationshipKind,
     ) -> Result<Record, RegistrationError> {
+        reject_legacy_prerequisite_declaration(kind)?;
         self.records.unrelate_records(from_id, to_id, kind)
     }
 
@@ -4024,6 +4000,18 @@ pub struct ApplicationStatus {
     pub name: &'static str,
     pub version: &'static str,
     pub ready: bool,
+}
+
+fn reject_legacy_prerequisite_declaration(
+    kind: RecordRelationshipKind,
+) -> Result<(), RegistrationError> {
+    if kind == RecordRelationshipKind::DependsOn {
+        return Err(RegistrationError::new(
+            "unsupported-relationship-kind",
+            "Legacy prerequisite declaration rejected; use waits-for for completion only or builds-on for completion and verified repository inheritance",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -4391,8 +4379,7 @@ mod tests {
                 .relationships
                 .iter()
                 .filter(|relationship| {
-                    relationship.kind == RecordRelationshipKind::DependsOn
-                        && relationship.from_id == id
+                    relationship.prerequisite_kind().is_some() && relationship.from_id == id
                 })
                 .filter_map(|relationship| {
                     records
@@ -4490,7 +4477,7 @@ mod tests {
                 .ok_or_else(|| {
                     RegistrationError::new("record-not-found", "Record does not exist")
                 })?;
-            if kind == RecordRelationshipKind::DependsOn {
+            if kind.prerequisite_kind().is_some() {
                 if records[child].status != RecordStatus::Open {
                     return Err(RegistrationError::new(
                         "blocked-record-not-open",
@@ -4505,7 +4492,7 @@ mod tests {
                 {
                     return Err(RegistrationError::new(
                         "invalid-relationship",
-                        "depends-on requires same-type Task or Spec Records",
+                        "prerequisites require same-type Task or Spec Records",
                     ));
                 }
                 let relationship = RecordRelationship {
@@ -5033,6 +5020,31 @@ mod tests {
     }
 
     #[test]
+    fn public_application_rejects_legacy_prerequisite_declarations_without_mutation() {
+        let app = application();
+        let blocked = app.open_task("blocked", None).unwrap();
+        let prerequisite = app.open_task("prerequisite", None).unwrap();
+        for result in [
+            app.relate_records(
+                blocked.id,
+                prerequisite.id,
+                RecordRelationshipKind::DependsOn,
+            ),
+            app.unrelate_records(
+                blocked.id,
+                prerequisite.id,
+                RecordRelationshipKind::DependsOn,
+            ),
+        ] {
+            let error = result.unwrap_err();
+            assert_eq!(error.code, "unsupported-relationship-kind");
+            assert!(error.message.contains("waits-for") && error.message.contains("builds-on"));
+        }
+        assert_eq!(app.show_record(blocked.id).unwrap(), blocked);
+        assert_eq!(app.show_record(prerequisite.id).unwrap(), prerequisite);
+    }
+
+    #[test]
     fn application_rejects_starts_with_unfinished_direct_prerequisites() {
         let app = application();
         let blocked = app.open_task("blocked", None).unwrap();
@@ -5040,7 +5052,7 @@ mod tests {
         app.relate_records(
             blocked.id,
             prerequisite.id,
-            RecordRelationshipKind::DependsOn,
+            RecordRelationshipKind::WaitsFor,
         )
         .unwrap();
 

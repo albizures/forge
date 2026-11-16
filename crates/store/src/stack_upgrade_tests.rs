@@ -10,8 +10,8 @@ fn legacy_completed_and_prepared_chain_round_trips_without_inventing_evidence() 
     let review = task(&store);
     let successor = task(&store);
     store.configure_task_stack(first, &root()).unwrap();
-    store.configure_task_stack(review, &StackSource::Predecessor {record_id:first}).unwrap();
-    store.configure_task_stack(successor, &StackSource::Predecessor {record_id:review}).unwrap();
+    store.relate_records(review, first, RecordRelationshipKind::BuildsOn).unwrap();
+    store.relate_records(successor, review, RecordRelationshipKind::BuildsOn).unwrap();
     pin(&store,first,&"1".repeat(40));
     complete(&store,first,&"a".repeat(40));
     pin(&store,review,&"a".repeat(40));
@@ -39,6 +39,11 @@ fn legacy_completed_and_prepared_chain_round_trips_without_inventing_evidence() 
     let copy = directory.join("staging.db");
     store.connection.lock().unwrap().backup(rusqlite::MAIN_DB,&source,None).unwrap();
     let c = rusqlite::Connection::open(&source).unwrap();
+    // Encode the historical predecessor representation explicitly; production no
+    // longer offers that declaration path.
+    for (id, predecessor) in [(review, first), (successor, review)] {
+        c.execute("UPDATE task_stacks SET predecessor=?2, source_json=?3 WHERE record_id=?1", params![id.cast_signed(), predecessor.cast_signed(), serde_json::to_string(&StackSource::Predecessor { record_id: predecessor }).unwrap()]).unwrap();
+    }
     c.execute_batch("DROP TABLE builds_on_dependencies; PRAGMA user_version=11;").unwrap();
     drop(c);
     let bytes = fs::read(&source).unwrap();

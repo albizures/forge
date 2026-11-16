@@ -161,7 +161,7 @@ A Record type that defines planned work for exactly one Project and may parent T
 _Avoid_: specification, issue
 
 **Task**:
-A leaf Record type that represents a unit of work with exactly one Project when opened under a Project-scoped Wayfinder, selected from that Wayfinder's Project Scope; a Projectless Wayfinder's Task remains Projectless. It may also be opened under one Spec, from which it receives its Project Scope, or opened without a parent. Its membership and scope are immutable after opening. A Task may explicitly join a Stack, which adds verified repository-result inheritance and publication or unchanged-result verification to its completion requirements. Stack membership does not depend on whether the Task edits code.
+A leaf Record type that represents a unit of work with exactly one Project when opened under a Project-scoped Wayfinder, selected from that Wayfinder's Project Scope; a Projectless Wayfinder's Task remains Projectless. It may also be opened under one Spec, from which it receives its Project Scope, or opened without a parent. Its membership and scope are immutable after opening. A Builds-On Relationship places a Task in a derived Stack, which adds verified repository-result inheritance and publication or unchanged-result verification to its completion requirements. Stack membership does not depend on whether the Task edits code.
 _Avoid_: subtask, to-do
 
 **Check Template**:
@@ -288,7 +288,7 @@ The required, non-blank free-text, usually Markdown, content describing the work
 _Avoid_: description
 
 **Record Relationship**:
-A typed association between two Records. Parent/child and dependency are Relationship kinds; their permitted changes and participant types are constrained by Record Type.
+A typed association between two Records. Parent/child, Waits-For and Builds-On are Relationship kinds; their permitted changes and participant types are constrained by Record Type.
 _Avoid_: link
 
 **Dependency Relationship**:

@@ -1523,14 +1523,6 @@ impl RecordRepository for SqliteProjectRepository {
         self.relate_with_intent(child_id, parent_id, stored_kind, ordering_only)
     }
 
-    fn relate_ordering_only_records(
-        &self,
-        from_id: u64,
-        to_id: u64,
-    ) -> Result<Record, RegistrationError> {
-        self.relate_with_intent(from_id, to_id, RecordRelationshipKind::DependsOn, true)
-    }
-
     fn unrelate_records(
         &self,
         child_id: u64,

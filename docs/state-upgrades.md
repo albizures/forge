@@ -10,11 +10,18 @@ The 7 → 8 step adds an empty `task_stacks` table; the 8 → 9 step adds an emp
 `ordering_only_dependencies` table; the 9 → 10 step adds an empty
 `task_unchanged_results` table; the 10 → 11 step adds an empty
 `forced_completions` table; 11 → 12 adds `builds_on_dependencies`.
-The semantic 12 → 13 step converts legacy Stack predecessors to Builds-On and
-unambiguous remaining prerequisites to Waits-For. It preserves direct indirect-
-ancestor completion constraints rather than dropping them. Existing explicit
-ordering-only designations remain Waits-For. Same-Spec ordinary Task dependencies
-without ancestry are unresolved intent, not inferred waiting or code consumption.
+The semantic 12 → 13 step applies these explicit rules:
+
+- Legacy Stack predecessor links become `builds-on`, absorbing their associated
+  dependency rather than creating two kinds on the same pair.
+- Explicit ordering-only dependencies become `waits-for`.
+- Ordinary dependencies on indirect Stack ancestors become `waits-for`, retaining
+  the direct completion constraint as well as the chain's transitive inheritance.
+- Same-Spec ordinary Task dependencies without required ancestry are unresolved
+  intent, not inferred waiting or code consumption.
+- Other permitted ordinary prerequisites become `waits-for`, including standalone,
+  cross-Project, Projectless, Spec and eligible Task-to-Grilling cases.
+
 Upgrades invent no execution evidence, unchanged results, forced completions,
 branches, or Check pins. Existing publication evidence and commit pins are preserved. Earlier, newer,
 foreign, corrupt, and structurally inconsistent stores are rejected. A same-schema

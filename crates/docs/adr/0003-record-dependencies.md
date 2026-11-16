@@ -1,3 +1,5 @@
 # Record dependencies gate starting, not dispatch
 
+The historical declaration vocabulary below is superseded by [ADR 0011](0011-derive-stacks-from-builds-on-relationships.md). Its prerequisite-completion and non-activation gates remain effective for both canonical kinds.
+
 Forge represents a dependency as a directed `depends-on` Record Relationship from a blocked Task or Spec to a same-type prerequisite; a blocked Record may enter In Progress only when each direct prerequisite is Done. Dependencies may cross Project Scopes, are many-to-many and acyclic, and may change only while their blocked endpoint is Open. Completion makes dependents eligible but does not start or allocate them: ordinary dispatch reconciliation decides that. The relationship uses endpoint-neutral `from_id`/`to_id` fields while retaining the established child/parent fields for `child-of` compatibility.

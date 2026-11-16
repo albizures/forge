@@ -1,4 +1,4 @@
-//! Explicit stack membership and verified publication commands.
+//! Root execution configuration, derived Stack inspection and verified publication.
 use clap::{Args, Subcommand};
 use forge_rpc::{StackDestination, StackSource, TaskStackAction, TaskStackRequest};
 
@@ -15,7 +15,7 @@ pub struct StackArgs {
 enum StackCommand {
     /// Show inherited destination, predecessor, pinned base and publication evidence.
     Show { id: u64 },
-    /// Start a stack against any branch in the selected GitHub repository.
+    /// Configure root execution inputs against any branch in the selected GitHub repository.
     Root {
         id: u64,
         #[arg(long)]
@@ -25,8 +25,10 @@ enum StackCommand {
         #[arg(long)]
         base: String,
     },
-    /// Stack an unprepared Task on another explicitly stacked Task.
+    /// Rejected legacy declaration; use record relate --kind builds-on.
+    #[command(hide = true)]
     After {
+        #[arg(value_parser = reject_legacy_after)]
         id: u64,
         #[arg(long)]
         predecessor: u64,
@@ -43,9 +45,12 @@ enum StackCommand {
     },
 }
 
+fn reject_legacy_after(_: &str) -> Result<u64, String> {
+    Err("task stack after is no longer supported; use forge record relate <task> --kind builds-on --to <predecessor>".into())
+}
+
 pub async fn run(args: StackArgs, workspace: Option<String>) -> i32 {
     let result = async {
-        let endpoint = super::resolve_managed_endpoint(args.server_url.as_deref()).await?;
         let (record_id, action) = match args.command {
             StackCommand::Show { id } => (id, TaskStackAction::Show),
             StackCommand::Root {
@@ -65,18 +70,14 @@ pub async fn run(args: StackArgs, workspace: Option<String>) -> i32 {
                     },
                 },
             ),
-            StackCommand::After { id, predecessor } => (
-                id,
-                TaskStackAction::Configure {
-                    source: StackSource::Predecessor {
-                        record_id: predecessor,
-                    },
-                },
-            ),
+            StackCommand::After { id, predecessor } => return Err(format!(
+                "task stack after is no longer supported; use forge record relate {id} --kind builds-on --to {predecessor}"
+            )),
             StackCommand::Prepare { id } => (id, TaskStackAction::Prepare),
             StackCommand::PublishUnchanged { id } => (id, TaskStackAction::PublishUnchanged),
             StackCommand::Publish { id, url } => (id, TaskStackAction::Publish { url }),
         };
+        let endpoint = super::resolve_managed_endpoint(args.server_url.as_deref()).await?;
         forge_cli::request_task_stack(
             (endpoint.as_str(), workspace.as_deref()),
             TaskStackRequest { record_id, action },

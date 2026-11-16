@@ -30,8 +30,8 @@ fn changed_unchanged_changed_retains_immediate_identity_and_earlier_publication_
     let review = task(&store);
     let last = task(&store);
     store.configure_task_stack(first, &root()).unwrap();
-    store.configure_task_stack(review, &StackSource::Predecessor { record_id: first }).unwrap();
-    store.configure_task_stack(last, &StackSource::Predecessor { record_id: review }).unwrap();
+    store.relate_records(review, first, RecordRelationshipKind::BuildsOn).unwrap();
+    store.relate_records(last, review, RecordRelationshipKind::BuildsOn).unwrap();
     pin(&store, first, &"1".repeat(40));
     complete(&store, first, &"a".repeat(40));
     published(&hosting, &store, first);
@@ -66,8 +66,11 @@ fn unchanged_root_and_consecutive_unchanged_results_preserve_selected_branch_and
     let mut previous = None;
     for _ in 0..3 {
         let id = task(&store);
-        let source = previous.map_or_else(root, |record_id| StackSource::Predecessor { record_id });
-        app.configure_task_stack(id, &source).unwrap();
+        if let Some(predecessor) = previous {
+            store.relate_records(id, predecessor, RecordRelationshipKind::BuildsOn).unwrap();
+        } else {
+            app.configure_task_stack(id, &root()).unwrap();
+        }
         let prepared = app.prepare_task_stack(id).unwrap().unwrap();
         assert_eq!(prepared.base_branch, "feature/payments");
         assert_eq!(prepared.base_commit, Some("a".repeat(40)));
@@ -93,8 +96,8 @@ fn retained_publication_drift_and_stale_unchanged_evidence_block_without_repinni
     let review = task(&store);
     let last = task(&store);
     store.configure_task_stack(first, &root()).unwrap();
-    store.configure_task_stack(review, &StackSource::Predecessor { record_id: first }).unwrap();
-    store.configure_task_stack(last, &StackSource::Predecessor { record_id: review }).unwrap();
+    store.relate_records(review, first, RecordRelationshipKind::BuildsOn).unwrap();
+    store.relate_records(last, review, RecordRelationshipKind::BuildsOn).unwrap();
     pin(&store, first, &"1".repeat(40));
     complete(&store, first, &"a".repeat(40));
     published(&hosting, &store, first);

@@ -101,16 +101,15 @@ fn preflight_then_cumulative_plan_readback_and_start_uses_returned_ids() {
             repository: "acme/widgets".into(), remote: "origin".into(), branch: "feature/input".into(),
         },
     };
-    repository.configure_task_stack(first.id, &root).unwrap();
     // An unrelated Record makes arithmetic predecessor selection observably wrong.
     repository.open_record(&NewRecord { body: "Interleaving writer".into(), project_slugs: vec![], generated_by_ids: vec![] }).unwrap();
     let review = repository.open_task_under_spec("Review without edits", parent.id, vec![]).unwrap();
     assert!(review.id > first.id + 1);
-    repository.relate_records(review.id, first.id, RecordRelationshipKind::DependsOn).unwrap();
-    // Missing Stack configuration is a partial plan, not an ordering-only exception.
-    assert_eq!(repository.start_record(parent.id).unwrap_err().code, "invalid-spec-plan");
+    repository.relate_records(review.id, first.id, RecordRelationshipKind::BuildsOn).unwrap();
+    // Missing root configuration is a partial plan, not implicit completion-only intent.
+    assert_eq!(repository.start_record(parent.id).unwrap_err().code, "stack-blocked");
     assert_eq!(repository.show_record(parent.id).unwrap().status, RecordStatus::Open);
-    repository.configure_task_stack(review.id, &forge_app::stacks::StackSource::Predecessor { record_id: first.id }).unwrap();
+    repository.configure_task_stack(first.id, &root).unwrap();
     for id in [first.id, review.id] {
         let record = repository.show_record(id).unwrap();
         assert!(record.relationships.iter().any(|r| r.kind == RecordRelationshipKind::ParentChild && r.parent_id == parent.id));

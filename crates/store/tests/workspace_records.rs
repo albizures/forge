@@ -1,6 +1,6 @@
 use forge_app::{
-    NewRecord, NewTypedRecord, Project, ProjectRepository, RecordListFilter, RecordRepository,
-    RecordType, WorkspaceRepository,
+    NewRecord, NewTypedRecord, Project, ProjectRepository, RecordListFilter,
+    RecordRelationshipKind, RecordRepository, RecordType, WorkspaceRepository,
 };
 use forge_store::SqliteProjectRepository;
 use std::{
@@ -119,7 +119,7 @@ fn ordering_only_dependencies_are_scoped_durable_ordered_and_removed_atomically(
         .unwrap();
     assert!(!store.show_record(blocked.id).unwrap().relationships[0].ordering_only);
     store
-        .relate_ordering_only_records(blocked.id, ordering.id)
+        .relate_records(blocked.id, ordering.id, RecordRelationshipKind::WaitsFor)
         .unwrap();
     let before = store.show_record(blocked.id).unwrap();
     assert_eq!(
@@ -139,7 +139,7 @@ fn ordering_only_dependencies_are_scoped_durable_ordered_and_removed_atomically(
     for target in [blocked.id, invalid.id, ordinary.id] {
         assert!(
             store
-                .relate_ordering_only_records(blocked.id, target)
+                .relate_records(blocked.id, target, RecordRelationshipKind::WaitsFor)
                 .is_err()
         );
         assert_eq!(store.show_record(blocked.id).unwrap(), before);
@@ -158,7 +158,7 @@ fn ordering_only_dependencies_are_scoped_durable_ordered_and_removed_atomically(
         .unwrap();
     assert!(
         store
-            .relate_ordering_only_records(blocked.id, other.id)
+            .relate_records(blocked.id, other.id, RecordRelationshipKind::WaitsFor)
             .is_err()
     );
     assert_eq!(store.show_record(blocked.id).unwrap(), before);
@@ -800,7 +800,7 @@ fn readiness_and_planning_remain_local_without_dispatch_configuration() {
         .open_grilling_under_wayfinder("decision", map.id, None, vec![])
         .unwrap();
     let other = two.open_task("other Workspace", None).unwrap();
-    one.relate_records(task.id, decision.id, RecordRelationshipKind::DependsOn)
+    one.relate_records(task.id, decision.id, RecordRelationshipKind::WaitsFor)
         .unwrap();
     assert!(one.ready_records(false, false, false).unwrap().is_empty());
     let blocked = one.ready_records(false, false, true).unwrap();

@@ -83,42 +83,59 @@ fn complete(store: &SqliteProjectRepository, id: u64, commit: &str) {
 }
 
 #[test]
-fn ordering_only_intent_and_stack_predecessors_are_mutually_exclusive() {
+fn legacy_predecessor_configuration_is_rejected_without_writes() {
     let store = fixture();
     let first = task(&store);
     let second = task(&store);
     store.configure_task_stack(first, &root()).unwrap();
-    store.relate_ordering_only_records(second, first).unwrap();
+    let record = store.show_record(second).unwrap();
+    let updates = store.list_record_updates(second).unwrap();
+    let base = store.task_base_commit(second).unwrap();
+    let error = store.configure_task_stack(second, &StackSource::Predecessor { record_id: first }).unwrap_err();
+    assert!(error.message.contains("record relate --kind builds-on"));
+    assert_eq!(store.show_record(second).unwrap(), record);
+    assert_eq!(store.list_record_updates(second).unwrap(), updates);
+    assert_eq!(store.task_base_commit(second).unwrap(), base);
+    assert!(store.task_stack(second).unwrap().is_none());
+}
+
+#[test]
+fn waits_for_and_builds_on_intent_are_mutually_exclusive() {
+    let store = fixture();
+    let first = task(&store);
+    let second = task(&store);
+    store.configure_task_stack(first, &root()).unwrap();
+    store.relate_records(second, first, RecordRelationshipKind::WaitsFor).unwrap();
     let before = store.show_record(second).unwrap();
     let updates = store.list_record_updates(second).unwrap();
-    assert!(store.configure_task_stack(second, &StackSource::Predecessor { record_id: first }).is_err());
+    assert!(store.relate_records(second, first, RecordRelationshipKind::BuildsOn).is_err());
     assert_eq!(store.show_record(second).unwrap(), before);
     assert_eq!(store.list_record_updates(second).unwrap(), updates);
     assert!(store.task_stack(second).unwrap().is_none());
-    store.unrelate_records(second, first, RecordRelationshipKind::DependsOn).unwrap();
-    store.configure_task_stack(second, &StackSource::Predecessor { record_id: first }).unwrap();
+    store.unrelate_records(second, first, RecordRelationshipKind::WaitsFor).unwrap();
+    store.relate_records(second, first, RecordRelationshipKind::BuildsOn).unwrap();
     let before = store.show_record(second).unwrap();
-    assert_eq!(store.relate_ordering_only_records(second, first).unwrap_err().code, "stack-blocked");
+    assert_eq!(store.relate_records(second, first, RecordRelationshipKind::WaitsFor).unwrap_err().code, "stack-blocked");
     assert_eq!(store.show_record(second).unwrap(), before);
     assert!(!before.relationships.iter().any(|r| r.ordering_only));
 }
 
 #[test]
-fn stacks_are_explicit_linear_and_dependencies_cannot_be_removed() {
+fn derived_stacks_are_linear_and_removal_requires_the_declared_kind() {
     let store = fixture();
     let first = task(&store);
     let second = task(&store);
     let third = task(&store);
     store.configure_task_stack(first, &root()).unwrap();
     assert!(store.task_base_commit(first).unwrap().is_none());
-    store.configure_task_stack(second, &StackSource::Predecessor { record_id: first }).unwrap();
+    store.relate_records(second, first, RecordRelationshipKind::BuildsOn).unwrap();
     assert_eq!(store.task_stack(second).unwrap().unwrap().base_branch, task_branch(first));
-    assert!(store.configure_task_stack(third, &StackSource::Predecessor { record_id: first }).is_err());
+    assert!(store.relate_records(third, first, RecordRelationshipKind::BuildsOn).is_err());
     assert!(store.task_stack(third).unwrap().is_none());
-    assert!(store.configure_task_stack(first, &StackSource::Predecessor { record_id: second }).is_err());
+    assert!(store.relate_records(first, second, RecordRelationshipKind::BuildsOn).is_err());
     assert!(store.unrelate_records(second, first, RecordRelationshipKind::DependsOn).is_err());
     assert!(store.start_record(first).is_err());
-    assert!(store.show_record(second).unwrap().relationships.iter().any(|r| r.kind == RecordRelationshipKind::DependsOn && r.to_id == first));
+    assert!(store.show_record(second).unwrap().relationships.iter().any(|r| r.kind == RecordRelationshipKind::BuildsOn && r.to_id == first));
 }
 
 #[test]
@@ -128,7 +145,7 @@ fn successor_pins_completed_predecessor_not_creation_head_or_adjacent_id() {
     let _unrelated = task(&store);
     let second = task(&store);
     store.configure_task_stack(first, &root()).unwrap();
-    store.configure_task_stack(second, &StackSource::Predecessor { record_id: first }).unwrap();
+    store.relate_records(second, first, RecordRelationshipKind::BuildsOn).unwrap();
     assert!(store.pin_task_stack(&store.task_stack(second).unwrap().unwrap(), &"a".repeat(40)).is_err());
     pin(&store, first, &"1".repeat(40));
     complete(&store, first, &"a".repeat(40));
@@ -176,7 +193,7 @@ fn late_link_to_completed_task_is_allowed_but_incompatible_checks_are_rejected()
     pin(&store, first, &"1".repeat(40));
     complete(&store, first, &"a".repeat(40));
     let second = task(&store);
-    store.configure_task_stack(second, &StackSource::Predecessor { record_id: first }).unwrap();
+    store.relate_records(second, first, RecordRelationshipKind::BuildsOn).unwrap();
     pin(&store, second, &"a".repeat(40));
     store.replace_check_template("alpha", &TemplateReplacement { expected_version: 1, actor: "operator".into(), message: "Implementation only".into(), criteria: vec![CheckCriterion { name: "Implementation".into(), description: "Deliver".into(), profile_revision: None }] }).unwrap();
     let incompatible = task(&store);
@@ -265,7 +282,7 @@ fn predecessor_movement_closed_pr_and_missing_branch_block_successor_preparation
     let first = task(&store);
     let second = task(&store);
     store.configure_task_stack(first, &root()).unwrap();
-    store.configure_task_stack(second, &StackSource::Predecessor { record_id: first }).unwrap();
+    store.relate_records(second, first, RecordRelationshipKind::BuildsOn).unwrap();
     pin(&store, first, &"1".repeat(40));
     complete(&store, first, &"a".repeat(40));
     let pr = store.task_stack(first).unwrap().unwrap().publication.unwrap();
@@ -299,13 +316,13 @@ fn concurrent_successors_cannot_fork_a_stack_or_leave_partial_dependencies() {
         std::thread::spawn(move || {
             let handle = SqliteProjectRepository { connection, record_workspace: workspace };
             barrier.wait();
-            (id, handle.configure_task_stack(id, &StackSource::Predecessor { record_id: first }).is_ok())
+            (id, handle.relate_records(id, first, RecordRelationshipKind::BuildsOn).is_ok())
         })
     }).collect::<Vec<_>>().into_iter().map(|t| t.join().unwrap()).collect();
     assert_eq!(results.iter().filter(|(_, success)| *success).count(), 1);
     for (id, success) in results {
         assert_eq!(store.task_stack(id).unwrap().is_some(), success);
-        assert_eq!(store.show_record(id).unwrap().relationships.iter().any(|r| r.kind == RecordRelationshipKind::DependsOn && r.to_id == first), success);
+        assert_eq!(store.show_record(id).unwrap().relationships.iter().any(|r| r.kind == RecordRelationshipKind::BuildsOn && r.to_id == first), success);
     }
 }
 
@@ -315,7 +332,7 @@ fn stack_membership_rejects_other_projects_and_prepared_suffix_changes_atomicall
     let first = task(&store);
     let second = task(&store);
     store.configure_task_stack(first, &root()).unwrap();
-    store.configure_task_stack(second, &StackSource::Predecessor { record_id: first }).unwrap();
+    store.relate_records(second, first, RecordRelationshipKind::BuildsOn).unwrap();
     // Simulate a retained preparation on the suffix to exercise the root mutation gate.
     store.connection.lock().unwrap().execute("UPDATE task_stacks SET base_commit = ?2 WHERE record_id = ?1", params![second.cast_signed(), "a".repeat(40)]).unwrap();
     let before = store.task_stack(first).unwrap();
@@ -325,7 +342,7 @@ fn stack_membership_rejects_other_projects_and_prepared_suffix_changes_atomicall
     store.replace_check_template("other", &TemplateReplacement { expected_version: 0, actor: "operator".into(), message: "Compatible checks".into(), criteria: store.show_check_template("alpha", None, 10).unwrap().criteria }).unwrap();
     let other = store.open_typed_record(&NewTypedRecord { record_type: RecordType::Task, project_slugs: vec!["other".into()], body: "Other work".into(), generated_by_ids: vec![] }).unwrap();
     store.set_record_execution_mode(other.id, other.execution_mode, ExecutionMode::Manual, "operator", "Manual fixture").unwrap();
-    let error = store.configure_task_stack(other.id, &StackSource::Predecessor { record_id: first }).unwrap_err();
+    let error = store.relate_records(other.id, first, RecordRelationshipKind::BuildsOn).unwrap_err();
     assert!(error.message.contains("same Project"));
     assert!(store.task_stack(other.id).unwrap().is_none());
 }

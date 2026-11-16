@@ -1055,7 +1055,7 @@ fn run_case(case: &str) {
         app.relate_records(
             task.id,
             next.id,
-            forge_app::RecordRelationshipKind::DependsOn,
+            forge_app::RecordRelationshipKind::WaitsFor,
         )
         .unwrap();
         assert_eq!(
@@ -1829,7 +1829,7 @@ fn run_case(case: &str) {
                     app.relate_records(
                         task.id,
                         prerequisite.id,
-                        forge_app::RecordRelationshipKind::DependsOn,
+                        forge_app::RecordRelationshipKind::WaitsFor,
                     )
                     .unwrap();
                 } else {

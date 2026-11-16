@@ -2,7 +2,7 @@ use super::Cli;
 use clap::Parser;
 
 #[test]
-fn stack_commands_parse_without_execution_and_require_explicit_predecessors() {
+fn retained_stack_commands_parse_without_execution() {
     for arguments in [
         vec!["forge", "task", "stack", "show", "49", "--json"],
         vec![
@@ -17,15 +17,6 @@ fn stack_commands_parse_without_execution_and_require_explicit_predecessors() {
             "origin",
             "--base",
             "feature/payments",
-        ],
-        vec![
-            "forge",
-            "task",
-            "stack",
-            "after",
-            "49",
-            "--predecessor",
-            "41",
         ],
         vec!["forge", "task", "stack", "prepare", "49"],
         vec![
@@ -49,6 +40,17 @@ fn stack_commands_parse_without_execution_and_require_explicit_predecessors() {
     ] {
         Cli::try_parse_from(arguments).unwrap();
     }
-    assert!(Cli::try_parse_from(["forge", "task", "stack", "after", "49"]).is_err());
+    let legacy = Cli::try_parse_from([
+        "forge",
+        "task",
+        "stack",
+        "after",
+        "49",
+        "--predecessor",
+        "41",
+    ])
+    .unwrap_err()
+    .to_string();
+    assert!(legacy.contains("record relate <task> --kind builds-on --to <predecessor>"));
     assert!(Cli::try_parse_from(["forge", "assignment", "stack", "--predecessor", "41"]).is_err());
 }

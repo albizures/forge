@@ -1832,15 +1832,11 @@ impl RecordApiServer for Daemon {
             record: request,
         } = request;
         let application = self.record_application(&selection, &mut [])?;
-        let result = if request.kind == "ordering-only-depends-on" {
-            application.relate_ordering_only_records(request.from_id, request.to_id)
-        } else {
-            application.relate_records(
-                request.from_id,
-                request.to_id,
-                relationship_kind(&request.kind)?,
-            )
-        };
+        let result = application.relate_records(
+            request.from_id,
+            request.to_id,
+            relationship_kind(&request.kind)?,
+        );
         result.map(Into::into).map_err(rpc_error)
     }
 
@@ -2015,14 +2011,15 @@ fn relationship_kind(kind: &str) -> RpcResult<forge_app::RecordRelationshipKind>
         "child-of" => Ok(forge_app::RecordRelationshipKind::ParentChild),
         "waits-for" => Ok(forge_app::RecordRelationshipKind::WaitsFor),
         "builds-on" => Ok(forge_app::RecordRelationshipKind::BuildsOn),
-        "depends-on" | "ordering-only-depends-on" => {
-            Ok(forge_app::RecordRelationshipKind::DependsOn)
-        }
+        "depends-on" | "ordering-only-depends-on" => Err(rpc_error(RegistrationError::new(
+            "unsupported-relationship-kind",
+            "Legacy prerequisite declarations are no longer supported; use waits-for for completion only or builds-on for completion and verified repository inheritance",
+        ))),
         "generated-by" => Ok(forge_app::RecordRelationshipKind::GeneratedBy),
         "initiative" => Ok(forge_app::RecordRelationshipKind::Initiative),
         _ => Err(rpc_error(RegistrationError::new(
             "unsupported-relationship-kind",
-            "Relationship kind must be child-of, waits-for, builds-on, depends-on, ordering-only-depends-on, generated-by, or initiative",
+            "Relationship kind must be child-of, waits-for, builds-on, generated-by, or initiative",
         ))),
     }
 }

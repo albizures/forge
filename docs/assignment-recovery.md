@@ -164,8 +164,8 @@ retained after completion; no automatic Git integration or cleanup occurs.
 
 An Open Spec is planning-only: its child Tasks cannot start, claim an attempt or
 launch. Finish the plan and explicitly start the Spec after validation. An In
-Progress legacy Spec is revalidated too; lifecycle status alone does not establish
-required Stack links or exact predecessor evidence. `invalid-spec-plan` identifies
+Progress upgraded Spec is revalidated too; lifecycle status alone does not establish
+valid Builds-On inheritance or exact predecessor evidence. `invalid-spec-plan` identifies
 missing inheritance; `stack-blocked` identifies unprepared, mismatched or stale
 Base Commit/predecessor evidence. Neither diagnostic authorizes a checkout reset,
 merge, rebase, Check repin or deletion of retained evidence.
@@ -173,7 +173,7 @@ merge, rebase, Check repin or deletion of retained evidence.
 Inspect the Record relationships, `forge task stack show <task-id>`, Checks/work state,
 Assignment info and worktree info first. Retire/reconcile old ownership as above;
 unknown resources, retained resources, capacity, holds and freshness still gate
-replacement. Ordinary Stack/dependency edits remain forbidden after Spec start.
+replacement. Ordinary root/prerequisite edits remain forbidden after Spec start.
 There is **no supported in-place conversion** of a started legacy plan missing
 Stack configuration, nor a supported repin of a wrong prepared Base Commit.
 Stop and retain that evidence for an explicitly designed operator recovery; do

@@ -1613,15 +1613,8 @@ pub fn render_record(record: &RecordResponse) -> String {
     for relationship in &record.relationships {
         let _ = write!(
             text,
-            "\nRelationship {} {} -> {}{}",
-            relationship.kind,
-            relationship.from_id,
-            relationship.to_id,
-            if relationship.ordering_only && relationship.kind != "waits-for" {
-                " [ordering-only]"
-            } else {
-                ""
-            },
+            "\nRelationship {} {} -> {}",
+            relationship.kind, relationship.from_id, relationship.to_id,
         );
     }
     if let Some(activity) = &record.activity {

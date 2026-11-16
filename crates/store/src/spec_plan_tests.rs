@@ -34,12 +34,7 @@ fn child(store: &SqliteProjectRepository, spec: u64) -> u64 {
 }
 fn link(store: &SqliteProjectRepository, task: u64, predecessor: u64) {
     store
-        .configure_task_stack(
-            task,
-            &StackSource::Predecessor {
-                record_id: predecessor,
-            },
-        )
+        .relate_records(task, predecessor, RecordRelationshipKind::BuildsOn)
         .unwrap();
 }
 
@@ -65,6 +60,7 @@ fn incomplete_legacy_plan_stays_open_without_status_or_audit_writes() {
     assert_eq!(store.list_record_updates(parent).unwrap(), updates);
     // An incomplete Open plan can be repaired without rewriting Checks or existing Tasks.
     store.configure_task_stack(first, &root()).unwrap();
+    store.unrelate_records(second, first, RecordRelationshipKind::DependsOn).unwrap();
     link(&store, second, first);
     assert_eq!(
         store.start_record(parent).unwrap().status,
@@ -92,7 +88,7 @@ fn explicit_ordering_exceptions_do_not_hide_ambiguous_inheritance() {
     store
         .unrelate_records(last, other, RecordRelationshipKind::DependsOn)
         .unwrap();
-    store.relate_ordering_only_records(last, other).unwrap();
+    store.relate_records(last, other, RecordRelationshipKind::WaitsFor).unwrap();
     // Deliberate independent roots plus an ordering-only prerequisite are supported.
     assert_eq!(
         store.start_record(parent).unwrap().status,
@@ -125,7 +121,7 @@ fn started_spec_rejects_every_ordinary_structural_write_without_partial_history(
     let other = child(&store, parent);
     store.configure_task_stack(first, &root()).unwrap();
     link(&store, second, first);
-    store.relate_ordering_only_records(second, other).unwrap();
+    store.relate_records(second, other, RecordRelationshipKind::WaitsFor).unwrap();
     store.start_record(parent).unwrap();
     let before = store.show_record(second).unwrap();
     let history = store.list_record_updates(second).unwrap();
@@ -148,9 +144,8 @@ fn started_spec_rejects_every_ordinary_structural_write_without_partial_history(
         store.relate_records(other, first, RecordRelationshipKind::DependsOn),
         store.relate_records(other, first, RecordRelationshipKind::WaitsFor),
         store.unrelate_records(second, other, RecordRelationshipKind::WaitsFor),
-        store.relate_ordering_only_records(second, first),
-        store.unrelate_records(second, other, RecordRelationshipKind::DependsOn),
-        store.unrelate_records(second, first, RecordRelationshipKind::DependsOn),
+        store.relate_records(second, first, RecordRelationshipKind::WaitsFor),
+        store.unrelate_records(second, first, RecordRelationshipKind::BuildsOn),
     ] {
         assert_eq!(result.unwrap_err().code, "spec-plan-started");
     }
@@ -268,7 +263,7 @@ fn start_rechecks_configured_member_compatibility_without_repinning_checks() {
 }
 
 #[test]
-fn legacy_contradictory_stack_order_is_diagnosed_without_repair() {
+fn current_state_rejects_legacy_topology_without_repair() {
     let store = fixture();
     let parent = spec(&store);
     let first = child(&store, parent);
@@ -277,16 +272,18 @@ fn legacy_contradictory_stack_order_is_diagnosed_without_repair() {
     link(&store, second, first);
     // Model historical inconsistent state, not a supported mutation or repair path.
     store.connection.lock().unwrap().execute(
+        "UPDATE task_stacks SET predecessor=?2, source_json=?3 WHERE record_id=?1",
+        rusqlite::params![second.cast_signed(), first.cast_signed(), serde_json::to_string(&StackSource::Predecessor { record_id: first }).unwrap()],
+    ).unwrap();
+    store.connection.lock().unwrap().execute(
         "DELETE FROM record_relationships WHERE from_id = ?1 AND to_id = ?2 AND kind = 'depends-on'",
         rusqlite::params![second.cast_signed(), first.cast_signed()],
     ).unwrap();
     let before = store.show_record(second).unwrap();
     let history = store.list_record_updates(parent).unwrap();
     let error = store.start_record(parent).unwrap_err();
-    assert_eq!(error.code, "invalid-spec-plan");
-    assert!(error.message.contains(&format!(
-        "Task {second} must depend on Stack Predecessor {first}"
-    )));
+    assert_eq!(error.code, "stack-blocked");
+    assert!(error.message.contains("explicit validated state upgrade"));
     assert_eq!(store.show_record(second).unwrap(), before);
     assert_eq!(store.list_record_updates(parent).unwrap(), history);
     assert_eq!(

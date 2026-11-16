@@ -260,10 +260,9 @@ impl Application {
         self.records.task_stack(record)
     }
 
-    /// Configure membership before any affected Task has prepared execution.
+    /// Configure root execution inputs before any affected Task has prepared execution.
     /// # Errors
-    /// Rejects invalid destinations, cycles, forks or prepared Tasks. Legacy predecessor
-    /// configuration also requires compatible Checks; canonical Open plans validate at execution.
+    /// Rejects invalid destinations, predecessor declarations or prepared Tasks.
     pub fn configure_task_stack(
         &self,
         record: u64,
@@ -274,10 +273,10 @@ impl Application {
         }
         let task = self.records.show_record(record)?;
         validate_stack_task(&task)?;
-        if let StackSource::Predecessor { record_id } = source {
-            let checks = self.list_record_checks(record)?;
-            validate_stack_member(&task, checks.iter().max_by_key(|c| c.position))?;
-            validate_stack_predecessor(&task, &self.records.show_record(*record_id)?)?;
+        if matches!(source, StackSource::Predecessor { .. }) {
+            return Err(error(
+                "Stack predecessor configuration is no longer supported; use record relate --kind builds-on --to <predecessor>",
+            ));
         }
         self.records.configure_task_stack(record, source)
     }
