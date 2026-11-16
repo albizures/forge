@@ -11,6 +11,9 @@ fn derived_chain_prepares_non_default_root_and_carries_multiple_unchanged_result
     for (successor, predecessor) in [(review, a), (verification, review), (c, verification)] {
         store.relate_records(successor, predecessor, RecordRelationshipKind::BuildsOn).unwrap();
     }
+    let decision = task(&store);
+    store.relate_records(c, decision, RecordRelationshipKind::WaitsFor).unwrap();
+    assert!(store.task_stack(decision).unwrap().is_none());
     hosting.branches.lock().unwrap().insert("feature/payments".into(), "1".repeat(40));
     let prepared = app.prepare_task_stack(a).unwrap().unwrap();
     assert_eq!(prepared.base_commit, Some("1".repeat(40)));
@@ -27,6 +30,18 @@ fn derived_chain_prepares_non_default_root_and_carries_multiple_unchanged_result
         assert!(store.task_stack(id).unwrap().unwrap().publication.is_none());
         assert!(!hosting.branches.lock().unwrap().contains_key(&task_branch(id)));
     }
+    // Verified code alone does not satisfy the independent decision prerequisite.
+    let waiting_history = store.list_record_updates(c).unwrap();
+    assert!(app.prepare_task_stack(c).is_err());
+    assert!(app.start_record(c).is_err());
+    assert_eq!(store.list_record_updates(c).unwrap(), waiting_history);
+    app.start_record(decision).unwrap();
+    for position in 0..3 {
+        pass(&store, decision, position, &"0".repeat(40));
+    }
+    app.done_record(decision, None).unwrap();
+    assert!(store.task_stack(decision).unwrap().is_none());
+    assert_eq!(store.show_record(c).unwrap().status, RecordStatus::Open);
     let inherited = app.prepare_task_stack(c).unwrap().unwrap();
     assert_eq!(inherited.predecessor, Some(verification));
     assert_eq!(inherited.base_commit, Some("a".repeat(40)));
