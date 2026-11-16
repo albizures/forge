@@ -272,7 +272,7 @@ The ordered collection of Record Updates for one Record.
 _Avoid_: history, audit log
 
 **Record Status**:
-A Record’s lifecycle state: Open, In Progress, or Done. A Record opens as Open and in the initial model advances only from Open to In Progress to Done; future Record types may add constraints.
+A Record’s lifecycle state: Open, In Progress, or Done. Ordinary progression is Open to In Progress to Done. An explicit operator override may close an Open or In Progress Record directly as Done despite unmet workflow or completion requirements, but not unsafe execution ownership. Done alone does not certify passing Checks.
 _Avoid_: state
 
 **Manual In Progress Task**:
@@ -312,11 +312,11 @@ The required endpoint of a Dependency Relationship. Its completion satisfies tha
 _Avoid_: dependency, blocker
 
 **Completion Resolution**:
-An optional immutable, non-blank free-text explanation recorded when a Record becomes Done.
+An immutable, non-blank free-text explanation recorded when a Record becomes Done. It is optional for ordinary completion and required for operator-forced completion.
 _Avoid_: outcome code
 
 **Parent Record**:
-A Record whose work includes the work represented by one or more Child Records through the parent/child Relationship kind. It may become Done only when all of its Child Records are Done at that time. A Spec shares its Project Scope with every Child Record; a Project-scoped Wayfinder's children select eligible non-empty subsets, while a Projectless Wayfinder's children inherit empty scope.
+A Record whose work includes the work represented by one or more Child Records through the parent/child Relationship kind. Ordinary completion requires every Child Record to be Done. An explicit operator override may close the Parent Record while children remain unfinished, without closing those children. A Spec shares its Project Scope with every Child Record; a Project-scoped Wayfinder's children select eligible non-empty subsets, while a Projectless Wayfinder's children inherit empty scope.
 _Avoid_: container, owner
 
 **Child Record**:

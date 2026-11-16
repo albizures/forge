@@ -20,6 +20,7 @@ use rusqlite::{Connection, ErrorCode, OptionalExtension, params};
 
 mod check_templates;
 mod checks;
+mod completion;
 mod execution_modes;
 mod findings;
 mod ordering_dependencies;
@@ -240,6 +241,7 @@ impl SqliteProjectRepository {
             );",
             )
             .map_err(storage_error)?;
+        completion::schema(connection)?;
         checks::schema(connection)?;
         outcomes::schema(connection)?;
         task_progress::schema(connection)?;
@@ -1406,6 +1408,27 @@ impl RecordRepository for SqliteProjectRepository {
         Ok(record)
     }
 
+    fn forced_completion(
+        &self,
+        id: u64,
+    ) -> Result<Option<forge_app::completion::ForcedCompletion>, RegistrationError> {
+        self.record_workspace(id)?;
+        let c = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "storage lock poisoned"))?;
+        completion::load(&c, id)
+    }
+
+    fn force_done_record(
+        &self,
+        id: u64,
+        resolution: Option<&str>,
+        actor: &str,
+    ) -> Result<forge_app::completion::CompletionResult, RegistrationError> {
+        self.force_complete(id, resolution, actor)
+    }
+
     fn done_record(
         &self,
         id: u64,
@@ -2393,6 +2416,12 @@ impl AgentDispatchRepository for SqliteProjectRepository {
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(storage_error)?;
         let record = load_record(&transaction, assignment.record_id)?;
+        if record.status == RecordStatus::Done {
+            return Err(RegistrationError::new(
+                "record-not-ready",
+                "Done Records cannot acquire an Assignment",
+            ));
+        }
         spec_plans::authorize(&transaction, assignment.record_id, None)?;
         if !matches!(
             record.record_type,
@@ -4119,6 +4148,9 @@ mod tests {
     }
     mod check_completion_tests {
         include!("check_completion_tests.rs");
+    }
+    mod forced_completion_tests {
+        include!("forced_completion_tests.rs");
     }
     include!("subscription_removal_tests.rs");
     use super::SqliteProjectRepository as Repository;

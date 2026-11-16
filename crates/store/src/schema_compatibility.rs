@@ -5,7 +5,9 @@ use rusqlite::Connection;
 
 // Bump for every incompatible storage contract. Revision 7 requires durable
 // retry/remediation accounting; older attempts cannot safely start with zero budgets.
-const SCHEMA_REVISION: i64 = 10;
+// Revision 11 adds structured forced-completion evidence; preserve frozen older
+// contracts through explicit copy-and-upgrade, never ordinary-open migration.
+const SCHEMA_REVISION: i64 = 11;
 const APPLICATION_ID: i64 = 0x464f_5247; // FORG
 
 pub(super) fn validate(connection: &Connection) -> Result<(), RegistrationError> {

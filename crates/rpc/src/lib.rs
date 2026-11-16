@@ -1343,6 +1343,9 @@ pub struct EditRecordRequest {
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DoneRecordRequest {
+    /// Explicit operator authority; omitted by historical clients.
+    #[serde(default)]
+    pub force: bool,
     pub id: u64,
     pub completion_resolution: Option<String>,
 }
@@ -1371,6 +1374,11 @@ pub struct RecordResponse {
     /// Additive persisted activity summary on normal Task show/list; absent on other responses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activity: Option<TaskActivityResponse>,
+    /// Immutable override evidence; absent for ordinary and historical completions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forced_completion: Option<forge_app::completion::ForcedCompletion>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub already_done: bool,
     /// Current Check summaries on Task inspection; no history is embedded.
     pub checks: Option<Vec<RecordCheck>>,
     pub execution_mode: forge_app::ExecutionMode,
@@ -1387,6 +1395,8 @@ impl From<Record> for RecordResponse {
     fn from(record: Record) -> Self {
         Self {
             activity: None,
+            forced_completion: None,
+            already_done: false,
             checks: None,
             execution_mode: record.execution_mode,
             workspace_id: record.workspace_id,
@@ -1436,6 +1446,57 @@ impl From<RegistrationError> for RegistrationErrorResponse {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn operator_force_is_explicit_and_assignment_completion_has_no_override_shape() {
+        let old: super::DoneRecordRequest =
+            serde_json::from_value(serde_json::json!({"id": 1, "completion_resolution": null}))
+                .unwrap();
+        assert!(!old.force);
+        let operator: super::DoneRecordRequest = serde_json::from_value(
+            serde_json::json!({"id": 1, "completion_resolution": "Obsolete", "force": true}),
+        )
+        .unwrap();
+        assert!(operator.force);
+        let base = serde_json::json!({"assignmentId": "bound", "secret": "fixture", "resolution": "Obsolete", "human": null});
+        assert!(
+            serde_json::from_value::<crate::assignment::AssignmentDoneRequest>(base.clone())
+                .is_ok()
+        );
+        let outcome = serde_json::json!({"assignmentId":"bound", "secret":"fixture", "outcome": {
+            "attempt_id":"bound", "generation":1,
+            "evidence":{"kind":"artifact", "uri":"urn:test:output", "sha256":"a".repeat(64)},
+            "verdict":"pass", "actor":"worker", "message":"Complete"
+        }});
+        assert!(
+            serde_json::from_value::<crate::assignment::AssignmentOutcomeRequest>(outcome.clone())
+                .is_ok()
+        );
+        for field in [
+            "force",
+            "forced",
+            "forceCompletion",
+            "forced_completion",
+            "override",
+        ] {
+            let mut input = base.clone();
+            input[field] = serde_json::json!(true);
+            assert!(
+                serde_json::from_value::<crate::assignment::AssignmentDoneRequest>(input).is_err(),
+                "{field}"
+            );
+            let mut top = outcome.clone();
+            top[field] = serde_json::json!(true);
+            assert!(
+                serde_json::from_value::<crate::assignment::AssignmentOutcomeRequest>(top).is_err()
+            );
+            let mut nested = outcome.clone();
+            nested["outcome"][field] = serde_json::json!(true);
+            assert!(
+                serde_json::from_value::<crate::assignment::AssignmentOutcomeRequest>(nested)
+                    .is_err()
+            );
+        }
+    }
     use super::*;
 
     fn revision_identity(revision: u32) -> RevisionIdentity {

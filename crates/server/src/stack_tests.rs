@@ -74,7 +74,7 @@ async fn stack_configuration_and_preparation_round_trip_through_scoped_rpc() {
             disposition: forge_app::outcomes::OutcomeDisposition::Complete, findings: vec![], verifications: vec![] };
         client.record_outcome_submit(forge_rpc::SelectedRecordRequest::selected("test", forge_rpc::RecordOutcomeSubmitRequest { record: task.id, outcome })).await.unwrap();
     }
-    forge_rpc::RecordApiClient::done(&client, forge_rpc::SelectedRecordRequest::selected("test", forge_rpc::DoneRecordRequest { id: task.id, completion_resolution: None })).await.unwrap();
+    forge_rpc::RecordApiClient::done(&client, forge_rpc::SelectedRecordRequest::selected("test", forge_rpc::DoneRecordRequest { id: task.id, completion_resolution: None, force: false })).await.unwrap();
     server.abort();
     let _ = server.await;
     std::fs::remove_dir_all(root).unwrap();

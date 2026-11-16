@@ -10,6 +10,7 @@ pub mod agent_profiles;
 pub mod assignment;
 pub mod check_templates;
 pub mod checks;
+pub mod completion;
 pub mod findings;
 pub mod outcomes;
 mod profile_catalog;
@@ -1016,6 +1017,31 @@ pub trait RecordRepository: ProjectRepository {
         id: u64,
         completion_resolution: Option<&str>,
     ) -> Result<Record, RegistrationError>;
+    /// Operator-only override. Implementations must validate safety and persist audit atomically.
+    ///
+    /// # Errors
+    /// Returns validation, ownership, or storage errors without partial closure.
+    fn force_done_record(
+        &self,
+        _id: u64,
+        _resolution: Option<&str>,
+        _actor: &str,
+    ) -> Result<completion::CompletionResult, RegistrationError> {
+        Err(RegistrationError::new(
+            "force-unavailable",
+            "forced completion is unavailable",
+        ))
+    }
+    /// Inspect immutable override evidence; historical ordinary completions have none.
+    ///
+    /// # Errors
+    /// Returns scope or storage errors.
+    fn forced_completion(
+        &self,
+        _id: u64,
+    ) -> Result<Option<completion::ForcedCompletion>, RegistrationError> {
+        Ok(None)
+    }
     /// Adds a typed directional Relationship from `from_id` to `to_id`.
     ///
     /// # Errors
@@ -3732,6 +3758,31 @@ impl Application {
         }
         self.records
             .set_record_execution_mode(id, expected, mode, actor, message)
+    }
+
+    /// Explicit operator closure; safety and validation are transactional in the repository.
+    ///
+    /// # Errors
+    /// Returns validation, ownership, or storage errors without partial closure.
+    pub fn force_done_record(
+        &self,
+        id: u64,
+        resolution: Option<&str>,
+        actor: &str,
+    ) -> Result<completion::CompletionResult, RegistrationError> {
+        self.records.force_done_record(id, resolution, actor)
+    }
+
+    /// Inspect durable operator override evidence.
+    ///
+    /// # Errors
+    /// Returns scope or storage errors.
+    pub fn forced_completion(
+        &self,
+        id: u64,
+    ) -> Result<Option<completion::ForcedCompletion>, RegistrationError> {
+        self.records.show_record(id)?;
+        self.records.forced_completion(id)
     }
 
     /// Completes an in-progress Record with an optional Resolution.

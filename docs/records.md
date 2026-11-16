@@ -216,6 +216,32 @@ retained rather than deleted. Comments are immutable; `record updates` is the
 Forge-authored Update Log. Assignment recovery retains its separate, conservative
 [reopen and retirement rules](assignment-recovery.md).
 
+### Explicit operator-forced completion
+
+```sh
+forge record done 44 --force --resolution 'Superseded by replacement work' --workspace personal --json
+```
+
+Force closes only the selected safe Open or In Progress Record, of any type,
+without starting it. It requires a nonblank Completion Resolution and bypasses
+workflow/completion gates, not active Assignments, open Manual attempts,
+unresolved ownership, or unsafe retained resource state. It performs no cleanup,
+mode change, hold clearing, assessment rewrite, or child closure.
+
+The operator `record_done` RPC accepts the additive `force` boolean (default
+`false`) alongside `id` and `completion_resolution` in its existing selected
+Workspace envelope. `forced_completion` in completion and show/list responses
+contains the linked Update ID, operator authority attribution, supplied resolution,
+and transaction-time `{code, message}` bypassed gates. Readable inspection reports
+the same override. Already-Done force replies set `already_done: true` and cannot
+rewrite original metadata, label normal completion forced, or append an Update.
+Assignment Capability completion and outcome payloads reject override fields.
+
+Done is closure, not passing assessment evidence or verified publication. Normal
+completion without force remains unchanged. Dependency warnings and the full
+operator consequence runbook are a follow-up; this operation does not pause or
+launch dispatch, and existing dispatch controls remain independent.
+
 ## Record Checks and Assessments (Tasks only)
 
 Every new Task receives an immutable, required **Implementation** Check in the
