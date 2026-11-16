@@ -5,21 +5,29 @@ another. It preserves the source database and upgrades a consistent copy. Ordina
 repository opening still rejects incompatible schemas before initialization writes;
 it never migrates, resets, or rewrites an older store's marker.
 
-Supported transfers target schema **11** from schema **7**, **8**, **9**, **10**, or **11**.
+Supported transfers target schema **13** from schemas **7** through **13**.
 The 7 → 8 step adds an empty `task_stacks` table; the 8 → 9 step adds an empty
 `ordering_only_dependencies` table; the 9 → 10 step adds an empty
 `task_unchanged_results` table; the 10 → 11 step adds an empty
-`forced_completions` table. Upgrades invent no Stack membership, ordering-only
-designations, unchanged results, or forced-completion evidence. Existing publication evidence and Check pins
-are preserved. Earlier, newer,
+`forced_completions` table; 11 → 12 adds `builds_on_dependencies`.
+The semantic 12 → 13 step converts legacy Stack predecessors to Builds-On and
+unambiguous remaining prerequisites to Waits-For. It preserves direct indirect-
+ancestor completion constraints rather than dropping them. Existing explicit
+ordering-only designations remain Waits-For. Same-Spec ordinary Task dependencies
+without ancestry are unresolved intent, not inferred waiting or code consumption.
+Upgrades invent no execution evidence, unchanged results, forced completions,
+branches, or Check pins. Existing publication evidence and commit pins are preserved. Earlier, newer,
 foreign, corrupt, and structurally inconsistent stores are rejected. A same-schema
 application update still needs state transfer because Revision State is isolated.
 
 ## Preconditions
 
 - Both revisions must be registered, distinct, and have valid immutable artifacts.
-- The target must implement offline upgrade interface 1. A source need not implement
-  that interface, but its schema and ownership evidence must be supported.
+- The current target implements offline upgrade interface 2. Updated Forgeup also
+  accepts interface-1 targets without decision input and retains interface-1 receipt
+  recovery. A source need not implement either interface, but its schema and
+  ownership evidence must be supported. Install the matching updated Forgeup before
+  preparing schema-13 transfers; older managers cannot interpret interface 2.
 - Stop both daemons. Exclusively acquire their existing `.lock` sidecars before
   execution. A live or ambiguous managed runtime record remains a blocker even if
   its database lock is available. Direct SQLite writers and deliberate manager
@@ -59,13 +67,20 @@ Preparation snapshots committed SQLite state, including WAL data, into private
 complete schema chain in one transaction to a unique `staging-<nonce>.db`. A schema marker advances
 only inside that transaction. Validation covers SQLite integrity, foreign keys,
 frozen table/index/trigger contracts, Record decoding and Workspace ownership,
-stack decoding, execution blockers, and exact preservation inventories of every
-pre-existing table. Invented stack membership is forbidden.
+Stack decoding, ownership blockers, shared prerequisite cycles, endpoint/scope
+eligibility, linear topology, canonical intent, and retained execution evidence.
+The three transformed tables (`task_stacks`, `ordering_only_dependencies`,
+`builds_on_dependencies`) have conversion-specific assertions, including exact
+decoded Stack equivalence. Every other pre-existing table has an exact preservation
+inventory. No preparation or fabricated execution evidence is permitted.
 
 The inventory hashes each typed stored value, independently of row order and page
 layout, and includes row counts and schema definitions. It is not a substitute for
-migration-specific domain tests. Future migrations that intentionally transform
-existing tables need explicit preservation assertions for those transformations.
+migration-specific domain tests. Schema 13 intentionally normalizes legacy
+successor source JSON and predecessor columns; all prepared pins and publication
+JSON remain retained. Update history keeps its original dependency terminology.
+Offline validation does not certify live hosting: execution authorization still
+re-observes required external evidence after activation.
 
 Only a validated, synced staging artifact is atomically published over a pristine
 destination. The receipt retains both Revision Identities, executable hashes,
@@ -91,6 +106,42 @@ Alternatively, `forgeup upgrade activate --to new --confirm-agents-stopped
 This never merges that work. `discard` accepts only an unchanged, unactivated
 publication, archives it as `prepared.db`, and resets the destination to empty. It
 refuses changed/user-written destinations and activated upgrades.
+
+## Explicit legacy intent decisions
+
+An unresolved conversion fails before publication and reports every affected
+`blocked -> prerequisite` Record pair. Source state stays untouched; the target
+remains unactivated. Plan reports structural compatibility and ownership blockers;
+intent validation runs inside the staging conversion, not by mutating the source.
+
+For an intentional completion-only prerequisite, create a JSON file:
+
+```json
+[{"from_id": 123, "to_id": 122}]
+```
+
+Then use the public workflow (archive a failed attempt before changing its input):
+
+```sh
+forgeup upgrade recover --to new
+forgeup upgrade prepare --from old --to new --confirm-agents-stopped \
+  --waits-for-decisions decisions.json
+```
+
+Only unresolved dependencies may receive decisions. Duplicate, extraneous,
+started/completed, prepared, or started-Spec decisions fail closed. For code
+inheritance, use the source revision's public Stack configuration workflow before
+preparing a new snapshot; its normal lifecycle restrictions still apply. There is
+no hand-edited storage repair, migration-created branch, or fabricated Check result.
+
+The parsed decisions are retained in the receipt and copied to a unique private
+per-attempt adapter input. Exact preparation retries must supply the same decisions;
+editing the operator file cannot change an existing attempt. Changed decisions
+require recovery/abandonment and a new preparation. Offline interface 2 advertises
+`waits_for_decisions` and accepts an optional migrate input; interface-1 targets
+default to no decision capability and never receive that input. This interface
+revision is separate from storage schema 13 and the unchanged daemon Management
+Protocol revision 1.
 
 ## Recovery and retries
 
@@ -200,8 +251,12 @@ python3 -m unittest discover -s tests -p 'test_state_upgrades.py'
 The subprocess test defaults to `target/release` (`FORGE_TEST_BIN_DIR` overrides it).
 It waits for real persisted dispatch leases to expire rather than resetting them.
 Debug binaries can exceed its command timeout due to hashing large unoptimized
-artifacts. Tests cover schema 7 → 11, 8 → 11, 9 → 11, and 10 → 11, same-schema transfer, real Record/comment/history
-preservation, managed startup rejection, and rollback acknowledgement. Rust tests
+artifacts. Tests cover each source schema 7 through 13, same-schema transfer, real
+Record/Comment/Update preservation, public unresolved-intent diagnostics and
+explicit decision retries, non-activation, managed startup rejection, and rollback
+acknowledgement. Store fixtures cover direct/indirect ancestry, explicit waits,
+standalone/cross-Project/Projectless waits, retained completed publication and
+unchanged results, prepared successors, and forced-completion evidence. Rust tests
 add transaction failure injection, WAL snapshots, structural incompatibility,
 concurrent ownership, interrupted journal phases, stale source acceptance,
 non-pristine destinations, changed publication, symlink boundaries, and retries.

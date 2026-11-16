@@ -83,6 +83,9 @@ enum UpgradeCommand {
         /// Assert operator verification that old agents cannot act.
         #[arg(long)]
         confirm_agents_stopped: bool,
+        /// JSON array of `{from_id,to_id}` completion-only resolutions for ambiguous legacy intent.
+        #[arg(long)]
+        waits_for_decisions: Option<std::path::PathBuf>,
     },
     /// Inspect retained progress and validation evidence.
     Status {
@@ -299,7 +302,26 @@ fn upgrade(command: UpgradeCommand) -> i32 {
             from,
             to,
             confirm_agents_stopped,
-        } => upgrade::prepare(&from, &to, confirm_agents_stopped).and_then(json_output),
+            waits_for_decisions,
+        } => {
+            let decisions = waits_for_decisions.map_or_else(
+                || Ok(vec![]),
+                |path| {
+                    std::fs::read(&path)
+                        .map_err(|error| forgeup::ForgeupError::UpgradeBlocked(error.to_string()))
+                        .and_then(|bytes| {
+                            serde_json::from_slice(&bytes).map_err(|error| {
+                                forgeup::ForgeupError::UpgradeBlocked(error.to_string())
+                            })
+                        })
+                },
+            );
+            decisions
+                .and_then(|decisions| {
+                    upgrade::prepare_with_decisions(&from, &to, confirm_agents_stopped, decisions)
+                })
+                .and_then(json_output)
+        }
         UpgradeCommand::Status { to } => upgrade::status(&to).and_then(json_output),
         UpgradeCommand::Activate {
             to,

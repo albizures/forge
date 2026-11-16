@@ -1,4 +1,4 @@
-//! Explicit upgrades preserve historical tables; no Task or intent backfill is allowed.
+//! Explicit upgrades preserve historical evidence and convert prerequisite intent.
 use forge_app::{NewTypedRecord, RecordRepository, RecordType, WorkspaceRepository};
 use forge_store::{SqliteProjectRepository, upgrade};
 use rusqlite::Connection;
@@ -105,7 +105,7 @@ fn explicit_seven_to_current_preserves_every_old_table_and_source_bytes() {
     let copy = f.root.join("snapshot.db");
     assert_eq!(upgrade::snapshot(&f.source, &copy).unwrap(), before);
     let after = upgrade::migrate(&copy).unwrap();
-    assert_eq!(after.schema, Some(12));
+    assert_eq!(after.schema, Some(13));
     for table in before.tables {
         assert!(after.tables.contains(&table), "lost {}", table.name);
     }
@@ -141,7 +141,7 @@ fn explicit_eight_to_eleven_preserves_all_old_facts_without_inventing_intent() {
     let copy = f.root.join("nine.db");
     upgrade::snapshot(&f.source, &copy).unwrap();
     let after = upgrade::migrate(&copy).unwrap();
-    assert_eq!(after.schema, Some(12));
+    assert_eq!(after.schema, Some(13));
     for table in before.tables {
         assert!(after.tables.contains(&table), "changed {}", table.name);
     }
@@ -152,12 +152,12 @@ fn explicit_eight_to_eleven_preserves_all_old_facts_without_inventing_intent() {
             .find(|t| t.name == "ordering_only_dependencies")
             .unwrap()
             .rows,
-        0
+        1
     );
     let repo = SqliteProjectRepository::open(&copy).unwrap();
     let record = repo.show_record(1).unwrap();
     assert_eq!(record.relationships.len(), 1);
-    assert!(!record.relationships[0].ordering_only);
+    assert!(record.relationships[0].ordering_only);
     assert_eq!(record.relationships[0].to_id, 42);
     assert_eq!(fs::read(&f.source).unwrap(), bytes);
 }
@@ -171,7 +171,7 @@ fn nine_to_eleven_preserves_every_table_without_inventing_unchanged_results() {
     let copy = f.root.join("ten.db");
     upgrade::snapshot(&f.source, &copy).unwrap();
     let after = upgrade::migrate(&copy).unwrap();
-    assert_eq!(after.schema, Some(12));
+    assert_eq!(after.schema, Some(13));
     for table in before.tables {
         assert!(after.tables.contains(&table));
     }
@@ -197,7 +197,7 @@ fn ten_to_eleven_preserves_history_without_inventing_forced_completions() {
     let copy = f.root.join("eleven.db");
     upgrade::snapshot(&f.source, &copy).unwrap();
     let after = upgrade::migrate(&copy).unwrap();
-    assert_eq!(after.schema, Some(12));
+    assert_eq!(after.schema, Some(13));
     for table in before.tables {
         assert!(after.tables.contains(&table));
     }
@@ -223,7 +223,7 @@ fn eleven_expansion_preserves_old_intent_and_rejects_ordinary_open_before_writes
     assert_eq!(fs::read(&f.source).unwrap(), bytes);
     let before = upgrade::inspect(&f.source).unwrap();
     let after = upgrade::migrate(&f.source).unwrap();
-    assert_eq!(after.schema, Some(12));
+    assert_eq!(after.schema, Some(13));
     for table in before.tables {
         assert!(after.tables.contains(&table));
     }
@@ -240,8 +240,24 @@ fn eleven_expansion_preserves_old_intent_and_rejects_ordinary_open_before_writes
 }
 
 #[test]
-fn same_schema_copy_keeps_ids_comments_and_history() {
+fn semantic_twelve_requires_explicit_conversion_despite_identical_ddl() {
     let f = Fixture::new(12);
+    let bytes = fs::read(&f.source).unwrap();
+    let before = upgrade::inspect(&f.source).unwrap();
+    assert!(SqliteProjectRepository::open(&f.source).is_err());
+    assert_eq!(fs::read(&f.source).unwrap(), bytes);
+    let copy = f.root.join("thirteen.db");
+    upgrade::snapshot(&f.source, &copy).unwrap();
+    let after = upgrade::migrate(&copy).unwrap();
+    assert_eq!(after.schema, Some(13));
+    assert_eq!(after.tables, before.tables);
+    assert_eq!(fs::read(&f.source).unwrap(), bytes);
+    drop(SqliteProjectRepository::open(&copy).unwrap());
+}
+
+#[test]
+fn same_schema_copy_keeps_ids_comments_and_history() {
+    let f = Fixture::new(13);
     let before = upgrade::inspect(&f.source).unwrap();
     let copy = f.root.join("copy.db");
     upgrade::snapshot(&f.source, &copy).unwrap();

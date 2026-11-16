@@ -9,7 +9,7 @@ by migrations—not just the initial `CREATE TABLE` statements.
 - [`src/lib.rs`](src/lib.rs): `SqliteProjectRepository::from_connection`,
   `migrate_*` functions, profile seeds, and repository operations.
 - [`src/workspaces.rs`](src/workspaces.rs): Workspace ownership and Project identity.
-- [`src/upgrade.rs`](src/upgrade.rs): explicit offline schema 7 → 8 → 9 → 10 → 11 → 12 expansion,
+- [`src/upgrade.rs`](src/upgrade.rs): explicit offline schema 7 → 8 → 9 → 10 → 11 → 12 → 13 conversion,
   frozen contract validation, consistent snapshots, and preservation inventories.
   See [Revision State upgrades](../../docs/state-upgrades.md) for orchestration.
 - [`src/record_workspaces.rs`](src/record_workspaces.rs): Record ownership,
@@ -45,7 +45,7 @@ is documented separately in [Records](../../docs/records.md),
   Most references do **not** cascade.
 - Ordinary repository opening accepts only the current marked schema revision.
   Triggers and repository validation also enforce invariants. Explicit managed
-  copy-and-upgrade targets revision 12 from revisions 7 through 12; unsupported
+  copy-and-upgrade targets revision 13 from revisions 7 through 13; unsupported
   stores are rejected without automatic conversion or reset.
 
 ## Canonical Builds-On topology (revision 12)
@@ -76,8 +76,39 @@ fork them and legacy declaration cannot fork canonical Relationships.
 Revision 12 is a breaking storage-contract expansion. Ordinary opening rejects
 revision 11 before writes. Explicit offline expansion adds an empty designation
 table without inferring historical intent or rewriting pins, history, or Checks.
-Validated historical conversion and legacy declaration removal remain separate
-slices; this expansion must not be mistaken for canonical intent conversion.
+This historical expansion alone did not convert intent.
+
+### Validated prerequisite intent (revision 13)
+
+Revision 13 is a **semantic** storage-contract break with the same frozen DDL as
+revision 12. Ordinary opens reject 12 and earlier before writes. Only the explicit
+staging upgrade may stamp 13, in the same transaction as conversion and validation.
+
+- Legacy `task_stacks.predecessor` pairs become `builds_on_dependencies` rows;
+  the successor's predecessor becomes NULL and source JSON becomes `{}`. The
+  associated prerequisite row is retained, not duplicated. Every decoded Stack
+  before/after conversion must be identical, including destination, prepared pin,
+  publication and unchanged results.
+- Existing ordering-only designations remain Waits-For. Indirect Stack-ancestor
+  prerequisites and other permitted ordinary prerequisites gain Waits-For
+  designations, preserving every direct completion constraint.
+- Other same-Spec ordinary Task prerequisites are unresolved. Diagnostics name
+  each blocked/prerequisite pair. `forgeup upgrade prepare --waits-for-decisions`
+  accepts explicit completion-only decisions for Open, unprepared Tasks under an
+  Open Spec. It cannot replace known intent or bypass lifecycle restrictions.
+  Code-inheritance decisions must first be declared through the source revision's
+  public Stack workflow; migration never prepares work, creates branches, or
+  invents result evidence.
+
+Conversion checks shared cycles, endpoint/scope eligibility, linear topology,
+canonical designation exclusivity, decoded Stack equivalence, prepared commit
+pins and persisted predecessor/result authorization. SQLite integrity and frozen
+schema checks remain mandatory. Every other pre-existing table's complete typed
+inventory is unchanged, including prerequisite rows, historical Updates and
+Comments, immutable Checks, attempts, work results, forced completions, ownership,
+retry counters and Dispatch Holds. Failure rolls back the entire staging chain;
+Forgeup never publishes or activates an unvalidated copy. External hosting is not
+queried offline: normal authorization still re-observes it before execution.
 
 ## Forced completion evidence (revision 11)
 

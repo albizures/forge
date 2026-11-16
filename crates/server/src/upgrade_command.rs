@@ -7,7 +7,11 @@ pub(super) fn run(arguments: &[String]) -> Result<serde_json::Value, Box<dyn std
         [operation, path] if operation == "inspect" => serde_json::to_value(forge_store::upgrade::inspect(Path::new(path)).map_err(storage_error)?)?,
         [operation, path, output] if operation == "snapshot" => serde_json::to_value(forge_store::upgrade::snapshot(Path::new(path), Path::new(output)).map_err(storage_error)?)?,
         [operation, path] if operation == "migrate" => serde_json::to_value(forge_store::upgrade::migrate(Path::new(path)).map_err(storage_error)?)?,
-        _ => return Err("usage: forge-server --state-upgrade capabilities|inspect PATH|snapshot SOURCE OUTPUT|migrate STAGING".into()),
+        [operation, path, decisions] if operation == "migrate" => {
+            let decisions: Vec<forge_app::storage_upgrade::WaitsForDecision> = serde_json::from_slice(&std::fs::read(decisions)?)?;
+            serde_json::to_value(forge_store::upgrade::migrate_with_decisions(Path::new(path), &decisions).map_err(storage_error)?)?
+        },
+        _ => return Err("usage: forge-server --state-upgrade capabilities|inspect PATH|snapshot SOURCE OUTPUT|migrate STAGING [WAITS_FOR_DECISIONS]".into()),
     };
     Ok(value)
 }

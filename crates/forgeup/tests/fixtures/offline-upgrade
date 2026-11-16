@@ -11,7 +11,7 @@ if sys.argv[1:] == ["--build-info", "--json"]:
     sys.exit()
 operation = sys.argv[2]
 if operation == "capabilities":
-    print(json.dumps(dict(interface_version=1, target_schema=8, supported_sources=[7, 8])))
+    print(json.dumps(dict(interface_version=2, target_schema=8, supported_sources=[7, 8], waits_for_decisions=True)))
     sys.exit()
 path = pathlib.Path(sys.argv[3])
 
@@ -24,5 +24,9 @@ if operation == "snapshot":
     shutil.copyfile(path, sys.argv[4])
     path = pathlib.Path(sys.argv[4])
 if operation == "migrate":
+    if path.read_text() == "7ambiguous":
+        if len(sys.argv) != 5 or json.loads(pathlib.Path(sys.argv[4]).read_text()) != [dict(from_id=4, to_id=1)]:
+            print("unresolved legacy prerequisite intent for Records: 4 -> 1", file=sys.stderr)
+            sys.exit(1)
     path.write_text("8" + path.read_text()[1:])
 print(json.dumps(inspect(path)))

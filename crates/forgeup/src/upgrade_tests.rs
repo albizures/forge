@@ -108,6 +108,59 @@ fn plan_is_read_only_and_prepare_preserves_source_without_activation() {
 }
 
 #[test]
+fn interface_one_receipts_and_capabilities_remain_readable_without_decisions() {
+    let caps: UpgradeCapabilities = serde_json::from_str(
+        r#"{"interface_version":1,"target_schema":8,"supported_sources":[7,8]}"#,
+    )
+    .unwrap();
+    assert!(!caps.waits_for_decisions);
+    let f = Fixture::new();
+    let mut receipt = f.prepare();
+    receipt.interface_version = 1;
+    save(&f.paths, &receipt).unwrap();
+    assert_eq!(f.load().interface_version, 1);
+    assert_eq!(f.prepare().id, receipt.id);
+    assert!(f.load().waits_for_decisions.is_empty());
+}
+
+#[test]
+fn unresolved_intent_never_publishes_and_explicit_decisions_are_durable_retry_input() {
+    let f = Fixture::new();
+    let source = f.paths.state(&f.source.selector).database;
+    let destination = f.paths.state(&f.target.selector).database;
+    fs::write(&source, "7ambiguous").unwrap();
+    let error = prepare_at(&f.paths, "old", "new", true).unwrap_err();
+    assert!(error.to_string().contains("4 -> 1"));
+    assert_eq!(fs::read_to_string(&source).unwrap(), "7ambiguous");
+    assert!(fs::read(&destination).unwrap().is_empty());
+    assert!(activate_at(&f.paths, "new", false, true).is_err());
+    assert!(use_revision_at(&f.paths, "new").is_err());
+    let decisions = vec![forge_app::storage_upgrade::WaitsForDecision {
+        from_id: 4,
+        to_id: 1,
+    }];
+    // Changing a retained attempt is not an exact retry; archive first.
+    assert!(prepare_decisions_at(&f.paths, "old", "new", true, decisions.clone()).is_err());
+    recover_at(&f.paths, "new").unwrap();
+    let receipt = prepare_decisions_at(&f.paths, "old", "new", true, decisions.clone()).unwrap();
+    assert_eq!(receipt.phase, UpgradePhase::Prepared);
+    assert_eq!(receipt.waits_for_decisions, decisions);
+    assert_eq!(f.load().waits_for_decisions, decisions);
+    let retry = prepare_decisions_at(&f.paths, "old", "new", true, decisions).unwrap();
+    assert_eq!(retry.id, receipt.id);
+    assert!(prepare_at(&f.paths, "old", "new", true).is_err());
+    assert_eq!(fs::read_to_string(&source).unwrap(), "7ambiguous");
+    assert!(
+        RegistryStore::open(f.paths.clone())
+            .unwrap()
+            .load()
+            .unwrap()
+            .active_selector
+            .is_none()
+    );
+}
+
+#[test]
 fn activation_checks_freshness_and_requires_explicit_rollback_acknowledgement() {
     let f = Fixture::new();
     f.prepare();
