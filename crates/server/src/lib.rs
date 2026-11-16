@@ -4,6 +4,7 @@
 //! exposes an unauthenticated service, so use that only on a trusted private network.
 
 mod agent_profiles;
+mod browser;
 mod herdr;
 mod stacks;
 #[cfg(test)]
@@ -29,19 +30,17 @@ use tokio::{
     time::{self, MissedTickBehavior},
 };
 
-use askama::Template;
 use axum::{
     Router,
     body::Body,
     extract::Request,
     http::{StatusCode, header},
-    response::Html,
     routing::{get, post},
 };
 use forge_app::{
     AgentDispatchAdapter, AgentDispatchAdapterFactory, AgentDispatchContext, AgentProfile,
-    Application, ApplicationStatus, AssignmentCapabilityDelivery, ManagedWorktreeAdapter, Project,
-    RecordStatus, RecordType, RegistrationError, RepositoryInspector, WorktreeSafetyAssessment,
+    Application, AssignmentCapabilityDelivery, ManagedWorktreeAdapter, Project, RecordStatus,
+    RecordType, RegistrationError, RepositoryInspector, WorktreeSafetyAssessment,
 };
 use forge_rpc::{
     AddRecordCommentRequest, AgentAssignmentResponse, AgentDispatchApiServer,
@@ -2044,8 +2043,7 @@ fn rpc_error(error: RegistrationError) -> jsonrpsee::types::ErrorObjectOwned {
 ///
 /// Panics if the statically defined RPC method sets overlap.
 pub fn router(daemon: Daemon) -> Router {
-    let page_daemon = daemon.clone();
-    let status_daemon = daemon.clone();
+    let browser = browser::router(daemon.application.clone());
     let mut methods = SystemApiServer::into_rpc(daemon.clone());
     methods
         .merge(forge_rpc::AgentProfileApiServer::into_rpc(daemon.clone()))
@@ -2073,20 +2071,7 @@ pub fn router(daemon: Daemon) -> Router {
     let server_handle = Arc::new(server_handle);
 
     Router::new()
-        .route(
-            "/",
-            get(move || {
-                let daemon = page_daemon.clone();
-                async move { status_page(&daemon.application.status()) }
-            }),
-        )
-        .route(
-            "/status",
-            get(move || {
-                let daemon = status_daemon.clone();
-                async move { status_fragment(&daemon.application.status()) }
-            }),
-        )
+        .merge(browser)
         .route(
             "/assets/htmx.min.js",
             get(|| async {
@@ -2119,70 +2104,6 @@ pub fn router(daemon: Daemon) -> Router {
                 }
             }),
         )
-}
-
-#[derive(Template)]
-#[template(
-    source = r##"<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Forge daemon status</title>
-  <script src="/assets/htmx.min.js"></script>
-</head>
-<body>
-  <main>
-    <h1>Forge daemon</h1>
-    {{ status_html|safe }}
-  </main>
-</body>
-</html>"##,
-    ext = "html"
-)]
-struct StatusPageTemplate<'a> {
-    status_html: &'a str,
-}
-
-#[derive(Template)]
-#[template(
-    source = r##"<section id="status" aria-live="polite">
-  <p><strong>{{ status.name }}</strong> {{ status.version }}</p>
-  <p>Ready: {{ status.ready }}</p>
-  <button type="button" hx-get="/status" hx-target="#status" hx-swap="outerHTML">Refresh status</button>
-</section>"##,
-    ext = "html"
-)]
-struct StatusFragmentTemplate<'a> {
-    status: &'a ApplicationStatus,
-}
-
-fn status_page(status: &ApplicationStatus) -> Result<Html<String>, StatusCode> {
-    let status_html = StatusFragmentTemplate { status }
-        .render()
-        .map_err(|error| {
-            warn!(%error, "failed to render status fragment");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-    StatusPageTemplate {
-        status_html: &status_html,
-    }
-    .render()
-    .map(Html)
-    .map_err(|error| {
-        warn!(%error, "failed to render status page");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })
-}
-
-fn status_fragment(status: &ApplicationStatus) -> Result<Html<String>, StatusCode> {
-    StatusFragmentTemplate { status }
-        .render()
-        .map(Html)
-        .map_err(|error| {
-            warn!(%error, "failed to render status fragment");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })
 }
 
 /// Runs the daemon until Ctrl-C or SIGTERM requests graceful shutdown.

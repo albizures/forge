@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Forge Records</title>
+  <style>
+    body { font: 1rem/1.5 system-ui, sans-serif; margin: 1rem auto; padding: 0 1rem; max-width: 80rem; }
+    nav { display: flex; flex-wrap: wrap; gap: 1rem; }
+    select, button { font: inherit; max-width: 100%; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 20rem), 1fr)); gap: 1rem; }
+    article { border: 1px solid #888; border-radius: .5rem; padding: 1rem; min-width: 0; overflow-wrap: anywhere; }
+    h2 { font-size: 1.2rem; margin-top: 0; }
+    dt { font-weight: bold; } dd { margin: 0 0 .5rem; }
+    :focus-visible { outline: 3px solid #1769aa; outline-offset: 3px; }
+  </style>
+</head>
+<body>
+  <nav aria-label="Main"><a href="/records" aria-current="page">Records</a> <a href="/">Daemon status</a></nav>
+  <main>
+    <h1>Records</h1>
+    {% if workspaces.is_empty() %}
+      <p>No registered Workspaces.</p>
+    {% else %}
+      <form action="/records" method="get">
+        <label for="workspace">Forge Workspace</label>
+        <select id="workspace" name="workspace">
+          <option value="" {% if selected.is_empty() %}selected{% endif %}>Choose a Workspace</option>
+          {% for workspace in workspaces %}
+          <option value="{{ workspace.id }}" {% if selected == workspace.id %}selected{% endif %}>{{ workspace.name }} ({{ workspace.id }})</option>
+          {% endfor %}
+        </select>
+        <button type="submit">View / Refresh</button>
+      </form>
+      {% if selected.is_empty() %}
+        <p>Select a Workspace to view its Records.</p>
+      {% else %}
+        <p>Workspace: {{ selected }} · Recently updated · {{ cards.len() }} Records</p>
+        {% if cards.is_empty() %}<p>No Records in this Workspace.</p>{% endif %}
+        <section class="cards" aria-label="Records, recently updated">
+          {% for card in cards %}
+          <article aria-labelledby="record-{{ card.id }}">
+            <h2 id="record-{{ card.id }}">{{ card.title }}</h2>
+            <dl>
+              <dt>Record Identifier</dt><dd>#{{ card.id }}</dd>
+              <dt>Record Type</dt><dd>{{ card.kind }}</dd>
+              <dt>Record Status</dt><dd>{{ card.status }}</dd>
+              <dt>Project Scope</dt><dd>{{ card.scope }}</dd>
+              <dt>Last updated (UTC)</dt><dd>{{ card.updated }}</dd>
+            </dl>
+          </article>
+          {% endfor %}
+        </section>
+      {% endif %}
+    {% endif %}
+  </main>
+</body>
+</html>

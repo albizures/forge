@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Forge daemon status</title>
+  <script src="/assets/htmx.min.js"></script>
+</head>
+<body>
+  <nav aria-label="Main"><a href="/records">Records</a> <a href="/" aria-current="page">Daemon status</a></nav>
+  <main>
+    <h1>Forge daemon</h1>
+    {{ status_html|safe }}
+  </main>
+</body>
+</html>

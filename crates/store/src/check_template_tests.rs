@@ -49,6 +49,7 @@ fn stack_template_preflight_is_read_only_and_checks_every_pin() {
     let policy = forge_app::agent_profiles::ResolvedLaunchPolicy {
         version: 1, runtime: "herdr/pi".into(), model: "test/model".into(), tools: vec![],
         behavior: "Verify".into(), skills: vec![], extensions: vec![], mcp_servers: vec![],
+        thinking_level: None,
     };
     repository.register_agent_profile("test", RecordType::Task, &policy).unwrap();
     input.expected_version = 1;
@@ -84,6 +85,7 @@ fn preflight_then_cumulative_plan_readback_and_start_uses_returned_ids() {
     let policy = forge_app::agent_profiles::ResolvedLaunchPolicy {
         version: 1, runtime: "herdr/pi".into(), model: "test/model".into(), tools: vec![],
         behavior: "Verify".into(), skills: vec![], extensions: vec![], mcp_servers: vec![],
+        thinking_level: None,
     };
     let profile = repository.register_agent_profile("test", RecordType::Task, &policy).unwrap();
     let mut input = replacement(0, &["Publication"]);

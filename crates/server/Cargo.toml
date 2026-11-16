@@ -22,6 +22,8 @@ tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 rusqlite.workspace = true
 serde_json = "1.0.145"
+serde = { version = "1", features = ["derive"] }
+time = { version = "0.3", features = ["formatting"] }
 
 [lints]
 workspace = true
