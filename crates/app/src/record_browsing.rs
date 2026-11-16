@@ -128,6 +128,20 @@ impl Application {
         })
     }
 
+    /// Read one Record and its durable dates within an explicit Workspace.
+    /// # Errors
+    /// Returns scoped not-found, Workspace, or storage errors.
+    pub fn record_detail(
+        &self,
+        workspace: &str,
+        id: u64,
+    ) -> Result<DatedRecord, RegistrationError> {
+        let scoped = self.records_in_workspace(workspace)?;
+        let record = scoped.show_record(id)?;
+        let dates = scoped.records.record_dates(id)?;
+        Ok(DatedRecord { record, dates })
+    }
+
     fn dated_records(&self, workspace: &str) -> Result<Vec<DatedRecord>, RegistrationError> {
         let scoped = self.records_in_workspace(workspace)?;
         scoped

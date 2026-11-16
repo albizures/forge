@@ -61,7 +61,7 @@
         <section class="cards" aria-label="Records, {{ sort_label }}">
           {% for card in cards %}
           <article aria-labelledby="record-{{ card.id }}">
-            <h2 id="record-{{ card.id }}">{{ card.title }}</h2>
+            <h2 id="record-{{ card.id }}"><a href="{{ card.url }}">{{ card.title }}</a></h2>
             <dl>
               <dt>Record Identifier</dt><dd>#{{ card.id }}</dd>
               <dt>Record Type</dt><dd>{{ card.kind }}</dd>

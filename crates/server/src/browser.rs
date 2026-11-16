@@ -13,6 +13,7 @@ use forge_app::{
     Application, ApplicationStatus, RecordStatus, RecordType, RegistrationError, Workspace,
     record_browsing::{DatedRecord, RecordSort},
 };
+mod detail;
 mod query;
 use query::{Choice, DashboardQuery, SORTS, STATUSES, TYPES};
 use tracing::warn;
@@ -20,6 +21,7 @@ use tracing::warn;
 pub(super) fn router(application: Arc<Application>) -> Router {
     let status_application = application.clone();
     let fragment_application = application.clone();
+    let detail_application = application.clone();
     Router::new()
         .route(
             "/",
@@ -38,6 +40,16 @@ pub(super) fn router(application: Arc<Application>) -> Router {
                     })
                 }
             }),
+        )
+        .route(
+            "/records/{id}",
+            get(
+                move |axum::extract::Path(id): axum::extract::Path<u64>,
+                      RawQuery(raw): RawQuery| {
+                    let app = detail_application.clone();
+                    async move { detail::page(&app, id, raw.as_deref().unwrap_or_default()) }
+                },
+            ),
         )
         .route(
             "/records",
@@ -100,7 +112,11 @@ fn dashboard_page(
     let cards: Vec<_> = result
         .into_iter()
         .flat_map(|result| result.records)
-        .map(|dated| Card::new(dated, query.sort))
+        .map(|dated| {
+            let mut card = Card::new(dated, query.sort);
+            card.url = detail::url(card.id, query);
+            card
+        })
         .collect();
     let types: Vec<_> = TYPES
         .iter()
@@ -155,6 +171,7 @@ fn dashboard_page(
 
 struct Card {
     id: u64,
+    url: String,
     title: String,
     kind: &'static str,
     status: &'static str,
@@ -177,6 +194,7 @@ impl Card {
         };
         Self {
             id: record.id,
+            url: String::new(),
             title: title.to_owned(),
             kind: match record.record_type {
                 RecordType::Generic => "Generic Record",

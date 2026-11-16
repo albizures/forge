@@ -1,4 +1,69 @@
-# Workspace Records dashboard (Tasks #10–11)
+# Workspace Records dashboard (Tasks #10–12)
+
+## Safe Record details (Task #12)
+
+Built on Task #11's verified Stack commit
+`add1e8014831dfe6546edbd9b603dd194532a4e6`, retaining its explicit dependency.
+Cards now link to `/records/{id}` with the same structured Workspace, repeated
+filters, sort and page parameters. Details reconstruct a local `/records` return
+URL from those parameters, not from a user-provided destination. Unknown return
+parameters are rejected with 400. Direct URLs require explicit Workspace selection;
+the application selects a scoped repository before fetching the Record or dates.
+Missing/foreign IDs and unknown Workspaces give the same non-disclosing 404;
+backend/projection failures give a distinct 500. Detail responses use `no-store`.
+
+Details include full Markdown Body, identifier, type, status, Workspace, empty or
+multi-Project Scope, opening/latest Update dates and optional plain-text Completion
+Resolution. Missing historical dates remain explicitly unknown. No schema, RPC,
+CLI, listener, status-route, mutation, Comment or Relationship navigation changes.
+
+### Markdown dependency and safety (ARCH-4)
+
+`pulldown-cmark` (locked at 0.13.6) provides CommonMark parsing and HTML escaping.
+The existing workspace dependencies and standard library do not parse Markdown;
+hand-written parsing would enlarge both the correctness and security surface.
+Only its `html` feature is enabled; default features/extensions are disabled.
+Raw HTML events are converted to escaped text, never trusted HTML. Link and image
+URLs are inspected after Markdown entity decoding: control/whitespace/backslash
+characters and protocol-relative URLs are rejected; explicit schemes allow only
+HTTP, HTTPS and mailto. Relative paths/fragments remain usable. Unsafe destinations
+become empty destinations. Renderer-generated text and attributes are escaped.
+Only this policy's output crosses Askama's `safe` boundary; all metadata, titles,
+return URLs and Completion Resolution retain Askama autoescaping. No general HTML
+sanitizer is necessary because user HTML is never admitted to the output markup.
+
+### Acceptance evidence and limits
+
+`crates/server/src/browser/detail/tests.rs` exercises the real daemon router and
+isolated SQLite/application boundary:
+
+- AC 8–9: a >60 KB Body through its last line, readable bold/code/links, required
+  metadata, controlled opening/latest dates, empty/multiple Projects, optional
+  escaped Resolution, script-bearing title, raw scripts/HTML/event handlers,
+  entity/control-obfuscated and mixed-case unsafe protocols and unsafe images.
+- AC 2, 7, 11: guessed foreign and missing IDs, missing Workspace selection,
+  unknown Workspace, backend date failure, full repeated-filter/sort/page return
+  URLs, card detail targets, rejected script/external/protocol-relative return
+  destinations and invalid metadata-like query inputs. Historical dates stay unknown.
+- AC 1: full Record (including Body/status/Relationships/Resolution) and Update Log
+  comparisons before/after detail browsing; inherited list/status/RPC regression
+  tests remain in the workspace suite. Ordinary GET links preserve browser history.
+
+No interactive browser/script-execution, keyboard, or viewport session was run;
+HTTP assertions verify inert markup and URL contracts, not a browser-engine audit.
+External safe-protocol Markdown links/images are permitted; this is not an
+untrusted-network privacy sandbox. Separate reads are not a cross-request snapshot.
+
+### Task #12 verification
+
+Final gates: `cargo fmt --check`,
+`cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`
+(463 passed, 0 failed, 1 ignored; default parallel execution), and
+`git diff --check` passed. Targeted `cargo test -p forge-server browser::`
+passed all 11 tests. Development runs caught and corrected fixture directory/SQL
+binding issues, cross-Workspace error mapping, a fault-injection connection reopen,
+and Clippy import placement/style warnings. No ignored test was added. These
+are local implementation checks, not publication or installation verification.
 
 ## Filtering, sorting and pagination (Task #11)
 
