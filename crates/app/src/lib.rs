@@ -63,6 +63,8 @@ pub enum RecordRelationshipKind {
     DependsOn,
     /// Completion-only prerequisite; stored using the supported explicit-intent representation.
     WaitsFor,
+    /// Completion and verified repository inheritance from the immediate predecessor.
+    BuildsOn,
     GeneratedBy,
     /// Non-hierarchical membership of a Spec or Wayfinder in an Initiative.
     Initiative,
@@ -73,6 +75,7 @@ pub enum RecordRelationshipKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PrerequisiteKind {
     WaitsFor,
+    BuildsOn,
     LegacyDependsOn,
 }
 
@@ -81,6 +84,7 @@ impl RecordRelationshipKind {
     pub fn prerequisite_kind(self) -> Option<PrerequisiteKind> {
         match self {
             Self::WaitsFor => Some(PrerequisiteKind::WaitsFor),
+            Self::BuildsOn => Some(PrerequisiteKind::BuildsOn),
             Self::DependsOn => Some(PrerequisiteKind::LegacyDependsOn),
             Self::ParentChild | Self::GeneratedBy | Self::Initiative => None,
         }
@@ -2326,6 +2330,7 @@ pub fn assignment_context<R: AgentDispatchRepository>(
                 RecordRelationshipKind::ParentChild
                     | RecordRelationshipKind::DependsOn
                     | RecordRelationshipKind::WaitsFor
+                    | RecordRelationshipKind::BuildsOn
                     | RecordRelationshipKind::GeneratedBy
             )
         })

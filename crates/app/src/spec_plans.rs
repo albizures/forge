@@ -1,4 +1,4 @@
-//! Initial Spec plan policy; dependency ordering is distinct from repository inheritance.
+//! Initial Spec plan policy; prerequisite intent distinguishes completion-only from code inheritance.
 use crate::{PrerequisiteKind, Record, RegistrationError, stacks::TaskStack};
 
 /// A Spec authorizes child execution only while In Progress; status is not plan evidence.
@@ -19,7 +19,7 @@ pub fn validate_execution_parent(task: u64, parent: &Record) -> Result<(), Regis
     Ok(())
 }
 
-/// Validate required same-Spec inheritance against explicitly configured Stack lineage.
+/// Validate required same-Spec inheritance against derived Stack lineage (or transitional legacy links).
 /// Independent Tasks and explicit Waits-For Relationships do not require a Stack.
 /// # Errors
 /// Rejects missing inheritance, contradictory ordering, and ambiguous branches.

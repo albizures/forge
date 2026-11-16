@@ -93,11 +93,11 @@ The immutable starting revision from which a Task's Task Branch is created. For 
 _Avoid_: dispatch base, checkout evidence
 
 **Stack**:
-An explicitly configured linear chain of Tasks in one Project whose repository results build on one another. Each successor inherits its immediate predecessor's verified final commit. Changed results require verified publication; unchanged results carry forward the applicable publication base. The Stack's selected starting branch need not be the repository default branch.
-_Avoid_: dependency chain, consecutive Record IDs
+A linear chain of Tasks in one Project connected by Builds-On Relationships. Each successor inherits its immediate predecessor's verified final commit. Changed results require verified publication; unchanged results carry forward the applicable publication base. The root's selected starting branch need not be the repository default branch.
+_Avoid_: separately declared Stack, consecutive Record IDs
 
 **Stack Predecessor**:
-The Task whose verified completed repository result a successor builds upon. It is also a prerequisite, but an ordinary prerequisite does not imply Stack membership. An unchanged predecessor passes through its verified commit without requiring its own pull request.
+The immediate prerequisite Task selected by a Builds-On Relationship, whose verified completed repository result supplies the successor's starting code. An unchanged predecessor passes through its verified commit without requiring its own pull request.
 _Avoid_: previous Record, previous ID
 
 **Base Branch**:
@@ -292,16 +292,16 @@ A typed association between two Records. Parent/child and dependency are Relatio
 _Avoid_: link
 
 **Dependency Relationship**:
-A directed Record Relationship from a Blocked Record to a Prerequisite Record. A Blocked Record cannot become In Progress until every prerequisite is Done; an agent-owned In Progress Task cannot gain a new dependency.
-_Avoid_: blocker, prerequisite link
+A directed prerequisite relationship from a Blocked Record to a Prerequisite Record, expressed as either a Waits-For Relationship or a Builds-On Relationship. Both require prerequisite completion; only Builds-On also requires verified repository inheritance.
+_Avoid_: ordinary dependency, ordering-only flag
 
 **Waits-For Relationship**:
 A directed prerequisite relationship requiring completion of the Prerequisite Record without inheritance of its repository result. It expresses completion ordering independently of code consumption.
 _Avoid_: ordering-only dependency, implicit no-stack exception
 
-**Ordering-Only Dependency** (transitional storage/legacy contract term):
-The existing explicit non-inheritance designation used to persist a Waits-For Relationship during expand–contract. It is not a separate canonical relationship intent.
-_Avoid_: non-code Task, implicit no-stack exception
+**Builds-On Relationship**:
+A directed prerequisite relationship between Tasks in one Project requiring completion of the predecessor and inheritance of its verified repository result. It identifies the immediate code predecessor even when the dependent Task makes no repository changes.
+_Avoid_: separate Stack link, code-writing Task dependency
 
 **Generated-By Relationship**:
 A directed, many-to-many provenance Record Relationship across Project Scopes within one Forge Workspace, from a generated Record to the Record whose work or output caused its creation; any Record Types may participate. It does not imply parenthood, dependency, or lifecycle control.

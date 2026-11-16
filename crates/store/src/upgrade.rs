@@ -28,8 +28,8 @@ fn error(message: impl Into<String>) -> RegistrationError {
 pub fn capabilities() -> UpgradeCapabilities {
     UpgradeCapabilities {
         interface_version: UPGRADE_INTERFACE_VERSION,
-        target_schema: 11,
-        supported_sources: vec![7, 8, 9, 10, 11],
+        target_schema: 12,
+        supported_sources: vec![7, 8, 9, 10, 11, 12],
     }
 }
 
@@ -141,7 +141,7 @@ fn reference(schema: u32) -> Result<Connection, RegistrationError> {
     let c = Connection::open_in_memory().map_err(storage_error)?;
     let ddl = match schema {
         7 => include_str!("upgrade/schema7.sql"),
-        8..=11 => include_str!("upgrade/schema8.sql"),
+        8..=12 => include_str!("upgrade/schema8.sql"),
         _ => return Err(error("missing frozen schema contract")),
     };
     c.execute_batch(ddl).map_err(storage_error)?;
@@ -163,6 +163,12 @@ fn reference(schema: u32) -> Result<Connection, RegistrationError> {
         c.pragma_update(None, "user_version", 11)
             .map_err(storage_error)?;
     }
+    if schema >= 12 {
+        c.execute_batch(include_str!("upgrade/builds_on_dependencies.sql"))
+            .map_err(storage_error)?;
+        c.pragma_update(None, "user_version", 12)
+            .map_err(storage_error)?;
+    }
     super::seed_agent_profiles(&c)?;
     c.execute_batch("INSERT INTO dispatch_provider_generation VALUES (1, 0)")
         .map_err(storage_error)?;
@@ -178,7 +184,7 @@ fn inspection(c: &Connection) -> Result<StoreInspection, RegistrationError> {
         .map_err(storage_error)?;
     if application != APPLICATION_ID || !capabilities().supported_sources.contains(&schema) {
         return Err(error(
-            "unsupported application or schema; supported source schemas: 7, 8, 9, 10, 11",
+            "unsupported application or schema; supported source schemas: 7, 8, 9, 10, 11, 12",
         ));
     }
     check_integrity(c)?;
@@ -360,7 +366,7 @@ fn migrate_connection(c: &mut Connection) -> Result<StoreInspection, Registratio
     }
     match before.schema {
         Some(7) => v007_to_v008::apply(&tx)?,
-        Some(8..=11) => {}
+        Some(8..=12) => {}
         _ => return Err(error("unsupported migration source")),
     }
     if before.schema.is_some_and(|s| s < 9) {
@@ -379,6 +385,12 @@ fn migrate_connection(c: &mut Connection) -> Result<StoreInspection, Registratio
         tx.execute_batch(include_str!("upgrade/forced_completions.sql"))
             .map_err(storage_error)?;
         tx.pragma_update(None, "user_version", 11)
+            .map_err(storage_error)?;
+    }
+    if before.schema.is_some_and(|s| s < 12) {
+        tx.execute_batch(include_str!("upgrade/builds_on_dependencies.sql"))
+            .map_err(storage_error)?;
+        tx.pragma_update(None, "user_version", 12)
             .map_err(storage_error)?;
     }
     let after = inspection(&tx)?;

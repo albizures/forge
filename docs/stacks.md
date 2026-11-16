@@ -1,8 +1,9 @@
 # Task stacks
 
-A Stack is an explicit linear chain of Tasks in one Project. Ordinary `depends-on`
-edges continue to control readiness without changing Git ancestry. Record IDs are
-opaque: a predecessor is never inferred by subtracting one.
+A Stack is a linear chain of Tasks in one Project derived from `builds-on`
+Relationships. Each edge declares both prerequisite completion and immediate code
+inheritance. `waits-for` requires completion without changing Git ancestry. Record
+IDs are opaque: a predecessor is never inferred by subtracting one.
 
 ```text
 feature/payments <- feat/forge-44 <- feat/forge-49
@@ -20,7 +21,9 @@ starting branch. No merge is needed before the next Task runs.
 The Project Check Template must end with a Check named exactly `Publication`, after
 Implementation and any reviews. For Dispatched Tasks it must pin a registered Task
 Agent Profile with a launch policy. Checks are immutable: configure the template
-before opening Tasks; incompatible existing Tasks cannot join a Stack. Read-only
+before opening Tasks. Open plans may declare relationships and root configuration
+before execution is complete; preparation and Spec start reject incompatible Checks
+without rewriting their immutable definitions. Read-only
 `forge project check-template preflight <project> --json` checks the future
 Dispatched Task criteria and every pinned Task profile's registered launch policy.
 It fails on blockers or an older server without preflight support, without changing
@@ -32,31 +35,40 @@ Select the Workspace by canonical cwd or `--workspace`. Substitute inspected IDs
 
 ```sh
 forge task stack root 44 --repository acme/widgets --remote origin --base feature/payments
-forge task stack after 49 --predecessor 44
+forge record relate 49 --kind builds-on --to 44
 forge task stack show 49 --json
 ```
 
-`after` also creates the dependency atomically, unless it already exists. Both
-Tasks must have compatible Check definitions and belong to the same Project.
-A Task has at most one Stack Predecessor and one Stack Successor. Cycles and forks
-are rejected. The predecessor may already be running or Done.
+No second Stack declaration is needed. Both endpoints must be Tasks in the same
+Project. A Task has at most one immediate Builds-On predecessor and one successor.
+Cycles (including mixed prerequisite kinds), forks and multiple code inputs are
+rejected. The predecessor may already be running or Done. Successors inherit the
+root's repository and remote rather than choosing competing starting inputs.
+
+`stack after`, ordinary dependencies, and historical Stack links remain transitional
+compatibility paths during implementation; new plans should use canonical Relationships.
+Historical intent is not automatically converted.
 
 Changes to a destination or predecessor are permitted only while every affected
 Task is Open and unprepared. Preparation pins the Base Commit even if subsequent
-worktree creation fails; recovery retains that evidence. Replacing a predecessor
-preserves existing ordinary dependency edges. A current Stack Predecessor dependency
-cannot be removed independently. There is no automatic conversion of existing Tasks.
+worktree creation fails; recovery retains that evidence. Replace relationship intent
+explicitly with `record unrelate <task> --kind builds-on --to <predecessor>` followed
+by a new declaration. Removal is subject to the same affected-suffix restrictions.
+The same ordered pair cannot carry both prerequisite kinds. Independent direct waits
+may remain alongside the immediate code predecessor, including waits on ancestors.
+An incomplete chain without root configuration can be planned, but Stack inspection
+and execution report the missing root configuration until it is supplied.
 
 ## Sequential Spec planning
 
 The source Spec planning skill creates one cumulative chain by default, including
 review and verification Tasks that consume code without editing it. Use returned
 IDs, not arithmetic. Configure every member while the Spec is Open, read back
-Checks, parentage, dependencies and Stack links, then `forge record start <spec-id>`.
+Checks, parentage, prerequisite Relationships and derived Stack, then `forge record start <spec-id>`.
 Task-creation authorization includes that validated start, not dispatch. Partial
 publication or failed validation is reported as an incomplete Open plan, not
-silently repaired. Wait-only edges require persisted `ordering-only-depends-on`
-intent; missing configuration or prose is not an exception. Started Spec structural
+silently repaired. Completion-only edges use `waits-for`; missing configuration or
+prose is not an exception. Started Spec structural
 edits are initially restricted; see [Records](records.md#relationships-and-lifecycle).
 
 A Stack carries repository commits only, not external files, untracked artifacts,

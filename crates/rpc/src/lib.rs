@@ -1303,6 +1303,7 @@ fn record_relationship_kind_name(kind: RecordRelationshipKind) -> String {
         RecordRelationshipKind::ParentChild => "parent-child",
         RecordRelationshipKind::DependsOn => "depends-on",
         RecordRelationshipKind::WaitsFor => "waits-for",
+        RecordRelationshipKind::BuildsOn => "builds-on",
         RecordRelationshipKind::GeneratedBy => "generated-by",
         RecordRelationshipKind::Initiative => "initiative",
     }

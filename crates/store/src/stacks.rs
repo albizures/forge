@@ -37,6 +37,48 @@ pub(super) fn schema(c: &Connection) -> Result<(), RegistrationError> {
 
 type StoredStackRow = (Option<i64>, String, Option<String>, Option<String>);
 
+/// Canonical inheritance is a prerequisite designation, never a mutable Stack link.
+pub(super) fn builds_on(c: &Connection, record: u64) -> Result<Option<u64>, RegistrationError> {
+    let exists: bool = c
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name = 'builds_on_dependencies')",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(storage_error)?;
+    if !exists {
+        return Ok(None);
+    }
+    c.query_row(
+        "SELECT to_id FROM builds_on_dependencies WHERE from_id = ?1",
+        [record.cast_signed()],
+        |r| r.get::<_, i64>(0),
+    )
+    .optional()
+    .map(|v| v.map(i64::cast_unsigned))
+    .map_err(storage_error)
+}
+
+/// Immediate topology can be inspected even while the root is not configured.
+pub(super) fn predecessor(c: &Connection, record: u64) -> Result<Option<u64>, RegistrationError> {
+    if let Some(previous) = builds_on(c, record)? {
+        return Ok(Some(previous));
+    }
+    c.query_row(
+        "SELECT predecessor FROM task_stacks WHERE record_id = ?1",
+        [record.cast_signed()],
+        |r| r.get::<_, Option<i64>>(0),
+    )
+    .optional()
+    .map(|v| v.flatten().map(i64::cast_unsigned))
+    .map_err(storage_error)
+}
+
+pub(super) fn editable_topology(c: &Connection, record: u64) -> Result<(), RegistrationError> {
+    super::spec_plans::editable_stack_suffix(c, record)?;
+    unprepared(c, record)
+}
+
 #[derive(Clone, Copy)]
 enum ObservedResult<'a> {
     Published(&'a Publication),
@@ -63,11 +105,13 @@ pub(super) fn load(c: &Connection, record: u64) -> Result<Option<TaskStack>, Reg
             return if id == record {
                 Ok(None)
             } else {
-                Err(error("predecessor is not stacked"))
+                Err(error(format!(
+                    "Stack root Task {id} has no root execution configuration; configure its repository, remote and starting branch"
+                )))
             };
         };
         lineage.push(id);
-        cursor = predecessor.map(i64::cast_unsigned);
+        cursor = builds_on(c, id)?.or_else(|| predecessor.map(i64::cast_unsigned));
     }
     // Resolve from the root iteratively: long linear plans must not consume call stack.
     let mut previous = None;
@@ -89,7 +133,18 @@ fn load_member(
     let Some((predecessor, source, base_commit, publication)) = row else {
         return Ok(None);
     };
-    let source: StackSource = serde_json::from_str(&source).map_err(json_error)?;
+    let canonical = builds_on(c, record)?;
+    if canonical.is_some() && (predecessor.is_some() || source != "{}") {
+        return Err(error(
+            "canonical Builds-On successor has competing stored starting-code configuration",
+        ));
+    }
+    let predecessor = canonical.map(u64::cast_signed).or(predecessor);
+    let source: StackSource = if let Some(record_id) = canonical {
+        StackSource::Predecessor { record_id }
+    } else {
+        serde_json::from_str(&source).map_err(json_error)?
+    };
     let (destination, base_branch) = match source {
         StackSource::Root { destination } if predecessor.is_none() => {
             let branch = destination.branch.clone();
@@ -191,7 +246,7 @@ fn audit(tx: &Transaction<'_>, record: u64, message: &str) -> Result<(), Registr
 }
 
 fn unprepared(c: &Connection, record: u64) -> Result<(), RegistrationError> {
-    let affected: bool = c.query_row("WITH RECURSIVE suffix(id) AS (SELECT ?1 UNION SELECT s.record_id FROM task_stacks s JOIN suffix ON s.predecessor = suffix.id)
+    let affected: bool = c.query_row("WITH RECURSIVE links(record_id, predecessor) AS (SELECT record_id, predecessor FROM task_stacks UNION SELECT from_id, to_id FROM builds_on_dependencies), suffix(id) AS (SELECT ?1 UNION SELECT s.record_id FROM links s JOIN suffix ON s.predecessor = suffix.id)
         SELECT EXISTS(SELECT 1 FROM suffix JOIN records r ON r.id = suffix.id
         WHERE r.status != 'open' OR EXISTS(SELECT 1 FROM task_stacks s WHERE s.record_id = r.id AND s.base_commit IS NOT NULL)
         OR EXISTS(SELECT 1 FROM worktree_claims w WHERE w.record_id = r.id)
@@ -259,9 +314,18 @@ impl SqliteProjectRepository {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(storage_error)?;
         let task = self.check_task(&tx, record)?;
+        forge_app::stacks::validate_stack_task(&task)?;
         super::spec_plans::editable_stack_suffix(&tx, record)?;
         unprepared(&tx, record)?;
-        compatible(&tx, record)?;
+        if builds_on(&tx, record)?.is_some() {
+            return Err(error(
+                "a Builds-On successor inherits its starting code; remove the Relationship before configuring a root",
+            ));
+        }
+        // Open canonical plans may be incomplete; preparation still validates Checks.
+        if matches!(source, StackSource::Predecessor { .. }) {
+            compatible(&tx, record)?;
+        }
         let predecessor = match source {
             StackSource::Root { .. } => None,
             StackSource::Predecessor { record_id } => {
@@ -278,7 +342,7 @@ impl SqliteProjectRepository {
                 if cycle {
                     return Err(error("stack cannot form a cycle"));
                 }
-                let occupied: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM task_stacks WHERE predecessor = ?1 AND record_id != ?2)", params![record_id.cast_signed(), record.cast_signed()], |r| r.get(0)).map_err(storage_error)?;
+                let occupied: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM task_stacks WHERE predecessor = ?1 AND record_id != ?2) OR EXISTS(SELECT 1 FROM builds_on_dependencies WHERE to_id = ?1 AND from_id != ?2)", params![record_id.cast_signed(), record.cast_signed()], |r| r.get(0)).map_err(storage_error)?;
                 if occupied {
                     return Err(error("predecessor already has a Stack Successor"));
                 }

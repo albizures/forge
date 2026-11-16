@@ -29,7 +29,7 @@ pub(super) fn editable_task(c: &Connection, task: u64) -> Result<(), Registratio
 
 pub(super) fn editable_stack_suffix(c: &Connection, task: u64) -> Result<(), RegistrationError> {
     let mut statement = c.prepare(
-        "WITH RECURSIVE suffix(id) AS (SELECT ?1 UNION SELECT record_id FROM task_stacks JOIN suffix ON predecessor = suffix.id) SELECT id FROM suffix"
+        "WITH RECURSIVE links(record_id, predecessor) AS (SELECT record_id, predecessor FROM task_stacks UNION SELECT from_id, to_id FROM builds_on_dependencies), suffix(id) AS (SELECT ?1 UNION SELECT record_id FROM links JOIN suffix ON predecessor = suffix.id) SELECT id FROM suffix"
     ).map_err(storage_error)?;
     let ids = statement
         .query_map([task.cast_signed()], |r| r.get::<_, i64>(0))
@@ -156,10 +156,14 @@ pub(super) fn validate(c: &Connection, spec: u64) -> Result<(), RegistrationErro
                 )?;
                 let member = load_record(c, id)?;
                 if !member.relationships.iter().any(|r| {
-                    r.kind == forge_app::RecordRelationshipKind::DependsOn
-                        && r.from_id == id
+                    matches!(
+                        r.prerequisite_kind(),
+                        Some(
+                            forge_app::PrerequisiteKind::BuildsOn
+                                | forge_app::PrerequisiteKind::LegacyDependsOn
+                        )
+                    ) && r.from_id == id
                         && r.to_id == previous
-                        && !r.ordering_only
                 }) {
                     return Err(RegistrationError::new(
                         "invalid-spec-plan",

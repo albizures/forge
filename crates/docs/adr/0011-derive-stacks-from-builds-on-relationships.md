@@ -1,0 +1,5 @@
+# Derive Stacks from explicit Builds-On Relationships
+
+Forge's separate dependency and Stack-link declarations overlap and make code-consumption intent ambiguous. Use Waits-For Relationships for completion-only prerequisites and Builds-On Relationships for completion plus verified repository inheritance, deriving each linear Stack from its Builds-On Relationships. This trades legacy declaration compatibility for one authoritative expression of intent while retaining root execution configuration, verified publication evidence, and existing lifecycle safeguards; it replaces the dependency/Stack declaration distinction described in ADRs 0003 and 0009 without weakening their readiness and Spec-start gates.
+
+During expand–contract, legacy declarations and historical Stack links remain narrowly isolated compatibility paths until the canonical-contract cutover. They do not supply a second declaration for canonical Builds-On Relationships. Explicit offline schema expansion does not infer or convert historical relationship intent; validated historical conversion is a separate slice.

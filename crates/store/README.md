@@ -9,7 +9,7 @@ by migrations—not just the initial `CREATE TABLE` statements.
 - [`src/lib.rs`](src/lib.rs): `SqliteProjectRepository::from_connection`,
   `migrate_*` functions, profile seeds, and repository operations.
 - [`src/workspaces.rs`](src/workspaces.rs): Workspace ownership and Project identity.
-- [`src/upgrade.rs`](src/upgrade.rs): explicit offline schema 7 → 8 → 9 → 10 → 11 conversion,
+- [`src/upgrade.rs`](src/upgrade.rs): explicit offline schema 7 → 8 → 9 → 10 → 11 → 12 expansion,
   frozen contract validation, consistent snapshots, and preservation inventories.
   See [Revision State upgrades](../../docs/state-upgrades.md) for orchestration.
 - [`src/record_workspaces.rs`](src/record_workspaces.rs): Record ownership,
@@ -45,8 +45,39 @@ is documented separately in [Records](../../docs/records.md),
   Most references do **not** cascade.
 - Ordinary repository opening accepts only the current marked schema revision.
   Triggers and repository validation also enforce invariants. Explicit managed
-  copy-and-upgrade targets revision 11 from revisions 7, 8, 9, 10, or 11; unsupported
+  copy-and-upgrade targets revision 12 from revisions 7 through 12; unsupported
   stores are rejected without automatic conversion or reset.
+
+## Canonical Builds-On topology (revision 12)
+
+`builds_on_dependencies` designates the code-consuming kind of a shared prerequisite
+row. It is the single authoritative immediate predecessor for canonical chains:
+
+| Column | Type / constraint |
+| --- | --- |
+| `from_id` | INTEGER PK; blocked Task, at most one code input |
+| `to_id` | INTEGER NOT NULL UNIQUE; prerequisite Task, at most one successor |
+| `kind` | TEXT NOT NULL DEFAULT `depends-on`, constrained to that value |
+
+The composite FK `(from_id, to_id, kind)` references `record_relationships` with
+`ON DELETE CASCADE`; a CHECK rejects self-links. Application policy plus writer
+transactions enforce same-Project Task endpoints, mutually exclusive intent,
+shared cycle/readiness checks, Open/unprepared affected suffixes, and started-Spec
+restrictions. Relationship, designation, execution-state initialization and audit
+commit atomically. Public reads expose `builds-on`, not the compatibility row kind.
+
+Canonical successors retain an evidence row in `task_stacks` with NULL predecessor
+and `{}` source JSON: it carries no mutable topology or competing root destination.
+Reads derive the predecessor and inherited destination from the relationship.
+Only roots retain repository/remote/selected branch configuration. Legacy Stack
+rows remain a transitional read/declaration adapter; canonical creation cannot
+fork them and legacy declaration cannot fork canonical Relationships.
+
+Revision 12 is a breaking storage-contract expansion. Ordinary opening rejects
+revision 11 before writes. Explicit offline expansion adds an empty designation
+table without inferring historical intent or rewriting pins, history, or Checks.
+Validated historical conversion and legacy declaration removal remain separate
+slices; this expansion must not be mistaken for canonical intent conversion.
 
 ## Forced completion evidence (revision 11)
 
