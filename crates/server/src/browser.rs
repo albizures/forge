@@ -4,16 +4,17 @@ use std::sync::Arc;
 use askama::Template;
 use axum::{
     Router,
-    extract::Query,
+    extract::RawQuery,
     http::StatusCode,
     response::{Html, IntoResponse, Response},
     routing::get,
 };
 use forge_app::{
     Application, ApplicationStatus, RecordStatus, RecordType, RegistrationError, Workspace,
-    record_browsing::DatedRecord,
+    record_browsing::{DatedRecord, RecordSort},
 };
-use serde::Deserialize;
+mod query;
+use query::{Choice, DashboardQuery, SORTS, STATUSES, TYPES};
 use tracing::warn;
 
 pub(super) fn router(application: Arc<Application>) -> Router {
@@ -40,23 +41,37 @@ pub(super) fn router(application: Arc<Application>) -> Router {
         )
         .route(
             "/records",
-            get(move |Query(query): Query<DashboardQuery>| {
+            get(move |RawQuery(raw): RawQuery| {
                 let app = application.clone();
-                async move { dashboard(&app, query) }
+                async move {
+                    let mut response =
+                        match DashboardQuery::parse(raw.as_deref().unwrap_or_default()) {
+                            Ok(query) => dashboard(&app, &query),
+                            Err(message) => invalid_query(message),
+                        };
+                    // Explicit navigation/Refresh must read current data, not a cached page.
+                    response.headers_mut().insert(
+                        axum::http::header::CACHE_CONTROL,
+                        axum::http::HeaderValue::from_static("no-store"),
+                    );
+                    response
+                }
             }),
         )
 }
 
-#[derive(Default, Deserialize)]
-struct DashboardQuery {
-    workspace: Option<String>,
+fn invalid_query(message: &str) -> Response {
+    (StatusCode::BAD_REQUEST, format!("Invalid Records query: {message}. Return to /records and apply selections to start at page one.")).into_response()
 }
 
-fn dashboard(application: &Application, query: DashboardQuery) -> Response {
+fn dashboard(application: &Application, query: &DashboardQuery) -> Response {
     match dashboard_page(application, query) {
         Ok(page) => page.into_response(),
         Err(error) => {
             warn!(?error, "failed to load Records dashboard");
+            if error.code == "invalid-page" {
+                return invalid_query(&error.message);
+            }
             let status = if error.code == "workspace-not-found" {
                 StatusCode::NOT_FOUND
             } else {
@@ -69,25 +84,71 @@ fn dashboard(application: &Application, query: DashboardQuery) -> Response {
 
 fn dashboard_page(
     application: &Application,
-    query: DashboardQuery,
+    query: &DashboardQuery,
 ) -> Result<Html<String>, RegistrationError> {
     let workspaces = application.workspaces()?;
-    let selected = query.workspace.unwrap_or_default();
+    let selected = &query.workspace;
     // No implicit cwd or first-Workspace fallback: selection is explicit and reproducible.
-    let cards = if selected.is_empty() {
-        Vec::new()
+    let result = if selected.is_empty() {
+        None
     } else {
-        application.workspace(&selected)?;
-        application
-            .recent_records(&selected)?
-            .into_iter()
-            .map(Card::from)
-            .collect()
+        application.workspace(selected)?;
+        Some(application.browse_records(selected, &query.filters, query.sort, query.page)?)
+    };
+    let total = result.as_ref().map_or(0, |result| result.total);
+    let pages = result.as_ref().map_or(1, |result| result.pages);
+    let cards: Vec<_> = result
+        .into_iter()
+        .flat_map(|result| result.records)
+        .map(|dated| Card::new(dated, query.sort))
+        .collect();
+    let types: Vec<_> = TYPES
+        .iter()
+        .map(|(value, label, kind)| Choice {
+            value,
+            label,
+            selected: query.filters.types.contains(kind),
+        })
+        .collect();
+    let statuses: Vec<_> = STATUSES
+        .iter()
+        .map(|(value, label, status)| Choice {
+            value,
+            label,
+            selected: query.filters.statuses.contains(status),
+        })
+        .collect();
+    let sorts: Vec<_> = SORTS
+        .iter()
+        .map(|(value, label, sort)| Choice {
+            value,
+            label,
+            selected: query.sort == *sort,
+        })
+        .collect();
+    let previous = query.url(query.page.saturating_sub(1).max(1));
+    let next = query.url(query.page.saturating_add(1));
+    let refresh = query.url(query.page);
+    let date_label = if query.sort.is_creation() {
+        "Created (UTC)"
+    } else {
+        "Last updated (UTC)"
     };
     render(&DashboardTemplate {
         workspaces: &workspaces,
-        selected: &selected,
+        selected,
         cards: &cards,
+        types: &types,
+        statuses: &statuses,
+        sorts: &sorts,
+        total,
+        page: query.page,
+        pages,
+        previous: &previous,
+        next: &next,
+        refresh: &refresh,
+        sort_label: query.sort_label(),
+        date_label,
     })
     .map_err(|_| RegistrationError::new("render", "failed to render Records dashboard"))
 }
@@ -101,8 +162,9 @@ struct Card {
     updated: String,
 }
 
-impl From<DatedRecord> for Card {
-    fn from(dated: DatedRecord) -> Self {
+impl Card {
+    fn new(dated: DatedRecord, sort: RecordSort) -> Self {
+        let date = sort.date(dated.dates);
         let record = dated.record;
         let first = record.body.lines().next().unwrap_or_default();
         let hashes = first.bytes().take_while(|byte| *byte == b'#').count();
@@ -134,7 +196,7 @@ impl From<DatedRecord> for Card {
             } else {
                 record.project_slugs.join(", ")
             },
-            updated: display_date(dated.dates.updated_at_millis),
+            updated: display_date(date),
         }
     }
 }
@@ -195,7 +257,22 @@ struct DashboardTemplate<'a> {
     workspaces: &'a [Workspace],
     selected: &'a str,
     cards: &'a [Card],
+    types: &'a [Choice],
+    statuses: &'a [Choice],
+    sorts: &'a [Choice],
+    total: usize,
+    page: usize,
+    pages: usize,
+    previous: &'a str,
+    next: &'a str,
+    refresh: &'a str,
+    sort_label: &'a str,
+    date_label: &'a str,
 }
 
+#[cfg(test)]
+mod browsing_tests;
+#[cfg(test)]
+mod date_tests;
 #[cfg(test)]
 mod tests;

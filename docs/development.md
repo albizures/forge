@@ -97,13 +97,21 @@ route is `/status`; the JSON-RPC endpoint is `POST /rpc`. Managed daemon ports
 are allocated by Forgeup rather than fixed at 45003.
 
 Open `/records` (or use the status page's **Records** link) for the read-only
-Records dashboard. Select a Forge Workspace and submit **View / Refresh**;
-`/records?workspace=<workspace-id>` reproduces the selection. No Workspace is
-selected implicitly, and no cross-Workspace inventory is shown. Cards include
-all Record Types and Projectless work, ordered by latest Record Update timestamp
-(descending), then Record Identifier (ascending). Dates are UTC; missing historical
-Updates are labeled unknown and sort last, never backfilled. This initial slice
-has no filters, pagination, alternative sorts, or Record detail links.
+Records dashboard. Select a Forge Workspace, optional Record Type/Status
+checkboxes, and a date order, then submit **Apply selections (page one)**.
+Selections within a filter are ORed; filters are ANDed; no selections mean all.
+The default order is Recently updated. Least recently updated, Newest created,
+and Oldest created are also available. Equal dates use ascending Record Identifier;
+unknown historical dates sort last in every order and are never backfilled.
+Cards show the relevant UTC date. No Workspace is selected implicitly, and no
+cross-Workspace inventory is shown. All Record Types and Projectless work are
+included before filtering. Matching results are counted and paginated at 50 cards.
+Normal GET URLs preserve Workspace, repeated `type`/`status` parameters, `sort`,
+and `page` (omitted values use defaults). Previous/Next and Refresh preserve
+selections; applying the form resets page one. Refresh reads current data without
+polling. Invalid query/page input returns 400; missing Workspaces return 404 and
+read failures return 500, never a successful empty inventory. There are not yet
+Record detail links.
 See [dashboard verification](records-dashboard-verification.md) for evidence and
 current limitations.
 
