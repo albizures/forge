@@ -68,7 +68,16 @@ Revision 11 adds this table through explicit copy-and-upgrade, preserving every
 old table and frozen schema contract without backfilling completion evidence.
 Ordinary opening rejects older stores before initialization writes.
 
-## Ordering-only dependencies (revision 9)
+## Waits-For compatibility representation (introduced in revision 9)
+
+Canonical `waits-for` uses the existing `depends-on` row plus its explicit
+`ordering_only_dependencies` designation. Application reads expose `WaitsFor`;
+readiness and cycle SQL continue to traverse all persisted prerequisite rows.
+Removal checks the designation in the same transaction as deletion and history.
+No schema change, marker rewrite, conversion, or new inheritance inference is
+introduced. Historical Update kinds remain unchanged; new designation Comments
+use Waits-For vocabulary. Legacy declaration paths are transitional and will be
+removed by the canonical-contract slice; historical conversion is separate.
 
 `ordering_only_dependencies` persists explicit intent without changing ordinary
 `record_relationships` rows or readiness ordering:

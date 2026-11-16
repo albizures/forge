@@ -79,7 +79,7 @@ impl SqliteProjectRepository {
                 },
             )?;
             if ordering_only {
-                tx.execute("INSERT INTO record_comments(record_id, author, body, created_at_millis) VALUES (?1, 'forge-dependency', ?2, ?3)", params![id.cast_signed(), format!("Ordering-only dependency designated: {from} depends on {to}"), super::now_millis()?]).map_err(storage_error)?;
+                tx.execute("INSERT INTO record_comments(record_id, author, body, created_at_millis) VALUES (?1, 'forge-dependency', ?2, ?3)", params![id.cast_signed(), format!("Waits-For Relationship designated: {from} waits for {to}"), super::now_millis()?]).map_err(storage_error)?;
                 insert_update(
                     &tx,
                     id,

@@ -1302,6 +1302,7 @@ fn record_relationship_kind_name(kind: RecordRelationshipKind) -> String {
     match kind {
         RecordRelationshipKind::ParentChild => "parent-child",
         RecordRelationshipKind::DependsOn => "depends-on",
+        RecordRelationshipKind::WaitsFor => "waits-for",
         RecordRelationshipKind::GeneratedBy => "generated-by",
         RecordRelationshipKind::Initiative => "initiative",
     }
@@ -1350,8 +1351,8 @@ pub struct DoneRecordRequest {
     pub completion_resolution: Option<String>,
 }
 /// Links or unlinks a typed directional Record Relationship.
-/// `ordering-only-depends-on` creates an explicitly designated dependency;
-/// inspection retains kind `depends-on` and exposes `ordering_only`.
+/// `waits-for` creates/removes a completion-only prerequisite. Legacy declaration
+/// paths and the `ordering_only` response field remain transitional compatibility.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RelateRecordRequest {
     pub from_id: u64,
@@ -1417,13 +1418,13 @@ impl From<Record> for RecordResponse {
                 .into_iter()
                 .map(|relationship| RecordRelationshipResponse {
                     ordering_only: relationship.ordering_only,
-                    kind: match relationship.kind {
-                        RecordRelationshipKind::ParentChild => "parent-child",
-                        RecordRelationshipKind::DependsOn => "depends-on",
-                        RecordRelationshipKind::GeneratedBy => "generated-by",
-                        RecordRelationshipKind::Initiative => "initiative",
-                    }
-                    .into(),
+                    kind: if relationship.prerequisite_kind()
+                        == Some(forge_app::PrerequisiteKind::WaitsFor)
+                    {
+                        "waits-for".into()
+                    } else {
+                        record_relationship_kind_name(relationship.kind)
+                    },
                     from_id: relationship.from_id,
                     to_id: relationship.to_id,
                     parent_id: relationship.parent_id,

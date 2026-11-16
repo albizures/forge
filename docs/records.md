@@ -157,28 +157,31 @@ a dependency. `generated-by` is provenance, independent of lifecycle ordering;
 it may cross Project scopes within one Workspace. Opening commands accept
 repeatable `--generated-by`; corrections require the generated Record to be Open.
 
-To explicitly require completion without inheriting a prerequisite's repository
-result, create an ordering-only dependency:
+To require completion without inheriting a prerequisite's repository result,
+create a Waits-For Relationship:
 
 ```sh
-forge record relate 44 --kind ordering-only-depends-on --to 45 --workspace personal
+forge record relate 44 --kind waits-for --to 45 --workspace personal
 forge record show 44 --workspace personal --json
-forge record unrelate 44 --kind depends-on --to 45 --workspace personal
+forge record unrelate 44 --kind waits-for --to 45 --workspace personal
 ```
 
-Inspection retains kind `depends-on` with `ordering_only: true`; human output
-labels it `[ordering-only]`. Ordinary dependencies have `ordering_only: false`.
+Inspection reports canonical kind `waits-for`. The transitional `ordering_only`
+field remains `true`; ordinary legacy dependencies have it set to `false`.
+Explicit removal refuses to remove an ordinary legacy dependency by mistake.
+Legacy declaration paths remain temporarily available during expand–contract.
 This is relationship-level intent, not a Task role, prose convention, or inferred
 absence of a Stack. It still blocks readiness until the prerequisite is Done.
-A Stack Predecessor cannot be designated ordering-only, and an ordering-only
-dependency cannot become a Stack link. To change intent while permitted, remove
+A Stack Predecessor cannot be designated Waits-For, and a Waits-For
+Relationship cannot become a Stack link. To change intent while permitted, remove
 and recreate the dependency; removal also deletes its designation. Creation
 records normal Relationship updates and Forge-authored designation comments.
 This designation alone does not authorize execution.
 
 Starting a Spec validates its persisted initial Task plan in the same transaction
 as its Open → In Progress transition. Ordinary same-Spec Task dependencies require
-explicit cumulative Stack ancestry unless individually designated ordering-only.
+explicit cumulative Stack ancestry unless explicitly replaced with `waits-for`.
+Same-Spec Waits-For Relationships require no Stack ancestry.
 Missing configuration and Task prose are not exceptions. Independent Tasks,
 independent configured Stacks with ordering-only coordination, and prerequisites
 already included transitively in one Stack remain supported; Forge does not merge
