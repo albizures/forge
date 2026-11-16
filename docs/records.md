@@ -218,6 +218,17 @@ Forge-authored Update Log. Assignment recovery retains its separate, conservativ
 
 ### Explicit operator-forced completion
 
+Establish safety first: inspect Assignment/recovery evidence and close or invalidate
+open Manual attempts through existing supported operations. Resolve uncertain
+ownership and unsafe retained resources using [Assignment recovery](assignment-recovery.md)
+and [Managed Worktrees](worktrees.md), not force. Missing heartbeats are not proof
+of retirement; a clean retained historical checkout is not a cleanup target merely
+because its Record is obsolete.
+
+If newly eligible work must not launch, use the existing
+[dispatch controls](dispatch.md) **before** closure. Completion neither pauses
+dispatch nor launches work; ordinary reconciliation remains responsible.
+
 ```sh
 forge record done 44 --force --resolution 'Superseded by replacement work' --workspace personal --json
 ```
@@ -226,7 +237,11 @@ Force closes only the selected safe Open or In Progress Record, of any type,
 without starting it. It requires a nonblank Completion Resolution and bypasses
 workflow/completion gates, not active Assignments, open Manual attempts,
 unresolved ownership, or unsafe retained resource state. It performs no cleanup,
-mode change, hold clearing, assessment rewrite, or child closure.
+mode change, hold clearing, assessment rewrite, or child closure. Unmet prerequisites,
+unfinished children, pending/failed Checks, blocking Findings, invalid legacy plans,
+parent execution gates and missing publication can be bypassed. Their evidence,
+dependency links, Stack configuration, profile revisions and Check pins are unchanged.
+This is not a new status or replacement relationship.
 
 The operator `record_done` RPC accepts the additive `force` boolean (default
 `false`) alongside `id` and `completion_resolution` in its existing selected
@@ -235,12 +250,37 @@ contains the linked Update ID, operator authority attribution, supplied resoluti
 and transaction-time `{code, message}` bypassed gates. Readable inspection reports
 the same override. Already-Done force replies set `already_done: true` and cannot
 rewrite original metadata, label normal completion forced, or append an Update.
-Assignment Capability completion and outcome payloads reject override fields.
+Assignment Capability completion and outcome payloads reject override fields:
+workers cannot waive their own requirements. `--force` and the required existing
+`--resolution` are sufficient explicit authorization; execution is noninteractive,
+with no preview, confirmation or second reason flag. The existing operator API's
+`operator` attribution is an authority label, not newly authenticated personal identity.
 
-Done is closure, not passing assessment evidence or verified publication. Normal
-completion without force remains unchanged. Dependency warnings and the full
-operator consequence runbook are a follow-up; this operation does not pause or
-launch dispatch, and existing dispatch controls remain independent.
+A new forced transition returns `dependency_consequences` with
+`newly_eligible_record_ids` and a `warning`; readable output reports the same IDs
+(or explicitly none) and warning. These are transaction-time workflow consequences,
+not a later readiness inventory. Only Open direct dependents with all prerequisites
+Done and valid persisted parent/plan/Stack authorization are reported. Other
+prerequisites or an independently blocked plan/Stack can keep a dependent ineligible.
+Already-Done replies and read-only inspection omit this operation-only result;
+retries do not imply new eligibility changes. This additive response member defaults
+to absent when decoding older responses; clients rejecting unknown fields need a
+matching revision. Non-forced completion responses omit it and retain normal semantics.
+
+Forced Done satisfies ordinary dependency gates exactly like normal Done. Workflow
+eligibility is **not dispatchability**, a launch promise, passing Checks or verified
+publication. Provider configuration, Execution Mode, holds and execution safety
+remain independent dispatch gates. Stack inheritance still requires its own verified
+repository result: forcing a predecessor Done supplies no missing commit or
+publication evidence. Normal reconciliation may dispatch newly eligible work without
+further confirmation. Closing a parent leaves every child unchanged (and a Spec's
+children still require an In Progress parent for execution).
+
+Done is closure, not assessment certification. Completion without force retains all
+normal requirements. Already-Done requests preserve the original resolution,
+forced/normal distinction and immutable Update Log even if a different explanation
+is supplied. This feature does not authorize live Record cleanup, legacy Stack
+migration, installation, release activation or rollout.
 
 ## Record Checks and Assessments (Tasks only)
 

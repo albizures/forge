@@ -95,6 +95,43 @@ fn gates(c: &Connection, record: &Record) -> Result<Vec<BypassedGate>, Registrat
     Ok(gates)
 }
 
+/// Only direct dependents can become newly eligible from this transition. Reuse the
+/// same parent, plan and persisted Stack authorization as start/dispatch, not just
+/// the dependency edges. No provider or external repository checks run here.
+fn newly_eligible(c: &Connection, prerequisite: u64) -> Result<Vec<u64>, RegistrationError> {
+    let mut statement = c.prepare("SELECT from_id FROM record_relationships WHERE to_id = ?1 AND kind = 'depends-on' ORDER BY from_id").map_err(storage_error)?;
+    let ids = statement
+        .query_map([prerequisite.cast_signed()], |r| r.get::<_, i64>(0))
+        .map_err(storage_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(storage_error)?;
+    let mut eligible = Vec::new();
+    for id in ids {
+        let id = id.cast_unsigned();
+        let record = load_record(c, id)?;
+        if record.status != RecordStatus::Open
+            || !super::unfinished_prerequisite_ids(c, id)?.is_empty()
+        {
+            continue;
+        }
+        let authorization = if record.record_type == RecordType::Spec {
+            super::spec_plans::validate(c, id)
+        } else {
+            super::spec_plans::authorize(c, id, None)
+        };
+        match authorization {
+            Ok(()) => eligible.push(id),
+            Err(e)
+                if matches!(
+                    e.code,
+                    "stack-blocked" | "invalid-spec-plan" | "spec-execution-blocked"
+                ) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(eligible)
+}
+
 impl SqliteProjectRepository {
     pub(super) fn force_complete(
         &self,
@@ -116,6 +153,7 @@ impl SqliteProjectRepository {
             return Ok(CompletionResult {
                 record,
                 already_done: true,
+                dependency_consequences: None,
             });
         }
         let resolution = resolution.filter(|r| !r.trim().is_empty()).ok_or_else(|| {
@@ -169,11 +207,14 @@ impl SqliteProjectRepository {
         )?;
         let update_id = tx.last_insert_rowid();
         tx.execute("INSERT INTO forced_completions (record_id, update_id, actor, resolution, bypassed_gates_json) VALUES (?1, ?2, ?3, ?4, ?5)", params![id.cast_signed(), update_id, actor, resolution, json]).map_err(storage_error)?;
+        let dependency_consequences =
+            forge_app::completion::DependencyConsequences::new(newly_eligible(&tx, id)?);
         let record = load_record(&tx, id)?;
         tx.commit().map_err(storage_error)?;
         Ok(CompletionResult {
             record,
             already_done: false,
+            dependency_consequences: Some(dependency_consequences),
         })
     }
 }

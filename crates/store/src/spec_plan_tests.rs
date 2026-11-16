@@ -3,6 +3,8 @@ use super::*;
 mod races;
 #[path = "spec_execution_tests.rs"]
 mod execution;
+#[path = "completion_dependency_tests.rs"]
+mod completion_dependencies;
 use crate::SqliteProjectRepository;
 use forge_app::{ExecutionMode, RecordRepository, stacks::StackSource};
 

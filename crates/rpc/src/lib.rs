@@ -1379,6 +1379,9 @@ pub struct RecordResponse {
     pub forced_completion: Option<forge_app::completion::ForcedCompletion>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub already_done: bool,
+    /// Transaction-time consequences of a new forced transition, absent on retries/inspection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dependency_consequences: Option<forge_app::completion::DependencyConsequences>,
     /// Current Check summaries on Task inspection; no history is embedded.
     pub checks: Option<Vec<RecordCheck>>,
     pub execution_mode: forge_app::ExecutionMode,
@@ -1397,6 +1400,7 @@ impl From<Record> for RecordResponse {
             activity: None,
             forced_completion: None,
             already_done: false,
+            dependency_consequences: None,
             checks: None,
             execution_mode: record.execution_mode,
             workspace_id: record.workspace_id,

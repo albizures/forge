@@ -73,6 +73,24 @@ For `child-of`, the first ID is the child; use typed creation commands for typed
 
 List status values are `open`, `in-progress`, and `done`; Record Types are `generic`, `spec`, `task`, `wayfinder`, `grilling`, and `initiative`. A list without a Project filter remains confined to the selected Workspace, not the containing Project. `record updates` is the Forge-authored Update Log, not editable history. Body edits and comment messages are inline strings, unlike creation's stdin support; do not assume `--body -` works for edit or that file flags exist.
 
+### Operator-only administrative closure
+
+Resolve active/uncertain execution, open Manual attempts and unsafe retained resources
+through existing recovery operations first. If dispatch must be paused, use existing
+dispatch controls before closure; this command does not pause dispatch or launch work.
+
+```sh
+forge record done 44 --force --resolution 'Superseded by completed replacement work' --json
+```
+
+This noninteractive override closes only the selected safe Open/In Progress Record
+and preserves Checks, Findings, children, dependencies, pins and publication evidence.
+It reports bypassed gates and newly workflow-eligible dependent IDs with a dispatch
+warning. Done satisfies ordinary dependency gates, but eligibility does not promise
+dispatchability or verified Stack evidence. Already-Done requests cannot rewrite
+completion metadata. Assignment capabilities cannot force completion. This example
+authorizes no live cleanup or rollout; see the [operator contract](records.md#explicit-operator-forced-completion).
+
 ## Workflow readiness and planning
 
 ```sh
