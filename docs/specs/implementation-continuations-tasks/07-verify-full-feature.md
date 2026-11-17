@@ -38,6 +38,63 @@ This is a Task with verification/correction deliverables, not permission for a r
 
 If no code corrections are needed, unchanged repository output is valid until the verification report is committed; do not manufacture empty implementation commits or PRs. Publication follows actual changed-versus-unchanged authoritative Stack evidence and configured Checks.
 
+## Implementation evidence
+
+- Status: complete (local source verification/correction delivery only).
+- Input: `06ea109f531897634e9d16ebac20e3393732d24b` (T06 verified handoff),
+  in the user-authorized checkout; no managed Assignment was created.
+- Inherited full review range:
+  `b1f900a26fb2c3f74245e0f10e94b1a970732325..06ea109f531897634e9d16ebac20e3393732d24b`.
+  T01 actually used an authorized checkout, not a prepared managed root; this
+  provenance is retained rather than invented.
+- Correction output: `4d3927095f26a7c06f7765a1332cc266bd7a4754`, followed by
+  Stack fixture correction `04e867eacb416335d46c55a81aeb308df6640fcf`.
+  Final executable review range:
+  `b1f900a26fb2c3f74245e0f10e94b1a970732325..04e867eacb416335d46c55a81aeb308df6640fcf`.
+- Verification report output: `58aa0b7bc42db671032bed94f90c3fe2e70742ee`,
+  [full report](../implementation-continuations-verification.md). It maps AC1–22
+  to named public-boundary tests, records red/green evidence, review results,
+  compatibility and separate operational handoff. This completion entry is
+  metadata after that verified output, not a substitute for the feature range.
+- Independent implementation and coding-standards reviews identified four gaps:
+  actual Repository identity for checkpoints, config/index-hidden dirty work,
+  clean salvage identity revalidation, and intent-to-add fingerprint binding.
+  Corrected all four with regressions. Both follow-up reviews and the final
+  fixed-range/report review found no remaining actionable implementation findings
+  or introduced documented-standard violations. No managed Checks/Findings exist
+  for this local plan, and none were invented or self-cleared.
+- Shared observation now validates Repository/branch/Base Commit; Git configuration
+  cannot hide untracked work and index trust flags require dirty salvage. Clean
+  and dirty pending recovery revalidate before/after preflight and match durable
+  source authority in the claim transaction. V2 fingerprints include extended
+  index flags without mutable stat-cache fields. Fixture updates model the
+  stricter input contract rather than weakening production checks.
+- Compatibility: explicit semantic schema **19**, preserving SQL/JSON/history and
+  counters with isolated upgrade support for schemas 7–19. Ordinary schema-18
+  opening rejects before writes. Historical v1 dirty recovery authorizations are
+  preserved but fail closed; exact retries do not renew authority. There is no
+  supported in-place reauthorization for such unconsumed historical recovery;
+  preserve it for separately approved operator recovery design. No new wire shape
+  or Management Protocol revision; immutable Check pins remain unchanged.
+- Final required gates passed: `cargo fmt --check`,
+  `cargo clippy --workspace --all-targets -- -D warnings`,
+  `cargo test --workspace` (**561 passed, 0 failed, 1 existing ignored**, default
+  parallelism), and `git diff --check`. Focused profile/outcome/glossary, CLI
+  documented commands, Stack/continuation execution, and skill parser/portability
+  checks passed. Intermediate fixture/lint failures were corrected before the
+  final full green run. The report identifies the initial zero-test parser filter
+  and its corrected executed filter; zero tests were not counted as evidence.
+- Unrun: existing ignored real-Pi runtime test, stochastic provider trials,
+  optional release-build Python state-upgrade subprocess rehearsal, cross-platform
+  crash/power-loss verification and live operational rehearsals. Local delivery
+  is not release readiness. No shipped skills changed; their extra gates passed
+  nonetheless.
+- Blockers: none for local T07 delivery. Historical-v1 recovery limitations and
+  rollout approvals are separate operational blockers, documented in the report.
+  No revision installation/activation, live migration, profile source overwrite,
+  registration/selection, Check repinning, #37 recovery/dispatch, merge, force-push,
+  branch reset or parent-Spec completion occurred.
+
 ## Routing hints
 
 Parent Spec test plan, all T01–T06 deliverables/tests, `CODING_STANDARDS.md`, existing full-range feature review precedents, runtime/dispatch/recovery documentation and delivered profile artifact.
