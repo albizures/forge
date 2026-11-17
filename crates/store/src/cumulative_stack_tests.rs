@@ -128,7 +128,7 @@ fn retained_publication_drift_and_stale_unchanged_evidence_block_without_repinni
 }
 
 #[test]
-fn repeated_root_preparation_reports_drift_without_rewriting_the_pin() {
+fn repeated_root_preparation_preserves_pin_after_branch_movement_or_unavailability() {
     let store = fixture();
     let hosting = Hosting::default();
     let app = app(&store, &hosting);
@@ -136,9 +136,14 @@ fn repeated_root_preparation_reports_drift_without_rewriting_the_pin() {
     app.configure_task_stack(id, &root()).unwrap();
     hosting.branches.lock().unwrap().insert("feature/payments".into(), "a".repeat(40));
     let pinned = app.prepare_task_stack(id).unwrap();
+    let updates = store.list_record_updates(id).unwrap();
     hosting.branches.lock().unwrap().insert("feature/payments".into(), "b".repeat(40));
-    assert!(app.prepare_task_stack(id).is_err());
+    assert_eq!(app.prepare_task_stack(id).unwrap(), pinned);
     hosting.branches.lock().unwrap().clear();
-    assert!(app.prepare_task_stack(id).is_err());
+    assert_eq!(app.prepare_task_stack(id).unwrap(), pinned);
     assert_eq!(store.task_stack(id).unwrap(), pinned);
+    assert_eq!(store.task_base_commit(id).unwrap(), Some("a".repeat(40)));
+    assert_eq!(store.list_record_updates(id).unwrap(), updates);
+    app.start_record(id).unwrap();
+    assert_eq!(app.prepare_task_stack(id).unwrap(), pinned);
 }

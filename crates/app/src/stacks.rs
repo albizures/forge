@@ -414,6 +414,8 @@ impl Application {
     }
 
     /// Resolve once, then atomically pin against the still-current stack and prerequisites.
+    /// Prepared roots retain their input without re-observing the starting branch;
+    /// successors must still revalidate their predecessor's hosting evidence.
     /// # Errors
     /// Returns hosting, dependency, drift, scope or concurrent-configuration failures.
     pub fn prepare_task_stack(&self, record: u64) -> Result<Option<TaskStack>, RegistrationError> {
@@ -421,6 +423,11 @@ impl Application {
             return Ok(None);
         };
         self.records.validate_task_execution_plan(record)?;
+        if stack.predecessor.is_none() && stack.base_commit.is_some() {
+            // The selected branch supplies the initial input, not continuing authorization.
+            // Retrying preparation must not repin or strand a root when that branch moves.
+            return Ok(Some(stack));
+        }
         let root = self.stack_root(record)?;
         self.verify_predecessor(&stack, &root)?;
         let commit = self

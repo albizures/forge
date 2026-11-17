@@ -94,8 +94,11 @@ Through unchanged predecessors, Forge follows the retained publication base: the
 nearest published Task's PR must remain open and non-draft and its branch must
 still identify the exact inherited commit. An all-unchanged prefix instead retains
 the selected starting branch at that commit. Missing, contradictory, stale or moved
-evidence blocks; there is no fallback to Project Root. Repeated preparation checks
-the retained pin and reports drift without changing it. Manual start and attempt
+evidence blocks; there is no fallback to Project Root. Repeated root preparation
+reuses the immutable Base Commit without fetching the selected starting branch:
+movement or unavailability of that branch does not strand an already-prepared root
+or authorize repinning it. Successor preparation still re-observes predecessor
+hosting evidence and rejects drift without changing the retained pin. Manual start and attempt
 begin, authenticated Assignment start (including idempotent retries), and dispatched
 Check entry observe required predecessor hosting evidence again; a successful earlier
 preparation is not continuing authorization. Writer transactions separately recheck persisted

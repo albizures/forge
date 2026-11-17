@@ -213,6 +213,50 @@ fn starting_source() -> StackSource {
 }
 
 #[test]
+fn prepared_root_resumes_after_branch_movement_and_database_reopen() {
+    let (fixture, store, commits) = fixture();
+    let root = fixture.0.join("repository");
+    let path = fixture.0.join("state.db");
+    let hosting = Hosting::default();
+    let app = application(&path, &hosting);
+    let task = store
+        .open_typed_record(&NewTypedRecord {
+            record_type: RecordType::Task,
+            project_slugs: vec!["test/alpha".into()],
+            body: "Resume prepared root".into(),
+            generated_by_ids: vec![],
+        })
+        .unwrap();
+    store
+        .set_record_execution_mode(
+            task.id,
+            task.execution_mode,
+            ExecutionMode::Manual,
+            "operator",
+            "Manual fixture",
+        )
+        .unwrap();
+    app.configure_task_stack(task.id, &starting_source())
+        .unwrap();
+    let prepared = app.prepare_task_stack(task.id).unwrap();
+    app.start_record(task.id).unwrap();
+    let updates = store.list_record_updates(task.id).unwrap();
+    drop(app);
+    git(&root, &["branch", "-f", "starting", &commits[2]]);
+    let reopened = application(&path, &hosting);
+    assert_eq!(reopened.prepare_task_stack(task.id).unwrap(), prepared);
+    assert_eq!(
+        store.show_record(task.id).unwrap().status,
+        forge_app::RecordStatus::InProgress
+    );
+    assert_eq!(
+        store.task_base_commit(task.id).unwrap().as_ref(),
+        Some(&commits[0])
+    );
+    assert_eq!(store.list_record_updates(task.id).unwrap(), updates);
+}
+
+#[test]
 fn cumulative_exact_git_input_and_publication_lineage_survive_database_reopen() {
     let (fixture, store, commits) = fixture();
     let root = fixture.0.join("repository");
