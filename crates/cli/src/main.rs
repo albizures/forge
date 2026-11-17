@@ -2390,6 +2390,10 @@ mod tests {
                 "profiles/publication.md",
                 include_str!("../../../docs/profiles/publication.md"),
             ),
+            (
+                "profiles/implementation-continuations.md",
+                include_str!("../../../docs/profiles/implementation-continuations.md"),
+            ),
             ("worktrees.md", include_str!("../../../docs/worktrees.md")),
             ("dispatch.md", include_str!("../../../docs/dispatch.md")),
             (
@@ -2431,7 +2435,10 @@ mod tests {
                             | "<task-id>"
                             | "<record-id>"
                             | "<check-id>"
-                            | "<current-generation>" => "42".into(),
+                            | "<current-generation>"
+                            | "<bound.checkAttempt.check_id>"
+                            | "<bound.recordId>"
+                            | "<related-record-id>" => "42".into(),
                             _ => arg,
                         })
                         .collect();
@@ -2446,6 +2453,25 @@ mod tests {
                 "{name}: missing/unfinished examples"
             );
         }
+    }
+
+    #[test]
+    fn implementation_continuations_inline_commands_parse_without_execution() {
+        let profile = include_str!("../../../docs/profiles/implementation-continuations.md");
+        let mut count = 0;
+        for example in profile.split('`').filter(|part| part.starts_with("forge ")) {
+            let args: Vec<String> = shlex::split(example)
+                .unwrap()
+                .into_iter()
+                .map(|arg| match arg.as_str() {
+                    "<id>" => "42".into(),
+                    _ => arg,
+                })
+                .collect();
+            Cli::try_parse_from(args).unwrap_or_else(|error| panic!("{example}: {error}"));
+            count += 1;
+        }
+        assert!(count >= 3, "missing inline profile command examples");
     }
 
     #[test]

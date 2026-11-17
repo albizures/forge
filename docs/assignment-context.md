@@ -166,6 +166,14 @@ Wire compatibility: `sessionId` is optional, so existing bootstrap requests stil
 work. Inspection adds a default-empty `sessions` collection. New clients supplying
 `sessionId` require a server supporting this field; older servers may reject it.
 
+## Implementation profile delivery
+
+The tracked [Continuation profile source](profiles/implementation-continuations.md)
+provides full outcome JSON and stopping guidance. Its
+[handoff](profiles/implementation-continuations-handoff.md) records provenance,
+isolated validation and separate rollout approvals. This artifact is not a live
+registered revision and does not alter existing immutable Check pins.
+
 ## Agent CLI examples
 
 In a delivered Assignment environment, first run `forge assignment bootstrap`.

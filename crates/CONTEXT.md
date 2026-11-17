@@ -176,6 +176,10 @@ _Avoid_: executable check, check runner
 The mandatory baseline Check on every Task, including Projectless Tasks, establishing that the work and deliverables described by the Task are complete. It applies to all Tasks, not only work that produces code.
 _Avoid_: coding check, implementation progress
 
+**Continuation**:
+A deliberate handoff of unfinished Implementation work for another Agent to continue without passing the bound Check.
+_Avoid_: interruption, implementation failure, Task completion
+
 **Assessment**:
 An immutable pass or fail verdict for one Check, optionally carrying revision evidence. The latest Assessment is authoritative; explicitly invalidating it leaves the Check unassessed rather than restoring an older verdict.
 _Avoid_: check result, mutable verdict
