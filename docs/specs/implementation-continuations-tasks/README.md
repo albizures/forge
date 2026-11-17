@@ -13,7 +13,7 @@ Check off each Task only after its deliverables and required verification are co
 - [x] **T03** — [Inspect and explicitly reset continuation budgets](03-inspect-and-reset-continuations.md)
 - [x] **T04** — [Authorize salvage of clean retained commits](04-recover-clean-retained-work.md)
 - [x] **T05** — [Salvage dirty and untracked interrupted work safely](05-recover-dirty-retained-work.md)
-- [ ] **T06** — [Deliver stopping guidance, glossary, and operator documentation](06-profiles-and-documentation.md)
+- [x] **T06** — [Deliver stopping guidance, glossary, and operator documentation](06-profiles-and-documentation.md)
 - [ ] **T07** — [Verify the full feature and correct remaining gaps](07-verify-full-feature.md)
 
 Live rollout and #37 recovery are separately approved operations, not completion items in this implementation checklist.

@@ -31,6 +31,57 @@ Agents and operators have accurate, testable instructions for continuing work, s
 
 Run shared root gates and affected documented-command/profile tests; run skill portability gates only if shipped skills are actually changed. Report actual commands, compatibility notes and unrun checks.
 
+## Implementation evidence
+
+- Status: complete (local source delivery only).
+- Input commit: `661ba11ca0cd2098d6263dfe99521f225a8edd43`, including T05's
+  actual output `5f5ac6ec73369441a95439fefaffbf03f7cb018b` and verification.
+  Work used the user-authorized `forge/` checkout, without a managed Assignment.
+- Output commit: `bdc4c5093a272a4637a5b30787c44ebfa8415a1b`.
+- Delivered `docs/profiles/implementation-continuations.md`, preserving the
+  originating Factory Workspace source's frontmatter/runtime/model/resources.
+  The tracked `implementation-continuations-origin.md` snapshot and adjacent
+  `implementation-continuations-handoff.md` provide a reviewable source diff,
+  provenance digest, focused instruction checklist and separate rollout approvals.
+  The external source remains byte-identical (SHA-256
+  `00545ecf96ee56d63ee1f8bbb2288d858d475b8080b45e98c61f02be60ff4648`).
+- Instructions distinguish all five outcomes, require continuing implementation
+  and testing until done or concretely constrained, and explain full outcome JSON,
+  actual clean output, truthful verification/unrun gates, same-Check checkpoints,
+  independent budgets and safe retirement versus explicitly authorized salvage.
+  Added the exact approved Continuation block to `crates/CONTEXT.md`, with no ADR.
+- Updated Assignment-context and dispatch documentation to route to the delivery
+  and rollout boundary. Reviewed existing T01–T05 recovery/worktree/reset/storage
+  documentation against current interfaces; it already describes clean and
+  content-bound dirty/staged/untracked salvage and schema 18 accurately. Retained
+  its command examples and compatibility/offline upgrade requirements rather than
+  duplicating operational policy into the glossary or profile handoff.
+- Isolated tests resolve candidate and origin through the actual ResourceCatalog
+  and compare all policy fields except behavior. Tests parse the documented full
+  outcome/disposition, reject missing/blank fields, passing Continuations,
+  unauthenticated/non-Implementation use and Finding effects, check existing
+  disposition spellings and dispatch's handoff example, and assert exact glossary
+  and key stopping/verification/salvage instructions. CLI tests now parse both
+  fenced and inline candidate commands without executing them. Existing boundary
+  tests continue to cover server-side role, evidence and ownership enforcement.
+- Final gates passed: `cargo fmt --check`,
+  `cargo clippy --workspace --all-targets -- -D warnings`,
+  `cargo test --workspace` (**559 passed, 0 failed, 1 existing ignored**), and
+  `git diff --check`. Focused application documentation and operator-guide CLI
+  tests also passed before the full run. An intermediate test fixture type error
+  was corrected before the final green gates. The existing ignored test was not
+  run. No stochastic provider trial was run; isolated deterministic validation is
+  the acceptance evidence. Shipped skills were unchanged, so skill-only gates
+  were not applicable. Local verification is not release readiness or T07 review.
+- Implementation and coding-standards self-review: no unresolved findings.
+  Compatibility: documentation/tests only; no new CLI/RPC/storage contracts or
+  schema changes. Candidate requires the already-delivered supporting peers and
+  explicit isolated upgrade policy. Existing immutable pins remain unchanged;
+  no supported existing-Check repin operation is invented.
+- Blockers: none for T06. No installation/activation, live migration, external
+  source overwrite, registration/selection, Check repinning, #37 recovery/dispatch,
+  branch reset, force-push or merge occurred. Rollout approvals remain separate.
+
 ## Routing hints
 
 `docs/profiles/`, actual Workspace Implementation profile source (read-only input for this Task), `crates/CONTEXT.md`, `docs/assignment-context.md`, `docs/dispatch.md`, `docs/assignment-recovery.md`, `docs/worktrees.md`, profile resolution/parser tests and affected CLI documentation tests.
