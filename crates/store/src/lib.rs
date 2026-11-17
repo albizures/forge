@@ -1536,20 +1536,7 @@ impl RecordRepository for SqliteProjectRepository {
         let transaction = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(storage_error)?;
-        let kind = if kind == RecordRelationshipKind::WaitsFor {
-            if !ordering_dependencies::designated(&transaction, child_id, parent_id)? {
-                return Err(RegistrationError::new(
-                    "relationship-not-found",
-                    "Waits-For Relationship does not exist; legacy intent must be removed explicitly",
-                ));
-            }
-            RecordRelationshipKind::DependsOn
-        } else {
-            kind
-        };
-        if kind == RecordRelationshipKind::DependsOn {
-            spec_plans::editable_task(&transaction, child_id)?;
-        }
+        let kind = ordering_dependencies::removal_intent(&transaction, child_id, parent_id, kind)?;
         let child = load_record(&transaction, child_id)?;
         let parent = load_record(&transaction, parent_id)?;
         match kind {
@@ -1581,13 +1568,14 @@ impl RecordRepository for SqliteProjectRepository {
         }
         let kind_name = match kind {
             RecordRelationshipKind::ParentChild => "parent-child",
-            RecordRelationshipKind::DependsOn | RecordRelationshipKind::WaitsFor => "depends-on",
+            RecordRelationshipKind::DependsOn
+            | RecordRelationshipKind::WaitsFor
+            | RecordRelationshipKind::BuildsOn => "depends-on",
             RecordRelationshipKind::GeneratedBy => "generated-by",
             RecordRelationshipKind::Initiative => "initiative",
         };
         if kind == RecordRelationshipKind::DependsOn
-            && stacks::load(&transaction, child_id)?
-                .is_some_and(|s| s.predecessor == Some(parent_id))
+            && stacks::predecessor(&transaction, child_id)? == Some(parent_id)
         {
             return Err(RegistrationError::new(
                 "stack-blocked",
@@ -3496,7 +3484,9 @@ impl AgentDispatchRepository for SqliteProjectRepository {
 fn relationship_kind_name(kind: RecordRelationshipKind) -> &'static str {
     match kind {
         RecordRelationshipKind::ParentChild => "parent-child",
-        RecordRelationshipKind::DependsOn | RecordRelationshipKind::WaitsFor => "depends-on",
+        RecordRelationshipKind::DependsOn
+        | RecordRelationshipKind::WaitsFor
+        | RecordRelationshipKind::BuildsOn => "depends-on",
         RecordRelationshipKind::GeneratedBy => "generated-by",
         RecordRelationshipKind::Initiative => "initiative",
     }
@@ -3554,7 +3544,9 @@ fn insert_relationship(
             }
             transaction.execute("INSERT INTO record_relationships (from_id, to_id, parent_id, child_id, kind) VALUES (?1, ?2, ?2, ?1, 'parent-child')", params![child.id.cast_signed(), parent.id.cast_signed()]).map_err(|error| if matches!(error.sqlite_error_code(), Some(ErrorCode::ConstraintViolation)) { RegistrationError::new("child-already-related", "a child Record can have only one parent") } else { storage_error(error) })?;
         }
-        RecordRelationshipKind::DependsOn | RecordRelationshipKind::WaitsFor => {
+        RecordRelationshipKind::DependsOn
+        | RecordRelationshipKind::WaitsFor
+        | RecordRelationshipKind::BuildsOn => {
             spec_plans::editable_task(transaction, child.id)?;
             if child.status == RecordStatus::Done {
                 return Err(RegistrationError::new(
@@ -4009,7 +4001,7 @@ fn load_record(connection: &Connection, id: u64) -> Result<Record, RegistrationE
             (from_id, to_id, Some(parent_id), Some(child_id), kind) if kind == "parent-child" => Ok(RecordRelationship { ordering_only: false, kind: RecordRelationshipKind::ParentChild, from_id, to_id, parent_id, child_id }),
             (from_id, to_id, None, None, kind) if kind == "depends-on" => {
                 let ordering_only = ordering_dependencies::designated(connection, from_id, to_id)?;
-                Ok(RecordRelationship { ordering_only, kind: if ordering_only { RecordRelationshipKind::WaitsFor } else { RecordRelationshipKind::DependsOn }, from_id, to_id, parent_id: 0, child_id: 0 })
+                Ok(RecordRelationship { ordering_only, kind: if stacks::builds_on(connection, from_id)? == Some(to_id) { RecordRelationshipKind::BuildsOn } else if ordering_only { RecordRelationshipKind::WaitsFor } else { RecordRelationshipKind::DependsOn }, from_id, to_id, parent_id: 0, child_id: 0 })
             },
             (from_id, to_id, None, None, kind) if kind == "generated-by" => Ok(RecordRelationship { ordering_only: false, kind: RecordRelationshipKind::GeneratedBy, from_id, to_id, parent_id: 0, child_id: 0 }),
             (from_id, to_id, None, None, kind) if kind == "initiative" => Ok(RecordRelationship { ordering_only: false, kind: RecordRelationshipKind::Initiative, from_id, to_id, parent_id: 0, child_id: 0 }),

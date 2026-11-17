@@ -2013,6 +2013,7 @@ fn relationship_kind(kind: &str) -> RpcResult<forge_app::RecordRelationshipKind>
     match kind {
         "child-of" => Ok(forge_app::RecordRelationshipKind::ParentChild),
         "waits-for" => Ok(forge_app::RecordRelationshipKind::WaitsFor),
+        "builds-on" => Ok(forge_app::RecordRelationshipKind::BuildsOn),
         "depends-on" | "ordering-only-depends-on" => {
             Ok(forge_app::RecordRelationshipKind::DependsOn)
         }
@@ -2020,7 +2021,7 @@ fn relationship_kind(kind: &str) -> RpcResult<forge_app::RecordRelationshipKind>
         "initiative" => Ok(forge_app::RecordRelationshipKind::Initiative),
         _ => Err(rpc_error(RegistrationError::new(
             "unsupported-relationship-kind",
-            "Relationship kind must be child-of, waits-for, depends-on, ordering-only-depends-on, generated-by, or initiative",
+            "Relationship kind must be child-of, waits-for, builds-on, depends-on, ordering-only-depends-on, generated-by, or initiative",
         ))),
     }
 }

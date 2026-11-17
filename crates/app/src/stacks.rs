@@ -202,9 +202,7 @@ pub fn validate_stack_member(
     task: &crate::Record,
     last: Option<&crate::checks::RecordCheck>,
 ) -> Result<(), RegistrationError> {
-    if task.record_type != crate::RecordType::Task || task.project_slugs.len() != 1 {
-        return Err(error("stack requires a Task scoped to exactly one Project"));
-    }
+    validate_stack_task(task)?;
     let last = last.ok_or_else(|| error("Task has no Checks"))?;
     if last.name != PUBLICATION_CHECK || last.position == 0 {
         return Err(error(
@@ -217,6 +215,16 @@ pub fn validate_stack_member(
     Ok(())
 }
 
+/// Validate the Task boundary independently of execution completeness.
+/// # Errors
+/// Rejects non-Task or non-single-Project configuration.
+pub fn validate_stack_task(task: &crate::Record) -> Result<(), RegistrationError> {
+    if task.record_type != crate::RecordType::Task || task.project_slugs.len() != 1 {
+        return Err(error("stack requires a Task scoped to exactly one Project"));
+    }
+    Ok(())
+}
+
 /// Validate the participants independently of graph/storage representation.
 /// # Errors
 /// Rejects self-links, non-Tasks and differing Project or Workspace scope.
@@ -225,6 +233,8 @@ pub fn validate_stack_predecessor(
     previous: &crate::Record,
 ) -> Result<(), RegistrationError> {
     if task.id == previous.id
+        || task.record_type != crate::RecordType::Task
+        || task.project_slugs.len() != 1
         || previous.record_type != crate::RecordType::Task
         || task.workspace_id != previous.workspace_id
         || task.project_slugs != previous.project_slugs
@@ -252,7 +262,8 @@ impl Application {
 
     /// Configure membership before any affected Task has prepared execution.
     /// # Errors
-    /// Rejects invalid destinations, incompatible Checks, cycles, forks or prepared Tasks.
+    /// Rejects invalid destinations, cycles, forks or prepared Tasks. Legacy predecessor
+    /// configuration also requires compatible Checks; canonical Open plans validate at execution.
     pub fn configure_task_stack(
         &self,
         record: u64,
@@ -262,9 +273,10 @@ impl Application {
             destination.validate()?;
         }
         let task = self.records.show_record(record)?;
-        let checks = self.list_record_checks(record)?;
-        validate_stack_member(&task, checks.iter().max_by_key(|c| c.position))?;
+        validate_stack_task(&task)?;
         if let StackSource::Predecessor { record_id } = source {
+            let checks = self.list_record_checks(record)?;
+            validate_stack_member(&task, checks.iter().max_by_key(|c| c.position))?;
             validate_stack_predecessor(&task, &self.records.show_record(*record_id)?)?;
         }
         self.records.configure_task_stack(record, source)

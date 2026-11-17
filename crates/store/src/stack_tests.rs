@@ -16,6 +16,8 @@ mod unchanged;
 mod cumulative;
 #[path = "cumulative_gate_tests.rs"]
 mod cumulative_gates;
+#[path = "builds_on_tests.rs"]
+mod builds_on;
 
 fn fixture() -> SqliteProjectRepository {
     let store = super::SqliteProjectRepository::in_memory().unwrap();
@@ -174,7 +176,8 @@ fn late_link_to_completed_task_is_allowed_but_incompatible_checks_are_rejected()
     pin(&store, second, &"a".repeat(40));
     store.replace_check_template("alpha", &TemplateReplacement { expected_version: 1, actor: "operator".into(), message: "Implementation only".into(), criteria: vec![CheckCriterion { name: "Implementation".into(), description: "Deliver".into(), profile_revision: None }] }).unwrap();
     let incompatible = task(&store);
-    assert!(store.configure_task_stack(incompatible, &root()).is_err());
+    let planned = store.configure_task_stack(incompatible, &root()).unwrap();
+    assert!(store.pin_task_stack(&planned, &"a".repeat(40)).is_err());
 }
 
 #[test]

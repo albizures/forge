@@ -507,6 +507,7 @@ fn relationships_and_child_creation_are_confined_and_transactional() {
     for kind in [
         RecordRelationshipKind::DependsOn,
         RecordRelationshipKind::WaitsFor,
+        RecordRelationshipKind::BuildsOn,
         RecordRelationshipKind::GeneratedBy,
     ] {
         assert_eq!(
