@@ -30,7 +30,7 @@ class StateUpgradeTests(unittest.TestCase):
         return result
 
     def test_preserves_real_records_across_schema_and_same_schema_upgrades(self):
-        for schema in (7, 8, 9, 10, 11):
+        for schema in (7, 8, 9, 10, 11, 12, 13):
             with self.subTest(schema=schema), tempfile.TemporaryDirectory(prefix="forge-upgrade-e2e-") as temporary:
                 self.workspace = Path(temporary).resolve()
                 home = self.workspace / "forgeup"
@@ -67,6 +67,7 @@ class StateUpgradeTests(unittest.TestCase):
                     # Remove each additive table so the marker matches its full contract.
                     with sqlite3.connect(source) as connection:
                         for introduced, table in (
+                            (12, "builds_on_dependencies"),
                             (11, "forced_completions"),
                             (10, "task_unchanged_results"),
                             (9, "ordering_only_dependencies"),
@@ -75,6 +76,31 @@ class StateUpgradeTests(unittest.TestCase):
                             if schema < introduced:
                                 connection.execute(f"DROP TABLE {table}")
                         connection.execute(f"PRAGMA user_version={schema}")
+                        if schema == 11:
+                            # Frozen legacy ambiguity, not a manual operator repair.
+                            connection.execute("INSERT INTO projects VALUES('legacy',?,'git@example:legacy','personal','legacy')", (str(self.workspace / 'legacy'),))
+                            connection.executescript("""
+                                INSERT INTO records(id,record_type,body,status,workspace_id) VALUES
+                                (100,'spec','Legacy Spec','open','personal'),
+                                (101,'task','Blocked','open','personal'),
+                                (102,'task','Prerequisite','open','personal');
+                                INSERT INTO record_projects VALUES(100,'legacy'),(101,'legacy'),(102,'legacy');
+                                INSERT INTO record_relationships(from_id,to_id,parent_id,child_id,kind) VALUES
+                                (101,100,100,101,'parent-child'),(102,100,100,102,'parent-child');
+                                INSERT INTO record_relationships(from_id,to_id,kind) VALUES(101,102,'depends-on');
+                            """)
+                        if schema in (12, 13):
+                            # Valid incomplete Open planning state: canonical lineage
+                            # exists before either Task has execution configuration.
+                            connection.execute("INSERT INTO projects VALUES('planned',?,'git@example:planned','personal','planned')", (str(self.workspace / 'planned'),))
+                            connection.executescript("""
+                                INSERT INTO records(id,record_type,body,status,workspace_id) VALUES
+                                (201,'task','Planned successor','open','personal'),
+                                (202,'task','Unconfigured root','open','personal');
+                                INSERT INTO record_projects VALUES(201,'planned'),(202,'planned');
+                                INSERT INTO record_relationships(from_id,to_id,kind) VALUES(201,202,'depends-on');
+                                INSERT INTO builds_on_dependencies(from_id,to_id) VALUES(201,202);
+                            """)
                     # A stopped dispatcher can retain an unexpired scan lease.
                     # Synchronize to its recorded expiry rather than resetting evidence.
                     with sqlite3.connect(source) as connection:
@@ -83,12 +109,30 @@ class StateUpgradeTests(unittest.TestCase):
                     source_bytes = source.read_bytes()
                     plan = json.loads(self.command("forgeup", "upgrade", "plan", "--from", "old", "--to", "new").stdout)
                     self.assertEqual(plan["blockers"], [])
-                    self.assertEqual(plan["migrations"], [[version, version + 1] for version in range(schema, 11)])
-                    self.command("forgeup", "upgrade", "prepare", "--from", "old", "--to", "new", "--confirm-agents-stopped")
+                    self.assertEqual(plan["migrations"], [[version, version + 1] for version in range(schema, 13)])
+                    decisions = []
+                    if schema == 11:
+                        failed = self.command("forgeup", "upgrade", "prepare", "--from", "old", "--to", "new", "--confirm-agents-stopped", success=False)
+                        self.assertIn("101 -> 102", failed.stderr)
+                        self.assertEqual(source.read_bytes(), source_bytes)
+                        self.command("forgeup", "upgrade", "activate", "--to", "new", "--confirm-agents-stopped", success=False)
+                        self.command("forgeup", "use", "new", success=False)
+                        self.command("forgeup", "upgrade", "recover", "--to", "new")
+                        decision_file = self.workspace / "decisions.json"
+                        decision_file.write_text(json.dumps([dict(from_id=101, to_id=102)]))
+                        decisions = ["--waits-for-decisions", str(decision_file)]
+                    receipt = json.loads(self.command("forgeup", "upgrade", "prepare", "--from", "old", "--to", "new", "--confirm-agents-stopped", *decisions).stdout)
+                    if schema == 11:
+                        self.assertEqual(receipt["waits_for_decisions"], [dict(from_id=101, to_id=102)])
+                        retry = json.loads(self.command("forgeup", "upgrade", "prepare", "--from", "old", "--to", "new", "--confirm-agents-stopped", *decisions).stdout)
+                        self.assertEqual(receipt, retry)
                     destination = home / "data/state" / selectors["new"] / "forge.db"
                     with sqlite3.connect(destination) as connection:
-                        self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 11)
+                        self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 13)
                         self.assertEqual(connection.execute("SELECT COUNT(*) FROM forced_completions").fetchone()[0], 0)
+                        if schema in (12, 13):
+                            self.assertEqual(connection.execute("SELECT from_id,to_id FROM builds_on_dependencies").fetchall(), [(201, 202)])
+                            self.assertEqual(connection.execute("SELECT COUNT(*) FROM task_stacks").fetchone()[0], 0)
                     self.assertEqual(source.read_bytes(), source_bytes)
                     self.command("forgeup", "use", "new", success=False)
                     self.command("forgeup", "upgrade", "activate", "--to", "new", "--confirm-agents-stopped")

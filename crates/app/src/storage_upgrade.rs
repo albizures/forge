@@ -2,7 +2,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Separate from both the storage schema and daemon Management Protocol.
-pub const UPGRADE_INTERFACE_VERSION: u32 = 1;
+pub const UPGRADE_INTERFACE_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -10,6 +10,9 @@ pub struct UpgradeCapabilities {
     pub interface_version: u32,
     pub target_schema: u32,
     pub supported_sources: Vec<u32>,
+    /// Interface-2 optional decision input; interface-1 targets default to false.
+    #[serde(default)]
+    pub waits_for_decisions: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -19,6 +22,15 @@ pub struct TableInventory {
     pub definition: String,
     pub rows: u64,
     pub digest: String,
+}
+
+/// Explicit completion-only resolution of an ambiguous legacy dependency.
+/// Code inheritance must instead be resolved through the source's public workflow.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WaitsForDecision {
+    pub from_id: u64,
+    pub to_id: u64,
 }
 
 /// Read-only evidence. The fingerprint covers schema and every stored value,

@@ -61,6 +61,8 @@ pub struct UpgradeReceipt {
     pub migrations: Vec<(u32, u32)>,
     pub accepted_stale_source: bool,
     pub source_restart_acknowledged: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub waits_for_decisions: Vec<forge_app::storage_upgrade::WaitsForDecision>,
 }
 
 fn blocked(message: impl Into<String>) -> ForgeupError {
@@ -154,7 +156,9 @@ fn load(paths: &ForgeupPaths, target: &str) -> Result<Option<UpgradeReceipt>, Fo
             return Err(blocked("invalid staging identity"));
         }
     }
-    if receipt.interface_version != UPGRADE_INTERFACE_VERSION || receipt.target.selector != target {
+    if !(1..=UPGRADE_INTERFACE_VERSION).contains(&receipt.interface_version)
+        || receipt.target.selector != target
+    {
         return Err(blocked("unsupported or misplaced upgrade receipt"));
     }
     // Selectors are also path components; never trust a receipt to supply arbitrary paths.
@@ -222,7 +226,7 @@ fn inspect(target: &Installation, path: &Path) -> Result<StoreInspection, Forgeu
 fn handshake(target: &Installation) -> Result<UpgradeCapabilities, ForgeupError> {
     validate_installation(target)?;
     let caps: UpgradeCapabilities = invoke(target, "capabilities", &[])?;
-    if caps.interface_version != UPGRADE_INTERFACE_VERSION {
+    if !(1..=UPGRADE_INTERFACE_VERSION).contains(&caps.interface_version) {
         return Err(blocked("unsupported target upgrade interface"));
     }
     Ok(caps)
@@ -402,11 +406,40 @@ pub fn prepare(
         confirm_agents_stopped,
     )
 }
+/// Prepare with explicit Waits-For resolutions, retained in the immutable retry intent.
+///
+/// # Errors
+/// Rejects conflicting retries and all ordinary preparation blockers.
+pub fn prepare_with_decisions(
+    from: &str,
+    to: &str,
+    confirmed: bool,
+    decisions: Vec<forge_app::storage_upgrade::WaitsForDecision>,
+) -> Result<UpgradeReceipt, ForgeupError> {
+    prepare_decisions_at(
+        &ForgeupPaths::from_environment()?,
+        from,
+        to,
+        confirmed,
+        decisions,
+    )
+}
+
 fn prepare_at(
     paths: &ForgeupPaths,
     from: &str,
     to: &str,
     confirmed: bool,
+) -> Result<UpgradeReceipt, ForgeupError> {
+    prepare_decisions_at(paths, from, to, confirmed, vec![])
+}
+
+fn prepare_decisions_at(
+    paths: &ForgeupPaths,
+    from: &str,
+    to: &str,
+    confirmed: bool,
+    decisions: Vec<forge_app::storage_upgrade::WaitsForDecision>,
 ) -> Result<UpgradeReceipt, ForgeupError> {
     if !confirmed {
         return Err(blocked(
@@ -421,8 +454,19 @@ fn prepare_at(
         return Err(blocked("source and target must differ"));
     }
     let _locks = OwnershipLocks::acquire(paths, &source, &target)?;
+    if !decisions.is_empty() {
+        let caps = handshake(&target)?;
+        if caps.interface_version < 2 || !caps.waits_for_decisions {
+            return Err(blocked(
+                "target does not support explicit Waits-For decisions",
+            ));
+        }
+    }
     if let Some(mut receipt) = load(paths, &target.selector)? {
-        if receipt.source != source || receipt.target != target {
+        if receipt.source != source
+            || receipt.target != target
+            || receipt.waits_for_decisions != decisions
+        {
             return Err(blocked("conflicting upgrade retry or changed installation"));
         }
         return finish_preparation(paths, &mut receipt);
@@ -444,6 +488,7 @@ fn prepare_at(
         migrations: plan.migrations,
         accepted_stale_source: false,
         source_restart_acknowledged: false,
+        waits_for_decisions: decisions,
     };
     let directory = artifacts(paths, &receipt);
     let parent = directory
@@ -501,6 +546,25 @@ fn remove_owned(path: &Path) -> Result<(), ForgeupError> {
     }
     Ok(())
 }
+fn migrate_staging(
+    paths: &ForgeupPaths,
+    receipt: &UpgradeReceipt,
+    staging: &Path,
+) -> Result<StoreInspection, ForgeupError> {
+    if receipt.waits_for_decisions.is_empty() {
+        return invoke(&receipt.target, "migrate", &[staging]);
+    }
+    // Per-attempt file: a surviving worker cannot observe a retry's decisions.
+    // Receipt content, not the operator's mutable file, is authoritative.
+    let decisions = staging.with_extension("decisions.json");
+    contained(paths, &decisions)?;
+    atomic_write(
+        &decisions,
+        &serde_json::to_vec(&receipt.waits_for_decisions).map_err(|e| blocked(e.to_string()))?,
+    )?;
+    invoke(&receipt.target, "migrate", &[staging, &decisions])
+}
+
 fn finish_preparation(
     paths: &ForgeupPaths,
     receipt: &mut UpgradeReceipt,
@@ -564,7 +628,7 @@ fn finish_preparation(
         );
         fs::copy(&backup, &staging).map_err(|e| io_error(&staging, e))?;
         set_private_permissions(&staging)?;
-        let upgraded: StoreInspection = invoke(&receipt.target, "migrate", &[&staging])?;
+        let upgraded = migrate_staging(paths, receipt, &staging)?;
         if upgraded.schema != Some(handshake(&receipt.target)?.target_schema)
             || !upgraded.blockers.is_empty()
         {

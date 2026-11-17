@@ -1,6 +1,9 @@
 //! Explicit offline upgrades. Ordinary repository opening never migrates a store.
 
 #[cfg(test)]
+#[path = "upgrade/intent_tests.rs"]
+mod intent_tests;
+#[cfg(test)]
 #[path = "upgrade_tests.rs"]
 mod tests;
 use std::{fs, path::Path};
@@ -14,8 +17,12 @@ use forge_app::{
 use rusqlite::{Connection, OpenFlags, TransactionBehavior, types::ValueRef};
 use sha2::{Digest, Sha256};
 
-use super::{stacks, storage_error};
+#[cfg(test)]
+use super::stacks;
+use super::storage_error;
 
+mod incomplete_plans;
+mod prerequisite_intent;
 mod v007_to_v008;
 
 const APPLICATION_ID: i64 = 0x464f_5247;
@@ -28,8 +35,9 @@ fn error(message: impl Into<String>) -> RegistrationError {
 pub fn capabilities() -> UpgradeCapabilities {
     UpgradeCapabilities {
         interface_version: UPGRADE_INTERFACE_VERSION,
-        target_schema: 12,
-        supported_sources: vec![7, 8, 9, 10, 11, 12],
+        target_schema: 13,
+        supported_sources: vec![7, 8, 9, 10, 11, 12, 13],
+        waits_for_decisions: true,
     }
 }
 
@@ -141,7 +149,7 @@ fn reference(schema: u32) -> Result<Connection, RegistrationError> {
     let c = Connection::open_in_memory().map_err(storage_error)?;
     let ddl = match schema {
         7 => include_str!("upgrade/schema7.sql"),
-        8..=12 => include_str!("upgrade/schema8.sql"),
+        8..=13 => include_str!("upgrade/schema8.sql"),
         _ => return Err(error("missing frozen schema contract")),
     };
     c.execute_batch(ddl).map_err(storage_error)?;
@@ -169,6 +177,10 @@ fn reference(schema: u32) -> Result<Connection, RegistrationError> {
         c.pragma_update(None, "user_version", 12)
             .map_err(storage_error)?;
     }
+    if schema >= 13 {
+        c.pragma_update(None, "user_version", 13)
+            .map_err(storage_error)?;
+    }
     super::seed_agent_profiles(&c)?;
     c.execute_batch("INSERT INTO dispatch_provider_generation VALUES (1, 0)")
         .map_err(storage_error)?;
@@ -184,7 +196,7 @@ fn inspection(c: &Connection) -> Result<StoreInspection, RegistrationError> {
         .map_err(storage_error)?;
     if application != APPLICATION_ID || !capabilities().supported_sources.contains(&schema) {
         return Err(error(
-            "unsupported application or schema; supported source schemas: 7, 8, 9, 10, 11, 12",
+            "unsupported application or schema; supported source schemas: 7, 8, 9, 10, 11, 12, 13",
         ));
     }
     check_integrity(c)?;
@@ -217,10 +229,13 @@ fn inspection(c: &Connection) -> Result<StoreInspection, RegistrationError> {
         let id = id.map_err(storage_error)?.cast_unsigned();
         super::load_record(c, id)?;
         if schema >= 8 {
-            stacks::load(c, id)?;
+            incomplete_plans::load(c, id)?;
         }
     }
     validate_workspace_ownership(c)?;
+    if schema >= 13 {
+        prerequisite_intent::validate(c)?;
+    }
     let mut blockers = Vec::new();
     for (sql, message) in [
         (
@@ -347,14 +362,33 @@ pub fn snapshot(source: &Path, output: &Path) -> Result<StoreInspection, Registr
 /// # Errors
 /// Rolls back the entire chain on validation, preservation, or SQL failure.
 pub fn migrate(path: &Path) -> Result<StoreInspection, RegistrationError> {
+    migrate_with_decisions(path, &[])
+}
+
+/// Upgrade a staging copy with explicit completion-only intent decisions.
+///
+/// # Errors
+/// Rejects unresolved, stale, duplicate, or lifecycle-incompatible decisions.
+pub fn migrate_with_decisions(
+    path: &Path,
+    decisions: &[forge_app::storage_upgrade::WaitsForDecision],
+) -> Result<StoreInspection, RegistrationError> {
     let mut c = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
         .map_err(storage_error)?;
     c.pragma_update(None, "journal_mode", "DELETE")
         .map_err(storage_error)?;
-    migrate_connection(&mut c)
+    migrate_decisions(&mut c, decisions)
 }
 
+#[cfg(test)]
 fn migrate_connection(c: &mut Connection) -> Result<StoreInspection, RegistrationError> {
+    migrate_decisions(c, &[])
+}
+
+fn migrate_decisions(
+    c: &mut Connection,
+    decisions: &[forge_app::storage_upgrade::WaitsForDecision],
+) -> Result<StoreInspection, RegistrationError> {
     c.pragma_update(None, "foreign_keys", true)
         .map_err(storage_error)?;
     let tx = c
@@ -366,7 +400,7 @@ fn migrate_connection(c: &mut Connection) -> Result<StoreInspection, Registratio
     }
     match before.schema {
         Some(7) => v007_to_v008::apply(&tx)?,
-        Some(8..=12) => {}
+        Some(8..=13) => {}
         _ => return Err(error("unsupported migration source")),
     }
     if before.schema.is_some_and(|s| s < 9) {
@@ -393,8 +427,23 @@ fn migrate_connection(c: &mut Connection) -> Result<StoreInspection, Registratio
         tx.pragma_update(None, "user_version", 12)
             .map_err(storage_error)?;
     }
+    if before.schema.is_some_and(|s| s < 13) {
+        prerequisite_intent::apply(&tx, decisions)?;
+        tx.pragma_update(None, "user_version", 13)
+            .map_err(storage_error)?;
+    } else if !decisions.is_empty() {
+        return Err(error("intent decisions require a legacy source schema"));
+    }
     let after = inspection(&tx)?;
     for table in &before.tables {
+        // These three tables have migration-specific semantic assertions in
+        // prerequisite_intent; every other stored value remains byte-exact.
+        if matches!(
+            table.name.as_str(),
+            "task_stacks" | "ordering_only_dependencies" | "builds_on_dependencies"
+        ) {
+            continue;
+        }
         if !after.tables.contains(table) {
             return Err(error(format!(
                 "migration changed preserved table {}",
