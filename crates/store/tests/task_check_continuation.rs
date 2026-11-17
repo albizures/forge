@@ -70,7 +70,7 @@ impl ManagedWorktreeAdapter for Checkout {
 }
 
 #[test]
-fn interrupted_check_stops_after_two_retries_even_after_restart_and_resume() {
+fn interrupted_check_stops_after_two_retries_and_resume_renews_budget() {
     run_case("retry-budget");
 }
 
@@ -128,7 +128,6 @@ fn retry_budget(
             .reason
             .contains("two automatic retries")
     );
-    store.resume_dispatch(task).unwrap();
     assert_eq!(
         application()
             .execute_task_check_acceptance(task)
@@ -146,61 +145,41 @@ fn retry_budget(
     assert_eq!(before[0].interruptions, 3);
     app.reset_task_remediation(task, "operator", "Investigated remediation only")
         .unwrap();
-    for (from, to) in [
-        (Dispatched, Manual),
-        (Manual, Dispatched),
-        (Dispatched, Manual),
-    ] {
-        app.set_record_execution_mode(task, from, to, "operator", "Safe mode handoff")
-            .unwrap();
-        assert_eq!(
-            app.record_work_state(task)
-                .unwrap()
-                .progress
-                .interrupted_checks,
-            before
-        );
-    }
-    let checks = app.list_record_checks(task).unwrap();
-    for (index, check) in checks.iter().take(2).enumerate() {
-        let work = app.record_work_state(task).unwrap();
-        let attempt = app
-            .begin_record_attempt(
-                task,
-                &forge_app::outcomes::AttemptInput {
-                    id: format!("manual-recovery-{index}"),
-                    check_id: check.id,
-                    generation: work.generation,
-                    evidence: work.input.unwrap(),
-                    actor: "operator".into(),
-                },
-            )
-            .unwrap();
-        app.submit_record_outcome(
-            task,
-            &OutcomeInput {
-                attempt_id: attempt.id,
-                generation: attempt.generation,
-                evidence: attempt.evidence,
-                verdict: Verdict::Pass,
-                actor: "operator".into(),
-                message: "Verified recovery".into(),
-                disposition: OutcomeDisposition::Complete,
-                findings: vec![],
-                verifications: vec![],
-            },
-        )
-        .unwrap();
-        let state = app.record_work_state(task).unwrap();
-        assert_eq!(
-            state.progress.interrupted_checks[0].interruptions,
-            if index == 0 { 3 } else { 0 }
-        );
-    }
-    assert!(
-        store.dispatch_hold(task).unwrap().is_some(),
-        "success never silently clears a hold"
+    assert_eq!(
+        app.record_work_state(task)
+            .unwrap()
+            .progress
+            .interrupted_checks,
+        before,
+        "remediation reset does not renew interrupted retries"
     );
+    let checks = app.list_record_checks(task).unwrap();
+    assert_eq!(checks[0].current_verdict, Some(Verdict::Pass));
+    let before = app.record_work_state(task).unwrap();
+    store.resume_dispatch(task).unwrap();
+    store.resume_dispatch(task).unwrap(); // Explicit resume is idempotent.
+    let app = application(); // Reopen the repository: the reset must be durable.
+    let after = app.record_work_state(task).unwrap();
+    assert_eq!(after.progress.interrupted_checks[0].interruptions, 0);
+    assert_eq!(after.generation, before.generation);
+    assert_eq!(after.input, before.input);
+    assert_eq!(
+        after.progress.remediation_cycles,
+        before.progress.remediation_cycles
+    );
+    assert_eq!(after.progress.resets, before.progress.resets);
+    assert!(store.dispatch_hold(task).unwrap().is_none());
+    let (assignment, _) = app.execute_task_check_acceptance(task).unwrap();
+    let attempt = store
+        .assignment_check_attempt(&assignment.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        attempt.check_id, checks[1].id,
+        "retry the interrupted review"
+    );
+    assert_eq!(app.list_record_checks(task).unwrap(), checks);
+    assert_eq!(store.list_agent_assignments(task).unwrap().len(), 5);
 }
 
 #[test]

@@ -2265,16 +2265,15 @@ impl AgentDispatchRepository for SqliteProjectRepository {
     }
 
     fn resume_dispatch(&self, record_id: u64) -> Result<(), RegistrationError> {
-        let connection = self
+        let mut connection = self
             .connection
             .lock()
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
-        connection
-            .execute(
-                "DELETE FROM dispatch_holds WHERE record_id = ?1",
-                [record_id.cast_signed()],
-            )
+        let tx = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(storage_error)?;
+        task_progress::resume(&tx, record_id)?;
+        tx.commit().map_err(storage_error)?;
         Ok(())
     }
 

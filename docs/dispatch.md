@@ -171,10 +171,12 @@ no partial effects. Closed capabilities remain revoked.
 
 Check-driven dispatch permits **two automatic retries per interrupted Check**
 (three interrupted attempts total) and **three remediation cycles per Task run**.
-A Check's successful outcome alone resets its interruption count; success of a
-different Check, restarting, changing modes, redispatching or resetting remediation
-does not. An explicitly retired, current attempt with no outcome consumes the same
-interruption allowance once retirement and every retained resource are reconciled.
+A Check's successful outcome resets its interruption count. Explicit operator
+`resume` resets interruption counts for all Checks on that Task and clears its
+Dispatch Hold atomically. Success of a different Check, restarting, changing modes,
+redispatching or resetting remediation does not renew interruption allowance.
+An explicitly retired, current attempt with no outcome consumes the same interruption
+allowance once retirement and every retained resource are reconciled.
 Substantive Implementation failure consumes remediation budget, not review retries.
 
 Each handback/failed Implementation records a cycle baseline. At the next failed
@@ -182,9 +184,10 @@ Implementation, review handback or final passing review, unchanged deliverable
 evidence with no newly verified Finding resolution is **no progress**. Verified
 resolution of an overlooked fix counts even at the same commit. Earlier review
 passes and new Findings alone do not establish progress. Exhaustion/no progress
-retains an operator-cleared Dispatch Hold, never Done. Ordinary `resume` cannot
-bypass an exhausted budget: the next acceptance reestablishes its diagnostic hold.
-Existing safety holds are not overwritten.
+retains an operator-cleared Dispatch Hold, never Done. `resume` renews interrupted
+retry allowance, but cannot bypass exhausted remediation or no-progress state:
+the next acceptance reestablishes that diagnostic hold until remediation is
+explicitly reset. Existing safety holds are not overwritten.
 
 Agents may submit `disposition: "human-input"` with `verdict: "fail"` and an
 explanation, without Findings or verifications. This creates a human-input hold
@@ -208,10 +211,11 @@ The trusted operator RPC is `agentDispatch.resetRemediation` (`id`, `actor`,
 required and retained atomically with the reset. Reset clears only remediation
 cycles, pending baseline and no-progress/exhaustion state. It never clears a
 Dispatch Hold, interrupted retry count, Finding, Assessment, evidence, freshness,
-ownership or resource blocker. To recover an exhausted interrupted Check, safely
-hand off to Manual, successfully assess that Check, then explicitly clear the hold
-and safely return to Dispatched. No resume, redispatch or mode transition silently
-resets the safety budget.
+ownership or resource blocker. To recover an exhausted interrupted Check,
+investigate interruptions and reconcile retirement/resources, then explicitly
+`resume` to renew interrupted retries without Manual handoff. Resume does not
+launch an agent, resolve ownership/resources, reset remediation, or erase historical
+attempts/outcomes. Redispatch and mode transitions do not reset either budget.
 
 Storage revision 7 requires a fresh store; older attempts cannot safely be given
 zero retry/remediation counts. No conversion, inferred backfill or automatic reset

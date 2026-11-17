@@ -400,7 +400,7 @@ enum AgentDispatchCommand {
     TaskReopen(DispatchTaskArgs),
     /// Explicitly reset only remediation limits; does not clear holds, retries or recovery blockers.
     ResetRemediation(ResetRemediationArgs),
-    /// Clear an operator-controlled Dispatch Hold.
+    /// Clear a Dispatch Hold and reset interrupted-Check retries (not remediation or recovery blockers).
     Resume(DispatchTaskArgs),
     /// Inspect persisted Assignment evidence without contacting the provider.
     AssignmentInfo(AssignmentRetireArgs),
@@ -1431,13 +1431,17 @@ async fn dispatcher_resume(args: DispatchTaskArgs) -> i32 {
                     serde_json::json!({
                         "task_id": args.task_id,
                         "operation": "clear-dispatch-hold",
+                        "resets_interrupted_retries": true,
                         "resolves_recovery_blockers": false,
                         "authorizes_replacement": false,
                         "warning": warning,
                     })
                 );
             } else {
-                println!("Task {}: Dispatch Hold cleared.\n{warning}", args.task_id);
+                println!(
+                    "Task {}: Dispatch Hold cleared. Interrupted-Check retries reset; remediation budget unchanged.\n{warning}",
+                    args.task_id
+                );
             }
             0
         }

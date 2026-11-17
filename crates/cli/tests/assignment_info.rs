@@ -155,10 +155,11 @@ async fn assignment_info_cli_renders_human_and_json_diagnostics() {
         if json {
             let value: serde_json::Value = serde_json::from_str(&text).unwrap();
             assert_eq!(value["task_id"], 1);
+            assert_eq!(value["resets_interrupted_retries"], true);
             assert_eq!(value["resolves_recovery_blockers"], false);
             assert_eq!(value["authorizes_replacement"], false);
         } else {
-            assert!(text.contains("Dispatch Hold cleared"), "{text}");
+            assert!(text.contains("Interrupted-Check retries reset"), "{text}");
             assert!(
                 text.contains("does not resolve recovery blockers"),
                 "{text}"

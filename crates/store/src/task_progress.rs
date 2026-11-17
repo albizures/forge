@@ -40,6 +40,22 @@ pub(super) fn hold(c: &Connection, record: u64, reason: &str) -> Result<(), Regi
     Ok(())
 }
 
+/// Explicit operator resume renews interruption allowance, not remediation or ownership.
+/// The caller commits both changes in one writer transaction.
+pub(super) fn resume(c: &Connection, record: u64) -> Result<(), RegistrationError> {
+    c.execute(
+        "UPDATE task_retry_counts SET interruptions = 0 WHERE check_id IN (SELECT id FROM record_checks WHERE record_id = ?1)",
+        [record.cast_signed()],
+    )
+    .map_err(storage_error)?;
+    c.execute(
+        "DELETE FROM dispatch_holds WHERE record_id = ?1",
+        [record.cast_signed()],
+    )
+    .map_err(storage_error)?;
+    Ok(())
+}
+
 pub(super) fn retain_hold(c: &Connection, record: u64) -> Result<(), RegistrationError> {
     let reason: Option<String> = c
         .query_row(
@@ -56,7 +72,7 @@ pub(super) fn retain_hold(c: &Connection, record: u64) -> Result<(), Registratio
         hold(
             c,
             record,
-            "Interrupted Check exhausted two automatic retries; complete this Check successfully through safe Manual handoff before resuming. Remediation reset does not reset interrupted retries.",
+            "Interrupted Check exhausted two automatic retries; investigate and explicitly resume to reset interrupted retries after safe retirement/resource reconciliation. Remediation reset does not reset interrupted retries.",
         )?;
     }
     Ok(())
@@ -144,4 +160,76 @@ pub(super) fn passed(c: &Connection, check: u64) -> Result<(), RegistrationError
     )
     .map_err(storage_error)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use forge_app::AgentDispatchRepository;
+
+    fn repository() -> super::super::SqliteProjectRepository {
+        let store = super::super::SqliteProjectRepository::in_memory().unwrap();
+        // Minimal counter fixtures isolate the resume transaction from dispatch setup.
+        // Foreign keys are disabled only for these synthetic Record/Check identities.
+        store.connection.lock().unwrap().execute_batch(
+            "PRAGMA foreign_keys = OFF;
+             INSERT INTO record_checks(id, record_id, name, description, position, profile_revision, version)
+             VALUES (101, 10, 'Implementation', 'test', 0, 1, 1),
+                    (102, 10, 'Review', 'test', 1, 1, 1),
+                    (201, 20, 'Implementation', 'test', 0, 1, 1);
+             INSERT INTO task_retry_counts(check_id, interruptions) VALUES (101, 3), (102, 2), (201, 3);
+             INSERT INTO dispatch_holds(record_id, reason) VALUES (10, 'interrupted'), (20, 'interrupted');"
+        ).unwrap();
+        store
+    }
+
+    #[test]
+    fn resume_resets_only_selected_tasks_checks() {
+        let store = repository();
+        store.resume_dispatch(10).unwrap();
+        let c = store.connection.lock().unwrap();
+        let counts: Vec<i64> = c
+            .prepare("SELECT interruptions FROM task_retry_counts ORDER BY check_id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(counts, vec![0, 0, 3]);
+        let held: Vec<i64> = c
+            .prepare("SELECT record_id FROM dispatch_holds ORDER BY record_id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(held, vec![20]);
+    }
+
+    #[test]
+    fn failed_hold_clearance_rolls_back_retry_reset() {
+        let store = repository();
+        store
+            .connection
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER deny_resume BEFORE DELETE ON dispatch_holds
+             BEGIN SELECT RAISE(ABORT, 'injected resume failure'); END;",
+            )
+            .unwrap();
+        assert!(store.resume_dispatch(10).is_err());
+        let c = store.connection.lock().unwrap();
+        assert_eq!(
+            super::state(&c, 10).unwrap().interrupted_checks[0].interruptions,
+            3
+        );
+        assert!(
+            c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM dispatch_holds WHERE record_id = 10)",
+                [],
+                |r| r.get::<_, bool>(0)
+            )
+            .unwrap()
+        );
+    }
 }

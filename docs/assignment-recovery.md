@@ -125,8 +125,10 @@ forge dispatcher status --project <slug>
 forge dispatcher reconcile
 ```
 
-`resume` only clears the operator-controlled hold. It does not resolve blockers,
-prove agent absence, redeliver a prompt or itself authorize replacement. Its JSON
+`resume` atomically clears the operator-controlled hold and resets the Task's
+interrupted-Check retry counts. It leaves remediation budget unchanged and does not
+resolve blockers, prove agent absence, redeliver a prompt or itself authorize
+replacement. Its JSON
 `resolves_recovery_blockers: false` and `authorizes_replacement: false` describe
 operation semantics, not a live eligibility verdict. Replacement still requires
 normal dispatch checks, including an eligible Open or Forge-managed In Progress
@@ -148,12 +150,13 @@ removing Findings/history; both original reviews rerun after Implementation.
 
 Two automatic retries per interrupted Check and three remediation cycles per Task
 run bound progress across restart, redispatch and mode changes. No progress stops
-earlier. `resume` cannot bypass exhaustion. Only a recorded operator
+earlier. `resume` renews interrupted retries, but cannot bypass remediation
+exhaustion or no-progress state. Only a recorded operator
 `dispatcher reset-remediation <task> --actor <operator> --message <explanation>`
 after safe ownership/resource reconciliation resets remediation budget; it does
 not reset interruption counts or clear holds, Findings or other safety state.
 See [bounded progress](dispatch.md#bounded-progress-and-operator-intervention)
-for interrupted-Check recovery and explicit Manual handoff.
+for interrupted-Check recovery through explicit resume; Manual handoff is not required.
 
 A final pass is not Done. Reconciliation separately requires confirmed retirement,
 all resources reconciled, clean current evidence/freshness, all current passes,

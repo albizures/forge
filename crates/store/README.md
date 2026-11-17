@@ -978,8 +978,11 @@ Revision 7 adds durable `task_retry_counts`, `task_progress` cycle baselines,
 verified-resolution accounting and append-only `task_progress_resets`. Revision-6
 stores are incompatible: historical attempts cannot safely receive empty budgets.
 Outcome acceptance, budget/hold effects and exact-replay persistence commit together;
-claims and evidence reconciliation reestablish exhausted-policy holds after ordinary
-hold clearance. Recorded operator remediation reset requires safe ownership, preserves
+claims and evidence reconciliation reestablish exhausted remediation/no-progress holds
+after hold clearance. Explicit operator resume atomically clears the hold and resets
+only that Task's interrupted-Check retry counts; it preserves historical attempts,
+remediation state and ownership/resource blockers. This uses the existing schema.
+Recorded operator remediation reset requires safe ownership, preserves
 interrupted retries and holds, and exposes its latest 20 audit entries in WorkState.
 See [bounded progress operations](../../docs/dispatch.md#bounded-progress-and-operator-intervention).
 
