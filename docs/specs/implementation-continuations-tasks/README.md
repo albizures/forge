@@ -10,7 +10,7 @@ Check off each Task only after its deliverables and required verification are co
 
 - [x] **T01** — [Reject changed-commit interruption outcomes safely](01-reject-changed-interruptions.md)
 - [x] **T02** — [Accept bounded Implementation Continuations end to end](02-accept-bounded-continuations.md)
-- [ ] **T03** — [Inspect and explicitly reset continuation budgets](03-inspect-and-reset-continuations.md)
+- [x] **T03** — [Inspect and explicitly reset continuation budgets](03-inspect-and-reset-continuations.md)
 - [ ] **T04** — [Authorize salvage of clean retained commits](04-recover-clean-retained-work.md)
 - [ ] **T05** — [Salvage dirty and untracked interrupted work safely](05-recover-dirty-retained-work.md)
 - [ ] **T06** — [Deliver stopping guidance, glossary, and operator documentation](06-profiles-and-documentation.md)
