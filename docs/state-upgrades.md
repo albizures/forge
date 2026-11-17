@@ -145,8 +145,12 @@ forgeup upgrade prepare --from old --to new --confirm-agents-stopped \
   --waits-for-decisions decisions.json
 ```
 
-Only unresolved dependencies may receive decisions. Duplicate, extraneous,
-started/completed, prepared, or started-Spec decisions fail closed. For code
+Only unresolved dependencies may receive decisions. When both endpoint Records
+are Done, an explicit completion-only decision may classify the legacy edge,
+including under a started or completed Spec. It does not change completion,
+history, execution configuration, or retained evidence; all preservation and
+validation gates still apply. Otherwise, duplicate, extraneous, started/completed,
+prepared, or started-Spec decisions fail closed. For code
 inheritance, use the source revision's public Stack configuration workflow before
 preparing a new snapshot; its normal lifecycle restrictions still apply. There is
 no hand-edited storage repair, migration-created branch, or fabricated Check result.

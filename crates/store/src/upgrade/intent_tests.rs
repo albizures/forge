@@ -235,10 +235,12 @@ fn semantic_stamp_failure_rolls_back_all_converted_rows_and_retry_is_exact() {
 }
 
 #[test]
-fn decisions_cannot_override_known_intent_or_started_prepared_and_completed_work() {
+fn decisions_cannot_override_known_intent_or_started_prepared_and_unfinished_work() {
     for sql in [
         "UPDATE records SET status='in_progress' WHERE id=4",
         "UPDATE records SET status='done' WHERE id=4",
+        "UPDATE records SET status='done' WHERE id=4; UPDATE records SET status='in_progress' WHERE id=1",
+        "UPDATE records SET status='in_progress' WHERE id=4; UPDATE records SET status='done' WHERE id=1",
         "UPDATE records SET status='in_progress' WHERE id=10",
         "INSERT INTO task_stacks(record_id,source_json,base_commit) SELECT 4,source_json,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' FROM task_stacks WHERE record_id=1",
         // Known intent is not an operator override target.
@@ -258,6 +260,60 @@ fn decisions_cannot_override_known_intent_or_started_prepared_and_completed_work
             .is_err()
         );
         assert_eq!(inspection(&c).unwrap(), before);
+    }
+}
+
+#[test]
+fn explicit_completed_waits_for_decisions_preserve_history_and_require_both_done() {
+    for schema in 7..=12 {
+        for parent_status in ["open", "in_progress", "done"] {
+            let mut c = fixture(schema);
+            // Use completed Tasks without Stack lineage; the existing chain still
+            // exercises normal lineage conversion alongside this explicit decision.
+            c.execute_batch("INSERT INTO records(id,record_type,body,status,workspace_id)
+                VALUES(8,'task','Completed prerequisite','done','w');
+                INSERT INTO record_projects VALUES(8,'p');
+                INSERT INTO record_relationships(from_id,to_id,parent_id,child_id,kind)
+                VALUES(8,10,10,8,'parent-child');
+                DELETE FROM record_relationships WHERE from_id=4 AND to_id=1 AND kind='depends-on';
+                INSERT INTO record_relationships(from_id,to_id,kind) VALUES(4,8,'depends-on');
+                UPDATE records SET status='done',completion_resolution='Retained completion' WHERE id=4;")
+                .unwrap();
+            c.execute("UPDATE records SET status=?1 WHERE id=10", [parent_status])
+                .unwrap();
+            let before = inspection(&c).unwrap();
+            // Done alone is not enough: the operator must supply the decision.
+            assert!(migrate_connection(&mut c).is_err());
+            assert_eq!(inspection(&c).unwrap(), before);
+            if schema == 7 {
+                // Schema 7 has no Stack metadata; exclude its unrelated
+                // ambiguous Open edges when exercising a started parent.
+                c.execute(
+                    "DELETE FROM record_relationships WHERE kind='depends-on' AND from_id IN (2,3)",
+                    [],
+                )
+                .unwrap();
+            }
+            let before = inspection(&c).unwrap();
+            let after = migrate_decisions(
+                &mut c,
+                &[WaitsForDecision {
+                    from_id: 4,
+                    to_id: 8,
+                }],
+            )
+            .unwrap();
+            assert_eq!(kind(&c, 4, 8), Some(PrerequisiteKind::WaitsFor));
+            for table in before.tables {
+                if !matches!(
+                    table.name.as_str(),
+                    "task_stacks" | "ordering_only_dependencies" | "builds_on_dependencies"
+                ) {
+                    assert!(after.tables.contains(&table), "changed {}", table.name);
+                }
+            }
+            assert_eq!(migrate_connection(&mut c).unwrap(), after);
+        }
     }
 }
 

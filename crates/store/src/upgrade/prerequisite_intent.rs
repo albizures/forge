@@ -126,6 +126,30 @@ struct ConversionPlan {
     waits: Vec<(u64, u64)>,
 }
 
+fn validate_decision(c: &Connection, from: u64, to: u64) -> Result<(), RegistrationError> {
+    let status = load_record(c, from)?.status;
+    // Completed endpoints need no new execution authorization. An explicit
+    // decision only classifies their legacy edge; retained execution facts
+    // are still checked by validate and the preservation inventory.
+    if status == RecordStatus::Done && load_record(c, to)?.status == RecordStatus::Done {
+        return Ok(());
+    }
+    // Other supplied decisions are not a lifecycle/recovery bypass.
+    if status != RecordStatus::Open {
+        return Err(error(format!(
+            "Record {from} is not Open and its endpoints are not both Done; cannot resolve legacy intent"
+        )));
+    }
+    crate::spec_plans::editable_task(c, from)?;
+    let prepared: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM task_stacks WHERE record_id=?1 AND base_commit IS NOT NULL)", [from.cast_signed()], |r| r.get(0)).map_err(storage_error)?;
+    if prepared {
+        return Err(error(format!(
+            "Record {from} is prepared; explicit recovery is required before an intent decision"
+        )));
+    }
+    Ok(())
+}
+
 fn plan(
     c: &Connection,
     decisions: &[WaitsForDecision],
@@ -195,19 +219,7 @@ fn plan(
                 unresolved.push(format!("{from} -> {to}"));
                 continue;
             }
-            // A supplied decision is not a lifecycle/recovery bypass.
-            if load_record(c, from)?.status != RecordStatus::Open {
-                return Err(error(format!(
-                    "Record {from} is not Open; cannot resolve legacy intent by rewriting started/completed work"
-                )));
-            }
-            crate::spec_plans::editable_task(c, from)?;
-            let prepared: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM task_stacks WHERE record_id=?1 AND base_commit IS NOT NULL)", [from.cast_signed()], |r| r.get(0)).map_err(storage_error)?;
-            if prepared {
-                return Err(error(format!(
-                    "Record {from} is prepared; explicit recovery is required before an intent decision"
-                )));
-            }
+            validate_decision(c, from, to)?;
         }
         waits.push((from, to));
     }
