@@ -68,8 +68,7 @@ fn success(output: Output) -> Value {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::too_many_lines)]
-async fn preview_registration_and_explicit_selections_are_isolated_immutable_and_side_effect_free()
-{
+async fn registration_selects_only_its_workspace_and_kind_without_launching() {
     let fixture = Fixture::new();
     let store = fixture.store();
     let root = fixture.0.join("workspace");
@@ -288,12 +287,14 @@ async fn preview_registration_and_explicit_selections_are_isolated_immutable_and
         frozen.launch_policy.as_ref().unwrap().mcp_servers[0].configuration["env"]["TOKEN"],
         "CREDENTIAL_SENTINEL"
     );
-    assert!(
+    assert_eq!(
         store
             .workspace_dispatch_configuration("one")
             .unwrap()
             .task_profile
-            .is_none()
+            .unwrap()
+            .revision,
+        revision
     );
     assert!(
         store
@@ -302,23 +303,8 @@ async fn preview_registration_and_explicit_selections_are_isolated_immutable_and
             .task_profile
             .is_none()
     );
-    assert!(
-        !cli("one", &["dispatcher", "profile"], true)
-            .status
-            .success(),
-        "missing selection must fail"
-    );
-    success(cli(
-        "one",
-        &[
-            "dispatcher",
-            "config",
-            "set",
-            "task-profile",
-            &revision.to_string(),
-        ],
-        true,
-    ));
+    let live = success(cli("one", &["dispatcher", "profile"], true));
+    assert_eq!(live["revision"], revision);
     let selected = store.workspace_dispatch_configuration("one").unwrap();
     assert_eq!(selected.task_profile.unwrap().revision, revision);
     assert!(selected.grilling_profile.is_none());
@@ -334,17 +320,16 @@ async fn preview_registration_and_explicit_selections_are_isolated_immutable_and
         true,
     ));
     let grilling_revision = grilling["revision"].as_u64().unwrap().to_string();
-    success(cli(
-        "one",
-        &[
-            "dispatcher",
-            "config",
-            "set",
-            "grilling-profile",
-            &grilling_revision,
-        ],
-        true,
-    ));
+    assert_eq!(
+        store
+            .workspace_dispatch_configuration("one")
+            .unwrap()
+            .grilling_profile
+            .unwrap()
+            .revision
+            .to_string(),
+        grilling_revision
+    );
     success(cli(
         "two",
         &[
@@ -395,14 +380,20 @@ async fn preview_registration_and_explicit_selections_are_isolated_immutable_and
             .unwrap(),
         frozen
     );
-    for workspace in ["one", "two"] {
+    for (workspace, expected_revision, expected_model) in [
+        ("one", 3, "anthropic/claude"),
+        ("two", revision, "openai/gpt-5"),
+    ] {
         let configuration = fixture
             .store()
             .workspace_dispatch_configuration(workspace)
             .unwrap();
-        assert_eq!(configuration.task_profile.unwrap().revision, revision);
+        assert_eq!(
+            configuration.task_profile.unwrap().revision,
+            expected_revision
+        );
         let live = success(cli(workspace, &["dispatcher", "profile"], true));
-        assert_eq!(live["model"], "openai/gpt-5");
+        assert_eq!(live["model"], expected_model);
     }
     assert_eq!(
         store

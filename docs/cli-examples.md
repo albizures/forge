@@ -143,8 +143,9 @@ Document paths resolve from the Workspace root; internal resource paths resolve 
 the profile document directory. Skills are selected explicitly, never by adjacency.
 Preview reads catalogs without executing extensions, connecting MCP servers or
 changing registration/selections. Registration persists a new immutable per-type
-revision without selecting it. Inspect the returned revision, then explicitly
-select with `dispatcher config set task-profile|grilling-profile <revision>`.
+revision and atomically selects it for the requested Workspace and Record Type.
+Use `dispatcher config set task-profile|grilling-profile <revision>` to switch
+to another registered revision.
 Source edits and new registrations do not reconfigure existing Assignments or
 Check pins. Task Checks retain their pinned revisions; configure Project Check
 Templates for future Tasks rather than assuming a Workspace selection updates

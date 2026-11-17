@@ -325,10 +325,11 @@ forge dispatcher profile
 Profiles include seeded revisions, registered immutable revisions and Task timeout
 revisions. Author, preview and register a Markdown profile beneath the Forge
 Workspace's `.agents/profiles/` directory as described in
-[Agent Profile policy](agent-profile-policy.md); registration never selects it.
+[Agent Profile policy](agent-profile-policy.md); registration atomically selects the
+new revision for that Workspace and Record Type.
 `task-profile` and `grilling-profile` select revisions independently per Workspace
-and Record Type; unknown revisions are rejected. There is no automatic latest
-selection. Workspace Task selection supplies authoring/lifecycle defaults and
+and Record Type; unknown revisions are rejected. Registration selects only the
+revision it creates; there is no ongoing latest-revision tracking. Workspace Task selection supplies authoring/lifecycle defaults and
 configuration readiness, **not live Task attempt routing**. Configure each Project's
 [Check Template](records.md#project-check-templates) with registered Task profile
 revisions **before opening Tasks**. Every attempt, retry and remediation uses its

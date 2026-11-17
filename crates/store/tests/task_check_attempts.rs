@@ -259,6 +259,11 @@ fn acceptance_claim_snapshots_first_unpassed_check_and_pinned_profile_atomically
             forge_app::AgentAssignmentClosureReason::Retired,
         )
         .unwrap();
+    // Registration changed the Workspace default, but not the failed Check's pin.
+    let selection = DispatchPreflightSelection {
+        task_revision: later.revision,
+        ..selection
+    };
     // Failure leaves Implementation selected; neither retry identity nor live selections can skip it.
     assert_eq!(
         store

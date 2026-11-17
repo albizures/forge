@@ -140,5 +140,5 @@ reconcile an uncertain old agent. Any separate operator reset first requires saf
 ownership retirement and retained-resource reconciliation.
 
 Author and register immutable profile revisions using [Agent Profile policy](agent-profile-policy.md);
-registration never changes a Workspace selection. For the delivered agent's
+registration atomically selects the new revision for that Workspace and Record Type. For the delivered agent's
 bounded bootstrap, reads and actions, see [Assignment context](assignment-context.md).

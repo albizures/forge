@@ -10,7 +10,7 @@ use std::{
 };
 
 #[test]
-fn registered_policy_survives_reopen_and_lifecycle_revision_without_selection() {
+fn registered_policy_is_selected_and_survives_reopen_and_lifecycle_revision() {
     use forge_app::agent_profiles::ResourceCatalog;
     let fixture = Fixture::new();
     let workspace = fixture.0.join("one");
@@ -54,7 +54,7 @@ fn registered_policy_survives_reopen_and_lifecycle_revision_without_selection() 
                 .workspace_dispatch_configuration("one")
                 .unwrap()
                 .task_profile,
-            None
+            Some(registered.clone())
         );
         registered
     };
@@ -66,15 +66,17 @@ fn registered_policy_survives_reopen_and_lifecycle_revision_without_selection() 
             .unwrap(),
         registered
     );
-    store
-        .select_workspace_profile("one", RecordType::Task, Some(registered.revision))
-        .unwrap();
+    assert_eq!(
+        store
+            .workspace_dispatch_configuration("one")
+            .unwrap()
+            .task_profile,
+        Some(registered.clone())
+    );
     let copied = store
         .configure_workspace_acknowledgement_timeout("one", Some(1234))
         .unwrap();
     assert_eq!(copied.launch_policy, registered.launch_policy);
-    assert_eq!(copied.model, registered.model);
-    assert_eq!(copied.acknowledgement_timeout_millis, 1234);
     let next = store
         .register_agent_profile("one", RecordType::Task, &policy)
         .unwrap();
@@ -87,19 +89,18 @@ fn registered_policy_survives_reopen_and_lifecycle_revision_without_selection() 
             .task_profile
             .unwrap()
             .revision,
-        copied.revision
+        next.revision
     );
     let grilling = store
         .register_agent_profile("one", RecordType::Grilling, &policy)
         .unwrap();
-    assert_eq!(grilling.launch_policy, Some(policy));
-    assert!(
-        store
-            .workspace_dispatch_configuration("one")
-            .unwrap()
-            .grilling_profile
-            .is_none()
-    );
+    assert_eq!(grilling.launch_policy.as_ref(), Some(&policy));
+    let configuration = store.workspace_dispatch_configuration("one").unwrap();
+    assert_eq!(configuration.grilling_profile, Some(grilling));
+    assert_eq!(configuration.task_profile, Some(next.clone()));
+    let other = store.workspace_dispatch_configuration("two").unwrap();
+    assert!(other.task_profile.is_none());
+    assert!(other.grilling_profile.is_none());
     let legacy_copy = store
         .configure_task_acknowledgement_timeout(Some(4321))
         .unwrap();
@@ -109,6 +110,42 @@ fn registered_policy_survives_reopen_and_lifecycle_revision_without_selection() 
             .agent_profile(RecordType::Task, registered.revision)
             .unwrap(),
         registered
+    );
+}
+
+#[test]
+fn registration_rolls_back_revision_when_selection_fails() {
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    fixture.register(&store);
+    let policy = serde_json::from_str(
+        r#"{"version":1,"runtime":"herdr/pi","model":"test/model","tools":[],"behavior":"test","skills":[],"extensions":[],"mcpServers":[]}"#,
+    )
+    .unwrap();
+    let original = store
+        .register_agent_profile("one", RecordType::Task, &policy)
+        .unwrap();
+    let connection = rusqlite::Connection::open(fixture.0.join("store.sqlite")).unwrap();
+    connection.execute_batch(
+        "CREATE TRIGGER reject_profile_selection BEFORE UPDATE ON workspace_dispatch_configuration
+         BEGIN SELECT RAISE(ABORT, 'selection rejected'); END;",
+    ).unwrap();
+    assert!(
+        store
+            .register_agent_profile("one", RecordType::Task, &policy)
+            .is_err()
+    );
+    assert!(
+        store
+            .agent_profile(RecordType::Task, original.revision + 1)
+            .is_err()
+    );
+    assert_eq!(
+        store
+            .workspace_dispatch_configuration("one")
+            .unwrap()
+            .task_profile,
+        Some(original)
     );
 }
 

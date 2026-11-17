@@ -28,8 +28,9 @@ Preview and registration validate canonical containment: file or directory symli
 cannot escape this directory. The profiles directory itself (or its `.agents`
 parent) cannot redirect elsewhere, even within the Workspace. This is an authoring
 boundary, not a security sandbox. No special basename or neighboring `SKILL.md` is
-required. No discovery, inheritance, or automatic selection is added.
-Only explicitly selected Skills are included; proximity never selects a Skill.
+required. Profiles are not auto-discovered or inherited; registration selects only
+the revision being created. Only explicitly selected Skills are included; proximity
+never selects a Skill.
 
 Example `.agents/profiles/implementation.md`:
 
@@ -91,14 +92,19 @@ entries is ambiguous and must be selected by unique server name instead.
 
 ## Operator preview, registration and selection
 
+Registration now creates and selects a revision in one transaction. This changes
+CLI/RPC mutation semantics from registration-only; request/response shapes and
+storage schema are unchanged. Preview remains read-only. To restore a previous
+selection, use `dispatcher config set task-profile|grilling-profile <revision>`.
+
 ```sh
 forge agent-profile preview .agents/profiles/implementation.md \
   --workspace development --record-type task --json
 forge agent-profile register .agents/profiles/implementation.md \
   --workspace development --record-type task --json
-# Use the returned revision explicitly; do not assume a latest/default revision.
+# Registration selects the returned revision for its Workspace and Record Type.
+# To switch to another registered revision later:
 forge dispatcher config set task-profile 2 --workspace development
-forge dispatcher config set grilling-profile 2 --workspace development
 forge dispatcher profile --workspace development
 forge dispatcher profile --kind grilling --workspace development
 ```
@@ -123,7 +129,7 @@ policy, exact fingerprint coverage and limitations. JSON policy responses expose
 this choice as `thinking_level` (the document field is `thinkingLevel`); historical
 policies without a choice omit it. They omit behavior and MCP configuration
 (including credentials). Preview has a null `revision`; registration returns the
-new revision and leaves all selections unchanged. Invalid documents/catalogs
+new revision and atomically selects it for the requested Workspace and Record Type. Invalid documents/catalogs
 fail with redacted reasons; neither operation imports extensions, starts MCP
 commands, provisions worktrees or contacts a runtime provider. JSON uses
 `schema_version: 1`. Operator RPC methods are `agent_profile.preview` and
@@ -172,8 +178,7 @@ done
   "$FORGE" agent-profile preview .agents/profiles/example.md --workspace demo
   "$FORGE" agent-profile register .agents/profiles/example.md \
     --workspace demo --record-type task --json
-  # This isolated fresh store returns Task revision 2. Registration did not select it.
-  "$FORGE" dispatcher config set task-profile 2 --workspace demo
+  # This isolated fresh store returns and selects Task revision 2.
   "$FORGE" dispatcher profile --workspace demo --json
 )
 kill "$daemon_pid"
@@ -198,8 +203,8 @@ membership rules and may reside outside the profiles folder.
 
 Existing registered revisions, Assignments and Task Check pins remain unchanged and
 usable: no source migration or re-registration is required to retain their meaning.
-To adopt changed profiles, preview and register new revisions, then explicitly select
-them and update Project Check Templates for future Tasks. Existing Task pins are never
+To adopt changed profiles, preview and register new revisions; registration selects
+them. Update Project Check Templates for future Tasks. Existing Task pins are never
 rewritten. Deploy and activate a supporting Forge Revision before migrating live source
 files or dispatch selections; older Forge Revisions require the legacy authoring layout.
 
@@ -295,8 +300,8 @@ audits and diagnostics rather than serializing the full persistence payload.
 `WorkspaceDispatchRepository::register_agent_profile` inserts a new per-Record-Type
 revision in the existing `agent_profiles` table. It copies Forge-owned lifecycle
 settings from that Workspace's selected same-type revision, or seed revision 1
-when none is selected. Registration never selects. Workspace Task and Grilling
-selections remain independent. Both acknowledgement-timeout revision operations
+when none is selected. Registration atomically selects the new revision for that
+Workspace and Record Type. Workspace Task and Grilling selections remain independent. Both acknowledgement-timeout revision operations
 copy `launch_policy_json` unchanged; old revisions are not mutated. Legacy rows
 retain `launch_policy: None` without fabricating historical policy.
 
@@ -304,7 +309,7 @@ The profile source is not a runtime dependency. Editing or deleting it cannot al
 stored behavior/configuration, including thinking level. Later registrations do
 not mutate prior revisions, Assignment bindings or Task Check pins. Source edits
 alone never reconfigure an existing Assignment or Check. Adoption requires new
-registration and explicit selection; Task routing additionally requires Project
+registration, which selects the new revision; Task routing additionally requires Project
 Check Template pins for future Tasks, not a rewrite of existing pins.
 `validate_direct_inputs` validates policy and compares only selected
 SKILL.md/extension entry bytes and persisted MCP configuration. Supporting files/imports/dependencies are not recursively hashed.

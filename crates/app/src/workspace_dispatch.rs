@@ -222,7 +222,7 @@ impl Application {
         Ok((policy, lifecycle))
     }
 
-    /// Explicitly register an immutable revision; never changes Workspace selection.
+    /// Register an immutable revision and atomically select it for this Workspace and Record Type.
     /// # Errors
     /// Rejects invalid authoring inputs or failed persistence.
     pub fn register_agent_profile(

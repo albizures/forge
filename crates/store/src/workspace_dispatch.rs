@@ -279,9 +279,9 @@ impl WorkspaceDispatchRepository for SqliteProjectRepository {
         record_type: RecordType,
         policy: &forge_app::agent_profiles::ResolvedLaunchPolicy,
     ) -> Result<forge_app::AgentProfile, RegistrationError> {
-        let kind = match record_type {
-            RecordType::Task => "task",
-            RecordType::Grilling => "grilling",
+        let (kind, column) = match record_type {
+            RecordType::Task => ("task", "task_profile_revision"),
+            RecordType::Grilling => ("grilling", "grilling_profile_revision"),
             _ => {
                 return Err(RegistrationError::new(
                     "invalid-profile-type",
@@ -320,6 +320,7 @@ impl WorkspaceDispatchRepository for SqliteProjectRepository {
         tx.execute("INSERT INTO agent_profiles (record_type, revision, provider, agent_kind, model, prompt_template, retry_limit, retry_backoff_millis, startup_timeout_millis, unknown_state_grace_millis, acknowledgement_timeout_millis, acknowledgement_timeout_overridden, launch_policy_json)
             SELECT record_type, ?1, 'herdr', 'pi', ?2, prompt_template, retry_limit, retry_backoff_millis, startup_timeout_millis, unknown_state_grace_millis, acknowledgement_timeout_millis, acknowledgement_timeout_overridden, ?3 FROM agent_profiles WHERE record_type = ?4 AND revision = ?5",
             params![revision, policy.model, payload, kind, base]).map_err(storage_error)?;
+        tx.execute(&format!("INSERT INTO workspace_dispatch_configuration (workspace_id, {column}) VALUES (?1, ?2) ON CONFLICT(workspace_id) DO UPDATE SET {column} = excluded.{column}"), params![workspace, revision]).map_err(storage_error)?;
         let profile = load_agent_profile(&tx, record_type, revision)?;
         tx.commit().map_err(storage_error)?;
         Ok(profile)

@@ -86,7 +86,7 @@ pub struct AgentProfileDocumentResponse {
     pub schema_version: u32,
     pub workspace: String,
     pub record_type: String,
-    /// Only registration creates a revision. It does not select it.
+    /// Registration creates and selects this revision for the Workspace and Record Type.
     pub revision: Option<u32>,
     pub policy: AgentProfilePolicyResponse,
     pub lifecycle: AgentProfileLifecycleResponse,
@@ -107,7 +107,7 @@ impl AgentProfileDocumentResponse {
             fingerprint_coverage: "SHA-256 of selected SKILL.md files, extension entry files and persisted MCP launch configuration only; profile behavior is persisted, not revalidated.".into(),
             limitations: vec![
                 "No recursive dependency pinning or atomic validation-to-runtime-load filesystem snapshot.".into(),
-                "External services, models and credentials are not frozen; registration does not select or enable dispatch.".into(),
+                "External services, models and credentials are not frozen; registration selects the revision but does not certify dispatch readiness.".into(),
                 "No OS/same-user isolation. Selected extensions are trusted unsandboxed code. MCP configuration and behavior are omitted from this view.".into(),
                 "Pi flags configure launch but do not attest runtime identity or closed enforcement; native reload and ambient user settings are not guarded.".into(),
                 "Selected MCP servers are unsupported at launch. Empty lists and the tool allowlist configure Pi flags, not a sandbox for trusted extensions.".into(),
