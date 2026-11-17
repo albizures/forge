@@ -211,6 +211,50 @@ async fn verify_context_completion(daemon: &Daemon, kind: RecordType) {
     }
 }
 
+async fn verify_session_registration(
+    daemon: &Daemon,
+    store: &SqliteProjectRepository,
+    database: &Path,
+) {
+    let before = store.agent_assignment_info("context-owner").unwrap().sessions;
+    let mut request = context_credentials();
+    request["sessionId"] = "pi-second".into();
+    let mut denied = request.clone();
+    denied["secret"] = "wrong".into();
+    assert!(assignment_rpc(daemon.clone(), "assignment.bootstrap", denied).await.get("error").is_some());
+    for invalid in [String::new(), "bad\nidentity".to_owned(), "x".repeat(257)] {
+        let mut invalid_request = request.clone();
+        invalid_request["sessionId"] = invalid.into();
+        let response = assignment_rpc(daemon.clone(), "assignment.bootstrap", invalid_request).await;
+        assert_eq!(response["error"]["data"], "invalid-session-id", "{response}");
+    }
+    let connection = rusqlite::Connection::open(database).unwrap();
+    connection.execute_batch("CREATE TRIGGER fail_session_registration BEFORE INSERT ON assignment_sessions BEGIN SELECT RAISE(ABORT, 'injected session persistence failure'); END;").unwrap();
+    let failed = assignment_rpc(daemon.clone(), "assignment.bootstrap", request.clone()).await;
+    assert!(failed.get("error").is_some(), "{failed}");
+    assert!(failed.get("result").is_none(), "failed registration cannot return behavior");
+    assert_eq!(store.agent_assignment_info("context-owner").unwrap().sessions, before);
+    connection.execute_batch("DROP TRIGGER fail_session_registration").unwrap();
+    let accepted = assignment_rpc(daemon.clone(), "assignment.bootstrap", request.clone()).await;
+    assert!(accepted.get("result").is_some(), "{accepted}");
+    let sessions = store.agent_assignment_info("context-owner").unwrap().sessions;
+    assert_eq!(sessions.len(), 2);
+    let second = sessions.iter().find(|s| s.session_id == "pi-second").unwrap();
+    assert_eq!(second.first_bootstrap_at_millis, second.last_bootstrap_at_millis);
+    // A controlled old observation verifies that retry advances only the last timestamp.
+    connection.execute("UPDATE assignment_sessions SET last_bootstrap_at_millis = 0 WHERE session_id = 'pi-second'", []).unwrap();
+    let retry = assignment_rpc(daemon.clone(), "assignment.bootstrap", request).await;
+    assert!(retry.get("result").is_some(), "{retry}");
+    let info = store.agent_assignment_info("context-owner").unwrap();
+    assert_eq!(info.sessions.len(), 2);
+    let retried = info.sessions.iter().find(|s| s.session_id == "pi-second").unwrap();
+    assert_eq!(retried.first_bootstrap_at_millis, second.first_bootstrap_at_millis);
+    assert!(retried.last_bootstrap_at_millis >= second.last_bootstrap_at_millis);
+    let wire = serde_json::to_value(forge_rpc::AgentAssignmentInfoResponse::from(info)).unwrap();
+    assert_eq!(wire["sessions"].as_array().unwrap().len(), 2);
+    assert_context_redacted(&wire.to_string(), false);
+}
+
 #[tokio::test]
 async fn persisted_task_and_multi_project_grilling_context_survives_source_deletion_and_restart() {
     use forge_app::{ManagedWorktreeRepository, WorkspaceDispatchRepository};
@@ -233,7 +277,10 @@ async fn persisted_task_and_multi_project_grilling_context_survives_source_delet
         let session = app
             .assignment(&root, "context-owner", "actual-secret")
             .unwrap();
-        let first = session.bootstrap().unwrap();
+        let first = session.bootstrap_with_session(Some("pi-first")).unwrap();
+        let first_sessions = store.agent_assignment_info("context-owner").unwrap().sessions;
+        assert_eq!(first_sessions.len(), 1);
+        assert_eq!(first_sessions[0].session_id, "pi-first");
         assert_eq!(first.behavior, "BEHAVIOR-SENTINEL");
         assert_eq!(
             first.context.projects.len(),
@@ -266,7 +313,11 @@ async fn persisted_task_and_multi_project_grilling_context_survives_source_delet
         drop(app);
         let mut daemon = Daemon::new(context_test_application(&fixture.database_path, &root));
         daemon.capability_secret_root = Some(root.clone());
+        verify_session_registration(&daemon, &store, &fixture.database_path).await;
         verify_source_independent_context_routes(&daemon, own.id, &bound).await;
+        let sessions = store.agent_assignment_info("context-owner").unwrap().sessions;
+        assert_eq!(sessions.len(), 2, "bootstrap without ID adds no association");
+        assert_eq!(sessions[0].first_bootstrap_at_millis, first_sessions[0].first_bootstrap_at_millis);
         verify_context_route_authentication(&daemon, own.id).await;
         if kind == RecordType::Task {
             check_tests::pass_checks(&store, own.id);
@@ -291,6 +342,10 @@ async fn persisted_task_and_multi_project_grilling_context_survives_source_delet
                 forge_app::AgentAssignmentClosureReason::Retired,
             )
             .unwrap();
+        assert_eq!(store.agent_assignment_info("context-owner").unwrap().sessions, sessions);
+        let mut closed_request = context_credentials();
+        closed_request["sessionId"] = "pi-closed".into();
+        assert!(assignment_rpc(daemon.clone(), "assignment.bootstrap", closed_request).await.get("error").is_some());
         assert!(
             assignment_rpc(daemon, "assignment.context", context_credentials())
                 .await

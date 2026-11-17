@@ -23,6 +23,15 @@ pub struct AssignmentCredentials {
 
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssignmentBootstrapRequest {
+    pub assignment_id: String,
+    pub secret: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AssignmentReadRequest {
     pub assignment_id: String,
     pub secret: String,
@@ -350,7 +359,7 @@ pub trait AssignmentApi {
     #[method(name = "bootstrap")]
     async fn bootstrap(
         &self,
-        request: AssignmentCredentials,
+        request: AssignmentBootstrapRequest,
     ) -> RpcResult<AssignmentBootstrapResponse>;
     #[method(name = "context")]
     async fn context(&self, request: AssignmentCredentials)

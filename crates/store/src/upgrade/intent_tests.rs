@@ -70,7 +70,7 @@ fn historical_matrix_converts_only_explicit_or_provable_intent_and_preserves_his
             }
         }
         let after = migrate_decisions(&mut c, &decisions).unwrap();
-        assert_eq!(after.schema, Some(13));
+        assert_eq!(after.schema, Some(14));
         for (from, to) in [(5, 1), (6, 5), (7, 6), (4, 1), (3, 1), (10, 20), (5, 31)] {
             assert_eq!(kind(&c, from, to), Some(PrerequisiteKind::WaitsFor));
         }
@@ -144,6 +144,7 @@ fn incomplete_open_chains_survive_conversion_and_same_schema_snapshot_transfer()
             .unwrap();
             c.execute(&format!("DELETE FROM task_stacks WHERE {missing}"), [])
                 .unwrap();
+            c.execute_batch("DROP TABLE assignment_sessions").unwrap();
             c.pragma_update(None, "user_version", schema).unwrap();
             let dir = std::env::temp_dir().join(format!(
                 "forge-incomplete-upgrade-{}-{}",
@@ -162,8 +163,19 @@ fn incomplete_open_chains_survive_conversion_and_same_schema_snapshot_transfer()
             assert!(before.blockers.is_empty());
             assert_eq!(snapshot(&source, &target).unwrap(), before);
             let after = migrate(&target).unwrap();
-            assert_eq!(after.schema, Some(13));
-            assert_eq!(after.tables, before.tables);
+            assert_eq!(after.schema, Some(14));
+            for table in &before.tables {
+                assert!(after.tables.contains(table));
+            }
+            assert_eq!(
+                after
+                    .tables
+                    .iter()
+                    .find(|t| t.name == "assignment_sessions")
+                    .unwrap()
+                    .rows,
+                0
+            );
             assert_eq!(migrate(&target).unwrap(), after);
             assert_eq!(fs::read(&source).unwrap(), bytes);
             let upgraded = Connection::open(&target).unwrap();
@@ -199,6 +211,7 @@ fn incomplete_lineage_cannot_hide_preparation_results_or_invalid_configuration()
             c.execute_batch("DELETE FROM task_stacks WHERE record_id=1")
                 .unwrap();
             c.execute_batch(invalid).unwrap();
+            c.execute_batch("DROP TABLE assignment_sessions").unwrap();
             c.pragma_update(None, "user_version", schema).unwrap();
             let before = inventory(&c).unwrap();
             assert!(inspection(&c).is_err(), "schema {schema}: {invalid}");

@@ -792,6 +792,8 @@ pub struct AgentAssignmentInfoResponse {
     pub acknowledged_at_millis: Option<u64>,
     pub dispatch_hold: Option<String>,
     pub resources: Vec<AgentAssignmentResourceResponse>,
+    #[serde(default)]
+    pub sessions: Vec<AssignmentSessionResponse>,
     pub recovery_blockers: Vec<String>,
     pub capacity_reserved: bool,
     pub operations: Vec<String>,
@@ -812,6 +814,14 @@ pub struct AgentAssignmentResourceResponse {
     pub resource_id: String,
     pub created_at_millis: u64,
     pub retired_at_millis: Option<u64>,
+}
+
+/// Successful bootstrap observations, not session start/end or liveness.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AssignmentSessionResponse {
+    pub session_id: String,
+    pub first_bootstrap_at_millis: u64,
+    pub last_bootstrap_at_millis: u64,
 }
 
 impl From<forge_app::AgentAssignmentInfo> for AgentAssignmentInfoResponse {
@@ -860,6 +870,15 @@ impl From<forge_app::AgentAssignmentInfo> for AgentAssignmentInfoResponse {
                     resource_id: resource.resource_id,
                     created_at_millis: resource.created_at_millis,
                     retired_at_millis: resource.retired_at_millis,
+                })
+                .collect(),
+            sessions: value
+                .sessions
+                .into_iter()
+                .map(|session| AssignmentSessionResponse {
+                    session_id: session.session_id,
+                    first_bootstrap_at_millis: session.first_bootstrap_at_millis,
+                    last_bootstrap_at_millis: session.last_bootstrap_at_millis,
                 })
                 .collect(),
             recovery_blockers,

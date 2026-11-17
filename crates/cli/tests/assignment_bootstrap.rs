@@ -6,7 +6,11 @@ async fn bootstrap_returns_context_and_behavior_only_from_unified_route() {
     for record_type in ["task", "grilling"] {
         let app = Router::new().route("/rpc", post(move |Json(request): Json<serde_json::Value>| async move {
             assert_eq!(request["method"], "assignment_bootstrap");
-            assert_eq!(request["params"][0], serde_json::json!({"assignmentId":"a", "secret":"private-secret"}));
+            let mut expected = serde_json::json!({"assignmentId":"a", "secret":"private-secret"});
+            if record_type == "task" {
+                expected["sessionId"] = "pi-cli-session".into();
+            }
+            assert_eq!(request["params"][0], expected);
             Json(serde_json::json!({"jsonrpc":"2.0", "id":request["id"], "result":{
                 "schemaVersion":1,
                 "context":{
@@ -34,7 +38,12 @@ async fn bootstrap_returns_context_and_behavior_only_from_unified_route() {
             std::fs::set_permissions(&secret_file, std::fs::Permissions::from_mode(0o600)).unwrap();
         }
         let output = tokio::task::spawn_blocking(move || {
-            Command::new(env!("CARGO_BIN_EXE_forge"))
+            let mut command = Command::new(env!("CARGO_BIN_EXE_forge"));
+            command.env_remove("PI_SESSION_ID");
+            if record_type == "task" {
+                command.env("PI_SESSION_ID", "pi-cli-session");
+            }
+            command
                 .args(["assignment", "bootstrap", "--json"])
                 .env("FORGE_ASSIGNMENT_ID", "a")
                 .env("FORGE_ASSIGNMENT_DAEMON_URL", endpoint)

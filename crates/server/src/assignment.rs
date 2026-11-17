@@ -170,11 +170,11 @@ impl AssignmentApiServer for Daemon {
     }
     async fn bootstrap(
         &self,
-        request: AssignmentCredentials,
+        request: forge_rpc::AssignmentBootstrapRequest,
     ) -> RpcResult<AssignmentBootstrapResponse> {
         let result = self
             .assignment_session(&request.assignment_id, &request.secret)?
-            .bootstrap();
+            .bootstrap_with_session(request.session_id.as_deref());
         result
             .map(|value| AssignmentBootstrapResponse {
                 schema_version: 1,

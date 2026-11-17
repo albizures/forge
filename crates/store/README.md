@@ -45,8 +45,23 @@ is documented separately in [Records](../../docs/records.md),
   Most references do **not** cascade.
 - Ordinary repository opening accepts only the current marked schema revision.
   Triggers and repository validation also enforce invariants. Explicit managed
-  copy-and-upgrade targets revision 13 from revisions 7 through 13; unsupported
+  copy-and-upgrade targets revision 14 from revisions 7 through 14; unsupported
   stores are rejected without automatic conversion or reset.
+
+## Assignment session provenance (revision 14)
+
+`assignment_sessions` retains successful bootstrap observations. Its composite
+primary key is `(assignment_id, session_id)`; `assignment_id` references
+`agent_assignments.id`. First and latest observation timestamps are Unix
+milliseconds, not session start/end or liveness evidence. Registration atomically
+requires an open, acknowledged Assignment, an In Progress Record and trusted
+context evidence. Retries update only the latest timestamp; associations remain
+with closed Assignment history.
+
+Revision 14 expands the storage contract. Ordinary opening rejects older schemas
+before writes. The explicit offline staging upgrade adds an empty table without
+inventing session history or modifying existing facts. Same-schema upgrade retains
+all existing session associations.
 
 ## Canonical Builds-On topology (revision 12)
 
@@ -330,6 +345,12 @@ erDiagram
         TEXT assignment_id PK,FK
         TEXT directory
     }
+    assignment_sessions {
+        TEXT assignment_id PK,FK
+        TEXT session_id PK
+        INTEGER first_bootstrap_at_millis
+        INTEGER last_bootstrap_at_millis
+    }
     assignment_context_bootstrap {
         TEXT assignment_id PK,FK
     }
@@ -358,6 +379,7 @@ erDiagram
     agent_assignments ||--o{ agent_assignment_resources : assignment_id
     agent_assignments ||--o| assignment_execution_bindings : assignment_id
     agent_assignments ||--o| assignment_context_bootstrap : assignment_id
+    agent_assignments ||--o{ assignment_sessions : assignment_id
     agent_assignments ||--o| assignment_unknown_resource_resolutions : assignment_id
     agent_assignments ||--o{ assignment_authorization_audits : assignment_id
 ```
@@ -816,6 +838,7 @@ There is no composite FK to `agent_profiles`.
 | `agent_assignment_resources` | `assignment_id TEXT` FK → `agent_assignments.id`, `resource_kind TEXT`, `resource_id TEXT`, `created_at_millis INTEGER`, `retired_at_millis INTEGER?`; PK `(assignment_id, resource_kind, resource_id)` | Tracks resources and retained cleanup evidence |
 | `assignment_execution_bindings` | `assignment_id TEXT` PK/FK → `agent_assignments.id`, `directory TEXT` | Execution directory binding |
 | `assignment_context_bootstrap` | `assignment_id TEXT` PK/FK → `agent_assignments.id` | Presence marks context bootstrap |
+| `assignment_sessions` | (`assignment_id TEXT` FK → `agent_assignments.id`, `session_id TEXT`) PK; `first_bootstrap_at_millis INTEGER`, `last_bootstrap_at_millis INTEGER` | Successful bootstrap provenance, retained after closure |
 | `assignment_unknown_resource_resolutions` | `assignment_id TEXT` PK/FK → `agent_assignments.id`, `confirmed_at_millis INTEGER`, `authority TEXT`, `confirmation TEXT` | Explicit resolution evidence for unknown resources |
 
 ### `assignment_authorization_audits`

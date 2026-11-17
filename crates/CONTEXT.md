@@ -212,6 +212,10 @@ _Avoid_: record agent metadata, agent link
 Forge’s scheduling and dispatch application service that automatically selects eligible Tasks and accepts explicit dispatch requests for eligible Tasks and Grillings. It provisions their Agent Assignments, with Managed Worktrees required for Tasks; Grillings require explicit dispatch because they involve human participation.
 _Avoid_: agent dispatcher, Herdr dispatcher
 
+**Assignment Session**:
+An association recording that a conversation session successfully bootstrapped an Agent Assignment. It conveys no execution authority or liveness guarantee; one Assignment may have multiple sessions and one session may participate in multiple Assignments.
+_Avoid_: Assignment owner, live session
+
 **Assignment Capability**:
 An opaque, revocable credential Forge issues for one open Agent Assignment. It authorizes that Assignment's bounded reads and own-Record actions through the Forge daemon; it does not protect against a hostile process running as the same OS user.
 _Avoid_: agent token, agent credential

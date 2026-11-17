@@ -132,6 +132,33 @@ independently authenticated human proof**. Its affirmative flag, nonblank
 confirmation and nonblank outcome are required and retained atomically in the
 completion resolution. They do not bypass lifecycle validation.
 
+## Assignment sessions
+
+`forge assignment bootstrap` reads optional `PI_SESSION_ID` and sends it as
+`sessionId` in the authenticated bootstrap request. Missing identity preserves
+existing bootstrap behavior. A supplied identity must be nonblank, no more than
+256 bytes and contain no control characters; invalid identity fails bootstrap.
+
+Successful bootstrap records an Assignment Session before returning context and
+behavior. Persistence failure fails the request; retry is safe. Associations are
+deduplicated by Assignment + session ID, retaining first and most recent successful
+bootstrap timestamps (Unix milliseconds). These are observation times, not session
+start/end times. A different session adds an association, and the same session may
+appear on multiple Assignments.
+
+`forge dispatcher assignment-info <assignment-id>` exposes all associations in
+human output and JSON `sessions`, including `session_id`,
+`first_bootstrap_at_millis` and `last_bootstrap_at_millis`. They remain with
+Assignment history after closure; there is no independent removal operation.
+Registration captures only sessions that bootstrap, not forks or other sessions
+that never bootstrap. It is provenance, not ownership, authorization, heartbeat,
+or proof of agent exit. Transcript lookup, navigation and session control are not
+provided.
+
+Wire compatibility: `sessionId` is optional, so existing bootstrap requests still
+work. Inspection adds a default-empty `sessions` collection. New clients supplying
+`sessionId` require a server supporting this field; older servers may reject it.
+
 ## Agent CLI examples
 
 In a delivered Assignment environment, first run `forge assignment bootstrap`.

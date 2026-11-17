@@ -75,6 +75,33 @@ fn inspection_application() -> Application {
     )
 }
 
+#[test]
+fn assignment_info_renders_all_session_observations_without_claiming_liveness() {
+    let mut info = forge_rpc::AgentAssignmentInfoResponse::from(
+        inspection_application()
+            .agent_assignment_info("inspect-me")
+            .unwrap(),
+    );
+    info.sessions = vec![
+        forge_rpc::AssignmentSessionResponse {
+            session_id: "pi-first".into(),
+            first_bootstrap_at_millis: 10,
+            last_bootstrap_at_millis: 20,
+        },
+        forge_rpc::AssignmentSessionResponse {
+            session_id: "pi-second".into(),
+            first_bootstrap_at_millis: 30,
+            last_bootstrap_at_millis: 30,
+        },
+    ];
+    let human = forge_cli::render_agent_assignment_info(&info);
+    assert!(human.contains("pi-first — first bootstrap at 10 — last bootstrap at 20"));
+    assert!(human.contains("pi-second — first bootstrap at 30 — last bootstrap at 30"));
+    assert!(human.contains("not authority or liveness evidence"));
+    let value = serde_json::to_value(info).unwrap();
+    assert_eq!(value["sessions"].as_array().unwrap().len(), 2);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn assignment_info_cli_renders_human_and_json_diagnostics() {
     let app = inspection_application();

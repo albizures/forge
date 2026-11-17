@@ -513,11 +513,12 @@ fn authenticated_actions_require_acknowledgement_and_normal_lifecycle_validation
         .hold_dispatch(owner, "Operator review required")
         .unwrap();
     assert!(
-        session.bootstrap().is_err(),
+        session.bootstrap_with_session(Some("pi-failed-context")).is_err(),
         "missing trusted scope must fail bootstrap after start"
     );
     assert!(store.dispatch_hold(owner).unwrap().is_some());
     assert!(!store.assignment_context_read(&assignment).unwrap());
+    assert!(store.agent_assignment_info(&assignment).unwrap().sessions.is_empty());
     assert!(
         session.behavior().is_err(),
         "start alone cannot release behavior before context"

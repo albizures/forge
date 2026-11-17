@@ -489,10 +489,35 @@ impl AuthenticatedAssignment<'_> {
     /// # Errors
     /// Stops on any failed step; safe to retry and never clears a Dispatch Hold.
     pub fn bootstrap(&self) -> Result<Bootstrap, RegistrationError> {
+        self.bootstrap_with_session(None)
+    }
+
+    /// Bootstraps and retains optional conversation-session provenance before success.
+    /// # Errors
+    /// Returns bootstrap, invalid identity or session-persistence failures.
+    pub fn bootstrap_with_session(
+        &self,
+        session_id: Option<&str>,
+    ) -> Result<Bootstrap, RegistrationError> {
+        self.authenticate()?;
+        if session_id.is_some_and(|id| {
+            id.trim().is_empty() || id.len() > 256 || id.chars().any(char::is_control)
+        }) {
+            return Err(RegistrationError::new(
+                "invalid-session-id",
+                "session ID must be nonblank, at most 256 bytes and contain no control characters",
+            ));
+        }
         self.acknowledge()?;
         self.start()?;
         let context = self.context()?;
         let behavior = self.behavior()?;
+        if let Some(session_id) = session_id {
+            self.authenticate()?;
+            self.application
+                .dispatch()?
+                .register_assignment_session(self.id, session_id)?;
+        }
         Ok(Bootstrap { context, behavior })
     }
 

@@ -1236,7 +1236,16 @@ pub struct AgentAssignmentInfo {
     pub acknowledged_at_millis: Option<u64>,
     pub dispatch_hold: Option<DispatchHold>,
     pub resources: Vec<AgentAssignmentResource>,
+    pub sessions: Vec<AssignmentSession>,
     pub unknown_resource_resolution: Option<UnknownResourceResolution>,
+}
+
+/// Provenance of successful bootstrap, not authority or evidence of liveness.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssignmentSession {
+    pub session_id: String,
+    pub first_bootstrap_at_millis: u64,
+    pub last_bootstrap_at_millis: u64,
 }
 
 /// Immutable operator assertion, not provider proof of process exit.
@@ -2105,6 +2114,17 @@ pub trait AgentDispatchRepository: RecordRepository + WorkspaceDispatchRepositor
         Err(RegistrationError::new(
             "assignment-context-unavailable",
             "context bootstrap persistence unavailable",
+        ))
+    }
+    /// Records a successful bootstrap observation on an open, started Assignment.
+    fn register_assignment_session(
+        &self,
+        _assignment_id: &str,
+        _session_id: &str,
+    ) -> Result<(), RegistrationError> {
+        Err(RegistrationError::new(
+            "assignment-session-unavailable",
+            "Assignment session persistence unavailable",
         ))
     }
     /// Returns whether trusted context was fetched after acknowledged start.

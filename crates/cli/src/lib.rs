@@ -314,9 +314,14 @@ pub async fn assignment_bootstrap() -> Result<forge_rpc::AssignmentBootstrapResp
     let client = client(&format!("{}/rpc", endpoint.trim_end_matches('/')))
         .map_err(|_| "invalid Assignment daemon URL")?;
     client
-        .bootstrap(forge_rpc::AssignmentCredentials {
+        .bootstrap(forge_rpc::AssignmentBootstrapRequest {
             assignment_id,
             secret,
+            session_id: match env::var("PI_SESSION_ID") {
+                Ok(id) => Some(id),
+                Err(env::VarError::NotPresent) => None,
+                Err(env::VarError::NotUnicode(_)) => return Err("invalid PI_SESSION_ID".into()),
+            },
         })
         .await
         .map_err(|_| "Assignment bootstrap failed or is uncertain; do not begin work".into())
@@ -707,6 +712,18 @@ pub fn render_agent_assignment_info(info: &forge_rpc::AgentAssignmentInfoRespons
             output,
             "\n  {} {} — created at {} — {}",
             resource.resource_kind, resource.resource_id, resource.created_at_millis, retirement
+        )
+        .unwrap();
+    }
+    output.push_str("\nSessions (successful bootstraps only; not authority or liveness evidence):");
+    if info.sessions.is_empty() {
+        output.push_str("\n  none recorded");
+    }
+    for session in &info.sessions {
+        write!(
+            output,
+            "\n  {} — first bootstrap at {} — last bootstrap at {}",
+            session.session_id, session.first_bootstrap_at_millis, session.last_bootstrap_at_millis
         )
         .unwrap();
     }

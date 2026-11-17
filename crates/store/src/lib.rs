@@ -18,6 +18,7 @@ use forge_app::{
 };
 use rusqlite::{Connection, ErrorCode, OptionalExtension, params};
 
+mod assignment_sessions;
 mod check_templates;
 mod checks;
 mod completion;
@@ -240,6 +241,9 @@ impl SqliteProjectRepository {
                 base_commit TEXT NOT NULL CHECK (length(trim(base_commit)) > 0)
             );",
             )
+            .map_err(storage_error)?;
+        connection
+            .execute_batch(include_str!("upgrade/assignment_sessions.sql"))
             .map_err(storage_error)?;
         completion::schema(connection)?;
         checks::schema(connection)?;
@@ -2625,6 +2629,7 @@ impl AgentDispatchRepository for SqliteProjectRepository {
                 authority: row.get(1)?, confirmation: row.get(2)?,
             }),
         ).optional().map_err(storage_error)?;
+        let sessions = assignment_sessions::load(&transaction, assignment_id)?;
         transaction.commit().map_err(storage_error)?;
         Ok(forge_app::AgentAssignmentInfo {
             assignment,
@@ -2633,6 +2638,7 @@ impl AgentDispatchRepository for SqliteProjectRepository {
             acknowledged_at_millis,
             dispatch_hold,
             resources,
+            sessions,
             unknown_resource_resolution,
         })
     }
@@ -3155,6 +3161,14 @@ impl AgentDispatchRepository for SqliteProjectRepository {
             )
             .map_err(storage_error)?;
         Ok(())
+    }
+
+    fn register_assignment_session(
+        &self,
+        assignment_id: &str,
+        session_id: &str,
+    ) -> Result<(), RegistrationError> {
+        self.persist_assignment_session(assignment_id, session_id)
     }
 
     fn assignment_context_read(&self, assignment_id: &str) -> Result<bool, RegistrationError> {
