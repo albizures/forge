@@ -185,6 +185,29 @@ fn canonical_existing_ancestor(path: &Path) -> Result<PathBuf, RegistrationError
 }
 
 impl Application {
+    /// Reads the effective policy for a qualified Project reference.
+    /// # Errors
+    /// Returns invalid reference, missing Project, or persistence failures.
+    pub fn base_branch_policy(
+        &self,
+        reference: &str,
+    ) -> Result<BaseBranchPolicy, RegistrationError> {
+        let reference = ProjectReference::parse(reference)?.qualified();
+        self.records.base_branch_policy(&reference)
+    }
+
+    /// Sets or resets the policy for a qualified Project reference.
+    /// # Errors
+    /// Returns invalid reference, missing Project, or persistence failures.
+    pub fn set_base_branch_policy(
+        &self,
+        reference: &str,
+        policy: Option<BaseBranchPolicy>,
+    ) -> Result<(), RegistrationError> {
+        let reference = ProjectReference::parse(reference)?.qualified();
+        self.records.set_base_branch_policy(&reference, policy)
+    }
+
     /// Routes registration by explicit selectors first, otherwise canonical cwd.
     /// # Errors
     /// Returns selector conflicts, missing Workspace, invalid roots or registration failures.

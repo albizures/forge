@@ -346,6 +346,24 @@ pub trait ProjectRepository: Send + Sync {
     ) -> Result<Project, RegistrationError> {
         self.project(&ProjectReference::new(workspace, slug)?.qualified())
     }
+    /// Reads the effective policy for an immutable Project reference.
+    fn base_branch_policy(&self, _reference: &str) -> Result<BaseBranchPolicy, RegistrationError> {
+        Err(RegistrationError::new(
+            "base-branch-policy-unavailable",
+            "Project Base Branch Policy storage is unavailable",
+        ))
+    }
+    /// Sets the policy, or removes its explicit configuration on reset.
+    fn set_base_branch_policy(
+        &self,
+        _reference: &str,
+        _policy: Option<BaseBranchPolicy>,
+    ) -> Result<(), RegistrationError> {
+        Err(RegistrationError::new(
+            "base-branch-policy-unavailable",
+            "Project Base Branch Policy storage is unavailable",
+        ))
+    }
     /// Stores `project`, or returns the matching existing Project idempotently.
     ///
     /// # Errors
