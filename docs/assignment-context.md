@@ -173,9 +173,13 @@ require an existing launch and delivery.
 
 ## Task stack reads and publication
 
-`forge assignment stack --json` reads only the bound Task's explicit stack,
-including its inherited destination, Base Branch, pinned Base Commit and verified
-publication. It does not configure membership or expand related-Record visibility.
+`forge assignment stack --json` reads only the bound Task's relationship-derived
+Stack, including its inherited destination, Base Branch, pinned Base Commit and
+verified publication or unchanged result. Resolving transitive repository lineage
+does not grant transitive Record access. It does not configure membership or expand
+related-Record visibility. Authenticated start rechecks required predecessor hosting
+evidence even when the Task is already In Progress; stale or deleted evidence does
+not fall back to the Project checkout.
 
 `forge assignment stack --url <actual-pr-url> --json` is restricted to the live,
 bootstrapped final Publication Check Assignment. Forge independently verifies the

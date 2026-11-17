@@ -1629,7 +1629,7 @@ async fn ready_records(args: ReadyRecordsArgs, workspace: Option<String>) -> i32
             } else {
                 for item in response.records {
                     println!(
-                        "{} {} ({}){}",
+                        "{} {} ({}){}{}",
                         item.record.record_type,
                         item.record.id,
                         item.record.status,
@@ -1637,6 +1637,11 @@ async fn ready_records(args: ReadyRecordsArgs, workspace: Option<String>) -> i32
                             String::new()
                         } else {
                             format!(" blocked by {:?}", item.blocked_by)
+                        },
+                        if item.execution_blockers.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" blocked: {}", item.execution_blockers.join("; "))
                         }
                     );
                 }

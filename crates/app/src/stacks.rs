@@ -404,6 +404,16 @@ impl Application {
         Ok(())
     }
 
+    /// Re-observe inherited hosting evidence at execution entry, without repinning inputs.
+    /// Root branch movement after preparation does not change a running Task's input.
+    pub(crate) fn verify_stack_execution(&self, record: u64) -> Result<(), RegistrationError> {
+        self.records.validate_task_execution_plan(record)?;
+        if let Some(stack) = self.task_stack(record)? {
+            self.verify_predecessor(&stack, &self.stack_root(record)?)?;
+        }
+        Ok(())
+    }
+
     /// Resolve once, then atomically pin against the still-current stack and prerequisites.
     /// # Errors
     /// Returns hosting, dependency, drift, scope or concurrent-configuration failures.
@@ -411,6 +421,7 @@ impl Application {
         let Some(stack) = self.task_stack(record)? else {
             return Ok(None);
         };
+        self.records.validate_task_execution_plan(record)?;
         let root = self.stack_root(record)?;
         self.verify_predecessor(&stack, &root)?;
         let commit = self

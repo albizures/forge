@@ -7,7 +7,7 @@ fn invalidated_predecessor_between_observation_and_pin_is_rejected_atomically() 
     let first = task(&store);
     let second = task(&store);
     store.configure_task_stack(first, &root()).unwrap();
-    store.configure_task_stack(second, &StackSource::Predecessor { record_id: first }).unwrap();
+    store.relate_records(second, first, RecordRelationshipKind::BuildsOn).unwrap();
     pin(&store, first, &"1".repeat(40));
     complete(&store, first, &"a".repeat(40));
     let expected = store.task_stack(second).unwrap().unwrap();
@@ -27,8 +27,8 @@ fn invalidated_ancestor_blocks_publication_and_final_outcome_in_writer_transacti
     let review = task(&store);
     let last = task(&store);
     store.configure_task_stack(first, &root()).unwrap();
-    store.configure_task_stack(review, &StackSource::Predecessor { record_id: first }).unwrap();
-    store.configure_task_stack(last, &StackSource::Predecessor { record_id: review }).unwrap();
+    store.relate_records(review, first, RecordRelationshipKind::BuildsOn).unwrap();
+    store.relate_records(last, review, RecordRelationshipKind::BuildsOn).unwrap();
     pin(&store, first, &"1".repeat(40));
     complete(&store, first, &"a".repeat(40));
     pin(&store, review, &"a".repeat(40));

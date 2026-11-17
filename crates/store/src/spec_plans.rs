@@ -57,6 +57,23 @@ pub(super) fn execution_plan(c: &Connection, task: u64) -> Result<(), Registrati
         // Legacy In Progress is not proof that its plan was validated at start.
         validate(c, spec)?;
     }
+    // Standalone chains have the same execution contract as Spec children.
+    // Planning may omit root configuration or compatible Checks; authorization may not.
+    let mut cursor = Some(task);
+    let mut visited = std::collections::HashSet::new();
+    while let Some(id) = cursor {
+        if !visited.insert(id) {
+            return Err(RegistrationError::new("stack-blocked", "Stack cycle"));
+        }
+        let Some(stack) = stacks::load(c, id)? else {
+            break;
+        };
+        stacks::compatible(c, id)?;
+        if id != task && load_record(c, id)?.status == RecordStatus::Done {
+            stack.verified_commit(&super::outcomes::state(c, id)?)?;
+        }
+        cursor = stack.predecessor;
+    }
     Ok(())
 }
 

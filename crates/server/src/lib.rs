@@ -1504,6 +1504,7 @@ impl RecordApiServer for Daemon {
                     .map(|item| forge_rpc::ReadyRecordResponse {
                         record: item.record.into(),
                         blocked_by: item.blocked_by,
+                        execution_blockers: item.execution_blockers,
                     })
                     .collect(),
             })
