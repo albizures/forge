@@ -44,7 +44,7 @@ fn legacy_completed_and_prepared_chain_round_trips_without_inventing_evidence() 
     for (id, predecessor) in [(review, first), (successor, review)] {
         c.execute("UPDATE task_stacks SET predecessor=?2, source_json=?3 WHERE record_id=?1", params![id.cast_signed(), predecessor.cast_signed(), serde_json::to_string(&StackSource::Predecessor { record_id: predecessor }).unwrap()]).unwrap();
     }
-    c.execute_batch("DROP TABLE assignment_sessions; DROP TABLE builds_on_dependencies; PRAGMA user_version=11;").unwrap();
+    c.execute_batch("DROP TABLE check_continuations; DROP TABLE assignment_sessions; DROP TABLE builds_on_dependencies; PRAGMA user_version=11;").unwrap();
     drop(c);
     let bytes = fs::read(&source).unwrap();
     assert!(SqliteProjectRepository::open(&source).is_err());

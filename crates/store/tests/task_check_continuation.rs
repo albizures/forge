@@ -18,6 +18,15 @@ use std::sync::{
 #[path = "support/task_attempt_adapters.rs"]
 mod adapters;
 use adapters::Provider;
+#[path = "support/implementation_continuations.rs"]
+mod implementation_continuations;
+
+#[test]
+fn deliberate_continuations_are_bounded_and_atomic() {
+    run_case("continuation-total");
+    run_case("continuation-unchanged");
+    run_case("continuation-sequence");
+}
 
 struct Head(Arc<Mutex<String>>);
 impl RepositoryInspector for Head {
@@ -67,6 +76,11 @@ impl ManagedWorktreeAdapter for Checkout {
     ) -> Result<(), RegistrationError> {
         unreachable!()
     }
+}
+
+#[test]
+fn review_cannot_submit_implementation_continuation() {
+    run_case("review-continuation-denied");
 }
 
 #[test]
@@ -996,6 +1010,24 @@ fn run_case(case: &str) {
         )
         .with_workspace_repository(Box::new(SqliteProjectRepository::open(&path).unwrap()))
     };
+    if case.starts_with("continuation-") {
+        implementation_continuations::run(
+            &implementation_continuations::Fixture {
+                store: &store,
+                path: &path,
+                root: &root,
+                application: &application,
+                task: task.id,
+                head: &head,
+                dirty: &dirty,
+                unavailable: &unavailable,
+                launches: &launches,
+            },
+            case,
+        );
+        std::fs::remove_dir_all(root).unwrap();
+        return;
+    }
     if case == "normal-preparation" {
         let app = application();
         // A failed preflight must not allocate a checkout or an Assignment.
@@ -1450,6 +1482,25 @@ fn run_case(case: &str) {
             findings: vec![],
             verifications: vec![],
         };
+        if index > 0 && case == "review-continuation-denied" {
+            let mut denied = input.clone();
+            denied.verdict = Verdict::Fail;
+            denied.disposition =
+                OutcomeDisposition::Continuation(forge_app::outcomes::ContinuationHandoff {
+                    stopping_reason: "Context exhausted".into(),
+                    completed_work: "Reviewed".into(),
+                    verification: "Partial review; remaining gates unrun".into(),
+                    remaining_work: "Finish review".into(),
+                });
+            let before = app.record_work_state(task.id).unwrap();
+            let before_checks = app.list_record_checks(task.id).unwrap();
+            assert_eq!(
+                session.submit_outcome(&denied).unwrap_err().code,
+                "invalid-continuation"
+            );
+            assert_eq!(application().record_work_state(task.id).unwrap(), before);
+            assert_eq!(app.list_record_checks(task.id).unwrap(), before_checks);
+        }
         if index == 0 && case == "residual" {
             input.findings.push(forge_app::outcomes::OutcomeFinding {
                 severity: forge_app::findings::Severity::Major,

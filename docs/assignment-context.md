@@ -66,6 +66,9 @@ Context separates:
   identity. Task `bound.checkAttempt` binds the immutable attempt/Check identity,
   starting freshness generation, input evidence and Task body; the Assignment
   revision is that Check's pin, never a live Workspace Task selection.
+  `checkAttempt.continuation` is null or the latest accepted Implementation handoff
+  captured at attempt creation: accepted attempt id, checkpoint evidence and the
+  stopping reason, completed work, actual verification/unrun gates and remaining work.
   These are persisted configuration/ownership facts, **not runtime
   attestation**. The execution directory is retained once available by dispatch
   context construction (or the first authenticated context read for an older
@@ -186,9 +189,15 @@ Use the actual `bound.checkAttempt` id/generation/input and the clean authorized
 output evidence. An `interrupted` outcome must instead repeat its bound input
 evidence. Changed evidence is rejected with `interrupted-evidence-changed`, without
 acceptance or retry-budget effects; Forge preserves the checkout. Deliberate
-checkpoint handoffs require explicit Continuation support, while genuinely
-interrupted retained work requires operator recovery. Neither new operation is
-available in this revision. Preserve the work and ask the operator; do not reset,
+checkpoint handoffs use the explicit `disposition: {"continuation": {...}}`
+Implementation outcome, with `verdict: "fail"`, all four required handoff strings
+and no Finding effects. Acceptance passes no Check and requires a clean independently
+observed full checkpoint commit. Same-Check replacement remains gated by confirmed
+retirement and resources, capacity, dependencies, provider readiness and holds.
+Budgets stop after 20 total or two consecutive unchanged-evidence Continuations;
+the limit-reaching checkpoint is retained. Genuinely interrupted retained work
+requires operator recovery; the new recovery operation is not available in this
+revision. Preserve the work and ask the operator; do not reset,
 discard changes, or report completion merely to hand off work. Exact replay of
 already accepted historical outcomes remains supported and confers no new authority.
 See [outcome shape and handback rules](dispatch.md#check-attempts-and-controlled-acceptance).

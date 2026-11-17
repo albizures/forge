@@ -26,6 +26,7 @@ pub(super) fn state(
     }).optional().map_err(storage_error)?.map(|(cycles, baseline, verified, stop)| -> Result<TaskProgress, RegistrationError> {
         Ok(TaskProgress { remediation_cycles: cycles, baseline: baseline.map(|s| serde_json::from_str(&s)).transpose().map_err(|e| RegistrationError::new("storage", e.to_string()))?, verified_resolutions: verified, stop_reason: stop, ..TaskProgress::default() })
     }).transpose()?.unwrap_or_default();
+    state.continuations = super::continuations::state(c, record)?;
     state.interrupted_checks = c.prepare("SELECT r.check_id, r.interruptions FROM task_retry_counts r JOIN record_checks c ON c.id = r.check_id WHERE c.record_id = ?1 ORDER BY c.position").map_err(storage_error)?.query_map([record.cast_signed()], |r| Ok(CheckRetries { check_id: r.get::<_, i64>(0)?.cast_unsigned(), interruptions: r.get(1)? })).map_err(storage_error)?.collect::<Result<_, _>>().map_err(storage_error)?;
     state.resets = c.prepare("SELECT actor, message, created_at_millis FROM task_progress_resets WHERE record_id = ?1 ORDER BY id DESC LIMIT 20").map_err(storage_error)?.query_map([record.cast_signed()], |r| Ok(ProgressReset { actor: r.get(0)?, message: r.get(1)?, created_at_millis: r.get::<_, i64>(2)?.cast_unsigned() })).map_err(storage_error)?.collect::<Result<_, _>>().map_err(storage_error)?;
     Ok(state)
@@ -53,7 +54,7 @@ pub(super) fn resume(c: &Connection, record: u64) -> Result<(), RegistrationErro
         [record.cast_signed()],
     )
     .map_err(storage_error)?;
-    Ok(())
+    super::continuations::retain_hold(c, record)
 }
 
 pub(super) fn retain_hold(c: &Connection, record: u64) -> Result<(), RegistrationError> {
@@ -75,7 +76,7 @@ pub(super) fn retain_hold(c: &Connection, record: u64) -> Result<(), Registratio
             "Interrupted Check exhausted two automatic retries; investigate and explicitly resume to reset interrupted retries after safe retirement/resource reconciliation. Remediation reset does not reset interrupted retries.",
         )?;
     }
-    Ok(())
+    super::continuations::retain_hold(c, record)
 }
 
 pub(super) fn interrupted(

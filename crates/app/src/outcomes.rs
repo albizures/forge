@@ -52,6 +52,9 @@ pub struct Attempt {
     pub actor: String,
     /// Task input text at the start of this immutable attempt.
     pub body: String,
+    /// Most recent accepted handoff for this Check, captured when the attempt starts.
+    #[serde(default)]
+    pub continuation: Option<ContinuationCheckpoint>,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -71,6 +74,31 @@ pub struct OutcomeInput {
     pub verifications: Vec<FindingVerification>,
 }
 impl OutcomeInput {
+    /// Validate deliberate handoff authority and content without observing external state.
+    /// # Errors
+    /// Rejects Manual/review handoffs, substantive effects and incomplete content.
+    pub fn validate_continuation(
+        &self,
+        implementation: bool,
+        authenticated: bool,
+    ) -> Result<(), RegistrationError> {
+        if let OutcomeDisposition::Continuation(handoff) = &self.disposition {
+            handoff.validate()?;
+            if !authenticated
+                || !implementation
+                || self.verdict != Verdict::Fail
+                || !self.findings.is_empty()
+                || !self.verifications.is_empty()
+            {
+                return Err(RegistrationError::new(
+                    "invalid-continuation",
+                    "Continuation is only for the authenticated Task Implementation agent, with Fail and no Finding or verification effects",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Interruption cannot adopt a new checkpoint; accepted historical replay is exempt.
     /// # Errors
     /// Rejects changed interruption evidence without authorizing recovery or handoff.
@@ -81,14 +109,14 @@ impl OutcomeInput {
         if self.disposition == OutcomeDisposition::Interrupted && &self.evidence != bound {
             return Err(RegistrationError::new(
                 "interrupted-evidence-changed",
-                "Interrupted outcomes must repeat their bound input evidence. Deliberate checkpoint handoffs require explicit Continuation support; genuinely interrupted retained work requires operator recovery. Neither new operation is available in this revision. Preserve the checkout and ask the operator; do not reset, discard changes, or report completion merely to hand off work.",
+                "Interrupted outcomes must repeat their bound input evidence. Deliberate checkpoint handoffs require explicit Continuation support; genuinely interrupted retained work requires operator recovery. Use the explicit continuation disposition for a deliberate clean Implementation checkpoint; interrupted-work recovery is not available in this revision. Preserve the checkout and ask the operator; do not reset, discard changes, or report completion merely to hand off work.",
             ));
         }
         Ok(())
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum OutcomeDisposition {
     #[default]
@@ -97,7 +125,66 @@ pub enum OutcomeDisposition {
     Interrupted,
     /// No substantive verdict; stop for an explicit operator decision.
     HumanInput,
+    /// Explicit unfinished Implementation checkpoint, never a substantive verdict.
+    Continuation(ContinuationHandoff),
 }
+
+pub const CONTINUATION_LIMIT: u32 = 20;
+pub const UNCHANGED_CONTINUATION_LIMIT: u32 = 2;
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContinuationHandoff {
+    pub stopping_reason: String,
+    pub completed_work: String,
+    /// Actual results, explicitly including gates not run and why.
+    pub verification: String,
+    pub remaining_work: String,
+}
+impl ContinuationHandoff {
+    /// # Errors
+    /// Rejects empty handoff sections; prose is not evaluated as semantic progress.
+    pub fn validate(&self) -> Result<(), RegistrationError> {
+        if [
+            &self.stopping_reason,
+            &self.completed_work,
+            &self.verification,
+            &self.remaining_work,
+        ]
+        .iter()
+        .any(|s| s.trim().is_empty())
+        {
+            return Err(RegistrationError::new(
+                "invalid-continuation",
+                "Continuation requires a concrete stopping reason, completed work, actual verification including unrun gates, and remaining work",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ContinuationCheckpoint {
+    pub attempt_id: String,
+    pub evidence: Evidence,
+    pub handoff: ContinuationHandoff,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CheckContinuations {
+    pub check_id: u64,
+    pub total: u32,
+    pub consecutive_unchanged: u32,
+    pub checkpoint: ContinuationCheckpoint,
+}
+impl CheckContinuations {
+    #[must_use]
+    pub fn exhausted(&self) -> bool {
+        self.total >= CONTINUATION_LIMIT
+            || self.consecutive_unchanged >= UNCHANGED_CONTINUATION_LIMIT
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct OutcomeFinding {
@@ -132,6 +219,8 @@ pub struct WorkState {
 }
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TaskProgress {
+    #[serde(default)]
+    pub continuations: Vec<CheckContinuations>,
     pub remediation_cycles: u32,
     pub baseline: Option<Evidence>,
     pub verified_resolutions: u64,

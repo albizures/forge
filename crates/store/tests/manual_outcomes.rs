@@ -87,6 +87,33 @@ fn evidence(value: char) -> Evidence {
 }
 
 #[test]
+fn manual_continuation_cannot_adopt_checkpoint_or_spend_budget() {
+    let db = Database::new();
+    let (task, mut input) = db.attempt();
+    input.verdict = Verdict::Fail;
+    input.disposition = forge_app::outcomes::OutcomeDisposition::Continuation(
+        forge_app::outcomes::ContinuationHandoff {
+            stopping_reason: "Execution constraint".into(),
+            completed_work: "Partial report".into(),
+            verification: "Read report; full verification unrun".into(),
+            remaining_work: "Finish report".into(),
+        },
+    );
+    let store = db.open();
+    let before = store.record_work_state(task).unwrap();
+    assert_eq!(
+        store.submit_record_outcome(task, &input).unwrap_err().code,
+        "invalid-continuation"
+    );
+    assert_eq!(db.open().record_work_state(task).unwrap(), before);
+    assert!(
+        store.list_record_checks(task).unwrap()[0]
+            .latest_assessment
+            .is_none()
+    );
+}
+
+#[test]
 fn changed_interruption_is_atomic_and_unchanged_interruption_replays() {
     use forge_app::outcomes::OutcomeDisposition;
     let db = Database::new();

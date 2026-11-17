@@ -8,7 +8,8 @@ use rusqlite::Connection;
 // Revision 13 requires explicit canonical prerequisite intent after validated
 // conversion; identical table definitions do not imply semantic compatibility.
 // Revision 14 retains Assignment session bootstrap provenance.
-const SCHEMA_REVISION: i64 = 14;
+// Revision 15 adds explicit Check-scoped continuation checkpoints and budgets.
+const SCHEMA_REVISION: i64 = 15;
 const APPLICATION_ID: i64 = 0x464f_5247; // FORG
 
 pub(super) fn validate(connection: &Connection) -> Result<(), RegistrationError> {

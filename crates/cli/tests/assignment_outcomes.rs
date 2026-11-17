@@ -11,6 +11,11 @@ async fn changed_interruption_cli_reports_safe_choices_without_success_json() {
     check_outcome_rejection("interrupted-evidence-changed").await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn continuation_cli_forwards_explicit_handoff_and_redacts_rejection() {
+    check_outcome_rejection("invalid-continuation").await;
+}
+
 async fn check_outcome_rejection(category: &'static str) {
     let router = Router::new().route(
         "/rpc",
@@ -21,6 +26,13 @@ async fn check_outcome_rejection(category: &'static str) {
             assert_eq!(p["secret"], "sentinel-secret");
             assert_eq!(p["outcome"]["attempt_id"], "bound-assignment");
             assert_eq!(p["outcome"]["generation"], 7);
+            if category == "invalid-continuation" {
+                assert_eq!(
+                    p["outcome"]["disposition"]["continuation"]["remaining_work"],
+                    "Finish"
+                );
+                assert_eq!(p["outcome"]["verdict"], "fail");
+            }
             assert!(p.get("record").is_none());
             Json(serde_json::json!({"jsonrpc":"2.0", "id":r["id"], "error":{
             "code":-32001, "message":"sentinel-secret must not leak", "data":category}}))
@@ -48,6 +60,22 @@ async fn check_outcome_rejection(category: &'static str) {
         .to_string(),
     )
     .unwrap();
+    if category == "invalid-continuation" {
+        std::fs::write(
+            &file,
+            serde_json::json!({
+                "attempt_id":"bound-assignment", "generation":7,
+                "evidence":{"kind":"repository", "repository":"/repo", "commit":"a".repeat(40)},
+                "verdict":"fail", "actor":"", "message":"Checkpoint",
+                "disposition":{"continuation":{
+                    "stopping_reason":"Execution constraint", "completed_work":"Checkpoint",
+                    "verification":"Focused tests pass; full gates unrun", "remaining_work":"Finish"
+                }}
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
     let run = || {
         Command::new(env!("CARGO_BIN_EXE_forge"))
             .args(["assignment", "outcome", "--file"])
@@ -70,7 +98,7 @@ async fn check_outcome_rejection(category: &'static str) {
             "Continuation",
             "operator recovery",
             "Preserve the checkout",
-            "Neither new operation is available",
+            "interrupted-work recovery is not available",
         ] {
             assert!(stderr.contains(guidance), "{stderr}");
         }

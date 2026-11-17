@@ -9,7 +9,7 @@ by migrations—not just the initial `CREATE TABLE` statements.
 - [`src/lib.rs`](src/lib.rs): `SqliteProjectRepository::from_connection`,
   `migrate_*` functions, profile seeds, and repository operations.
 - [`src/workspaces.rs`](src/workspaces.rs): Workspace ownership and Project identity.
-- [`src/upgrade.rs`](src/upgrade.rs): explicit offline schema 7 → 8 → 9 → 10 → 11 → 12 → 13 conversion,
+- [`src/upgrade.rs`](src/upgrade.rs): explicit offline schema 7 → 8 → 9 → 10 → 11 → 12 → 13 → 14 → 15 conversion,
   frozen contract validation, consistent snapshots, and preservation inventories.
   See [Revision State upgrades](../../docs/state-upgrades.md) for orchestration.
 - [`src/record_workspaces.rs`](src/record_workspaces.rs): Record ownership,
@@ -45,8 +45,36 @@ is documented separately in [Records](../../docs/records.md),
   Most references do **not** cascade.
 - Ordinary repository opening accepts only the current marked schema revision.
   Triggers and repository validation also enforce invariants. Explicit managed
-  copy-and-upgrade targets revision 14 from revisions 7 through 14; unsupported
+  copy-and-upgrade targets revision 15 from revisions 7 through 15; unsupported
   stores are rejected without automatic conversion or reset.
+
+## Implementation Continuations (revision 15)
+
+`check_continuations` stores one row per stable Check: `check_id` is its primary
+key and FK to `record_checks`; `total` is constrained to 1–20;
+`consecutive_unchanged` to 0–2; `checkpoint_json` contains accepted attempt id,
+Repository evidence and full structured handoff. Acceptance updates these fields,
+`record_work.input_json` (clearing output), closed attempt request/result and any
+limit-triggered Dispatch Hold in one immediate transaction. No Assessment is added,
+no Finding cleared, and immutable Stack Base Commit is untouched. Historical
+checkpoint requests/results remain in `record_attempts`; the counter row retains
+the latest checkpoint. Each successor's immutable `attempt_json` captures its
+handoff context. New serialized fields have absent-field defaults for decoding
+historical results, not fabricated historical handoffs.
+
+Claim, evidence reconciliation and completion recreate exhausted continuation holds;
+ordinary resume retains/reinstates them. Remediation resets, invalidation and body
+edits never change continuation counters. Existing safety hold reasons win through
+`INSERT OR IGNORE`. Exact replay returns the original accepted result before live
+freshness checks and never spends the budget again.
+
+Revision 15 is a breaking storage expansion: old writers cannot enforce the new
+checkpoint and budget semantics. Ordinary opening rejects revision 14 and earlier
+before initialization writes. Explicit offline staging upgrade adds an **empty**
+table and preserves every pre-existing typed value and historical JSON byte-for-byte.
+It does not infer Continuations from prior failures/interruptions or reset existing
+budgets. Same-schema transfer retains continuation counters, handoffs and replay.
+No live conversion is performed by application opening.
 
 ## Assignment session provenance (revision 14)
 

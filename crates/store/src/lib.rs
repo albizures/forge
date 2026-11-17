@@ -22,6 +22,7 @@ mod assignment_sessions;
 mod check_templates;
 mod checks;
 mod completion;
+mod continuations;
 mod execution_modes;
 mod findings;
 mod ordering_dependencies;
@@ -249,6 +250,9 @@ impl SqliteProjectRepository {
         checks::schema(connection)?;
         outcomes::schema(connection)?;
         task_progress::schema(connection)?;
+        connection
+            .execute_batch(include_str!("upgrade/continuations.sql"))
+            .map_err(storage_error)?;
         findings::schema(connection)?;
         check_templates::schema(connection)?;
         migrate_record_status_schema(connection)?;

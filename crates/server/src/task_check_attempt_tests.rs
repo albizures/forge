@@ -1,16 +1,23 @@
 #[tokio::test]
 async fn check_bound_rpc_context_outcome_and_normal_dispatch_share_same_owner() {
-    check_bound_outcome_inspection(false).await;
+    check_bound_outcome_inspection(0).await;
 }
 
 #[tokio::test]
 async fn task_inspection_after_accepted_human_input_and_clean_retirement() {
-    check_bound_outcome_inspection(true).await;
+    check_bound_outcome_inspection(1).await;
+}
+
+#[tokio::test]
+async fn implementation_continuation_rpc_retains_clean_checkpoint_and_handoff() {
+    check_bound_outcome_inspection(2).await;
 }
 
 #[allow(clippy::too_many_lines)]
-async fn check_bound_outcome_inspection(human_input: bool) {
+async fn check_bound_outcome_inspection(kind: u8) {
     use forge_app::{ManagedWorktreeRepository, WorkspaceDispatchRepository, WorkspaceRepository};
+    let human_input = kind == 1;
+    let continuation = kind == 2;
     let (fixture, _, _) = assignment_test_daemon_scoped(true);
     let store = SqliteProjectRepository::open(&fixture.database_path).unwrap();
     for assignment in ["owner-assignment", "target-assignment"] {
@@ -228,7 +235,7 @@ async fn check_bound_outcome_inspection(human_input: bool) {
         let message = rejected["error"]["message"].as_str().unwrap();
         assert!(message.contains("Continuation"), "{message}");
         assert!(message.contains("operator recovery"), "{message}");
-        assert!(message.contains("Neither new operation is available"), "{message}");
+        assert!(message.contains("interrupted-work recovery is not available"), "{message}");
         assert_eq!(store.record_work_state(task.id).unwrap(), before_work);
         assert_eq!(store.list_record_checks(task.id).unwrap(), before_checks);
         assert_eq!(store.agent_assignment_info("bound-check").unwrap(), before_owner);
@@ -245,13 +252,49 @@ async fn check_bound_outcome_inspection(human_input: bool) {
     // Fixture-only restoration, not a product repair path.
     std::fs::write(checkout.path.join("deliverable.txt"), "Implemented\n").unwrap();
     std::fs::remove_file(checkout.path.join("untracked.txt")).unwrap();
+    if continuation {
+        request["outcome"]["verdict"] = "fail".into();
+        request["outcome"]["disposition"] = serde_json::json!({"continuation": {
+            "stopping_reason": "Context budget nearly exhausted",
+            "completed_work": "Implemented checkpoint",
+            "verification": "Focused tests passed; full gates unrun due to constraint",
+            "remaining_work": "Finish and run full gates"
+        }});
+        for (field, value) in [("secret", "wrong"), ("attempt_id", "owner-assignment")] {
+            let mut denied = request.clone();
+            if field == "secret" { denied[field] = value.into(); } else { denied["outcome"][field] = value.into(); }
+            assert!(assignment_rpc(daemon.clone(), "assignment.outcomeSubmit", denied).await.get("error").is_some());
+            assert_eq!(store.record_work_state(task.id).unwrap(), before_work);
+        }
+        for field in ["stopping_reason", "completed_work", "verification", "remaining_work"] {
+            let mut missing = request.clone();
+            missing["outcome"]["disposition"]["continuation"].as_object_mut().unwrap().remove(field);
+            assert!(assignment_rpc(daemon.clone(), "assignment.outcomeSubmit", missing).await.get("error").is_some());
+            assert_eq!(store.record_work_state(task.id).unwrap(), before_work);
+        }
+        std::fs::write(checkout.path.join("untracked.txt"), "Retain dirty work").unwrap();
+        let rejected = assignment_rpc(daemon.clone(), "assignment.outcomeSubmit", request.clone()).await;
+        assert_eq!(rejected["error"]["data"], "invalid-continuation", "{rejected}");
+        assert_eq!(store.record_work_state(task.id).unwrap(), before_work);
+        assert!(store.dispatch_hold(task.id).unwrap().is_none());
+        std::fs::remove_file(checkout.path.join("untracked.txt")).unwrap();
+    }
     let accepted =
         assignment_rpc(daemon.clone(), "assignment.outcomeSubmit", request.clone()).await;
     assert_eq!(
         accepted["result"]["attempt"]["actor"], "bound-check",
         "{accepted}"
     );
-    if human_input {
+    if continuation {
+        assert!(accepted["result"]["check"]["latest_assessment"].is_null(), "{accepted}");
+        let work = store.record_work_state(task.id).unwrap();
+        assert_eq!(work.input, Some(serde_json::from_value(request["outcome"]["evidence"].clone()).unwrap()));
+        assert!(work.output.is_none());
+        assert_eq!(work.progress.continuations[0].total, 1);
+        assert_eq!(work.progress.continuations[0].consecutive_unchanged, 0);
+        assert_eq!(work.progress.continuations[0].checkpoint.handoff.remaining_work, "Finish and run full gates");
+        assert_eq!(store.worktree_claim(task.id).unwrap(), before_claim);
+    } else if human_input {
         assert!(accepted["result"]["check"]["latest_assessment"].is_null());
         // Persist the clean retirement facts; no external provider is needed by inspection.
         for resource in store.list_agent_assignment_resources("bound-check").unwrap() {

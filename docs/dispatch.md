@@ -55,13 +55,13 @@ Check-bound Assignment history; lifecycle status or missing ownership alone is
 not sufficient. Normal `dispatcher dispatch <task-id>` uses the same guarded
 Check execution path, preparing a Managed Worktree first if needed for an eligible
 Open Task. Automatic scheduling starts eligible Open Tasks; after a current
-passing outcome or substantive review handback, daemon reconciliation retires the
+passing outcome, deliberate Implementation Continuation, or substantive review handback, daemon reconciliation retires the
 old agent, reconciles its retained resources, then launches the next required
 Check with its pinned profile. The explicit command does not create a worktree or
 complete the Task; daemon reconciliation can complete enrolled work only through
 the separate final gate below.
 Repeating dispatch or acceptance returns the existing Assignment without relaunching it while
-no passing outcome or freshness invalidation is available; both use the same
+no accepted outcome or freshness invalidation is available; both use the same
 retirement gate.
 
 Forge selects the first Check without a current pass and atomically reserves its
@@ -107,6 +107,69 @@ Description edits also advance freshness, even at the same commit; replacement
 returns to Implementation only after old ownership/resources are safely retired.
 Historical Assessments and Findings remain, but invalidated passes never revive.
 A false output commit claim is rejected without publishing an Assessment.
+
+### Deliberate Implementation Continuations
+
+Only the authenticated Task Implementation agent may deliberately hand off unfinished
+work. Keep implementing and testing until complete or a concrete execution constraint;
+inspection, a small commit, or complexity alone is not a stopping reason. Use the
+same outcome command and identity/evidence fields, with `verdict: "fail"` (a wire
+sentinel, **not** a failed Assessment) and this explicit disposition:
+
+```json
+{
+  "continuation": {
+    "stopping_reason": "Context budget nearly exhausted after implementation and focused tests",
+    "completed_work": "Implemented the checkpoint; list concrete deliverables here",
+    "verification": "Focused tests passed; full workspace gates unrun due to the constraint",
+    "remaining_work": "Finish boundary tests and run the full required gates"
+  }
+}
+```
+
+The object above is the value of `disposition`, not the whole outcome. All four
+handoff strings are required and nonblank; report actual results and explicitly
+identify unrun gates. Findings and Finding verifications must be empty. Manual,
+review and Publication attempts cannot use this disposition. Forge validates shape
+and authority, not whether a prose constraint or changed commit represents meaningful
+progress. Dirty, mismatched, stale or foreign checkpoints reject without partial
+adoption, counter increments or new drift holds.
+
+Forge independently observes a clean active bound Managed Worktree and its full
+commit. Acceptance atomically closes the attempt, records the handoff/checkpoint
+and counters, and replaces Implementation input with that checkpoint. It creates
+no Assessment, passes no Check, leaves the Task In Progress, and preserves Findings,
+history and immutable Stack Base Commit. The same Check is selected after safe
+retirement/resource reconciliation and all ordinary dispatch gates. Its next
+`bound.checkAttempt.continuation` contains the accepted attempt id, evidence and
+full handoff; this context is captured with the successor attempt. It is not a
+review or certification of partial work.
+
+Each stable Check allows **20 accepted Continuations total** or **two consecutive
+unchanged-evidence Continuations**, whichever comes first. Evidence is compared
+with that attempt's input. Changed evidence resets only the consecutive-unchanged
+count; it does not certify semantic progress. The checkpoint reaching either limit
+is accepted and retained with a durable Dispatch Hold. Existing safety diagnostics
+are not overwritten. Counters survive restart, invalidation, body edits, retries,
+remediation reset and ordinary resume. Resume cannot bypass exhausted allowance;
+there is no continuation-budget reset operation in this slice. Operator inspection
+via `forge record check work <task> --json` exposes `progress.continuations` (Check id, total,
+consecutive unchanged count, latest checkpoint and handoff). T03 supplies dedicated
+reset and human inspection operations.
+
+Exact replay, including after closure/restart, returns the original accepted result
+and spends budget once; conflicting retries reject. Cleanup uncertainty retains
+capacity and never authorizes another agent. Continuation has accounting separate
+from substantive failure/remediation and actual interruption retries.
+
+Wire compatibility: existing unit-string dispositions and omitted disposition
+(`complete`) are unchanged. The externally tagged `{"continuation": {...}}` variant
+requires a supporting server/client; older peers may reject it. Attempt context
+adds default-null `continuation`, and progress adds default-empty `continuations`.
+Strict older response decoders may reject the added fields; upgrade CLI and server
+together. Storage revision **15** requires explicit isolated upgrade; ordinary opening never
+converts old state or invents historical Continuations. Accepted historical JSON
+is preserved, with absent added fields decoded as empty/null.
 
 A failed substantive review submits `"disposition": "handback"` with its Findings.
 Acceptance atomically records the failure and Findings, invalidates Implementation
@@ -199,9 +262,10 @@ New `interrupted` submissions must repeat the attempt's bound input evidence.
 Changed evidence is rejected as `interrupted-evidence-changed` before acceptance,
 interruption counters, Assessments, Findings, or work-input/hold changes. The
 checkout (including committed, tracked and untracked work) is preserved. Deliberate
-checkpoint handoffs require explicit Continuation support; genuinely interrupted
-retained work requires operator recovery. Neither new operation is available in
-this revision: preserve the checkout and ask the operator, rather than resetting,
+checkpoint handoffs use the explicit Implementation Continuation disposition above;
+genuinely interrupted retained work requires operator recovery. The new interrupted-work
+recovery operation is not available in this revision: preserve the checkout and
+ask the operator, rather than resetting,
 discarding changes, or reporting completion merely to hand off work. This does not
 change substantive failed Implementation or `human-input` semantics.
 
@@ -210,8 +274,8 @@ interruption, still returns the original durable result after authorization;
 conflicting retries remain rejected. No historical outcome is rewritten. This is
 an intentional tightening of new-submission validation, with an additive structured
 RPC error category (`error.data`) and redacted CLI guidance on stderr (no successful
-JSON on rejection). Request/result shapes and storage schema are unchanged; no
-state upgrade or historical backfill is required.
+JSON on rejection). Historical outcomes are not converted into Continuations;
+the new explicit disposition and schema-15 upgrade are described above.
 
 Inspect counters, the pending baseline, verified-resolution count, stop reason and
 latest 20 recorded resets using `forge record check work <task> --json` (the

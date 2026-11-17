@@ -285,6 +285,7 @@ impl SqliteProjectRepository {
             evidence: input.evidence.clone(),
             actor: input.actor.clone(),
             body: task.body,
+            continuation: None,
         };
         let existing: Option<String> = tx
             .query_row(
@@ -453,6 +454,23 @@ impl SqliteProjectRepository {
         }
         // Authorize and replay first, then reject before even drift/hold effects.
         input.validate_interruption_evidence(&attempt.evidence)?;
+        input.validate_continuation(check.position == 0, assignment.is_some())?;
+        if matches!(&input.disposition, OutcomeDisposition::Continuation(_)) {
+            let owned: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM worktree_claims w JOIN assignment_execution_bindings b ON b.directory = w.path WHERE w.record_id = ?1 AND w.state = 'active' AND b.assignment_id = ?2)", params![record.cast_signed(), assignment], |r| r.get(0)).map_err(storage_error)?;
+            if !owned {
+                return Err(error(
+                    "invalid-continuation",
+                    "Continuation requires the active bound Managed Worktree",
+                ));
+            }
+            // Unlike drift reconciliation, rejected checkpoints have no partial effects.
+            if !observed.is_some_and(|o| o.as_ref().is_ok_and(|e| e == &input.evidence)) {
+                return Err(error(
+                    "invalid-continuation",
+                    "Continuation must identify the independently observed clean Managed Worktree commit",
+                ));
+            }
+        }
         if assignment.is_some() {
             let observed = observed.ok_or_else(|| {
                 error("evidence-required", "trusted worktree observation required")
@@ -500,6 +518,20 @@ impl SqliteProjectRepository {
                 "invalid-outcome",
                 "a failed review must explicitly hand back or report interruption",
             ));
+        }
+        if let OutcomeDisposition::Continuation(handoff) = &input.disposition {
+            super::continuations::accept(&tx, &attempt, &input.evidence, handoff)?;
+            let result = AcceptedOutcome {
+                attempt,
+                evidence: input.evidence.clone(),
+                check,
+                findings: vec![],
+                work: state(&tx, record)?,
+                blocking_findings: super::findings::blockers(&tx, record)?,
+            };
+            tx.execute("UPDATE record_attempts SET closed = 1, outcome_json = ?2, result_json = ?3 WHERE id = ?1", params![input.attempt_id, serde_json::to_string(input).map_err(json_error)?, serde_json::to_string(&result).map_err(json_error)?]).map_err(storage_error)?;
+            tx.commit().map_err(storage_error)?;
+            return Ok(result);
         }
         if matches!(
             input.disposition,

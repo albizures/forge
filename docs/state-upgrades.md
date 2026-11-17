@@ -5,7 +5,12 @@ another. It preserves the source database and upgrades a consistent copy. Ordina
 repository opening still rejects incompatible schemas before initialization writes;
 it never migrates, resets, or rewrites an older store's marker.
 
-Supported transfers target schema **13** from schemas **7** through **13**.
+Supported transfers target schema **15** from schemas **7** through **15**.
+The 13 → 14 step adds empty Assignment session provenance; 14 → 15 adds empty
+Check-scoped continuation accounting/checkpoints. Neither step invents historical
+events or rewrites accepted outcomes. Existing continuation budgets/context and
+replay data are retained exactly during same-schema transfer. All steps require
+explicit isolated staging conversion, never an ordinary-open upgrade.
 The 7 → 8 step adds an empty `task_stacks` table; the 8 → 9 step adds an empty
 `ordering_only_dependencies` table; the 9 → 10 step adds an empty
 `task_unchanged_results` table; the 10 → 11 step adds an empty
