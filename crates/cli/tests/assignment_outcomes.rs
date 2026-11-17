@@ -3,9 +3,18 @@ use std::process::Command;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn outcome_cli_uses_protected_delivery_and_redacts_provider_messages() {
+    check_outcome_rejection("outcome-conflict").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn changed_interruption_cli_reports_safe_choices_without_success_json() {
+    check_outcome_rejection("interrupted-evidence-changed").await;
+}
+
+async fn check_outcome_rejection(category: &'static str) {
     let router = Router::new().route(
         "/rpc",
-        post(|Json(r): Json<serde_json::Value>| async move {
+        post(move |Json(r): Json<serde_json::Value>| async move {
             assert_eq!(r["method"], "assignment_outcomeSubmit");
             let p = &r["params"][0];
             assert_eq!(p["assignmentId"], "bound-assignment");
@@ -14,7 +23,7 @@ async fn outcome_cli_uses_protected_delivery_and_redacts_provider_messages() {
             assert_eq!(p["outcome"]["generation"], 7);
             assert!(p.get("record").is_none());
             Json(serde_json::json!({"jsonrpc":"2.0", "id":r["id"], "error":{
-            "code":-32001, "message":"sentinel-secret must not leak", "data":"outcome-conflict"}}))
+            "code":-32001, "message":"sentinel-secret must not leak", "data":category}}))
         }),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -53,7 +62,19 @@ async fn outcome_cli_uses_protected_delivery_and_redacts_provider_messages() {
     };
     let output = run();
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("outcome-conflict"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(category), "{stderr}");
+    assert!(output.stdout.is_empty());
+    if category == "interrupted-evidence-changed" {
+        for guidance in [
+            "Continuation",
+            "operator recovery",
+            "Preserve the checkout",
+            "Neither new operation is available",
+        ] {
+            assert!(stderr.contains(guidance), "{stderr}");
+        }
+    }
     assert!(!String::from_utf8_lossy(&output.stderr).contains("sentinel-secret"));
     assert!(!String::from_utf8_lossy(&output.stdout).contains("sentinel-secret"));
     std::fs::write(&file, "{invalid JSON").unwrap();

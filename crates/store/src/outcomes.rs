@@ -451,6 +451,8 @@ impl SqliteProjectRepository {
                 "dispatched output must identify the bound Repository",
             ));
         }
+        // Authorize and replay first, then reject before even drift/hold effects.
+        input.validate_interruption_evidence(&attempt.evidence)?;
         if assignment.is_some() {
             let observed = observed.ok_or_else(|| {
                 error("evidence-required", "trusted worktree observation required")

@@ -559,6 +559,9 @@ pub async fn assignment_outcome(input: serde_json::Value) -> Result<serde_json::
             } else {
                 None
             };
+            if category.as_deref() == Some("interrupted-evidence-changed") {
+                return "Assignment outcome rejected: interrupted-evidence-changed; interruption must repeat bound input evidence. Deliberate checkpoint handoffs require explicit Continuation support; genuinely interrupted retained work requires operator recovery. Neither new operation is available in this revision. Preserve the checkout and ask the operator; do not reset, discard changes, or report completion merely to hand off work.".into();
+            }
             let category = category.as_deref().filter(|code| {
                 matches!(
                     *code,

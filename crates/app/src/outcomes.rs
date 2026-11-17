@@ -70,6 +70,24 @@ pub struct OutcomeInput {
     #[serde(default)]
     pub verifications: Vec<FindingVerification>,
 }
+impl OutcomeInput {
+    /// Interruption cannot adopt a new checkpoint; accepted historical replay is exempt.
+    /// # Errors
+    /// Rejects changed interruption evidence without authorizing recovery or handoff.
+    pub fn validate_interruption_evidence(
+        &self,
+        bound: &Evidence,
+    ) -> Result<(), RegistrationError> {
+        if self.disposition == OutcomeDisposition::Interrupted && &self.evidence != bound {
+            return Err(RegistrationError::new(
+                "interrupted-evidence-changed",
+                "Interrupted outcomes must repeat their bound input evidence. Deliberate checkpoint handoffs require explicit Continuation support; genuinely interrupted retained work requires operator recovery. Neither new operation is available in this revision. Preserve the checkout and ask the operator; do not reset, discard changes, or report completion merely to hand off work.",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum OutcomeDisposition {

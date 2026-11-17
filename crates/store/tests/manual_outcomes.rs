@@ -87,6 +87,74 @@ fn evidence(value: char) -> Evidence {
 }
 
 #[test]
+fn changed_interruption_is_atomic_and_unchanged_interruption_replays() {
+    use forge_app::outcomes::OutcomeDisposition;
+    let db = Database::new();
+    let (task, mut input) = db.attempt();
+    input.verdict = Verdict::Fail;
+    input.disposition = OutcomeDisposition::Interrupted;
+    let store = db.open();
+    let before = store.record_work_state(task).unwrap();
+    let checks = store.list_record_checks(task).unwrap();
+    let updates = store.list_record_updates(task).unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            store.submit_record_outcome(task, &input).unwrap_err().code,
+            "interrupted-evidence-changed"
+        );
+        assert_eq!(store.record_work_state(task).unwrap(), before);
+        assert_eq!(store.list_record_checks(task).unwrap(), checks);
+        assert_eq!(store.list_record_updates(task).unwrap(), updates);
+    }
+    input.evidence = evidence('a');
+    let accepted = store.submit_record_outcome(task, &input).unwrap();
+    assert_eq!(accepted.work, before);
+    assert!(accepted.check.latest_assessment.is_none());
+    assert_eq!(
+        db.open().submit_record_outcome(task, &input).unwrap(),
+        accepted
+    );
+    input.message = "Conflicting retry".into();
+    assert_eq!(
+        store.submit_record_outcome(task, &input).unwrap_err().code,
+        "outcome-conflict"
+    );
+}
+
+#[test]
+fn historical_changed_interruption_replays_without_new_policy_or_effects() {
+    let db = Database::new();
+    let (task, mut input) = db.attempt();
+    input.verdict = Verdict::Fail;
+    input.disposition = forge_app::outcomes::OutcomeDisposition::Interrupted;
+    input.evidence = evidence('a');
+    let mut accepted = db.open().submit_record_outcome(task, &input).unwrap();
+    // Isolated legacy fixture: the old contract accepted changed evidence but kept A as input.
+    input.evidence = evidence('b');
+    accepted.evidence = input.evidence.clone();
+    let connection = rusqlite::Connection::open(db.path()).unwrap();
+    connection
+        .execute(
+            "UPDATE record_attempts SET outcome_json = ?1, result_json = ?2 WHERE id = ?3",
+            rusqlite::params![
+                serde_json::to_string(&input).unwrap(),
+                serde_json::to_string(&accepted).unwrap(),
+                input.attempt_id
+            ],
+        )
+        .unwrap();
+    let store = db.open();
+    let before = store.record_work_state(task).unwrap();
+    assert_eq!(store.submit_record_outcome(task, &input).unwrap(), accepted);
+    assert_eq!(store.record_work_state(task).unwrap(), before);
+    input.message = "Changed history".into();
+    assert_eq!(
+        store.submit_record_outcome(task, &input).unwrap_err().code,
+        "outcome-conflict"
+    );
+}
+
+#[test]
 #[allow(clippy::too_many_lines)]
 fn manual_artifact_outcome_is_bound_and_replays_after_restart() {
     let db = Database::new();

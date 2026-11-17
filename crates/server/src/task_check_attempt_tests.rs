@@ -201,6 +201,50 @@ async fn check_bound_outcome_inspection(human_input: bool) {
     ).await.unwrap();
     assert!(normal.already_assigned);
     assert_eq!(normal.assignment.id, "bound-check");
+    // Reproduce the changed-commit interruption incident before accepting B normally.
+    let before_work = store.record_work_state(task.id).unwrap();
+    let before_checks = store.list_record_checks(task.id).unwrap();
+    let before_owner = store.agent_assignment_info("bound-check").unwrap();
+    let before_claim = store.worktree_claim(task.id).unwrap();
+    let before_updates = store.list_record_updates(task.id).unwrap();
+    let before_findings = store.list_record_findings(task.id, None, 100).unwrap();
+    let mut interrupted = request.clone();
+    interrupted["outcome"]["disposition"] = "interrupted".into();
+    interrupted["outcome"]["verdict"] = "fail".into();
+    for (field, value) in [("secret", "wrong"), ("attempt_id", "owner-assignment")] {
+        let mut denied = interrupted.clone();
+        if field == "secret" { denied[field] = value.into(); } else { denied["outcome"][field] = value.into(); }
+        let response = assignment_rpc(daemon.clone(), "assignment.outcomeSubmit", denied).await;
+        assert!(response.get("error").is_some(), "{response}");
+        assert_ne!(response["error"]["data"], "interrupted-evidence-changed", "{response}");
+    }
+    for dirty in [false, true] {
+        if dirty {
+            std::fs::write(checkout.path.join("deliverable.txt"), "Retained edits\n").unwrap();
+            std::fs::write(checkout.path.join("untracked.txt"), "Retained new work\n").unwrap();
+        }
+        let rejected = assignment_rpc(daemon.clone(), "assignment.outcomeSubmit", interrupted.clone()).await;
+        assert_eq!(rejected["error"]["data"], "interrupted-evidence-changed", "{rejected}");
+        let message = rejected["error"]["message"].as_str().unwrap();
+        assert!(message.contains("Continuation"), "{message}");
+        assert!(message.contains("operator recovery"), "{message}");
+        assert!(message.contains("Neither new operation is available"), "{message}");
+        assert_eq!(store.record_work_state(task.id).unwrap(), before_work);
+        assert_eq!(store.list_record_checks(task.id).unwrap(), before_checks);
+        assert_eq!(store.agent_assignment_info("bound-check").unwrap(), before_owner);
+        assert_eq!(store.worktree_claim(task.id).unwrap(), before_claim);
+        assert_eq!(store.list_record_updates(task.id).unwrap(), before_updates);
+        assert_eq!(store.list_record_findings(task.id, None, 100).unwrap(), before_findings);
+        assert!(store.dispatch_hold(task.id).unwrap().is_none());
+        assert_eq!(super::git(&checkout.path, &["rev-parse", "HEAD"]).unwrap(), request["outcome"]["evidence"]["commit"].as_str().unwrap());
+        if dirty {
+            assert_eq!(std::fs::read_to_string(checkout.path.join("deliverable.txt")).unwrap(), "Retained edits\n");
+            assert_eq!(std::fs::read_to_string(checkout.path.join("untracked.txt")).unwrap(), "Retained new work\n");
+        }
+    }
+    // Fixture-only restoration, not a product repair path.
+    std::fs::write(checkout.path.join("deliverable.txt"), "Implemented\n").unwrap();
+    std::fs::remove_file(checkout.path.join("untracked.txt")).unwrap();
     let accepted =
         assignment_rpc(daemon.clone(), "assignment.outcomeSubmit", request.clone()).await;
     assert_eq!(

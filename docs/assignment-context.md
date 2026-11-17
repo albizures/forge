@@ -183,7 +183,15 @@ forge assignment outcome --file outcome.json --json
 ```
 
 Use the actual `bound.checkAttempt` id/generation/input and the clean authorized
-output evidence. See [outcome shape and handback rules](dispatch.md#check-attempts-and-controlled-acceptance).
+output evidence. An `interrupted` outcome must instead repeat its bound input
+evidence. Changed evidence is rejected with `interrupted-evidence-changed`, without
+acceptance or retry-budget effects; Forge preserves the checkout. Deliberate
+checkpoint handoffs require explicit Continuation support, while genuinely
+interrupted retained work requires operator recovery. Neither new operation is
+available in this revision. Preserve the work and ask the operator; do not reset,
+discard changes, or report completion merely to hand off work. Exact replay of
+already accepted historical outcomes remains supported and confers no new authority.
+See [outcome shape and handback rules](dispatch.md#check-attempts-and-controlled-acceptance).
 Implementation cannot self-verify review Findings. Reviews cannot modify the
 checkout. Final review acceptance leaves In Progress until Forge separately
 reconciles retirement/resources and every completion gate. Exact accepted replay

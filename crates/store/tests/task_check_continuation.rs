@@ -183,6 +183,11 @@ fn retry_budget(
 }
 
 #[test]
+fn unchanged_implementation_interruption_preserves_input_and_retries_after_retirement() {
+    run_case("unchanged-implementation-interruption");
+}
+
+#[test]
 fn human_input_requests_hold_without_assessment_or_automatic_completion() {
     run_case("human-budget");
 }
@@ -1383,6 +1388,45 @@ fn run_case(case: &str) {
         session.acknowledge().unwrap();
         session.start().unwrap();
         session.context().unwrap();
+        if index == 0 && case == "unchanged-implementation-interruption" {
+            let before = app.record_work_state(task.id).unwrap();
+            let input = OutcomeInput {
+                attempt_id: attempt.id.clone(),
+                generation: attempt.generation,
+                evidence: attempt.evidence.clone(),
+                verdict: Verdict::Fail,
+                actor: "ignored".into(),
+                message: "Execution was interrupted".into(),
+                disposition: OutcomeDisposition::Interrupted,
+                findings: vec![],
+                verifications: vec![],
+            };
+            let accepted = session.submit_outcome(&input).unwrap();
+            assert_eq!(session.submit_outcome(&input).unwrap(), accepted);
+            let after = application().record_work_state(task.id).unwrap();
+            assert_eq!(after.input, before.input);
+            assert_eq!(after.output, before.output);
+            assert_eq!(after.generation, before.generation);
+            assert_eq!(after.progress.interrupted_checks[0].interruptions, 1);
+            assert_eq!(app.list_record_checks(task.id).unwrap(), checks);
+            assert!(store.dispatch_hold(task.id).unwrap().is_none());
+            application()
+                .reconcile_agent_dispatch("unchanged-interruption", 800_000)
+                .unwrap();
+            let (replacement, _) = application()
+                .execute_task_check_acceptance(task.id)
+                .unwrap();
+            assert_ne!(replacement.id, assignment.id);
+            let retry = store
+                .assignment_check_attempt(&replacement.id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(retry.check_id, attempt.check_id);
+            assert_eq!(retry.evidence, attempt.evidence);
+            assert_eq!(retry.generation, attempt.generation);
+            std::fs::remove_dir_all(root).unwrap();
+            return;
+        }
         if index == 0 {
             // Authorized Implementation output B is not external drift from input A.
             *head.lock().unwrap() = "b".repeat(40);

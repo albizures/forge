@@ -195,6 +195,24 @@ and no substantive Assessment or handback; retirement/resource gates still apply
 The operator must intervene and explicitly resume. `interrupted` likewise creates
 no Assessment, Finding or substantive handback.
 
+New `interrupted` submissions must repeat the attempt's bound input evidence.
+Changed evidence is rejected as `interrupted-evidence-changed` before acceptance,
+interruption counters, Assessments, Findings, or work-input/hold changes. The
+checkout (including committed, tracked and untracked work) is preserved. Deliberate
+checkpoint handoffs require explicit Continuation support; genuinely interrupted
+retained work requires operator recovery. Neither new operation is available in
+this revision: preserve the checkout and ask the operator, rather than resetting,
+discarding changes, or reporting completion merely to hand off work. This does not
+change substantive failed Implementation or `human-input` semantics.
+
+Exact replay of a previously accepted outcome, including a historical changed-evidence
+interruption, still returns the original durable result after authorization;
+conflicting retries remain rejected. No historical outcome is rewritten. This is
+an intentional tightening of new-submission validation, with an additive structured
+RPC error category (`error.data`) and redacted CLI guidance on stderr (no successful
+JSON on rejection). Request/result shapes and storage schema are unchanged; no
+state upgrade or historical backfill is required.
+
 Inspect counters, the pending baseline, verified-resolution count, stop reason and
 latest 20 recorded resets using `forge record check work <task> --json` (the
 `progress` object in WorkState). All reset audit rows remain durably stored.
