@@ -34,6 +34,69 @@ An authenticated Implementation agent can submit a deliberate clean checkpoint t
 
 Use existing outcome replay, task-progress, cumulative-gate, Check-attempt and provider-fake test seams. Tests must fail without the new behavior. Run shared root gates; report actual evidence and unrun checks.
 
+## Implementation evidence
+
+- Status: complete (local source implementation only).
+- Input commit: `73c088fbeb896f2d13291545b3d0ab66d0a7abe3`, including T01's verified
+  output and committed local planning context, in the user-authorized `forge/`
+  checkout. No managed Assignment or live execution authority was created.
+- Output commit: `18dedd6423f76f541410d6059469f47d5bbedbe9`.
+- Wire disposition: `{"continuation":{"stopping_reason":"...","completed_work":"...","verification":"...","remaining_work":"..."}}`.
+  All four strings are required/nonblank; verification must truthfully identify
+  actual results and unrun gates. `verdict: "fail"` is the existing non-complete
+  wire sentinel, not an Assessment. Only the authenticated Task Implementation
+  attempt may submit it, with no Finding/verification effects.
+- Application owns handoff validation and limit policy. Persistence atomically
+  records checkpoint/handoff, input adoption, attempt closure/result, counters and
+  limit holds. No Check passes, no Assessment is inserted, no Finding/history or
+  immutable Base Commit is rewritten. The successor's immutable attempt captures
+  the accepted handoff and checkpoint. Existing retirement/reconciliation and
+  dispatch gates remain authoritative.
+- Tests exercise 19 changed checkpoints followed by the accepted/held twentieth;
+  two unchanged checkpoints; unchanged/changed/unchanged; missing/blank content;
+  dirty/mismatched/stale evidence; invalid/foreign credentials and attempts;
+  Manual/review rejection; concurrent exact replay; conflicting replay; and
+  replay after closure, restart and later body edits. Injected final-result-write
+  failure rolls back checkpoint, counters and limit hold, including at exhaustion.
+  A stronger existing safety diagnostic survives limit acceptance.
+- Fake-provider integration runs ordinary daemon reconciliation into the same
+  Implementation Check, delivers handoff context, retains capacity after uncertain
+  cleanup or retained resources, and checks independent dependency, provider and
+  hold blockers. Existing workspace tests retain mode/capacity gates. Mixed
+  Continuation → interruption → substantive failure → pass → review handback
+  verifies independent accounting and retention through freshness invalidation.
+  Real-Git Assignment RPC tests accept committed B from input A and reject dirty
+  checkpoints without adoption; CLI tests forward the explicit structured handoff
+  using protected delivery and redact rejected provider messages.
+- Compatibility: storage revision **15** adds `check_continuations`; ordinary
+  opening rejects older stores before writes. Explicit isolated upgrades from
+  supported schemas 7–14 add an empty table without inferred historical events;
+  same-schema snapshots retain actual budgets, handoffs and replay inventories.
+  Upgrade stamp failure rolls back atomically. Existing serialized dispositions
+  remain accepted; added attempt/progress fields decode absent historical values
+  as null/empty without rewriting stored JSON. Strict older clients may reject
+  new response fields/disposition; documented client/server coordination is
+  required. Storage, outcome and context contracts are documented.
+- Red/green evidence: temporarily disabling checkpoint accounting/input adoption
+  made `cargo test -p forge-store --test task_check_continuation deliberate_continuations`
+  fail because accepted work still used A instead of checkpoint B. Restoring the
+  acceptance call passes; the injected change was not committed.
+- Focused verification passed: `cargo test -p forge-store`,
+  `cargo test -p forge-store --test task_check_continuation`,
+  `cargo test -p forge-server implementation_continuation_rpc`, and the focused
+  deliberate-continuation test after its final additions. Final root gates passed:
+  `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
+  `cargo test --workspace` (**542 passed, 0 failed, 1 existing ignored**), and
+  `git diff --check`. Initial fixture/lint failures were corrected before the
+  final full run. The workspace suite includes CLI and public RPC regressions.
+- Self-review against T02 and `CODING_STANDARDS.md`: no unresolved findings.
+- Blockers: none for T02. Dedicated operator inspection/reset remains T03;
+  interrupted-work recovery and profile rollout remain later Tasks. The existing
+  ignored test was not run. No shipped skills changed, so skill parser/portability
+  gates were not applicable. No live activation, migration, profile registration
+  or selection, Check repinning, #37 recovery/dispatch, branch reset, merge or
+  force-push was performed. Local verification is not release readiness.
+
 ## Routing hints
 
 Application outcome/attempt contracts; persistence outcomes, task progress and attempt selection; Assignment context delivery; RPC/server/CLI outcome adaptation; explicit schema upgrade and storage README; `docs/dispatch.md` and `docs/assignment-context.md`.
