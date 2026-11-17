@@ -19,7 +19,8 @@ pub fn validate_execution_parent(task: u64, parent: &Record) -> Result<(), Regis
     Ok(())
 }
 
-/// Validate required same-Spec inheritance against derived Stack lineage (or transitional legacy links).
+/// Validate required same-Spec inheritance against derived Stack lineage.
+/// Historical prerequisite intent remains distinguishable for explicit upgrade validation.
 /// Independent Tasks and explicit Waits-For Relationships do not require a Stack.
 /// # Errors
 /// Rejects missing inheritance, contradictory ordering, and ambiguous branches.

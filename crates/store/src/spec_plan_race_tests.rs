@@ -55,12 +55,12 @@ impl Mutation {
                 .relate_records(second, first, RecordRelationshipKind::DependsOn)
                 .map(|_| ()),
             Self::OrderingOnly => store
-                .relate_ordering_only_records(second, first)
+                .relate_records(second, first, RecordRelationshipKind::WaitsFor)
                 .map(|_| ()),
             Self::Remove => store
-                .unrelate_records(second, first, RecordRelationshipKind::DependsOn)
+                .unrelate_records(second, first, RecordRelationshipKind::WaitsFor)
                 .map(|_| ()),
-            Self::Stack => store.configure_task_stack(second, &root()).map(|_| ()),
+            Self::Stack => store.configure_task_stack(first, &root()).map(|_| ()),
         }
     }
     fn table(self) -> &'static str {
@@ -220,7 +220,7 @@ fn spec_start_wins_each_structural_race_and_late_writes_are_rejected() {
         let second = child(&starter, parent);
         starter.configure_task_stack(first, &root()).unwrap();
         if matches!(mutation, Mutation::Remove) {
-            starter.relate_ordering_only_records(second, first).unwrap();
+            starter.relate_records(second, first, RecordRelationshipKind::WaitsFor).unwrap();
         }
         let writer = database.open();
         let (reserved, release) = pause(&starter, "records");
@@ -265,7 +265,7 @@ fn structural_writes_win_and_start_validates_the_committed_plan() {
         let second = child(&writer, parent);
         writer.configure_task_stack(first, &root()).unwrap();
         if matches!(mutation, Mutation::Remove) {
-            writer.relate_ordering_only_records(second, first).unwrap();
+            writer.relate_records(second, first, RecordRelationshipKind::WaitsFor).unwrap();
         }
         if matches!(mutation, Mutation::Stack) {
             link(&writer, second, first);
@@ -285,7 +285,7 @@ fn structural_writes_win_and_start_validates_the_committed_plan() {
             release.send(()).unwrap();
             write.join().unwrap().unwrap();
             let result = start.join().unwrap();
-            if matches!(mutation, Mutation::Dependency | Mutation::Stack) {
+            if matches!(mutation, Mutation::Dependency) {
                 assert_eq!(
                     result.unwrap_err().code,
                     "invalid-spec-plan",

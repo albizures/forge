@@ -70,8 +70,9 @@ Canonical successors retain an evidence row in `task_stacks` with NULL predecess
 and `{}` source JSON: it carries no mutable topology or competing root destination.
 Reads derive the predecessor and inherited destination from the relationship.
 Only roots retain repository/remote/selected branch configuration. Legacy Stack
-rows remain a transitional read/declaration adapter; canonical creation cannot
-fork them and legacy declaration cannot fork canonical Relationships.
+predecessor declarations are rejected with `record relate --kind builds-on`
+replacement guidance. Historical row decoding remains for explicit offline upgrade
+inspection; conversion removes independent topology before target activation.
 
 Revision 12 is a breaking storage-contract expansion. Ordinary opening rejects
 revision 11 before writes. Explicit offline expansion adds an empty designation
@@ -142,10 +143,12 @@ Canonical `waits-for` uses the existing `depends-on` row plus its explicit
 `ordering_only_dependencies` designation. Application reads expose `WaitsFor`;
 readiness and cycle SQL continue to traverse all persisted prerequisite rows.
 Removal checks the designation in the same transaction as deletion and history.
-No schema change, marker rewrite, conversion, or new inheritance inference is
-introduced. Historical Update kinds remain unchanged; new designation Comments
-use Waits-For vocabulary. Legacy declaration paths are transitional and will be
-removed by the canonical-contract slice; historical conversion is separate.
+The public cutover changes no storage revision or Management Protocol. Historical
+Update kinds remain unchanged; new designation Comments use Waits-For vocabulary.
+CLI, RPC and Application declarations reject legacy prerequisite names. Public
+inspection exposes canonical `kind` without the former `ordering_only` wire flag;
+that flag remains an internal representation, not an alternative intent model.
+Historical conversion uses the separate explicit offline upgrade path.
 
 `ordering_only_dependencies` persists explicit intent without changing ordinary
 `record_relationships` rows or readiness ordering:

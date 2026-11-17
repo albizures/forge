@@ -134,21 +134,18 @@ async fn spec_start_validation_and_structural_guards_round_trip_cli_and_rpc() {
             "record", action, &second, "--kind", kind, "--to", &first, "--json",
         ]))
     };
-    relationship("relate", "depends-on");
+    relationship("relate", "builds-on");
     let failed = run(&["record", "start", &parent]);
     assert!(!failed.status.success());
     let diagnostic = String::from_utf8_lossy(&failed.stderr);
-    assert!(diagnostic.contains("invalid-spec-plan"), "{diagnostic}");
-    assert!(
-        diagnostic.contains(&format!("Task {second}, prerequisite {first}")),
-        "{diagnostic}"
-    );
+    assert!(diagnostic.contains("stack-blocked"), "{diagnostic}");
+    assert!(diagnostic.contains("root"), "{diagnostic}");
     assert_eq!(
         json(run(&["record", "show", &parent, "--json"]))["status"],
         "open"
     );
-    relationship("unrelate", "depends-on");
-    relationship("relate", "ordering-only-depends-on");
+    relationship("unrelate", "builds-on");
+    relationship("relate", "waits-for");
     assert_eq!(
         json(run(&["record", "start", &parent, "--json"]))["status"],
         "in_progress"
@@ -160,7 +157,7 @@ async fn spec_start_validation_and_structural_guards_round_trip_cli_and_rpc() {
             "unrelate",
             &second,
             "--kind",
-            "depends-on",
+            "waits-for",
             "--to",
             &first,
         ],
@@ -169,7 +166,7 @@ async fn spec_start_validation_and_structural_guards_round_trip_cli_and_rpc() {
             "relate",
             &first,
             "--kind",
-            "ordering-only-depends-on",
+            "waits-for",
             "--to",
             &second,
         ],
@@ -251,7 +248,7 @@ async fn waits_for_round_trips_cli_rpc_and_human_inspection() {
         "--json",
     ]));
     assert_eq!(record["relationships"][0]["kind"], "waits-for");
-    assert_eq!(record["relationships"][0]["ordering_only"], true);
+    assert!(record["relationships"][0].get("ordering_only").is_none());
     let inspected = json(run(&["record", "show", &from, "--json"]));
     assert_eq!(inspected["relationships"], record["relationships"]);
     let ready = json(run(&["ready", "--blocked", "--json"]));
@@ -437,7 +434,7 @@ async fn record_commands_and_rpc_are_confined_by_explicit_or_client_cwd_selectio
             "relate",
             &task_id,
             "--kind",
-            "depends-on",
+            "waits-for",
             "--to",
             &grilling_id,
             "--json",
@@ -449,7 +446,7 @@ async fn record_commands_and_rpc_are_confined_by_explicit_or_client_cwd_selectio
         &two,
     ));
     let foreign_task_id = foreign_task["id"].to_string();
-    for kind in ["depends-on", "generated-by"] {
+    for kind in ["waits-for", "generated-by"] {
         rejected(run(
             &[
                 "record",
@@ -651,7 +648,7 @@ async fn record_commands_and_rpc_are_confined_by_explicit_or_client_cwd_selectio
             "unrelate",
             &task_id,
             "--kind",
-            "depends-on",
+            "waits-for",
             "--to",
             &grilling_id,
             "--json",

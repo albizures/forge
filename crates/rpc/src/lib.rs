@@ -1354,8 +1354,8 @@ pub struct DoneRecordRequest {
     pub completion_resolution: Option<String>,
 }
 /// Links or unlinks a typed directional Record Relationship.
-/// `waits-for` creates/removes a completion-only prerequisite. Legacy declaration
-/// paths and the `ordering_only` response field remain transitional compatibility.
+/// `waits-for` requires completion only; `builds-on` additionally selects immediate
+/// verified repository inheritance. Legacy prerequisite names are rejected, not aliases.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RelateRecordRequest {
     pub from_id: u64,
@@ -1365,8 +1365,6 @@ pub struct RelateRecordRequest {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RecordRelationshipResponse {
     pub kind: String,
-    #[serde(default)]
-    pub ordering_only: bool,
     pub from_id: u64,
     pub to_id: u64,
     pub parent_id: u64,
@@ -1420,7 +1418,6 @@ impl From<Record> for RecordResponse {
                 .relationships
                 .into_iter()
                 .map(|relationship| RecordRelationshipResponse {
-                    ordering_only: relationship.ordering_only,
                     kind: if relationship.prerequisite_kind()
                         == Some(forge_app::PrerequisiteKind::WaitsFor)
                     {

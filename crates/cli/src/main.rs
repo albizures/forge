@@ -555,9 +555,9 @@ enum RecordCommand {
     Start(RecordIdArgs),
     /// Complete an in-progress Record.
     Done(DoneRecordArgs),
-    /// Link Records with child-of, depends-on, generated-by, or initiative membership.
+    /// Link Records with child-of, waits-for, builds-on, generated-by, or initiative membership.
     Relate(RelationshipArgs),
-    /// Remove a child-of, depends-on, generated-by, or initiative Relationship.
+    /// Remove a child-of, waits-for, builds-on, generated-by, or initiative Relationship.
     Unrelate(RelationshipArgs),
     /// Add an immutable Comment to a Record.
     Comment(AddRecordCommentArgs),
@@ -650,11 +650,21 @@ struct DoneRecordArgs {
     #[arg(long)]
     json: bool,
 }
+fn parse_relationship_kind(kind: &str) -> Result<String, String> {
+    match kind {
+        "child-of" | "waits-for" | "builds-on" | "generated-by" | "initiative" => Ok(kind.into()),
+        "depends-on" | "ordering-only-depends-on" => Err(
+            "legacy prerequisite declaration rejected; use waits-for for completion only or builds-on for completion and verified repository inheritance".into(),
+        ),
+        _ => Err("relationship kind must be child-of, waits-for, builds-on, generated-by, or initiative".into()),
+    }
+}
+
 #[derive(Args, Debug)]
 struct RelationshipArgs {
     from_id: u64,
     /// Use waits-for for completion only, or builds-on for completion and code inheritance.
-    #[arg(long, value_parser = ["child-of", "waits-for", "builds-on", "depends-on", "ordering-only-depends-on", "generated-by", "initiative"])]
+    #[arg(long, value_parser = parse_relationship_kind)]
     kind: String,
     #[arg(long = "to")]
     to_id: u64,

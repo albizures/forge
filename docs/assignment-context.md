@@ -71,7 +71,10 @@ Context separates:
   context construction (or the first authenticated context read for an older
   attempt), independently of later Worktree Claim cleanup state.
 - `record`: live identity/type, title (first Body line), Body, status, resolution,
-  scope and incident relationships.
+  scope and incident relationships. Prerequisite `kind` is explicitly `waits-for`
+  or `builds-on`, matching operator Record inspection; the former `ordering_only`
+  response flag is removed. Related Record reads use the same canonical contract.
+  Historical Update Log relationship kinds remain historical.
 - `workspace`: owning Forge Workspace identity/name/root.
 - `projects`: every scoped Project's reference, Workspace, slug and root. Remote
   URLs are deliberately omitted because they may contain credentials. A

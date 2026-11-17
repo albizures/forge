@@ -64,14 +64,35 @@ pub(super) fn predecessor(c: &Connection, record: u64) -> Result<Option<u64>, Re
     if let Some(previous) = builds_on(c, record)? {
         return Ok(Some(previous));
     }
-    c.query_row(
-        "SELECT predecessor FROM task_stacks WHERE record_id = ?1",
-        [record.cast_signed()],
-        |r| r.get::<_, Option<i64>>(0),
-    )
-    .optional()
-    .map(|v| v.flatten().map(i64::cast_unsigned))
-    .map_err(storage_error)
+    let legacy = c
+        .query_row(
+            "SELECT predecessor FROM task_stacks WHERE record_id = ?1",
+            [record.cast_signed()],
+            |r| r.get::<_, Option<i64>>(0),
+        )
+        .optional()
+        .map_err(storage_error)?
+        .flatten();
+    validate_historical_topology(c, legacy)?;
+    Ok(legacy.map(i64::cast_unsigned))
+}
+
+// Historical topology is readable only while inspecting an explicit offline
+// upgrade source. Current Revision State must use canonical designations.
+fn validate_historical_topology(
+    c: &Connection,
+    predecessor: Option<i64>,
+) -> Result<(), RegistrationError> {
+    if predecessor.is_some()
+        && c.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+            .map_err(storage_error)?
+            >= 13
+    {
+        return Err(error(
+            "legacy Stack topology requires explicit validated state upgrade; declare new plans with record relate --kind builds-on",
+        ));
+    }
+    Ok(())
 }
 
 pub(super) fn editable_topology(c: &Connection, record: u64) -> Result<(), RegistrationError> {
@@ -118,6 +139,7 @@ pub(super) fn load(c: &Connection, record: u64) -> Result<Option<TaskStack>, Reg
                 )))
             };
         };
+        validate_historical_topology(c, predecessor)?;
         lineage.push(id);
         cursor = builds_on(c, id)?.or_else(|| predecessor.map(i64::cast_unsigned));
     }
@@ -355,55 +377,12 @@ impl SqliteProjectRepository {
                 "a Builds-On successor inherits its starting code; remove the Relationship before configuring a root",
             ));
         }
-        // Open canonical plans may be incomplete; preparation still validates Checks.
         if matches!(source, StackSource::Predecessor { .. }) {
-            compatible(&tx, record)?;
+            return Err(error(
+                "Stack predecessor configuration is no longer supported; use record relate --kind builds-on --to <predecessor>",
+            ));
         }
-        let predecessor = match source {
-            StackSource::Root { .. } => None,
-            StackSource::Predecessor { record_id } => {
-                self.ensure_record_workspace(&tx, *record_id)?;
-                let previous = load_record(&tx, *record_id)?;
-                forge_app::stacks::validate_stack_predecessor(&task, &previous)?;
-                required(&tx, *record_id)?;
-                if super::ordering_dependencies::designated(&tx, record, *record_id)? {
-                    return Err(error(
-                        "an ordering-only dependency cannot be a Stack Predecessor",
-                    ));
-                }
-                let cycle: bool = tx.query_row("WITH RECURSIVE suffix(id) AS (SELECT ?1 UNION SELECT record_id FROM task_stacks JOIN suffix ON predecessor = suffix.id) SELECT EXISTS(SELECT 1 FROM suffix WHERE id = ?2)", params![record.cast_signed(), record_id.cast_signed()], |r| r.get(0)).map_err(storage_error)?;
-                if cycle {
-                    return Err(error("stack cannot form a cycle"));
-                }
-                let occupied: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM task_stacks WHERE predecessor = ?1 AND record_id != ?2) OR EXISTS(SELECT 1 FROM builds_on_dependencies WHERE to_id = ?1 AND from_id != ?2)", params![record_id.cast_signed(), record.cast_signed()], |r| r.get(0)).map_err(storage_error)?;
-                if occupied {
-                    return Err(error("predecessor already has a Stack Successor"));
-                }
-                let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM record_relationships WHERE from_id = ?1 AND to_id = ?2 AND kind = 'depends-on')", params![record.cast_signed(), record_id.cast_signed()], |r| r.get(0)).map_err(storage_error)?;
-                if !exists {
-                    super::insert_relationship(
-                        &tx,
-                        &task,
-                        &previous,
-                        forge_app::RecordRelationshipKind::DependsOn,
-                    )?;
-                    for (id, other) in [(record, *record_id), (*record_id, record)] {
-                        insert_update(
-                            &tx,
-                            id,
-                            RecordUpdateKind::RelationshipAdded {
-                                related_record_id: other,
-                                relationship_kind: Some(
-                                    forge_app::RecordRelationshipKind::DependsOn,
-                                ),
-                            },
-                        )?;
-                    }
-                }
-                Some(record_id.cast_signed())
-            }
-        };
-        tx.execute("INSERT INTO task_stacks(record_id, predecessor, source_json) VALUES (?1, ?2, ?3) ON CONFLICT(record_id) DO UPDATE SET predecessor = excluded.predecessor, source_json = excluded.source_json", params![record.cast_signed(), predecessor, serde_json::to_string(source).map_err(json_error)?]).map_err(storage_error)?;
+        tx.execute("INSERT INTO task_stacks(record_id, predecessor, source_json) VALUES (?1, NULL, ?2) ON CONFLICT(record_id) DO UPDATE SET predecessor = NULL, source_json = excluded.source_json", params![record.cast_signed(), serde_json::to_string(source).map_err(json_error)?]).map_err(storage_error)?;
         // Stacked Tasks resolve at preparation, never from opening-time Project HEAD.
         tx.execute(
             "DELETE FROM task_base_commits WHERE record_id = ?1",

@@ -58,8 +58,11 @@ forge record list --project alpha --status open --type task --json
 forge record comments 42
 forge record updates 42
 forge record edit 42 --body 'Revised canonical body'
-forge record relate 44 --kind depends-on --to 45
-forge record unrelate 44 --kind depends-on --to 45
+forge record relate 44 --kind waits-for --to 45
+forge record unrelate 44 --kind waits-for --to 45
+forge task stack root 44 --repository acme/widgets --remote origin --base feature/payments
+forge record relate 49 --kind builds-on --to 44
+forge task stack show 49 --json
 forge record relate 44 --kind generated-by --to 41
 forge record relate 46 --kind child-of --to 42
 forge record relate 42 --kind initiative --to 40

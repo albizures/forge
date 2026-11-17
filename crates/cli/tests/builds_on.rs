@@ -3,6 +3,10 @@ use forge_app::{
     Application, NewTypedRecord, Project, ProjectRepository, RecordRepository, RecordType,
     WorkspaceRepository,
 };
+use forge_rpc::{
+    RecordApiClient, RelateRecordRequest, SelectedRecordRequest, StackSource, TaskStackAction,
+    TaskStackRequest,
+};
 use forge_server::{Daemon, GitInspector, router};
 use forge_store::SqliteProjectRepository;
 use std::process::Command;
@@ -69,6 +73,88 @@ async fn builds_on_cli_declares_prerequisite_and_inspected_predecessor_in_one_wr
         );
         serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
     };
+    let help = Command::new(env!("CARGO_BIN_EXE_forge"))
+        .args(["help", "task", "stack", "--all"])
+        .output()
+        .unwrap();
+    assert!(help.status.success());
+    let help = String::from_utf8(help.stdout).unwrap();
+    for command in ["root", "show", "prepare", "publish", "publish-unchanged"] {
+        assert!(help.contains(&format!("=== forge task stack {command} ===")));
+    }
+    assert!(!help.contains("=== forge task stack after ==="));
+    let client = jsonrpsee::http_client::HttpClientBuilder::default()
+        .build(&endpoint)
+        .unwrap();
+    let from_id = tasks[1].parse().unwrap();
+    let to_id = tasks[0].parse().unwrap();
+    for kind in ["depends-on", "ordering-only-depends-on"] {
+        for action in ["relate", "unrelate"] {
+            let output = run(&[
+                "record", action, &tasks[1], "--kind", kind, "--to", &tasks[0],
+            ]);
+            assert!(!output.status.success());
+            assert!(output.stdout.is_empty());
+            let diagnostic = String::from_utf8(output.stderr).unwrap();
+            assert!(
+                diagnostic.contains("waits-for") && diagnostic.contains("builds-on"),
+                "{diagnostic}"
+            );
+            let request = SelectedRecordRequest::selected(
+                "one",
+                RelateRecordRequest {
+                    from_id,
+                    to_id,
+                    kind: kind.into(),
+                },
+            );
+            let error = if action == "relate" {
+                client.relate(request).await
+            } else {
+                client.unrelate(request).await
+            }
+            .unwrap_err()
+            .to_string();
+            assert!(
+                error.contains("completion only") && error.contains("builds-on"),
+                "{error}"
+            );
+        }
+    }
+    let legacy = run(&[
+        "task",
+        "stack",
+        "after",
+        &tasks[1],
+        "--predecessor",
+        &tasks[0],
+    ]);
+    assert!(!legacy.status.success());
+    assert!(
+        String::from_utf8(legacy.stderr)
+            .unwrap()
+            .contains("--kind builds-on")
+    );
+    let error = client
+        .task_stack(SelectedRecordRequest::selected(
+            "one",
+            TaskStackRequest {
+                record_id: from_id,
+                action: TaskStackAction::Configure {
+                    source: StackSource::Predecessor { record_id: to_id },
+                },
+            },
+        ))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("record relate --kind builds-on"), "{error}");
+    assert!(
+        json(&["record", "show", &tasks[1], "--json"])["relationships"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
     // Missing execution Checks/configuration do not prevent assembling an Open plan.
     json(&[
         "record",
@@ -98,6 +184,7 @@ async fn builds_on_cli_declares_prerequisite_and_inspected_predecessor_in_one_wr
     assert_eq!(stack["destination"]["branch"], "release/2.x");
     let record = json(&["record", "show", &tasks[1], "--json"]);
     assert_eq!(record["relationships"][0]["kind"], "builds-on");
+    assert!(record["relationships"][0].get("ordering_only").is_none());
     let human = run(&["record", "show", &tasks[1]]);
     assert!(human.status.success());
     assert!(

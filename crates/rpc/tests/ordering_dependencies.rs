@@ -13,7 +13,7 @@ fn application_inspection_emits_canonical_waits_for_and_preserves_unrelated_kind
         parent_id: 0,
         child_id: 0,
     };
-    let response = forge_rpc::RecordResponse::from(Record {
+    let record = Record {
         workspace_id: "isolated".into(),
         id: 42,
         record_type: RecordType::Task,
@@ -25,12 +25,23 @@ fn application_inspection_emits_canonical_waits_for_and_preserves_unrelated_kind
         relationships: vec![
             edge(RecordRelationshipKind::WaitsFor, true, 17),
             edge(RecordRelationshipKind::DependsOn, true, 18),
-            edge(RecordRelationshipKind::DependsOn, false, 19),
+            edge(RecordRelationshipKind::BuildsOn, false, 19),
             edge(RecordRelationshipKind::GeneratedBy, false, 20),
         ],
-    });
+    };
+    let assigned = forge_rpc::AssignmentLiveRecord::from(record.clone());
+    let response = forge_rpc::RecordResponse::from(record);
     let serialized = serde_json::to_value(&response).unwrap();
-    for (index, kind) in ["waits-for", "waits-for", "depends-on", "generated-by"]
+    let assigned = serde_json::to_value(assigned).unwrap();
+    assert_eq!(assigned["relationships"], serialized["relationships"]);
+    assert!(
+        assigned["relationships"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|edge| edge.get("ordering_only").is_none())
+    );
+    for (index, kind) in ["waits-for", "waits-for", "builds-on", "generated-by"]
         .iter()
         .enumerate()
     {
@@ -43,18 +54,13 @@ fn application_inspection_emits_canonical_waits_for_and_preserves_unrelated_kind
 }
 
 #[test]
-fn dependency_inspection_preserves_explicit_intent_and_defaults_legacy_responses() {
-    let legacy = serde_json::json!({
-        "kind": "depends-on", "from_id": 42, "to_id": 17, "parent_id": 0, "child_id": 0,
-    });
-    let mut relationship: RecordRelationshipResponse = serde_json::from_value(legacy).unwrap();
-    assert!(!relationship.ordering_only);
-    relationship.ordering_only = true;
-    let serialized = serde_json::to_value(&relationship).unwrap();
-    assert_eq!(serialized["kind"], "depends-on");
-    assert_eq!(serialized["ordering_only"], true);
-    assert_eq!(
-        serde_json::from_value::<RecordRelationshipResponse>(serialized).unwrap(),
-        relationship
-    );
+fn prerequisite_inspection_round_trips_kind_without_a_competing_flag() {
+    for kind in ["waits-for", "builds-on"] {
+        let wire = serde_json::json!({
+            "kind": kind, "from_id": 42, "to_id": 17, "parent_id": 0, "child_id": 0,
+        });
+        let relationship: RecordRelationshipResponse =
+            serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(relationship).unwrap(), wire);
+    }
 }

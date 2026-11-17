@@ -36,17 +36,17 @@ Use the Spec and conversation as authority; inspect the codebase, domain glossar
 
 - Cover the entire outcome with narrow end-to-end vertical slices. Each Task fits one fresh context window and is independently verifiable on its predecessor's result.
 - Put necessary prefactoring first; sequence expand–contract work so intermediate results stay green.
-- Order **all** Tasks into one dependency chain and one cumulative Stack by default, including research, review, verification and other Tasks consuming repository code without editing it. Unchanged output still runs every required Check, including Publication.
+- Order **all** Tasks into one Builds-On chain and its derived cumulative Stack by default, including research, review, verification and other Tasks consuming repository code without editing it. Unchanged output still runs every required Check, including Publication.
 - Describe deliverables in ordinary Task bodies; there are no Task-kind flags.
 - Assign proposed glossary/ADR changes to their owning slices.
 - For code changes, include an integration/local Verification Task after implementation and review unless the user explicitly opts out. Add required release/handoff work after verification.
 
 Each body provides a descriptive outcome, context and settled decisions, scope boundaries, routing hints, numbered Spec criteria, observable acceptance checks, verification/evidence and its immediate predecessor. Require the predecessor's exact verified final commit as input, not the then-current Project Root. Repository inheritance transfers commits only: external files, untracked artifacts, services, credentials and other state need explicit handoff contracts.
 
-Default same-Spec code inheritance is configured with Stack links, not inferred from every dependency. Intentional wait-only exceptions use persisted dependency-level intent:
+Declare immediate code inheritance with `builds-on`; it also requires predecessor completion. Declare independent completion-only prerequisites with `waits-for`:
 
 ```sh
-forge record relate 57 --kind ordering-only-depends-on --to 49
+forge record relate 57 --kind waits-for --to 49
 ```
 
 Use that only when the dependent does not consume the prerequisite's repository result; document why. Prose or missing Stack configuration is not an exception. Forks or multiple code prerequisites need an explicit integration decision before writing, not a guessed predecessor. Finish drafting only when every Spec criterion and domain change is covered and the default plan has one root and one immediate predecessor per successor.
@@ -59,32 +59,31 @@ Immediately before writing, recheck authoritative child membership and the templ
 forge task under-spec --spec 42 --body -
 ```
 
-Use actual returned IDs, even when non-consecutive. Configure the first Task as root and every later Task after the immediately preceding Task, including unchanged code consumers. For example, if the root returned 44 and the next Task returned 49:
+Use actual returned IDs, even when non-consecutive. Configure the first Task as root and declare every later Task as building on the immediately preceding Task, including unchanged code consumers. For example, if the root returned 44 and the next Task returned 49:
 
 ```sh
 forge task stack root 44 --repository acme/widgets --remote origin --base feature/payments
-forge record relate 49 --kind depends-on --to 44
-forge task stack after 49 --predecessor 44
+forge record relate 49 --kind builds-on --to 44
 ```
 
-Stack configuration also creates the dependency atomically; explicit dependency readback must still match the complete plan. Record IDs are opaque, never `N-1`. Create and configure each Task before creating the next.
+Builds-On atomically declares completion ordering and immediate repository inheritance; relationship readback must match the complete plan. Record IDs are opaque, never `N-1`. Create and configure each Task before creating the next.
 
-Task creation, dependencies and Stack configuration are separate operations. On any failed write, unexpected child, incompatible immutable Check, validation error or concurrency conflict, stop. Report exact created IDs, Checks, relationships, Stack state and incomplete operations. Leave the incomplete plan Open; do not dispatch, blindly retry creation, delete children or repair through this mode.
+Task creation, prerequisite declarations and root configuration are separate operations. On any failed write, unexpected child, incompatible immutable Check, validation error or concurrency conflict, stop. Report exact created IDs, Checks, relationships, Stack state and incomplete operations. Leave the incomplete plan Open; do not dispatch, blindly retry creation, delete children or repair through this mode.
 
 ## 5. Read back, start and report
 
-Read every Task, its Checks and relationships. Verify exact direct child membership, criterion coverage and the immediate dependency chain without forks. Inspect every Stack member:
+Read every Task, its Checks and relationships. Verify exact direct child membership, criterion coverage and the immediate Builds-On chain without forks. Inspect every Stack member:
 
 ```sh
 forge task stack show 44 --json
 forge task stack show 49 --json
 ```
 
-Require the resolved root destination and immediate Stack Predecessor for every successor, including unchanged Tasks; verify persisted ordering-only exceptions separately. Once the complete plan matches, invoke validated start:
+Require the resolved root destination and immediate Stack Predecessor for every successor, including unchanged Tasks; verify independent Waits-For prerequisites separately. Once the complete plan matches, invoke validated start:
 
 ```sh
 forge record start 42
 forge record show 42 --json
 ```
 
-Start transactionally validates the persisted plan before Open → In Progress. On failure, report the diagnostic and read back the actual state; validation failure leaves Open. Do not describe a concurrent actor's changes as your success. On successful start, report ordered IDs/outcomes, dependency chain, cumulative Stack, template observation and parent status. Stop: the planner does not dispatch agents, prepare worktrees, publish PRs or manage production rollout.
+Start transactionally validates the persisted plan before Open → In Progress. On failure, report the diagnostic and read back the actual state; validation failure leaves Open. Do not describe a concurrent actor's changes as your success. On successful start, report ordered IDs/outcomes, canonical prerequisites, derived Stack, template observation and parent status. Stop: the planner does not dispatch agents, prepare worktrees, publish PRs or manage production rollout.

@@ -133,7 +133,7 @@ It never silently falls back to Manual.
 ## Relationships and lifecycle
 
 ```sh
-forge record relate 44 --kind depends-on --to 45 --workspace personal
+forge record relate 44 --kind waits-for --to 45 --workspace personal
 forge record relate 44 --kind generated-by --to 41 --workspace personal
 forge record relate 42 --kind initiative --to 40 --workspace personal
 forge record unrelate 42 --kind initiative --to 40 --workspace personal
@@ -150,11 +150,13 @@ relationship commands. Generic Records may form nested `child-of` hierarchies;
 a Generic child may attach to a Generic or Task parent with identical scope.
 A child has at most one parent and cycles are forbidden.
 
-`depends-on` points from blocked Record to prerequisite. Same-type Tasks or Specs
-may depend on each other; a Task may also depend on a Grilling containing its
-Project (or both may be Projectless). An agent-owned In Progress Task cannot gain
-a dependency. `generated-by` is provenance, independent of lifecycle ordering;
-it may cross Project scopes within one Workspace. Opening commands accept
+`waits-for` points from blocked Record to prerequisite. Same-type Tasks or Specs
+may wait for each other, including cross-Project and Projectless cases; a Task may
+also wait for a Grilling containing its Project (or both may be Projectless).
+Both canonical prerequisite kinds require completion and participate in one cycle
+check. Adding either kind requires the dependent Task to be Open.
+`generated-by` is provenance, independent of lifecycle ordering; it may cross
+Project scopes within one Workspace. Opening commands accept
 repeatable `--generated-by`; corrections require the generated Record to be Open.
 
 To require completion without inheriting a prerequisite's repository result,
@@ -166,32 +168,39 @@ forge record show 44 --workspace personal --json
 forge record unrelate 44 --kind waits-for --to 45 --workspace personal
 ```
 
-Inspection reports canonical kind `waits-for`. The transitional `ordering_only`
-field remains `true`; ordinary legacy dependencies have it set to `false`.
-Explicit removal refuses to remove an ordinary legacy dependency by mistake.
-Legacy declaration paths remain temporarily available during expand–contract.
-This is relationship-level intent, not a Task role, prose convention, or inferred
-absence of a Stack. It still blocks readiness until the prerequisite is Done.
-A Stack Predecessor cannot be designated Waits-For, and a Waits-For
-Relationship cannot become a Stack link. To change intent while permitted, remove
-and recreate the dependency; removal also deletes its designation. Creation
-records normal Relationship updates and Forge-authored designation comments.
-This designation alone does not authorize execution.
+Use `builds-on` when a Task also inherits its prerequisite's verified repository
+result. Both endpoints must be Tasks in one Project; the relationship alone selects
+the immediate Stack Predecessor. Each Task has at most one predecessor and one
+successor. Configure repository, remote and starting branch on the root only; see
+[Task stacks](stacks.md). Review-only Tasks may inherit and verify unchanged output.
+
+Inspection reports `waits-for` or `builds-on` in `kind`, in human and JSON output,
+including Assignment-visible Record reads. The old `ordering_only` wire field is
+removed. Removal must name the actual kind. A pair cannot carry both kinds;
+replace intent explicitly by removing and recreating the relationship while
+lifecycle restrictions permit. Shared parentage, Task prose and file edits never
+infer intent. Neither declaration nor prerequisite completion authorizes dispatch.
+
+Legacy `depends-on`, `ordering-only-depends-on` and `task stack after` declarations
+are rejected, not aliases. Choose completion-only `waits-for` or code-inheriting
+`builds-on`. Historical audit entries retain their original terminology. Existing
+state requires the explicit validated [upgrade workflow](state-upgrades.md), not
+reissuing declarations against live old state. This is an intentional CLI/RPC
+compatibility break: update clients to declare and inspect canonical `kind`, rather
+than relying on legacy aliases or the removed flag. It does not change daemon
+Management Protocol 1 or offline upgrade interface 2.
 
 Starting a Spec validates its persisted initial Task plan in the same transaction
-as its Open → In Progress transition. Ordinary same-Spec Task dependencies require
-explicit cumulative Stack ancestry unless explicitly replaced with `waits-for`.
-Same-Spec Waits-For Relationships require no Stack ancestry.
-Missing configuration and Task prose are not exceptions. Independent Tasks,
-independent configured Stacks with ordering-only coordination, and prerequisites
-already included transitively in one Stack remain supported; Forge does not merge
-multiple code branches. Configured members must retain compatible Publication
+as its Open → In Progress transition. Builds-On chains require complete root
+configuration and valid inheritance; same-Spec Waits-For Relationships require no
+Stack ancestry or publication configuration. Independent Tasks, independent derived
+Stacks with Waits-For coordination, and direct waits on transitive ancestors remain
+supported; Forge does not merge multiple code branches. Configured members must retain compatible Publication
 Checks and dispatched profiles. Invalid plans remain Open without transition history.
 
 Open Specs permit incomplete intermediate plans. Once a Spec starts, ordinary
-child Task creation, dependency addition/removal, Stack reconfiguration, and
-ordering-only changes are rejected transactionally. Comments and otherwise
-permitted Body edits remain available. Preparation and existing explicit
+child Task creation, prerequisite addition/removal, and root reconfiguration are
+rejected transactionally. Comments and otherwise permitted Body edits remain available. Preparation and existing explicit
 ownership/evidence recovery operations are not structural replanning; they do not
 grant permission to rewrite a started plan. This initial product limitation does
 not make Spec plans inherently immutable. See
@@ -200,7 +209,7 @@ not make Spec plans inherently immutable. See
 Spec child Tasks execute only while their parent is In Progress. Manual start,
 Manual attempt begin, Assignment-bound start, automatic/explicit claims and
 Check-bound dispatch revalidate the persisted plan at authorization, including
-legacy In Progress plans. An Open parent reports `spec-execution-blocked`; missing
+upgraded In Progress plans. An Open parent reports `spec-execution-blocked`; missing
 required inheritance reports Task/prerequisite identities with `invalid-spec-plan`.
 Configured Stack execution also rechecks the pinned Base Commit and verified
 predecessor lineage; an initial attempt must bind the exact Stack input commit.
