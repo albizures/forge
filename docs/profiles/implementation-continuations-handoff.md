@@ -48,7 +48,10 @@ Focused review checklist (also guarded by profile text assertions):
    do not establish release readiness. Use matched CLI/server versions: the object
    Continuation disposition and added context fields require supporting peers.
 2. Approve explicit offline Revision State migration if needed. Current schema is
-   **18**; ordinary opening rejects incompatible stores without writes. Follow
+   **19**; ordinary opening rejects incompatible stores without writes. Schema-18
+   v1 dirty recovery authorizations are preserved but fail closed under corrected
+   fingerprinting; there is no automatic in-place reauthorization. Preserve such
+   evidence for separately approved recovery design, not storage edits. Follow
    [state upgrades](../state-upgrades.md), with isolated rehearsal/backups. Never
    infer historical Continuations, fingerprints or reset budgets during upgrade.
 3. Approve copying the delivered candidate to the selected Workspace's

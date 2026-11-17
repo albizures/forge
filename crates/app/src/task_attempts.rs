@@ -31,6 +31,21 @@ impl Application {
         }
         let task = self.dispatch()?.show_record(record)?;
         let project = self.dispatch()?.project(&task.project_slugs[0])?;
+        let base = self
+            .managed_worktrees()?
+            .task_base_commit(record)?
+            .ok_or_else(|| {
+                RegistrationError::new(
+                    "task-base-commit-unavailable",
+                    "Task has no persisted Base Commit",
+                )
+            })?;
+        self.worktree_adapter()?.validate_recovery(
+            &project.project_root,
+            &info.claim.path,
+            &crate::stacks::task_branch(record),
+            &base,
+        )?;
         Ok(Evidence::Repository {
             repository: project.project_root.display().to_string(),
             commit: self.inspector.head_commit(&info.claim.path)?,

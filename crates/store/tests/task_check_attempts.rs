@@ -105,6 +105,9 @@ fn acceptance_claim_snapshots_first_unpassed_check_and_pinned_profile_atomically
         })
         .unwrap();
     let checks = store.list_record_checks(task.id).unwrap();
+    store
+        .set_task_base_commit(task.id, &"a".repeat(40))
+        .unwrap();
     store.reserve_worktree_claim(task.id).unwrap();
     store.activate_worktree_claim(task.id).unwrap();
     let selection = DispatchPreflightSelection {
@@ -415,6 +418,9 @@ fn acceptance_claim_snapshots_first_unpassed_check_and_pinned_profile_atomically
                 body: "Blocked profile".into(),
                 generated_by_ids: vec![],
             })
+            .unwrap();
+        store
+            .set_task_base_commit(invalid.id, &"a".repeat(40))
             .unwrap();
         store.reserve_worktree_claim(invalid.id).unwrap();
         store.activate_worktree_claim(invalid.id).unwrap();

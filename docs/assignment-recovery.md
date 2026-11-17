@@ -139,15 +139,21 @@ arbitrary same-user filesystem mutation.
 Clean commits and dirty tracked, staged and untracked work are supported. The
 command selects HEAD and independently observes retained state twice. For dirty
 input, `recoveries[].retained_state.sha256` binds HEAD, index entries/stages/flags,
-file names, file modes and working contents (including untracked/ignored files),
+extended index flags (including intent-to-add), file names, file modes and working
+contents (including untracked/ignored files),
 without committing, stashing, copying or discarding anything. The digest is salvage
 identity, **not clean checkpoint evidence**. Inspection failures remain unknown:
 links in dirty input, submodules, unreadable files and unsupported path encodings
 fail closed with `recovery-state-unknown`; preserve them for explicit investigation.
 Exclude external writers throughout authorization and dispatch.
 
-The first successor revalidates the exact retained fingerprint and canonical
-Repository/branch/base/claim before claim, including after restart. Changed bytes
+Clean and dirty recovery both revalidate canonical Repository/branch/base/claim
+before the first successor claim, including after restart. Dirty recovery also
+revalidates the exact retained fingerprint. Repository configuration cannot hide
+untracked files from cleanliness checks; assume-unchanged/skip-worktree index flags
+conservatively require dirty salvage rather than waiving tracked-byte validation.
+Schema 19 uses v2 fingerprints; historical v1 dirty authorizations are retained but
+fail closed, with no automatic in-place reauthorization (see [state upgrades](state-upgrades.md)). Changed bytes
 or staged state retain an actionable drift hold and launch nothing. Exact request
 replay returns the original audit, never new authority for changed bytes; conflicts
 cannot overwrite it. The exception is consumed by reserving the first successor,

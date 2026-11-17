@@ -457,8 +457,28 @@ impl ManagedWorktreeAdapter for GitWorktreeAdapter {
                 removable: false,
             };
         }
-        match git(path, &["status", "--porcelain"]) {
-            Ok(status) if status.is_empty() => facts.push("clean".into()),
+        // Repository config must not hide untracked work. Index trust flags can
+        // suppress tracked-byte checks; classify them conservatively as dirty.
+        let status = git(
+            path,
+            &[
+                "status",
+                "--porcelain",
+                "--untracked-files=all",
+                "--ignore-submodules=none",
+            ],
+        )
+        .and_then(|status| git(path, &["ls-files", "-v", "-z"]).map(|files| (status, files)));
+        match status {
+            Ok((status, files))
+                if status.is_empty()
+                    && !files.split('\0').any(|entry| {
+                        entry.starts_with('S')
+                            || entry.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
+                    }) =>
+            {
+                facts.push("clean".into());
+            }
             Ok(_) => {
                 facts.push("dirty".into());
                 blockers.push("dirty");

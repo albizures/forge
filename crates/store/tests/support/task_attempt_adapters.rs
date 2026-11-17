@@ -16,6 +16,16 @@ impl RepositoryInspector for Local {
     }
 }
 impl ManagedWorktreeAdapter for Local {
+    fn validate_recovery(
+        &self,
+        _: &Path,
+        _: &Path,
+        _: &str,
+        _: &str,
+    ) -> Result<(), RegistrationError> {
+        // This fixture models a valid canonical checkout without invoking Git.
+        Ok(())
+    }
     fn create(&self, _: &Path, _: &Path, _: &str, _: &str) -> Result<(), RegistrationError> {
         unreachable!()
     }

@@ -158,7 +158,7 @@ impl Application {
         Ok(retained)
     }
 
-    /// Only the first replacement may use this exact authorized dirty input.
+    /// Revalidate clean and dirty salvage identity before reserving the first replacement.
     pub(crate) fn observe_recovery_input(
         &self,
         record: u64,
@@ -174,7 +174,6 @@ impl Application {
         let work = self.record_work_state(record)?;
         let Some(recovery) = work.recoveries.last().filter(|r| {
             r.request.source_assignment == latest.id
-                && r.retained_state.is_some()
                 && work.input.as_ref() == Some(&r.request.evidence)
         }) else {
             return Ok(None);

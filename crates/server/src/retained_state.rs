@@ -33,15 +33,41 @@ fn field(hash: &mut Sha256, bytes: &[u8]) {
     hash.update(bytes);
 }
 
+// `--stage -v` omits extended flags such as intent-to-add. Debug output exposes
+// them, but its stat cache must not become identity (a read/refresh may update it).
+fn index_flags(hash: &mut Sha256, mut debug: &[u8]) -> Result<(), RegistrationError> {
+    while !debug.is_empty() {
+        let end = debug.iter().position(|b| *b == 0).ok_or_else(unknown)?;
+        field(hash, &debug[..end]);
+        debug = &debug[end + 1..];
+        let mut flags = None;
+        for _ in 0..5 {
+            let end = debug.iter().position(|b| *b == b'\n').ok_or_else(unknown)?;
+            let line = &debug[..end];
+            if let Some(value) = line
+                .split(|b| *b == b'\t')
+                .find_map(|s| s.strip_prefix(b"flags: "))
+            {
+                let value = std::str::from_utf8(value).map_err(|_| unknown())?;
+                flags = Some(u32::from_str_radix(value, 16).map_err(|_| unknown())?);
+            }
+            debug = &debug[end + 1..];
+        }
+        field(hash, &flags.ok_or_else(unknown)?.to_le_bytes());
+    }
+    Ok(())
+}
+
 pub(super) fn observe(path: &Path) -> Result<RetainedState, RegistrationError> {
     let mut hash = Sha256::new();
-    field(&mut hash, b"forge-retained-state-v1");
+    field(&mut hash, b"forge-retained-state-v2");
     field(&mut hash, &git_bytes(path, &["rev-parse", "HEAD"])?);
     // Includes staged blobs, modes, merge stages and index flags, distinct from working bytes.
     field(
         &mut hash,
         &git_bytes(path, &["ls-files", "--stage", "-v", "-z"])?,
     );
+    index_flags(&mut hash, &git_bytes(path, &["ls-files", "--debug", "-z"])?)?;
     let files = git_bytes(path, &["ls-files", "--cached", "--others", "-z"])?;
     let files = files
         .split(|b| *b == 0)
@@ -126,6 +152,18 @@ mod tests {
         )
         .unwrap();
         let base = observe(&root).unwrap();
+        fs::write(root.join("empty"), b"").unwrap();
+        super::super::git(&root, &["add", "--intent-to-add", "empty"]).unwrap();
+        let intent = observe(&root).unwrap();
+        super::super::git(&root, &["add", "empty"]).unwrap();
+        assert_ne!(
+            observe(&root).unwrap(),
+            intent,
+            "intent-to-add and staged empty blobs have different index semantics"
+        );
+        super::super::git(&root, &["rm", "--cached", "empty"]).unwrap();
+        fs::remove_file(root.join("empty")).unwrap();
+        assert_eq!(observe(&root).unwrap(), base);
         fs::write(root.join("tracked"), b"staged").unwrap();
         super::super::git(&root, &["add", "tracked"]).unwrap();
         fs::write(root.join("tracked"), b"original").unwrap();

@@ -203,7 +203,9 @@ Wire compatibility: existing unit-string dispositions and omitted disposition
 requires a supporting server/client; older peers may reject it. Attempt context
 adds default-null `continuation`, and progress adds default-empty `continuations`.
 Strict older response decoders may reject the added fields; upgrade CLI and server
-together. Storage revision **18** adds content-bound dirty salvage (17 added explicit retained-work authorization; 16 added
+together. Storage revision **19** corrects Repository identity/cleanliness validation
+and binds extended index flags in v2 dirty fingerprints (18 added content-bound
+dirty salvage; 17 added explicit retained-work authorization; 16 added
 reset audit/resettable accounting; 15 introduced Continuations). It requires explicit isolated upgrade; ordinary opening never
 converts old state or invents historical Continuations. Accepted historical JSON
 is preserved, with absent added fields decoded as empty/null.
@@ -216,8 +218,10 @@ pass or automatic launch. `WorkState.recoveries` defaults empty and
 `Attempt.recovery` defaults null for historical stored JSON. Strict older clients
 must upgrade with the server; the Assignment capability surface has no recovery
 operation. Recovery context adds default-null `retained_state` with a SHA-256
-fingerprint for dirty salvage; this is not an accepted checkpoint. Schema 18 prevents
-older dispatchers ignoring that binding. No existing stored JSON is rewritten.
+fingerprint for dirty salvage; this is not an accepted checkpoint. Schema 19 prevents
+older dispatchers ignoring corrected identity and extended-index binding. No existing
+stored JSON is rewritten. Historical v1 dirty authorizations fail closed rather than
+silently gaining new authority; see [state upgrade limitations](state-upgrades.md).
 See the recovery runbook for the public CLI, safety assertions and
 separate resume. No historical accepted response is rewritten.
 

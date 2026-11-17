@@ -1005,16 +1005,10 @@ fn run_case(case: &str) {
             original_profiles
         );
     }
-    if case.starts_with("retained-") {
-        store
-            .set_task_base_commit(task.id, &"a".repeat(40))
-            .unwrap();
-    }
-    if case == "normal-preparation" {
-        store
-            .set_task_base_commit(task.id, &"a".repeat(40))
-            .unwrap();
-    } else {
+    store
+        .set_task_base_commit(task.id, &"a".repeat(40))
+        .unwrap();
+    if case != "normal-preparation" {
         store.reserve_worktree_claim(task.id).unwrap();
         store.activate_worktree_claim(task.id).unwrap();
     }
@@ -2286,6 +2280,9 @@ fn run_case(case: &str) {
             body: "Manual work".into(),
             generated_by_ids: vec![],
         })
+        .unwrap();
+    store
+        .set_task_base_commit(unmanaged.id, &"a".repeat(40))
         .unwrap();
     store.reserve_worktree_claim(unmanaged.id).unwrap();
     store.activate_worktree_claim(unmanaged.id).unwrap();

@@ -114,11 +114,9 @@ async fn check_bound_outcome_inspection(kind: u8) {
     std::fs::create_dir_all(&repository).unwrap();
     super::git(&repository, &["init"]).unwrap();
     super::git(&repository, &["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "Input"]).unwrap();
-    let branch = if kind >= 3 { format!("feat/forge-{}", task.id) } else { "task-check".into() };
+    let branch = format!("feat/forge-{}", task.id);
     super::git(&repository, &["worktree", "add", "-b", &branch, checkout.path.to_str().unwrap()]).unwrap();
-    if kind >= 3 {
-        store.set_task_base_commit(task.id, &super::git(&checkout.path, &["rev-parse", "HEAD"]).unwrap()).unwrap();
-    }
+    store.set_task_base_commit(task.id, &super::git(&checkout.path, &["rev-parse", "HEAD"]).unwrap()).unwrap();
     store.activate_worktree_claim(task.id).unwrap();
     let evidence = forge_app::outcomes::Evidence::Repository {
         repository: workspace.root.join("alpha").display().to_string(),
@@ -293,12 +291,32 @@ async fn check_bound_outcome_inspection(kind: u8) {
             assert!(assignment_rpc(daemon.clone(), "assignment.outcomeSubmit", missing).await.get("error").is_some());
             assert_eq!(store.record_work_state(task.id).unwrap(), before_work);
         }
+        // Neither config-hidden untracked files nor index trust flags waive cleanliness.
+        super::git(&checkout.path, &["config", "status.showUntrackedFiles", "no"]).unwrap();
+        for flag in ["--assume-unchanged", "--skip-worktree"] {
+            super::git(&checkout.path, &["update-index", flag, "deliverable.txt"]).unwrap();
+            std::fs::write(checkout.path.join("deliverable.txt"), "Hidden tracked work\n").unwrap();
+            let denied = assignment_rpc(daemon.clone(), "assignment.outcomeSubmit", request.clone()).await;
+            assert_eq!(denied["error"]["data"], "invalid-continuation", "{denied}");
+            std::fs::write(checkout.path.join("deliverable.txt"), "Implemented\n").unwrap();
+            let clear = if flag == "--assume-unchanged" { "--no-assume-unchanged" } else { "--no-skip-worktree" };
+            super::git(&checkout.path, &["update-index", clear, "deliverable.txt"]).unwrap();
+        }
         std::fs::write(checkout.path.join("untracked.txt"), "Retain dirty work").unwrap();
         let rejected = assignment_rpc(daemon.clone(), "assignment.outcomeSubmit", request.clone()).await;
         assert_eq!(rejected["error"]["data"], "invalid-continuation", "{rejected}");
         assert_eq!(store.record_work_state(task.id).unwrap(), before_work);
         assert!(store.dispatch_hold(task.id).unwrap().is_none());
         std::fs::remove_file(checkout.path.join("untracked.txt")).unwrap();
+        let other = workspace.root.join("foreign-continuation-repository");
+        super::git(&workspace.root, &["clone", "--shared", repository.to_str().unwrap(), other.to_str().unwrap()]).unwrap();
+        super::git(&other, &["checkout", "-b", &branch, request["outcome"]["evidence"]["commit"].as_str().unwrap()]).unwrap();
+        let metadata = std::fs::read(checkout.path.join(".git")).unwrap();
+        std::fs::write(checkout.path.join(".git"), format!("gitdir: {}\n", other.join(".git").display())).unwrap();
+        let denied = assignment_rpc(daemon.clone(), "assignment.outcomeSubmit", request.clone()).await;
+        assert_eq!(denied["error"]["data"], "invalid-continuation", "{denied}");
+        assert_eq!(store.record_work_state(task.id).unwrap(), before_work);
+        std::fs::write(checkout.path.join(".git"), metadata).unwrap();
     }
     let accepted =
         assignment_rpc(daemon.clone(), "assignment.outcomeSubmit", request.clone()).await;

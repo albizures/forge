@@ -31,6 +31,7 @@ async fn verify_clean_recovery_rpc(
     wrong_commit.record.recovery.evidence = before.input.clone().unwrap();
     assert!(RecordApiServer::recover_retained_work(daemon, wrong_commit).await.is_err());
     if dirty {
+        super::git(checkout, &["config", "status.showUntrackedFiles", "no"]).unwrap();
         std::fs::write(checkout.join("deliverable.txt"), "Staged retained work\n").unwrap();
         super::git(checkout, &["add", "deliverable.txt"]).unwrap();
         std::fs::write(checkout.join("deliverable.txt"), "Unstaged retained work\n").unwrap();
@@ -92,6 +93,25 @@ async fn verify_clean_recovery_rpc(
     let mut conflict = request.clone(); conflict.record.recovery.message.push('!');
     assert!(RecordApiServer::recover_retained_work(daemon, conflict).await.is_err());
     assert_eq!(store.record_work_state(task).unwrap(), work);
+    if !dirty {
+        // Clean salvage must revalidate branch identity after authorization too.
+        super::git(checkout, &["branch", "-m", "changed-after-authorization"]).unwrap();
+        store.resume_dispatch(task).unwrap();
+        let error = daemon.application.execute_task_check_acceptance(task).unwrap_err();
+        assert_eq!(error.code, "evidence-drift");
+        assert_eq!(store.list_agent_assignments(task).unwrap().len(), 1);
+        assert_eq!(store.record_work_state(task).unwrap().input, work.input);
+        super::git(checkout, &["branch", "-m", &expected_branch]).unwrap();
+        let commit = outcome["outcome"]["evidence"]["commit"].as_str().unwrap();
+        super::git(&other, &["fetch", checkout.to_str().unwrap(), commit]).unwrap();
+        super::git(&other, &["checkout", "-b", &expected_branch, commit]).unwrap();
+        let metadata = std::fs::read(checkout.join(".git")).unwrap();
+        std::fs::write(checkout.join(".git"), format!("gitdir: {}\n", other.join(".git").display())).unwrap();
+        store.resume_dispatch(task).unwrap();
+        assert_eq!(daemon.application.execute_task_check_acceptance(task).unwrap_err().code, "evidence-drift");
+        assert_eq!(store.list_agent_assignments(task).unwrap().len(), 1);
+        std::fs::write(checkout.join(".git"), metadata).unwrap();
+    }
     if dirty {
         assert_eq!(std::fs::read(checkout.join("untracked.txt")).unwrap(), b"Untracked retained work\0\xff");
         assert_eq!(super::git(checkout, &["show", ":deliverable.txt"]).unwrap(), "Staged retained work");

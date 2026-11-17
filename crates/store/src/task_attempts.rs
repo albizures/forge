@@ -321,9 +321,9 @@ impl SqliteProjectRepository {
         }
         let latest: Option<String> = tx.query_row("SELECT id FROM agent_assignments WHERE record_id = ?1 ORDER BY attempt_number DESC LIMIT 1", [record.cast_signed()], |r| r.get(0)).optional().map_err(storage_error)?;
         let recoveries = super::retained_work::state(&tx, record)?;
-        let pending = recoveries.last().filter(|r| {
-            r.retained_state.is_some() && Some(&r.request.source_assignment) == latest.as_ref()
-        });
+        let pending = recoveries
+            .last()
+            .filter(|r| Some(&r.request.source_assignment) == latest.as_ref());
         if pending != recovery
             || recovery
                 .is_some_and(|r| r.check_id != expected_check || &r.request.evidence != evidence)

@@ -9,7 +9,7 @@ by migrations—not just the initial `CREATE TABLE` statements.
 - [`src/lib.rs`](src/lib.rs): `SqliteProjectRepository::from_connection`,
   `migrate_*` functions, profile seeds, and repository operations.
 - [`src/workspaces.rs`](src/workspaces.rs): Workspace ownership and Project identity.
-- [`src/upgrade.rs`](src/upgrade.rs): explicit offline schema 7 → 8 → 9 → 10 → 11 → 12 → 13 → 14 → 15 → 16 → 17 → 18 conversion,
+- [`src/upgrade.rs`](src/upgrade.rs): explicit offline schema 7 → 8 → 9 → 10 → 11 → 12 → 13 → 14 → 15 → 16 → 17 → 18 → 19 conversion,
   frozen contract validation, consistent snapshots, and preservation inventories.
   See [Revision State upgrades](../../docs/state-upgrades.md) for orchestration.
 - [`src/record_workspaces.rs`](src/record_workspaces.rs): Record ownership,
@@ -45,7 +45,7 @@ is documented separately in [Records](../../docs/records.md),
   Most references do **not** cascade.
 - Ordinary repository opening accepts only the current marked schema revision.
   Triggers and repository validation also enforce invariants. Explicit managed
-  copy-and-upgrade targets revision 18 from revisions 7 through 18; unsupported
+  copy-and-upgrade targets revision 19 from revisions 7 through 19; unsupported
   stores are rejected without automatic conversion or reset.
 
 ## Retained-work salvage authorization (revision 17)
@@ -87,6 +87,19 @@ exception and prevents duplicate launches after restart. Output observation rema
 strictly clean. Upgrade 17 → 18 only advances the marker in an explicit transaction,
 preserving all JSON/history/counters exactly without inventing fingerprints or
 recovery events. Ordinary opening rejects older markers before writes.
+
+Revision **19** fences corrected checkpoint/salvage identity validation and the
+`forge-retained-state-v2` fingerprint, which includes extended Git index flags
+(such as intent-to-add) but excludes mutable stat-cache fields. Clean and dirty
+salvage both revalidate canonical Repository, branch and Base Commit before the
+first successor. Clean outcome observations use the same identity checks;
+untracked-file configuration cannot hide work, and index trust flags conservatively
+require dirty salvage. SQL and JSON shapes are unchanged. Explicit 18 → 19 upgrade
+preserves every stored value and advances only the marker. Historical v1 dirty
+fingerprints are not rewritten or reauthorized; they fail closed at dispatch.
+Exact retries still return their original audit, so an unconsumed old dirty
+recovery has no automatic reauthorization path. Preserve it for separately approved
+operator recovery design rather than editing storage or discarding evidence.
 
 ## Continuation resets (revision 16)
 
