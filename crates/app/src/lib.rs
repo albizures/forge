@@ -28,7 +28,7 @@ pub use workspace_dispatch::{
     WorkspaceDispatchReadiness, WorkspaceDispatchRepository,
 };
 mod projects;
-pub use projects::{ProjectReference, canonical_project_root};
+pub use projects::{BaseBranchPolicy, ProjectReference, canonical_project_root};
 pub mod record_browsing;
 mod record_planning;
 pub use record_planning::RecordReadiness;

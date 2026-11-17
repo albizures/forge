@@ -2,6 +2,58 @@
 use crate::{Application, Project, RegistrationError, Workspace};
 use std::path::{Path, PathBuf};
 
+/// Project policy for selecting an explicitly configured root's starting branch.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum BaseBranchPolicy {
+    #[default]
+    Ask,
+    PlanningBranch,
+    DefaultBranch,
+}
+
+impl BaseBranchPolicy {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ask => "ask",
+            Self::PlanningBranch => "planning-branch",
+            Self::DefaultBranch => "default-branch",
+        }
+    }
+}
+
+impl std::str::FromStr for BaseBranchPolicy {
+    type Err = RegistrationError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "ask" => Ok(Self::Ask),
+            "planning-branch" => Ok(Self::PlanningBranch),
+            "default-branch" => Ok(Self::DefaultBranch),
+            _ => Err(RegistrationError::new(
+                "invalid-base-branch-policy",
+                "Base Branch Policy must be ask, planning-branch, or default-branch",
+            )),
+        }
+    }
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::BaseBranchPolicy;
+
+    #[test]
+    fn policy_values_are_exact_and_round_trip() {
+        assert_eq!(BaseBranchPolicy::default(), BaseBranchPolicy::Ask);
+        for value in ["ask", "planning-branch", "default-branch"] {
+            assert_eq!(value.parse::<BaseBranchPolicy>().unwrap().as_str(), value);
+        }
+        for value in ["", "ASK", "default", " ask", "ask "] {
+            assert!(value.parse::<BaseBranchPolicy>().is_err());
+        }
+    }
+}
+
 /// An unambiguous Project reference, rendered as `<workspace>/<slug>`.
 /// Persist this reference (not the local slug) in Project-owned configuration and scope.
 #[derive(Clone, Debug, Eq, PartialEq)]
