@@ -87,7 +87,8 @@ Confirmation is an operator assertion, not agent-exit evidence. Recovery require
 no open Assignment and retains a Dispatch Hold until explicitly resumed.
 This Open-Task claim recovery does not authorize salvage of unreported commits on
 an In Progress Task. Use the separate operator `dispatcher recover-retained-work`
-workflow after safe retirement; it currently accepts clean retained commits only
-and preserves/rejects dirty or untracked work without cleanup.
+workflow after safe retirement. It supports clean commits and content-bound dirty,
+staged and untracked salvage without cleanup. Dirty-state fingerprints are separate
+from clean checkpoint evidence; changed or unknown observations block replacement.
 See [dispatch operations](dispatch.md) and [Assignment recovery](assignment-recovery.md)
 for dispatch and provider-resource procedures.

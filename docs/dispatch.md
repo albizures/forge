@@ -104,7 +104,7 @@ current Assessments and outstanding attempts, advance freshness, and retain a
 diagnostic Dispatch Hold. No changes are committed, discarded, reset or cleaned.
 Investigate the retained checkout and explicitly resume dispatch after repair.
 Unexpected observed commits are not automatically selected as trusted input. For
-interrupted Implementation work, use explicit [clean retained-work authorization](assignment-recovery.md#authorize-clean-retained-implementation-work-for-salvage)
+interrupted Implementation work, use explicit [retained-work authorization](assignment-recovery.md#authorize-retained-implementation-work-for-salvage)
 after safe retirement; hold clearance alone cannot adopt unexplained work.
 Description edits also advance freshness, even at the same commit; replacement
 returns to Implementation only after old ownership/resources are safely retired.
@@ -198,19 +198,22 @@ Wire compatibility: existing unit-string dispositions and omitted disposition
 requires a supporting server/client; older peers may reject it. Attempt context
 adds default-null `continuation`, and progress adds default-empty `continuations`.
 Strict older response decoders may reject the added fields; upgrade CLI and server
-together. Storage revision **17** adds explicit retained-work salvage authorization (16 added
+together. Storage revision **18** adds content-bound dirty salvage (17 added explicit retained-work authorization; 16 added
 reset audit/resettable accounting; 15 introduced Continuations). It requires explicit isolated upgrade; ordinary opening never
 converts old state or invents historical Continuations. Accepted historical JSON
 is preserved, with absent added fields decoded as empty/null.
 
 Operator RPC `record.recoverRetainedWork` takes selected Workspace and
 `{record, recovery: {source_assignment, generation, evidence, actor, message,
-confirm_old_agent_cannot_act, confirm_resources_safe}}`. It authorizes only clean
+confirm_old_agent_cannot_act, confirm_resources_safe}}`. It authorizes clean or content-bound dirty/staged/untracked
 retained interrupted Implementation work after verified retirement, without a Check
 pass or automatic launch. `WorkState.recoveries` defaults empty and
 `Attempt.recovery` defaults null for historical stored JSON. Strict older clients
 must upgrade with the server; the Assignment capability surface has no recovery
-operation. See the recovery runbook for the public CLI, safety assertions and
+operation. Recovery context adds default-null `retained_state` with a SHA-256
+fingerprint for dirty salvage; this is not an accepted checkpoint. Schema 18 prevents
+older dispatchers ignoring that binding. No existing stored JSON is rewritten.
+See the recovery runbook for the public CLI, safety assertions and
 separate resume. No historical accepted response is rewritten.
 
 A failed substantive review submits `"disposition": "handback"` with its Findings.
@@ -305,10 +308,9 @@ Changed evidence is rejected as `interrupted-evidence-changed` before acceptance
 interruption counters, Assessments, Findings, or work-input/hold changes. The
 checkout (including committed, tracked and untracked work) is preserved. Deliberate
 checkpoint handoffs use the explicit Implementation Continuation disposition above;
-genuinely interrupted retained work requires operator recovery. The new interrupted-work
-recovery operation is not available in this revision: preserve the checkout and
-ask the operator, rather than resetting,
-discarding changes, or reporting completion merely to hand off work. This does not
+genuinely interrupted retained work requires operator recovery. The operator must use the separate retained-work
+recovery operation after verified retirement. Preserve the checkout rather than
+resetting, discarding changes, or reporting completion merely to hand off work. This does not
 change substantive failed Implementation or `human-input` semantics.
 
 Exact replay of a previously accepted outcome, including a historical changed-evidence

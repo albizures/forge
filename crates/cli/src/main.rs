@@ -402,7 +402,7 @@ enum AgentDispatchCommand {
     ResetRemediation(ResetRemediationArgs),
     /// Reset one Check's continuation counters; retain holds, history and resources.
     ResetContinuations(ResetContinuationsArgs),
-    /// Authorize clean interrupted work for salvage after verified retirement; retains holds.
+    /// Authorize clean or content-bound dirty/staged/untracked salvage after verified retirement; retains holds.
     RecoverRetainedWork(RecoverRetainedWorkArgs),
     /// Clear a Dispatch Hold and reset interrupted-Check retries (not remediation or recovery blockers).
     Resume(DispatchTaskArgs),
@@ -1367,7 +1367,7 @@ async fn agent_dispatch(command: AgentDispatchCommand, workspace: Option<String>
                         );
                     } else {
                         println!(
-                            "Authorized clean retained work for Task {}, Check {} at generation {}. No Check passed; holds and budgets retained. Inspect and explicitly resume separately.",
+                            "Authorized retained work for Task {}, Check {} at generation {}. No Check passed; holds and budgets retained. Inspect recovery context (including any dirty-state fingerprint) and explicitly resume separately.",
                             recovery.record_id, recovery.check_id, recovery.generation
                         );
                     }

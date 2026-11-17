@@ -334,7 +334,15 @@ fn git(folder: &Path, arguments: &[&str]) -> Result<String, ()> {
 /// Server-only adapter for Git worktree lifecycle and platform-shell setup hooks.
 pub struct GitWorktreeAdapter;
 
+mod retained_state;
+
 impl ManagedWorktreeAdapter for GitWorktreeAdapter {
+    fn retained_state(
+        &self,
+        path: &Path,
+    ) -> Result<forge_app::retained_work::RetainedState, RegistrationError> {
+        retained_state::observe(path)
+    }
     fn validate_recovery(
         &self,
         repository: &Path,

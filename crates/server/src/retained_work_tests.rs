@@ -1,9 +1,9 @@
 #[allow(clippy::too_many_lines)]
 async fn verify_clean_recovery_rpc(
     daemon: &Daemon, store: &SqliteProjectRepository, task: u64,
-    checkout: &std::path::Path, outcome: &serde_json::Value,
+    checkout: &std::path::Path, outcome: &serde_json::Value, dirty: bool, database: &std::path::Path,
 ) {
-    use forge_app::{AgentDispatchRepository, RecordRepository};
+    use forge_app::{AgentDispatchRepository, RecordRepository, WorkspaceDispatchRepository};
     use forge_rpc::RecordApiServer;
     let selection = forge_rpc::RecordSelection { workspace: Some("test".into()), ..Default::default() };
     let input = forge_app::retained_work::RecoveryInput {
@@ -30,16 +30,11 @@ async fn verify_clean_recovery_rpc(
     let mut wrong_commit = request.clone();
     wrong_commit.record.recovery.evidence = before.input.clone().unwrap();
     assert!(RecordApiServer::recover_retained_work(daemon, wrong_commit).await.is_err());
-    for untracked in [false, true] {
-        let file = checkout.join(if untracked { "untracked.txt" } else { "deliverable.txt" });
-        std::fs::write(&file, "Retained dirty work\n").unwrap();
-        let error = RecordApiServer::recover_retained_work(daemon, request.clone()).await.unwrap_err();
-        assert!(error.to_string().contains("clean active Managed Worktree"), "{error:?}");
-        assert_eq!(std::fs::read_to_string(&file).unwrap(), "Retained dirty work\n");
-        assert_eq!(store.record_work_state(task).unwrap(), before);
-        // Fixture restoration only; the product never cleans dirty work to authorize recovery.
-        if untracked { std::fs::remove_file(file).unwrap(); }
-        else { std::fs::write(file, "Implemented\n").unwrap(); }
+    if dirty {
+        std::fs::write(checkout.join("deliverable.txt"), "Staged retained work\n").unwrap();
+        super::git(checkout, &["add", "deliverable.txt"]).unwrap();
+        std::fs::write(checkout.join("deliverable.txt"), "Unstaged retained work\n").unwrap();
+        std::fs::write(checkout.join("untracked.txt"), b"Untracked retained work\0\xff").unwrap();
     }
     let mut wrong_repository = request.clone();
     if let forge_app::outcomes::Evidence::Repository { repository, .. } = &mut wrong_repository.record.recovery.evidence { repository.push_str("-other"); }
@@ -61,6 +56,15 @@ async fn verify_clean_recovery_rpc(
         assert!(RecordApiServer::recover_retained_work(daemon, request.clone()).await.is_err());
         std::fs::remove_file(checkout).unwrap();
         std::fs::rename(saved, checkout).unwrap();
+        if dirty {
+            let link = checkout.join("retained-link");
+            std::os::unix::fs::symlink("/etc/passwd", &link).unwrap();
+            let error = RecordApiServer::recover_retained_work(daemon, request.clone()).await.unwrap_err();
+            assert!(error.to_string().contains("Cannot safely observe retained state"));
+            assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+            assert_eq!(store.record_work_state(task).unwrap(), before);
+            std::fs::remove_file(link).unwrap();
+        }
     }
     let expected_branch = format!("feat/forge-{task}");
     super::git(checkout, &["branch", "-m", "wrong-branch"]).unwrap();
@@ -74,6 +78,7 @@ async fn verify_clean_recovery_rpc(
     let recovery = one.unwrap();
     assert_eq!(two.unwrap(), recovery);
     let work = store.record_work_state(task).unwrap();
+    assert_eq!(recovery.retained_state.is_some(), dirty);
     assert_eq!(work.recoveries, vec![recovery.clone()]);
     assert_eq!(work.input, Some(input.evidence));
     assert!(work.output.is_none());
@@ -84,7 +89,73 @@ async fn verify_clean_recovery_rpc(
     let inspected = RecordApiServer::record_work_state(daemon, forge_rpc::SelectedRecordRequest { selection, record: forge_rpc::RecordWorkStateRequest { record: task } }).await.unwrap();
     assert_eq!(inspected, work);
     assert_eq!(RecordApiServer::recover_retained_work(daemon, request.clone()).await.unwrap(), recovery);
-    let mut conflict = request; conflict.record.recovery.message.push('!');
+    let mut conflict = request.clone(); conflict.record.recovery.message.push('!');
     assert!(RecordApiServer::recover_retained_work(daemon, conflict).await.is_err());
     assert_eq!(store.record_work_state(task).unwrap(), work);
+    if dirty {
+        assert_eq!(std::fs::read(checkout.join("untracked.txt")).unwrap(), b"Untracked retained work\0\xff");
+        assert_eq!(super::git(checkout, &["show", ":deliverable.txt"]).unwrap(), "Staged retained work");
+        assert_eq!(std::fs::read_to_string(checkout.join("deliverable.txt")).unwrap(), "Unstaged retained work\n");
+        // Reopen at authorization boundary; exact retries cannot rebind altered bytes.
+        let reopened = SqliteProjectRepository::open(database).unwrap();
+        assert_eq!(reopened.record_work_state(task).unwrap(), work);
+        assert_eq!(super::retained_state::observe(checkout).unwrap(), recovery.retained_state.clone().unwrap());
+        for (file, bytes) in [("untracked.txt", b"changed".as_slice()), ("deliverable.txt", b"changed".as_slice())] {
+            let original = std::fs::read(checkout.join(file)).unwrap();
+            std::fs::write(checkout.join(file), bytes).unwrap();
+            store.resume_dispatch(task).unwrap();
+            let error = daemon.application.execute_task_check_acceptance(task).unwrap_err();
+            assert_eq!(error.code, "evidence-drift");
+            assert!(store.dispatch_hold(task).unwrap().unwrap().reason.contains("Authorized retained bytes or index changed"));
+            assert_eq!(store.list_agent_assignments(task).unwrap().len(), 1);
+            assert_eq!(RecordApiServer::recover_retained_work(daemon, request.clone()).await.unwrap(), recovery);
+            std::fs::write(checkout.join(file), original).unwrap();
+        }
+        // Staged-only drift is detected even if working bytes and HEAD remain identical.
+        super::git(checkout, &["add", "deliverable.txt"]).unwrap();
+        store.resume_dispatch(task).unwrap();
+        assert_eq!(daemon.application.execute_task_check_acceptance(task).unwrap_err().code, "evidence-drift");
+        // Restore only the deliberately mutated fixture, then reserve the authorized successor.
+        std::fs::write(checkout.join("deliverable.txt"), "Staged retained work\n").unwrap();
+        super::git(checkout, &["add", "deliverable.txt"]).unwrap();
+        std::fs::write(checkout.join("deliverable.txt"), "Unstaged retained work\n").unwrap();
+        assert_eq!(super::retained_state::observe(checkout).unwrap(), recovery.retained_state.clone().unwrap());
+        store.resume_dispatch(task).unwrap();
+        let configuration = store.workspace_dispatch_configuration("test").unwrap();
+        let revision = store.agent_assignment("bound-check").unwrap().profile.revision;
+        let selection = forge_app::DispatchPreflightSelection {
+            task_revision: configuration.task_profile.unwrap().revision,
+            grilling_revision: configuration.grilling_profile.unwrap().revision,
+            binding_id: configuration.binding.unwrap().id,
+            provider_generation: configuration.provider_generation,
+        };
+        let mut stale = recovery.clone();
+        stale.retained_state.as_mut().unwrap().sha256 = "0".repeat(64);
+        for expected in [None, Some(&stale)] {
+            assert_eq!(store.claim_task_check_acceptance(task, "denied-salvage", &selection, &request.record.recovery.evidence, recovery.check_id, revision, expected).unwrap_err().code, "recovery-source-stale");
+            assert_eq!(store.list_agent_assignments(task).unwrap().len(), 1);
+        }
+        store.claim_task_check_acceptance(task, "salvage-successor", &selection, &request.record.recovery.evidence, recovery.check_id, revision, Some(&recovery)).unwrap();
+        let secret_root = daemon.capability_secret_root.as_ref().unwrap();
+        std::fs::write(secret_root.join("salvage-successor"), "salvage-secret").unwrap();
+        let credentials = serde_json::json!({"assignmentId":"salvage-successor", "secret":"salvage-secret"});
+        let boot = assignment_rpc(daemon.clone(), "assignment.bootstrap", credentials.clone()).await;
+        assert_eq!(boot["result"]["context"]["bound"]["checkAttempt"]["recovery"], serde_json::to_value(&recovery).unwrap(), "{boot}");
+        assert_eq!(std::fs::read(checkout.join("untracked.txt")).unwrap(), b"Untracked retained work\0\xff");
+        assert_eq!(super::git(checkout, &["show", ":deliverable.txt"]).unwrap(), "Staged retained work");
+        assert_eq!(std::fs::read_to_string(checkout.join("deliverable.txt")).unwrap(), "Unstaged retained work\n");
+        let attempt = store.assignment_check_attempt("salvage-successor").unwrap().unwrap();
+        let mut output = outcome["outcome"].clone();
+        output["attempt_id"] = "salvage-successor".into();
+        output["generation"] = attempt.generation.into();
+        let mut submission = credentials;
+        submission["outcome"] = output;
+        super::git(checkout, &["add", "deliverable.txt", "untracked.txt"]).unwrap();
+        super::git(checkout, &["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "Salvaged output"]).unwrap();
+        let commit = super::git(checkout, &["rev-parse", "HEAD"]).unwrap();
+        submission["outcome"]["evidence"]["commit"] = commit.clone().into();
+        let accepted = assignment_rpc(daemon.clone(), "assignment.outcomeSubmit", submission).await;
+        assert_eq!(accepted["result"]["evidence"]["commit"], commit, "{accepted}");
+        assert_ne!(accepted["result"]["evidence"], outcome["outcome"]["evidence"]);
+    }
 }

@@ -9,7 +9,7 @@ by migrations—not just the initial `CREATE TABLE` statements.
 - [`src/lib.rs`](src/lib.rs): `SqliteProjectRepository::from_connection`,
   `migrate_*` functions, profile seeds, and repository operations.
 - [`src/workspaces.rs`](src/workspaces.rs): Workspace ownership and Project identity.
-- [`src/upgrade.rs`](src/upgrade.rs): explicit offline schema 7 → 8 → 9 → 10 → 11 → 12 → 13 → 14 → 15 → 16 → 17 conversion,
+- [`src/upgrade.rs`](src/upgrade.rs): explicit offline schema 7 → 8 → 9 → 10 → 11 → 12 → 13 → 14 → 15 → 16 → 17 → 18 conversion,
   frozen contract validation, consistent snapshots, and preservation inventories.
   See [Revision State upgrades](../../docs/state-upgrades.md) for orchestration.
 - [`src/record_workspaces.rs`](src/record_workspaces.rs): Record ownership,
@@ -45,7 +45,7 @@ is documented separately in [Records](../../docs/records.md),
   Most references do **not** cascade.
 - Ordinary repository opening accepts only the current marked schema revision.
   Triggers and repository validation also enforce invariants. Explicit managed
-  copy-and-upgrade targets revision 17 from revisions 7 through 17; unsupported
+  copy-and-upgrade targets revision 18 from revisions 7 through 18; unsupported
   stores are rejected without automatic conversion or reset.
 
 ## Retained-work salvage authorization (revision 17)
@@ -63,7 +63,7 @@ retirement and all resources, active canonical claim/Repository and freshness.
 Authorization, freshness invalidation, selected work input and retained hold commit
 together. No Check passes, Continuation is invented, budget resets, or Stack pins
 change. Historical outcomes, Assessments and Findings remain. External Git identity
-and clean commit observations run outside the transaction. The next matching
+and retained-state observations run outside the transaction. The next matching
 Implementation attempt captures `recovery` context; work inspection returns the
 durable `recoveries` audit. Added JSON fields default null/empty when absent from
 historical accepted results, which are never rewritten.
@@ -74,7 +74,19 @@ no historical authorization or adoption, preserving all existing typed values.
 Same-schema transfers retain real audits. Drift reconciliation now invalidates and
 holds without adopting the unexpected observed commit; hold clearance cannot make
 unexplained work trusted input. See [Assignment recovery](../../docs/assignment-recovery.md)
-for clean-only support and the separate trusted operator interface.
+for the separate trusted operator interface.
+
+Revision **18** adds content-bound dirty/staged/untracked salvage. SQL tables are
+unchanged, but this is a breaking semantic safety contract: older dispatchers must
+not ignore dirty-state identity. `recovery_json.retained_state` defaults null for
+historical clean authorizations; dirty authorization stores `{sha256}` binding
+HEAD, index entries/stages/flags, paths, modes and working bytes. It is not ordinary
+clean commit evidence. The application revalidates this identity before the first
+successor claim; the exclusive durable Assignment reservation consumes this input
+exception and prevents duplicate launches after restart. Output observation remains
+strictly clean. Upgrade 17 → 18 only advances the marker in an explicit transaction,
+preserving all JSON/history/counters exactly without inventing fingerprints or
+recovery events. Ordinary opening rejects older markers before writes.
 
 ## Continuation resets (revision 16)
 

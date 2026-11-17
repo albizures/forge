@@ -35,6 +35,11 @@ fn deliberate_continuations_are_bounded_and_atomic() {
     run_case("continuation-sequence");
 }
 
+#[test]
+fn dirty_retained_work_survives_restart_and_launches_one_salvage_agent() {
+    run_case("retained-dirty");
+}
+
 struct Head(Arc<Mutex<String>>);
 impl RepositoryInspector for Head {
     fn inspect(&self, _: &std::path::Path) -> Result<Project, RegistrationError> {
@@ -47,6 +52,14 @@ impl RepositoryInspector for Head {
 
 struct Checkout(Arc<AtomicBool>);
 impl ManagedWorktreeAdapter for Checkout {
+    fn retained_state(
+        &self,
+        _: &std::path::Path,
+    ) -> Result<forge_app::retained_work::RetainedState, RegistrationError> {
+        Ok(forge_app::retained_work::RetainedState {
+            sha256: "c".repeat(64),
+        })
+    }
     fn validate_recovery(
         &self,
         _: &std::path::Path,
@@ -992,7 +1005,7 @@ fn run_case(case: &str) {
             original_profiles
         );
     }
-    if case == "retained-work" {
+    if case.starts_with("retained-") {
         store
             .set_task_base_commit(task.id, &"a".repeat(40))
             .unwrap();
@@ -1033,18 +1046,21 @@ fn run_case(case: &str) {
         )
         .with_workspace_repository(Box::new(SqliteProjectRepository::open(&path).unwrap()))
     };
-    if case == "retained-work" {
-        retained_work::run(&implementation_continuations::Fixture {
-            store: &store,
-            path: &path,
-            root: &root,
-            application: &application,
-            task: task.id,
-            head: &head,
-            dirty: &dirty,
-            unavailable: &unavailable,
-            launches: &launches,
-        });
+    if case.starts_with("retained-") {
+        retained_work::run(
+            &implementation_continuations::Fixture {
+                store: &store,
+                path: &path,
+                root: &root,
+                application: &application,
+                task: task.id,
+                head: &head,
+                dirty: &dirty,
+                unavailable: &unavailable,
+                launches: &launches,
+            },
+            case == "retained-dirty",
+        );
         std::fs::remove_dir_all(root).unwrap();
         return;
     }

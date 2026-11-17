@@ -70,7 +70,7 @@ fn historical_matrix_converts_only_explicit_or_provable_intent_and_preserves_his
             }
         }
         let after = migrate_decisions(&mut c, &decisions).unwrap();
-        assert_eq!(after.schema, Some(17));
+        assert_eq!(after.schema, Some(18));
         for (from, to) in [(5, 1), (6, 5), (7, 6), (4, 1), (3, 1), (10, 20), (5, 31)] {
             assert_eq!(kind(&c, from, to), Some(PrerequisiteKind::WaitsFor));
         }
@@ -164,7 +164,7 @@ fn incomplete_open_chains_survive_conversion_and_same_schema_snapshot_transfer()
             assert!(before.blockers.is_empty());
             assert_eq!(snapshot(&source, &target).unwrap(), before);
             let after = migrate(&target).unwrap();
-            assert_eq!(after.schema, Some(17));
+            assert_eq!(after.schema, Some(18));
             for table in &before.tables {
                 assert!(after.tables.contains(table));
             }

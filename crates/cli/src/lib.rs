@@ -560,7 +560,7 @@ pub async fn assignment_outcome(input: serde_json::Value) -> Result<serde_json::
                 None
             };
             if category.as_deref() == Some("interrupted-evidence-changed") {
-                return "Assignment outcome rejected: interrupted-evidence-changed; interruption must repeat bound input evidence. Deliberate checkpoint handoffs require explicit Continuation support; genuinely interrupted retained work requires operator recovery. Use the explicit continuation disposition for a deliberate clean Implementation checkpoint; clean retained work requires the operator's explicit recover-retained-work authorization after safe retirement. Preserve the checkout and ask the operator; do not reset, discard changes, or report completion merely to hand off work.".into();
+                return "Assignment outcome rejected: interrupted-evidence-changed; interruption must repeat bound input evidence. Deliberate checkpoint handoffs require explicit Continuation support; genuinely interrupted retained work requires operator recovery. Use the explicit continuation disposition for a deliberate clean Implementation checkpoint; retained work requires the operator's explicit recover-retained-work authorization after safe retirement. Preserve the checkout and ask the operator; do not reset, discard changes, or report completion merely to hand off work.".into();
             }
             let category = category.as_deref().filter(|code| {
                 matches!(
@@ -646,7 +646,7 @@ pub async fn request_reset_task_remediation(
         .map_err(|error| format!("could not reset Task remediation through Forge daemon: {error}"))
 }
 
-/// Authorize clean retained work through the trusted operator interface.
+/// Authorize retained work through the trusted operator interface.
 /// # Errors
 /// Returns routing, authorization or daemon failures.
 pub async fn request_recover_retained_work(

@@ -173,8 +173,16 @@ impl Application {
             }
             return Ok((existing, true));
         }
-        let observed = self.observe_task_evidence(record);
+        // Dirty salvage is a one-use, content-bound input exception, never output evidence.
+        let recovery = self.observe_recovery_input(record);
+        let observed = recovery.clone().and_then(|recovery| {
+            recovery.map_or_else(
+                || self.observe_task_evidence(record),
+                |r| Ok(r.request.evidence),
+            )
+        });
         self.records.reconcile_task_evidence(record, &observed)?;
+        let recovery = recovery?;
         let evidence = observed?;
         let check = self
             .list_record_checks(record)?
@@ -263,6 +271,12 @@ impl Application {
                 "provider Workspace identity mismatch",
             ));
         }
+        if self.observe_recovery_input(record)? != recovery {
+            return Err(RegistrationError::new(
+                "recovery-state-changed",
+                "Recovery input changed during provider preflight; inspect retained work",
+            ));
+        }
         let (assignment, existing) = repository.claim_task_check_acceptance(
             record,
             &crate::next_dispatch_assignment_id(),
@@ -270,6 +284,7 @@ impl Application {
             &evidence,
             check.id,
             revision,
+            recovery.as_ref(),
         )?;
         if !existing {
             crate::reconcile_assignment(repository, adapter.as_ref(), &assignment, true)?;

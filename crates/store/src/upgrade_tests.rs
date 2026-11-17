@@ -139,7 +139,7 @@ fn session_schema_expansion_preserves_history_and_stamp_failure_rolls_back() {
         .unwrap();
     assert_eq!(inspection(&c).unwrap(), before);
     let after = migrate_connection(&mut c).unwrap();
-    assert_eq!(after.schema, Some(17));
+    assert_eq!(after.schema, Some(18));
     for table in before.tables {
         assert!(after.tables.contains(&table));
     }
@@ -173,7 +173,7 @@ fn continuation_reset_schema_stamp_failure_rolls_back_rebuild_and_audit_table() 
     c.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
         .unwrap();
     assert_eq!(inspection(&c).unwrap(), before);
-    assert_eq!(migrate_connection(&mut c).unwrap().schema, Some(17));
+    assert_eq!(migrate_connection(&mut c).unwrap().schema, Some(18));
 }
 
 #[test]
@@ -195,7 +195,7 @@ fn continuation_expansion_is_empty_and_stamp_failure_rolls_back() {
         .unwrap();
     assert_eq!(inspection(&c).unwrap(), before);
     let after = migrate_connection(&mut c).unwrap();
-    assert_eq!(after.schema, Some(17));
+    assert_eq!(after.schema, Some(18));
     for table in before.tables {
         assert!(after.tables.contains(&table));
     }
@@ -209,6 +209,29 @@ fn continuation_expansion_is_empty_and_stamp_failure_rolls_back() {
         0
     );
     assert_eq!(migrate_connection(&mut c).unwrap(), after);
+}
+
+#[test]
+fn dirty_recovery_semantic_stamp_failure_preserves_all_old_facts() {
+    let mut c = reference(17).unwrap();
+    c.pragma_update(None, "application_id", APPLICATION_ID)
+        .unwrap();
+    let before = inspection(&c).unwrap();
+    c.authorizer(Some(|context: AuthContext<'_>| match context.action {
+        AuthAction::Pragma {
+            pragma_name: "user_version",
+            pragma_value: Some("18"),
+        } => Authorization::Deny,
+        _ => Authorization::Allow,
+    }))
+    .unwrap();
+    assert!(migrate_connection(&mut c).is_err());
+    c.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+        .unwrap();
+    assert_eq!(inspection(&c).unwrap(), before);
+    let after = migrate_connection(&mut c).unwrap();
+    assert_eq!(after.schema, Some(18));
+    assert_eq!(after.tables, before.tables);
 }
 
 #[test]
@@ -230,7 +253,7 @@ fn retained_work_schema_stamp_failure_rolls_back_all_authority_ddl() {
         .unwrap();
     assert_eq!(inspection(&c).unwrap(), before);
     let after = migrate_connection(&mut c).unwrap();
-    assert_eq!(after.schema, Some(17));
+    assert_eq!(after.schema, Some(18));
     assert_eq!(
         after
             .tables

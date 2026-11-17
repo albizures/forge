@@ -42,8 +42,17 @@ impl SqliteProjectRepository {
         record: u64,
         input: &RecoveryInput,
         claim: &WorktreeClaim,
+        retained_state: Option<&forge_app::retained_work::RetainedState>,
     ) -> Result<RetainedWorkRecovery, RegistrationError> {
         input.validate()?;
+        if retained_state.is_some_and(|s| {
+            s.sha256.len() != 64 || !s.sha256.bytes().all(|b| b.is_ascii_hexdigit())
+        }) {
+            return Err(error(
+                "invalid-recovery",
+                "Retained state requires a full SHA-256 digest",
+            ));
+        }
         let mut c = self
             .connection
             .lock()
@@ -176,6 +185,7 @@ impl SqliteProjectRepository {
             worktree_path: claim.path.clone(),
             generation: work.generation + 1,
             created_at_millis: super::now_millis()?.cast_unsigned(),
+            retained_state: retained_state.cloned(),
         };
         tx.execute(
             "INSERT INTO retained_work_recoveries VALUES (?1, ?2, ?3)",
@@ -187,7 +197,7 @@ impl SqliteProjectRepository {
             ],
         )
         .map_err(storage_error)?;
-        tx.execute("INSERT OR IGNORE INTO dispatch_holds(record_id, reason) VALUES (?1, 'Operator authorized clean retained work for inspection/salvage; verify safety and explicitly resume')", [record.cast_signed()]).map_err(storage_error)?;
+        tx.execute("INSERT OR IGNORE INTO dispatch_holds(record_id, reason) VALUES (?1, 'Operator authorized retained work for inspection/salvage; verify safety and explicitly resume')", [record.cast_signed()]).map_err(storage_error)?;
         tx.commit().map_err(storage_error)?;
         Ok(recovery)
     }

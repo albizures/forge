@@ -2,7 +2,10 @@ use super::*;
 use forge_app::retained_work::RecoveryInput;
 
 #[allow(clippy::too_many_lines)]
-pub fn run(f: &implementation_continuations::Fixture<'_, impl Fn() -> Application + Sync>) {
+pub fn run(
+    f: &implementation_continuations::Fixture<'_, impl Fn() -> Application + Sync>,
+    dirty_recovery: bool,
+) {
     let implementation_continuations::Fixture {
         store,
         path,
@@ -123,13 +126,15 @@ pub fn run(f: &implementation_continuations::Fixture<'_, impl Fn() -> Applicatio
         assert!(application().recover_retained_work(task, &denied).is_err());
         assert_eq!(app.record_work_state(task).unwrap(), before);
     }
-    dirty.store(true, Ordering::SeqCst);
-    assert!(application().recover_retained_work(task, &input).is_err());
-    dirty.store(false, Ordering::SeqCst);
+    dirty.store(dirty_recovery, Ordering::SeqCst);
     // Persistence must revalidate mutable observations even when called without the app adapter.
     let mut claim = store.worktree_claim(task).unwrap().unwrap();
     claim.path = root.join("wrong");
-    assert!(store.authorize_retained_work(task, &input, &claim).is_err());
+    assert!(
+        store
+            .authorize_retained_work(task, &input, &claim, None)
+            .is_err()
+    );
     let c = rusqlite::Connection::open(path).unwrap();
     c.execute_batch("CREATE TRIGGER deny_recovery BEFORE INSERT ON retained_work_recoveries BEGIN SELECT RAISE(ABORT,'injected'); END;").unwrap();
     assert!(application().recover_retained_work(task, &input).is_err());
@@ -148,6 +153,7 @@ pub fn run(f: &implementation_continuations::Fixture<'_, impl Fn() -> Applicatio
         recovery
     });
     let work = application().record_work_state(task).unwrap();
+    assert_eq!(recovery.retained_state.is_some(), dirty_recovery);
     assert_eq!(work.recoveries, vec![recovery.clone()]);
     assert_eq!(work.input, Some(evidence.clone()));
     assert!(work.output.is_none());
@@ -228,6 +234,58 @@ pub fn run(f: &implementation_continuations::Fixture<'_, impl Fn() -> Applicatio
         replacement.id
     );
     assert_eq!(launches.lock().unwrap().len(), 3);
+    if dirty_recovery {
+        std::fs::write(secrets.join(&replacement.id), "secret").unwrap();
+        let replacement_session = app.assignment(&secrets, &replacement.id, "secret").unwrap();
+        let boot = replacement_session.bootstrap().unwrap();
+        assert_eq!(
+            boot.context.bound.check_attempt.unwrap().recovery,
+            Some(recovery.clone())
+        );
+        let mut output = checkpoint.clone();
+        output.attempt_id = successor.id;
+        output.generation = successor.generation;
+        output.evidence = evidence.clone();
+        assert!(
+            replacement_session.submit_outcome(&output).is_err(),
+            "dirty salvage input cannot become a checkpoint"
+        );
+        dirty.store(false, Ordering::SeqCst);
+        *head.lock().unwrap() = "d".repeat(40);
+        output.evidence = Evidence::Repository {
+            repository: root.display().to_string(),
+            commit: "d".repeat(40),
+        };
+        let accepted = replacement_session.submit_outcome(&output).unwrap();
+        assert_eq!(accepted.work.input, Some(output.evidence));
+        // Retirement after reservation never makes the old authorization reusable.
+        app.retire_agent_assignment(&replacement.id).unwrap();
+        store.resume_dispatch(task).unwrap();
+        let configuration = store.workspace_dispatch_configuration("test").unwrap();
+        let selection = forge_app::DispatchPreflightSelection {
+            task_revision: configuration.task_profile.unwrap().revision,
+            grilling_revision: configuration.grilling_profile.unwrap().revision,
+            binding_id: configuration.binding.unwrap().id,
+            provider_generation: configuration.provider_generation,
+        };
+        assert_eq!(
+            store
+                .claim_task_check_acceptance(
+                    task,
+                    "duplicate-salvage",
+                    &selection,
+                    &evidence,
+                    recovery.check_id,
+                    replacement.profile.revision,
+                    Some(&recovery)
+                )
+                .unwrap_err()
+                .code,
+            "recovery-source-stale"
+        );
+        assert_eq!(store.list_agent_assignments(task).unwrap().len(), 3);
+        assert_eq!(store.task_base_commit(task).unwrap(), Some("a".repeat(40)));
+    }
     assert!(
         session.context().is_err(),
         "revoked source capability never regains authority"

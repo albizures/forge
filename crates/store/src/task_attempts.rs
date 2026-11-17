@@ -275,6 +275,7 @@ impl SqliteProjectRepository {
         evidence: &Evidence,
         expected_check: u64,
         expected_profile: u32,
+        recovery: Option<&forge_app::retained_work::RetainedWorkRecovery>,
     ) -> Result<(AgentAssignment, bool), RegistrationError> {
         if id.trim().is_empty() {
             return Err(error(
@@ -317,6 +318,20 @@ impl SqliteProjectRepository {
             drop(tx);
             drop(c);
             return Ok((self.agent_assignment(&existing)?, true));
+        }
+        let latest: Option<String> = tx.query_row("SELECT id FROM agent_assignments WHERE record_id = ?1 ORDER BY attempt_number DESC LIMIT 1", [record.cast_signed()], |r| r.get(0)).optional().map_err(storage_error)?;
+        let recoveries = super::retained_work::state(&tx, record)?;
+        let pending = recoveries.last().filter(|r| {
+            r.retained_state.is_some() && Some(&r.request.source_assignment) == latest.as_ref()
+        });
+        if pending != recovery
+            || recovery
+                .is_some_and(|r| r.check_id != expected_check || &r.request.evidence != evidence)
+        {
+            return Err(error(
+                "recovery-source-stale",
+                "Retained input authorization changed or was consumed; re-observe before claiming",
+            ));
         }
         if !matches!(task.status, RecordStatus::Open | RecordStatus::InProgress) {
             return Err(error(

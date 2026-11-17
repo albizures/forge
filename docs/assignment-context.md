@@ -69,6 +69,10 @@ Context separates:
   `checkAttempt.continuation` is null or the latest accepted Implementation handoff
   captured at attempt creation: accepted attempt id, checkpoint evidence and the
   stopping reason, completed work, actual verification/unrun gates and remaining work.
+  `checkAttempt.recovery` separately captures explicit operator salvage authorization.
+  Its optional `retained_state.sha256` binds dirty/staged/untracked starting state,
+  not a clean accepted checkpoint. Inspect and salvage that retained checkout;
+  ordinary output submission still requires clean committed evidence.
   These are persisted configuration/ownership facts, **not runtime
   attestation**. The execution directory is retained once available by dispatch
   context construction (or the first authenticated context read for an older
@@ -196,8 +200,9 @@ observed full checkpoint commit. Same-Check replacement remains gated by confirm
 retirement and resources, capacity, dependencies, provider readiness and holds.
 Budgets stop after 20 total or two consecutive unchanged-evidence Continuations;
 the limit-reaching checkpoint is retained. Genuinely interrupted retained work
-requires operator recovery; the new recovery operation is not available in this
-revision. Preserve the work and ask the operator; do not reset,
+requires the operator's explicit `dispatcher recover-retained-work` authorization
+after verified retirement/resource reconciliation. Dirty salvage is content-bound
+and transfers inspection authority, not correctness. Preserve the work and ask the operator; do not reset,
 discard changes, or report completion merely to hand off work. Exact replay of
 already accepted historical outcomes remains supported and confers no new authority.
 See [outcome shape and handback rules](dispatch.md#check-attempts-and-controlled-acceptance).

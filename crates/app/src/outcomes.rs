@@ -112,7 +112,7 @@ impl OutcomeInput {
         if self.disposition == OutcomeDisposition::Interrupted && &self.evidence != bound {
             return Err(RegistrationError::new(
                 "interrupted-evidence-changed",
-                "Interrupted outcomes must repeat their bound input evidence. Deliberate checkpoint handoffs require explicit Continuation support; genuinely interrupted retained work requires operator recovery. Use the explicit continuation disposition for a deliberate clean Implementation checkpoint; clean retained work requires the operator's explicit recover-retained-work authorization after safe retirement. Preserve the checkout and ask the operator; do not reset, discard changes, or report completion merely to hand off work.",
+                "Interrupted outcomes must repeat their bound input evidence. Deliberate checkpoint handoffs require explicit Continuation support; genuinely interrupted retained work requires operator recovery. Use the explicit continuation disposition for a deliberate clean Implementation checkpoint; retained work requires the operator's explicit recover-retained-work authorization after safe retirement. Preserve the checkout and ask the operator; do not reset, discard changes, or report completion merely to hand off work.",
             ));
         }
         Ok(())

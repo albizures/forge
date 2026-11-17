@@ -1321,8 +1321,9 @@ impl RecordRepository for SqliteProjectRepository {
         record: u64,
         input: &forge_app::retained_work::RecoveryInput,
         claim: &WorktreeClaim,
+        retained_state: Option<&forge_app::retained_work::RetainedState>,
     ) -> Result<forge_app::retained_work::RetainedWorkRecovery, RegistrationError> {
-        self.recover_retained_work(record, input, claim)
+        self.recover_retained_work(record, input, claim, retained_state)
     }
     fn reset_record_continuations(
         &self,
@@ -2399,6 +2400,7 @@ impl AgentDispatchRepository for SqliteProjectRepository {
         evidence: &forge_app::outcomes::Evidence,
         check: u64,
         profile_revision: u32,
+        recovery: Option<&forge_app::retained_work::RetainedWorkRecovery>,
     ) -> Result<(AgentAssignment, bool), RegistrationError> {
         self.claim_check_attempt(
             record,
@@ -2407,6 +2409,7 @@ impl AgentDispatchRepository for SqliteProjectRepository {
             evidence,
             check,
             profile_revision,
+            recovery,
         )
     }
 

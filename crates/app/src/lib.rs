@@ -494,6 +494,16 @@ pub trait ManagedWorktreeAdapter: Send + Sync {
             "Worktree recovery validation is unavailable",
         ))
     }
+    /// Observe retained bytes without modifying Git or following filesystem links.
+    fn retained_state(
+        &self,
+        _path: &Path,
+    ) -> Result<retained_work::RetainedState, RegistrationError> {
+        Err(RegistrationError::new(
+            "recovery-unavailable",
+            "Retained-state observation is unavailable",
+        ))
+    }
     fn create(
         &self,
         repository: &Path,
@@ -737,6 +747,7 @@ pub trait RecordRepository: ProjectRepository {
         _record: u64,
         _input: &retained_work::RecoveryInput,
         _claim: &WorktreeClaim,
+        _retained_state: Option<&retained_work::RetainedState>,
     ) -> Result<retained_work::RetainedWorkRecovery, RegistrationError> {
         Err(RegistrationError::new(
             "unsupported-contract",
@@ -2115,6 +2126,7 @@ pub trait AgentDispatchRepository: RecordRepository + WorkspaceDispatchRepositor
         _evidence: &outcomes::Evidence,
         _check: u64,
         _profile_revision: u32,
+        _recovery: Option<&retained_work::RetainedWorkRecovery>,
     ) -> Result<(AgentAssignment, bool), RegistrationError> {
         Err(task_dispatch_unsupported())
     }

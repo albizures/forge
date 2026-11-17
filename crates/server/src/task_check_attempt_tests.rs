@@ -20,6 +20,11 @@ async fn clean_retained_work_recovery_rpc_checks_git_scope_and_operator_authorit
     check_bound_outcome_inspection(3).await;
 }
 
+#[tokio::test]
+async fn dirty_retained_work_recovery_rpc_binds_staged_tracked_and_untracked_bytes() {
+    check_bound_outcome_inspection(4).await;
+}
+
 #[allow(clippy::too_many_lines)]
 async fn check_bound_outcome_inspection(kind: u8) {
     use forge_app::{ManagedWorktreeRepository, WorkspaceDispatchRepository, WorkspaceRepository};
@@ -109,9 +114,9 @@ async fn check_bound_outcome_inspection(kind: u8) {
     std::fs::create_dir_all(&repository).unwrap();
     super::git(&repository, &["init"]).unwrap();
     super::git(&repository, &["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "Input"]).unwrap();
-    let branch = if kind == 3 { format!("feat/forge-{}", task.id) } else { "task-check".into() };
+    let branch = if kind >= 3 { format!("feat/forge-{}", task.id) } else { "task-check".into() };
     super::git(&repository, &["worktree", "add", "-b", &branch, checkout.path.to_str().unwrap()]).unwrap();
-    if kind == 3 {
+    if kind >= 3 {
         store.set_task_base_commit(task.id, &super::git(&checkout.path, &["rev-parse", "HEAD"]).unwrap()).unwrap();
     }
     store.activate_worktree_claim(task.id).unwrap();
@@ -132,6 +137,7 @@ async fn check_bound_outcome_inspection(kind: u8) {
             &evidence,
             check.id,
             profile.revision,
+            None,
         )
         .unwrap();
     let root = fixture.database_path.with_extension("assignment-secrets");
@@ -263,8 +269,8 @@ async fn check_bound_outcome_inspection(kind: u8) {
     // Fixture-only restoration, not a product repair path.
     std::fs::write(checkout.path.join("deliverable.txt"), "Implemented\n").unwrap();
     std::fs::remove_file(checkout.path.join("untracked.txt")).unwrap();
-    if kind == 3 {
-        verify_clean_recovery_rpc(&daemon, &store, task.id, &checkout.path, &request).await;
+    if kind >= 3 {
+        verify_clean_recovery_rpc(&daemon, &store, task.id, &checkout.path, &request, kind == 4, &fixture.database_path).await;
         return;
     }
     if continuation {

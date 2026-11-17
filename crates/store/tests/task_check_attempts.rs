@@ -137,6 +137,7 @@ fn acceptance_claim_snapshots_first_unpassed_check_and_pinned_profile_atomically
                         &input,
                         check,
                         revision,
+                        None,
                     )
                     .unwrap()
             })
@@ -186,7 +187,8 @@ fn acceptance_claim_snapshots_first_unpassed_check_and_pinned_profile_atomically
                 &selection,
                 &input,
                 checks[0].id,
-                pinned.revision
+                pinned.revision,
+                None,
             )
             .unwrap(),
         (assignment, true)
@@ -273,7 +275,8 @@ fn acceptance_claim_snapshots_first_unpassed_check_and_pinned_profile_atomically
                 &selection,
                 &outcome.evidence,
                 checks[1].id,
-                pinned.revision
+                pinned.revision,
+                None,
             )
             .unwrap_err()
             .code,

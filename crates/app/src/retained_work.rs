@@ -34,6 +34,12 @@ impl RecoveryInput {
     }
 }
 
+/// Content-bound salvage input, deliberately separate from clean commit evidence.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RetainedState {
+    pub sha256: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RetainedWorkRecovery {
     pub record_id: u64,
@@ -42,13 +48,15 @@ pub struct RetainedWorkRecovery {
     pub worktree_path: std::path::PathBuf,
     pub generation: u64,
     pub created_at_millis: u64,
+    #[serde(default)]
+    pub retained_state: Option<RetainedState>,
 }
 
 impl Application {
-    /// Authorize clean retained work as salvage input, not as an accepted checkpoint or pass.
+    /// Authorize retained work as salvage input, not as an accepted checkpoint or pass.
     /// Does not clear holds, reset budgets, retire resources or launch a replacement.
     /// # Errors
-    /// Rejects unsafe ownership, changed observations, dirty work and conflicting retries.
+    /// Rejects unsafe ownership, changed/unknown observations and conflicting retries.
     pub fn recover_retained_work(
         &self,
         record: u64,
@@ -77,18 +85,16 @@ impl Application {
                 "Retained-work recovery requires an existing active claim",
             )
         })?;
-        let expected_path = managed.worktree_path(record)?;
-        if claim.path != expected_path {
+        let observed = self.validate_retained_work(record, input, &claim)?;
+        // External observations remain outside the writer transaction. Exclude external writers.
+        if self.validate_retained_work(record, input, &claim)? != observed {
             return Err(RegistrationError::new(
-                "worktree-recovery-invalid",
-                "Claim does not match canonical Task placement",
+                "recovery-state-changed",
+                "Retained state changed during observation; exclude external writers and inspect again",
             ));
         }
-        self.validate_retained_work(record, input, &claim)?;
-        // Git/provider observations never run in the writer transaction. Recheck Git immediately
-        // before committing; persistence atomically revalidates mutable Forge ownership/identity.
-        self.validate_retained_work(record, input, &claim)?;
-        self.records.authorize_retained_work(record, input, &claim)
+        self.records
+            .authorize_retained_work(record, input, &claim, observed.as_ref())
     }
 
     fn validate_retained_work(
@@ -96,9 +102,17 @@ impl Application {
         record: u64,
         input: &RecoveryInput,
         claim: &WorktreeClaim,
-    ) -> Result<(), RegistrationError> {
+    ) -> Result<Option<RetainedState>, RegistrationError> {
         crate::validate_managed_worktree_placement(&claim.path)?;
         let managed = self.managed_worktrees()?;
+        if claim.path != managed.worktree_path(record)?
+            || claim.state != crate::WorktreeClaimState::Active
+        {
+            return Err(RegistrationError::new(
+                "worktree-recovery-invalid",
+                "Claim does not match active canonical Task placement",
+            ));
+        }
         let task = managed.show_record(record)?;
         crate::validate_task_dispatch_mode(&task)?;
         if task.status != crate::RecordStatus::InProgress || task.project_slugs.len() != 1 {
@@ -120,12 +134,65 @@ impl Application {
             &crate::stacks::task_branch(record),
             &base,
         )?;
-        if self.observe_task_evidence(record)? != input.evidence {
+        let info = self.managed_worktree_info(record)?;
+        let dirty = info.safety.facts.iter().any(|f| f == "dirty");
+        let observed = if dirty {
+            Evidence::Repository {
+                repository: project.project_root.display().to_string(),
+                commit: self.inspector.head_commit(&claim.path)?,
+            }
+        } else {
+            self.observe_task_evidence(record)?
+        };
+        let retained = if dirty {
+            Some(self.worktree_adapter()?.retained_state(&claim.path)?)
+        } else {
+            None
+        };
+        if observed != input.evidence {
             return Err(RegistrationError::new(
                 "recovery-evidence-changed",
-                "Observed clean Repository commit differs from the selected recovery evidence; preserve and inspect retained work",
+                "Observed Repository HEAD differs from selected recovery evidence; preserve and inspect retained work",
             ));
         }
-        Ok(())
+        Ok(retained)
+    }
+
+    /// Only the first replacement may use this exact authorized dirty input.
+    pub(crate) fn observe_recovery_input(
+        &self,
+        record: u64,
+    ) -> Result<Option<RetainedWorkRecovery>, RegistrationError> {
+        let Some(latest) = self
+            .dispatch()?
+            .list_agent_assignments(record)?
+            .into_iter()
+            .next()
+        else {
+            return Ok(None);
+        };
+        let work = self.record_work_state(record)?;
+        let Some(recovery) = work.recoveries.last().filter(|r| {
+            r.request.source_assignment == latest.id
+                && r.retained_state.is_some()
+                && work.input.as_ref() == Some(&r.request.evidence)
+        }) else {
+            return Ok(None);
+        };
+        let claim = self
+            .managed_worktrees()?
+            .worktree_claim(record)?
+            .ok_or_else(|| {
+                RegistrationError::new("managed-worktree-required", "Recovery claim missing")
+            })?;
+        if self.validate_retained_work(record, &recovery.request, &claim)?
+            != recovery.retained_state
+        {
+            return Err(RegistrationError::new(
+                "recovery-state-changed",
+                "Authorized retained bytes or index changed; preserve evidence and inspect before new authorization",
+            ));
+        }
+        Ok(Some(recovery.clone()))
     }
 }

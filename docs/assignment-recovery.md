@@ -107,7 +107,7 @@ retirement-pending and other blockers remain untouched and reserve capacity unti
 separately resolved. The Dispatch Hold remains, too. Inspect again rather than
 assuming the command's success means recovery is complete.
 
-## Authorize clean retained Implementation work for salvage
+## Authorize retained Implementation work for salvage
 
 Unreported changed HEAD is **not** an accepted Continuation. Ordinary dispatch or
 clearing a drift hold never adopts that commit. After retirement and complete
@@ -118,7 +118,7 @@ external children. Only when the old agent cannot act and all resources are safe
 forge record check work <task-id> --workspace <id> --json
 forge dispatcher recover-retained-work <task-id> --workspace <id> \
   --source-assignment <assignment-id> --generation <current-generation> \
-  --repository <registered-project-root> --commit <full-clean-HEAD> \
+  --repository <registered-project-root> --commit <full-HEAD> \
   --actor <operator> --message <salvage-explanation> \
   --confirm-old-agent-cannot-act --confirm-resources-safe --json
 ```
@@ -136,15 +136,32 @@ source attempt and freshness are revalidated atomically. Operators must exclude
 external Git writers during inspection/authorization; Forge cannot lock out
 arbitrary same-user filesystem mutation.
 
-**This revision supports clean retained commits only.** Dirty tracked changes and
-untracked files are preserved and rejected; do not clean, reset or commit them just
-to satisfy recovery. Dirty/untracked salvage is a later slice. Keep the diagnostic
-and retained evidence for operator investigation if observations are uncertain.
+Clean commits and dirty tracked, staged and untracked work are supported. The
+command selects HEAD and independently observes retained state twice. For dirty
+input, `recoveries[].retained_state.sha256` binds HEAD, index entries/stages/flags,
+file names, file modes and working contents (including untracked/ignored files),
+without committing, stashing, copying or discarding anything. The digest is salvage
+identity, **not clean checkpoint evidence**. Inspection failures remain unknown:
+links in dirty input, submodules, unreadable files and unsupported path encodings
+fail closed with `recovery-state-unknown`; preserve them for explicit investigation.
+Exclude external writers throughout authorization and dispatch.
+
+The first successor revalidates the exact retained fingerprint and canonical
+Repository/branch/base/claim before claim, including after restart. Changed bytes
+or staged state retain an actionable drift hold and launch nothing. Exact request
+replay returns the original audit, never new authority for changed bytes; conflicts
+cannot overwrite it. The exception is consumed by reserving the first successor,
+not by bootstrap, preventing crash/restart from duplicating an actor. A failed or
+uncertain launch still requires normal retirement/resource reconciliation; it does
+not renew salvage authority. Do not clean or reset work to satisfy dispatch.
+The replacement receives the original checkout and explicit recovery context.
+Its Continuation/success must report actual clean committed output: dirty recovery
+input never waives output, review or publication validation.
 
 Authorization atomically records selected evidence, source Assignment, actor,
 explanation, confirmations, canonical path and timestamp. It advances freshness,
 invalidates current passes/attempts while retaining all historical Assessments,
-outcomes and Findings, and selects the retained commit as Implementation input.
+outcomes and Findings, and selects retained HEAD plus the separate dirty-state identity as Implementation input.
 It does not backfill a Continuation, pass a Check, certify correctness, change the
 immutable Stack Base Commit, reset any budget, clear existing holds, or launch an
 agent. A hold is retained (existing safety reasons win). Exact retries for the same

@@ -5,7 +5,13 @@ another. It preserves the source database and upgrades a consistent copy. Ordina
 repository opening still rejects incompatible schemas before initialization writes;
 it never migrates, resets, or rewrites an older store's marker.
 
-Supported transfers target schema **17** from schemas **7** through **17**.
+Supported transfers target schema **18** from schemas **7** through **18**.
+The 17 → 18 step is a semantic safety-contract upgrade: dirty salvage now requires
+a content-bound retained-state fingerprint and one-use successor input validation.
+Tables do not change. Existing recovery JSON, history and counters remain byte-exact;
+no fingerprints or authorization are invented. Older binaries must not open schema
+18 and ignore this binding. Ordinary opening of schema 17 rejects before writes;
+only explicit isolated upgrade advances the marker transactionally.
 The 16 → 17 step adds empty retained-work recovery authority/audit. It never
 adopts unreported commits or invents historical authorization. Existing counters,
 checkpoints, outcomes, Findings, immutable pins and ownership evidence are retained.
