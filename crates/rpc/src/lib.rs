@@ -286,6 +286,12 @@ pub trait RecordApi {
         &self,
         request: SelectedRecordRequest<RecordFindingMutationRequest>,
     ) -> RpcResult<Finding>;
+    /// Trusted operator route; never an Assignment capability operation.
+    #[method(name = "resetContinuations")]
+    async fn reset_continuations(
+        &self,
+        request: SelectedRecordRequest<ResetContinuationsRequest>,
+    ) -> RpcResult<forge_app::outcomes::WorkState>;
     #[method(name = "recordWorkState")]
     async fn record_work_state(
         &self,
@@ -461,6 +467,15 @@ pub struct RecordFindingMutationRequest {
     pub finding: u64,
     pub mutation: FindingMutationInput,
 }
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResetContinuationsRequest {
+    pub record: u64,
+    pub check: u64,
+    pub actor: String,
+    pub message: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecordWorkStateRequest {

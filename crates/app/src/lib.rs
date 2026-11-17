@@ -728,6 +728,21 @@ pub trait RecordRepository: ProjectRepository {
             "Findings are not supported",
         ))
     }
+    /// Operator-only reset, scoped to this repository's Workspace and selected Task/Check.
+    /// # Errors
+    /// Returns unsupported, scope or storage errors.
+    fn reset_record_continuations(
+        &self,
+        _record: u64,
+        _check: u64,
+        _actor: &str,
+        _message: &str,
+    ) -> Result<outcomes::WorkState, RegistrationError> {
+        Err(RegistrationError::new(
+            "unsupported-contract",
+            "continuation reset is unavailable",
+        ))
+    }
     /// Inspect a Task's current work evidence and freshness.
     /// # Errors
     /// Returns unsupported, scope or storage errors.

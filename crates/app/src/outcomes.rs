@@ -176,6 +176,8 @@ pub struct CheckContinuations {
     pub total: u32,
     pub consecutive_unchanged: u32,
     pub checkpoint: ContinuationCheckpoint,
+    #[serde(default)]
+    pub resets: Vec<ProgressReset>,
 }
 impl CheckContinuations {
     #[must_use]
@@ -267,6 +269,19 @@ impl Application {
     ) -> Result<WorkState, RegistrationError> {
         self.dispatch()?
             .reset_task_remediation(record, actor, message)
+    }
+    /// Reset only one Check's continuation counters, retaining checkpoints and safety state.
+    /// # Errors
+    /// Rejects blank attribution and Check identities outside the selected Task.
+    pub fn reset_check_continuations(
+        &self,
+        record: u64,
+        check: u64,
+        actor: &str,
+        message: &str,
+    ) -> Result<WorkState, RegistrationError> {
+        self.records
+            .reset_record_continuations(record, check, actor, message)
     }
     /// Inspect freshness and the immutable input/output evidence of a Task.
     /// # Errors

@@ -355,11 +355,110 @@ pub fn run(f: &Fixture<'_, impl Fn() -> Application + Sync>, case: &str) {
                     .unwrap(),
                 accepted
             );
+            verify_reset(f, initial_checks[0].id);
         }
     }
     if case == "continuation-sequence" {
         mixed_accounting(f, &secrets);
     }
+}
+
+fn verify_reset(f: &Fixture<'_, impl Fn() -> Application + Sync>, check: u64) {
+    let app = (f.application)();
+    let before = app.record_work_state(f.task).unwrap();
+    let hold = f.store.dispatch_hold(f.task).unwrap();
+    let assignments = f.store.list_agent_assignments(f.task).unwrap();
+    for (actor, message) in [(" ", "reason"), ("operator", " ")] {
+        assert!(
+            app.reset_check_continuations(f.task, check, actor, message)
+                .is_err()
+        );
+    }
+    assert!(
+        app.reset_check_continuations(f.task, check + 10000, "operator", "reason")
+            .is_err()
+    );
+    let unrelated = f
+        .store
+        .open_typed_record(&NewTypedRecord {
+            record_type: RecordType::Task,
+            body: "Unrelated Task".into(),
+            project_slugs: vec!["test/api".into()],
+            generated_by_ids: vec![],
+        })
+        .unwrap();
+    let other_check = f.store.list_record_checks(unrelated.id).unwrap()[0].id;
+    assert!(
+        app.reset_check_continuations(f.task, other_check, "operator", "reason")
+            .is_err()
+    );
+    let other_root = f.root.with_extension("other-workspace");
+    std::fs::create_dir(&other_root).unwrap();
+    f.store
+        .create_workspace("other", "Other", &other_root)
+        .unwrap();
+    let other = f.store.in_record_workspace("other").unwrap();
+    assert!(
+        other
+            .reset_record_continuations(f.task, check, "operator", "reason")
+            .is_err()
+    );
+    std::fs::remove_dir(&other_root).unwrap();
+    assert_eq!(app.record_work_state(f.task).unwrap(), before);
+    let c = rusqlite::Connection::open(f.path).unwrap();
+    c.execute_batch("CREATE TRIGGER deny_reset BEFORE INSERT ON check_continuation_resets BEGIN SELECT RAISE(ABORT, 'injected reset audit failure'); END;").unwrap();
+    assert!(
+        app.reset_check_continuations(f.task, check, "operator", "reason")
+            .is_err()
+    );
+    assert_eq!((f.application)().record_work_state(f.task).unwrap(), before);
+    c.execute_batch("DROP TRIGGER deny_reset").unwrap();
+    let barrier = std::sync::Barrier::new(2);
+    std::thread::scope(|scope| {
+        let reset = || {
+            let app = (f.application)();
+            barrier.wait();
+            app.reset_check_continuations(
+                f.task,
+                check,
+                "operator",
+                "Investigated checkpoint and renewed allowance",
+            )
+            .unwrap();
+        };
+        let a = scope.spawn(reset);
+        let b = scope.spawn(reset);
+        a.join().unwrap();
+        b.join().unwrap();
+    });
+    let mut expected = before;
+    let counters = &mut expected.progress.continuations[0];
+    counters.total = 0;
+    counters.consecutive_unchanged = 0;
+    let after = (f.application)().record_work_state(f.task).unwrap();
+    assert_eq!(after.progress.continuations[0].resets.len(), 2);
+    counters
+        .resets
+        .clone_from(&after.progress.continuations[0].resets);
+    assert_eq!(after, expected);
+    assert_eq!(f.store.dispatch_hold(f.task).unwrap(), hold);
+    assert_eq!(f.store.list_agent_assignments(f.task).unwrap(), assignments);
+    assert_eq!(
+        app.execute_task_check_acceptance(f.task).unwrap_err().code,
+        "dispatch-held"
+    );
+    // Body invalidation and reset confer no authority; after the independent hold
+    // and retirement gates, the ordinary path can select the same Check again.
+    f.store.resume_dispatch(f.task).unwrap();
+    let (successor, _) = app.execute_task_check_acceptance(f.task).unwrap();
+    assert_eq!(
+        f.store
+            .assignment_check_attempt(&successor.id)
+            .unwrap()
+            .unwrap()
+            .check_id,
+        check
+    );
 }
 
 fn mixed_accounting(f: &Fixture<'_, impl Fn() -> Application>, secrets: &std::path::Path) {

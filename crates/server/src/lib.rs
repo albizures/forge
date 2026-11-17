@@ -1388,6 +1388,16 @@ impl RecordApiServer for Daemon {
             .mutate_record_finding(r.record, r.finding, &r.mutation)
             .map_err(rpc_error)
     }
+    async fn reset_continuations(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<forge_rpc::ResetContinuationsRequest>,
+    ) -> RpcResult<forge_app::outcomes::WorkState> {
+        let application = self.record_application(&request.selection, &mut [])?;
+        let r = request.record;
+        application
+            .reset_check_continuations(r.record, r.check, &r.actor, &r.message)
+            .map_err(rpc_error)
+    }
     async fn record_work_state(
         &self,
         request: forge_rpc::SelectedRecordRequest<forge_rpc::RecordWorkStateRequest>,

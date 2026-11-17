@@ -9,7 +9,8 @@ use rusqlite::Connection;
 // conversion; identical table definitions do not imply semantic compatibility.
 // Revision 14 retains Assignment session bootstrap provenance.
 // Revision 15 adds explicit Check-scoped continuation checkpoints and budgets.
-const SCHEMA_REVISION: i64 = 15;
+// Revision 16 adds append-only, Check-scoped continuation reset attribution.
+const SCHEMA_REVISION: i64 = 16;
 const APPLICATION_ID: i64 = 0x464f_5247; // FORG
 
 pub(super) fn validate(connection: &Connection) -> Result<(), RegistrationError> {

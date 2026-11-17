@@ -9,7 +9,7 @@ by migrations—not just the initial `CREATE TABLE` statements.
 - [`src/lib.rs`](src/lib.rs): `SqliteProjectRepository::from_connection`,
   `migrate_*` functions, profile seeds, and repository operations.
 - [`src/workspaces.rs`](src/workspaces.rs): Workspace ownership and Project identity.
-- [`src/upgrade.rs`](src/upgrade.rs): explicit offline schema 7 → 8 → 9 → 10 → 11 → 12 → 13 → 14 → 15 conversion,
+- [`src/upgrade.rs`](src/upgrade.rs): explicit offline schema 7 → 8 → 9 → 10 → 11 → 12 → 13 → 14 → 15 → 16 conversion,
   frozen contract validation, consistent snapshots, and preservation inventories.
   See [Revision State upgrades](../../docs/state-upgrades.md) for orchestration.
 - [`src/record_workspaces.rs`](src/record_workspaces.rs): Record ownership,
@@ -45,13 +45,32 @@ is documented separately in [Records](../../docs/records.md),
   Most references do **not** cascade.
 - Ordinary repository opening accepts only the current marked schema revision.
   Triggers and repository validation also enforce invariants. Explicit managed
-  copy-and-upgrade targets revision 15 from revisions 7 through 15; unsupported
+  copy-and-upgrade targets revision 16 from revisions 7 through 16; unsupported
   stores are rejected without automatic conversion or reset.
+
+## Continuation resets (revision 16)
+
+`check_continuation_resets` is append-only through supported operations: `id` PK,
+`check_id` FK to `record_checks`, nonblank `actor` and `message` validated at the
+application/persistence boundary, and `created_at_millis`. Explicit operator reset
+atomically sets only the selected Check's total and consecutive-unchanged counts
+to zero and inserts the audit row. Checkpoint/handoff and historical outcomes,
+holds, remediation/interruption budgets and resource/ownership state are retained.
+Inspection includes the full reset history ordered by audit id, not a truncated page.
+Concurrent resets serialize; audit failure rolls back both effects.
+
+Revision 16 is breaking: `check_continuations.total` now permits zero. Ordinary
+opening rejects schema 15 and earlier before writes. Explicit offline upgrade
+rebuilds the counter table preserving all existing typed values/checkpoint bytes,
+and adds an empty audit table without invented resets. Same-schema transfers
+retain actual history. Wire additions are compatible for permissive decoders:
+`CheckContinuations.resets` defaults empty for old stored JSON; strict older clients
+must coordinate CLI/server upgrades. Historical accepted results are never rewritten.
 
 ## Implementation Continuations (revision 15)
 
 `check_continuations` stores one row per stable Check: `check_id` is its primary
-key and FK to `record_checks`; `total` is constrained to 1–20;
+key and FK to `record_checks`; `total` is constrained to 0–20 (1–20 in revision 15);
 `consecutive_unchanged` to 0–2; `checkpoint_json` contains accepted attempt id,
 Repository evidence and full structured handoff. Acceptance updates these fields,
 `record_work.input_json` (clearing output), closed attempt request/result and any

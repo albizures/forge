@@ -163,6 +163,17 @@ all resources reconciled, clean current evidence/freshness, all current passes,
 no blockers/holds and satisfied dependencies. Managed Worktrees/branches remain
 retained after completion; no automatic Git integration or cleanup occurs.
 
+Continuation accounting is independent: 20 total or two consecutive unchanged
+checkpoints exhaust a Check. `record check work <task> --workspace <id>` (or `--json`)
+shows counters, retained handoff and reset audit. Only
+`dispatcher reset-continuations <task> --check <check> --workspace <id> --actor <operator> --message <explanation>`
+renews that Check's total and consecutive-unchanged allowance. It retains holds,
+ownership/resources, evidence and all other budgets/history, and launches nothing.
+After investigating the limit and recording a justified reset, complete the separate
+retirement/resource checks above before explicit resume. Neither resume nor remediation
+reset bypasses exhausted continuation accounting. See
+[continuation operations](dispatch.md#deliberate-implementation-continuations).
+
 ## Spec parent and inheritance rejections
 
 An Open Spec is planning-only: its child Tasks cannot start, claim an attempt or

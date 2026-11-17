@@ -34,9 +34,52 @@ pub(super) fn state(
                 total,
                 consecutive_unchanged,
                 checkpoint: serde_json::from_str(&json).map_err(json_error)?,
+                resets: if revision < 16 { vec![] } else {
+                    c.prepare("SELECT actor, message, created_at_millis FROM check_continuation_resets WHERE check_id = ?1 ORDER BY id")
+                        .map_err(storage_error)?
+                        .query_map([check_id.cast_signed()], |r| Ok(forge_app::outcomes::ProgressReset {
+                            actor: r.get(0)?, message: r.get(1)?, created_at_millis: r.get::<_, i64>(2)?.cast_unsigned(),
+                        })).map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)?
+                },
             })
         })
         .collect()
+}
+
+/// Called only after Task/Workspace authorization, within the reset writer transaction.
+pub(super) fn reset(
+    c: &Connection,
+    record: u64,
+    check: u64,
+    actor: &str,
+    message: &str,
+) -> Result<(), RegistrationError> {
+    let selected: bool = c
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM record_checks WHERE id = ?1 AND record_id = ?2)",
+            params![check.cast_signed(), record.cast_signed()],
+            |r| r.get(0),
+        )
+        .map_err(storage_error)?;
+    if !selected {
+        return Err(RegistrationError::new(
+            "invalid-check",
+            "Check does not belong to selected Task",
+        ));
+    }
+    c.execute(
+        "UPDATE check_continuations SET total = 0, consecutive_unchanged = 0 WHERE check_id = ?1",
+        [check.cast_signed()],
+    )
+    .map_err(storage_error)?;
+    if c.changes() == 0 {
+        return Err(RegistrationError::new(
+            "invalid-check",
+            "Check has no continuation accounting to reset",
+        ));
+    }
+    c.execute("INSERT INTO check_continuation_resets(check_id, actor, message, created_at_millis) VALUES (?1, ?2, ?3, ?4)", params![check.cast_signed(), actor, message, super::now_millis()?]).map_err(storage_error)?;
+    Ok(())
 }
 
 pub(super) fn retain_hold(c: &Connection, record: u64) -> Result<(), RegistrationError> {
@@ -46,7 +89,7 @@ pub(super) fn retain_hold(c: &Connection, record: u64) -> Result<(), Registratio
                 c,
                 record,
                 &format!(
-                    "Implementation Continuation limit reached for Check {} ({} total, {} consecutive unchanged evidence). Checkpoint retained; ordinary resume or remediation reset cannot renew continuation allowance. Explicit operator budget intervention is required; no reset operation is available in this revision.",
+                    "Implementation Continuation limit reached for Check {} ({} total, {} consecutive unchanged evidence). Checkpoint retained; ordinary resume or remediation reset cannot renew continuation allowance. Use dispatcher reset-continuations with the Task and Check IDs, actor and explanation; then independently reconcile safety state before explicit resume.",
                     count.check_id, count.total, count.consecutive_unchanged
                 ),
             )?;

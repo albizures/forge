@@ -251,7 +251,10 @@ impl SqliteProjectRepository {
         outcomes::schema(connection)?;
         task_progress::schema(connection)?;
         connection
-            .execute_batch(include_str!("upgrade/continuations.sql"))
+            .execute_batch(concat!(
+                include_str!("upgrade/continuations16.sql"),
+                include_str!("upgrade/continuation_resets.sql")
+            ))
             .map_err(storage_error)?;
         findings::schema(connection)?;
         check_templates::schema(connection)?;
@@ -1307,6 +1310,33 @@ impl RecordRepository for SqliteProjectRepository {
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
         self.ensure_record_workspace(&connection, id)?;
         load_record(&connection, id)
+    }
+
+    fn reset_record_continuations(
+        &self,
+        record: u64,
+        check: u64,
+        actor: &str,
+        message: &str,
+    ) -> Result<forge_app::outcomes::WorkState, RegistrationError> {
+        if actor.trim().is_empty() || message.trim().is_empty() {
+            return Err(RegistrationError::new(
+                "invalid-progress-reset",
+                "operator actor and explanation are required",
+            ));
+        }
+        let mut c = self
+            .connection
+            .lock()
+            .map_err(|_| RegistrationError::new("storage", "storage lock poisoned"))?;
+        let tx = c
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        self.check_task(&tx, record)?;
+        continuations::reset(&tx, record, check, actor, message)?;
+        let state = outcomes::state(&tx, record)?;
+        tx.commit().map_err(storage_error)?;
+        Ok(state)
     }
 
     fn record_work_state(

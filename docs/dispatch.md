@@ -152,10 +152,38 @@ count; it does not certify semantic progress. The checkpoint reaching either lim
 is accepted and retained with a durable Dispatch Hold. Existing safety diagnostics
 are not overwritten. Counters survive restart, invalidation, body edits, retries,
 remediation reset and ordinary resume. Resume cannot bypass exhausted allowance;
-there is no continuation-budget reset operation in this slice. Operator inspection
-via `forge record check work <task> --json` exposes `progress.continuations` (Check id, total,
-consecutive unchanged count, latest checkpoint and handoff). T03 supplies dedicated
-reset and human inspection operations.
+only an explicit continuation accounting reset renews its allowance. Inspect with
+`forge record check work <task> --workspace <id>` (human) or `--json`. Both expose
+`progress.continuations`: Check id, total, consecutive unchanged count, latest
+checkpoint/handoff and append-only `resets`. Historical checkpoints and outcomes
+remain available through attempt history. Human diagnostics distinguish available
+allowance from total/unchanged exhaustion; evidence change is not semantic progress.
+
+To renew one Check's allowance explicitly:
+
+```sh
+forge dispatcher reset-continuations <task-id> --check <check-id> --workspace <id> \
+  --actor <operator> --message <explanation> --json
+```
+
+Actor and explanation must be nonblank. This operator-only command routes through
+`record.resetContinuations` with selected Workspace and `{record, check, actor,
+message}`; the Check must belong to the selected Task and have continuation
+accounting. It atomically sets **only** total and consecutive-unchanged counts to
+zero and appends timestamped attribution. Checkpoint, handoff, historical outcomes,
+Assessments, Findings, remediation/interruption counters, freshness, ownership,
+resources and Dispatch Holds remain unchanged. Repeated requests record separate
+resets (this is an intervention, not an idempotent outcome submission).
+
+Safe order: inspect checkpoint and safety state; investigate the exhaustion;
+explicitly reset if justified; independently retire/reconcile old agents and all
+retained/unknown resources using the [recovery runbook](assignment-recovery.md);
+then inspect eligibility and explicitly resume. Reset is permitted without safe
+ownership transfer because it transfers no ownership, clears no blocker and launches
+nothing. Clearing a hold alone never bypasses exhaustion; resetting alone never
+clears the hold or authorizes replacement. The trusted operator interface is
+unauthenticated: attribution is an audit assertion, not proof of human identity;
+Assignment capabilities cannot invoke this as an agent operation.
 
 Exact replay, including after closure/restart, returns the original accepted result
 and spends budget once; conflicting retries reject. Cleanup uncertainty retains
@@ -167,7 +195,8 @@ Wire compatibility: existing unit-string dispositions and omitted disposition
 requires a supporting server/client; older peers may reject it. Attempt context
 adds default-null `continuation`, and progress adds default-empty `continuations`.
 Strict older response decoders may reject the added fields; upgrade CLI and server
-together. Storage revision **15** requires explicit isolated upgrade; ordinary opening never
+together. Storage revision **16** adds reset audit and resettable accounting (15 introduced
+Continuations). It requires explicit isolated upgrade; ordinary opening never
 converts old state or invents historical Continuations. Accepted historical JSON
 is preserved, with absent added fields decoded as empty/null.
 

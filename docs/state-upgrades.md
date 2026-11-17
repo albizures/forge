@@ -5,7 +5,10 @@ another. It preserves the source database and upgrades a consistent copy. Ordina
 repository opening still rejects incompatible schemas before initialization writes;
 it never migrates, resets, or rewrites an older store's marker.
 
-Supported transfers target schema **15** from schemas **7** through **15**.
+Supported transfers target schema **16** from schemas **7** through **16**.
+The 15 → 16 step preserves continuation accounting/checkpoint bytes, permits zero
+counts after explicit operator reset, and adds empty Check reset audit history.
+It invents no resets and renews no existing allowance.
 The 13 → 14 step adds empty Assignment session provenance; 14 → 15 adds empty
 Check-scoped continuation accounting/checkpoints. Neither step invents historical
 events or rewrites accepted outcomes. Existing continuation budgets/context and

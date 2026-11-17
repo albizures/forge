@@ -646,6 +646,56 @@ pub async fn request_reset_task_remediation(
         .map_err(|error| format!("could not reset Task remediation through Forge daemon: {error}"))
 }
 
+/// Reset only selected Check continuation counters through the operator interface.
+/// # Errors
+/// Returns routing, attribution or daemon failures.
+pub async fn request_reset_continuations(
+    url: impl Into<RecordEndpoint>,
+    request: forge_rpc::ResetContinuationsRequest,
+) -> Result<forge_rpc::WorkState, String> {
+    record_client(url)?
+        .reset_continuations(request)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Render continuation facts without certifying semantic progress or safe replacement.
+#[must_use]
+pub fn render_continuations(state: &forge_rpc::WorkState) -> String {
+    use std::fmt::Write;
+    let mut text = String::from(
+        "Continuation accounting (changed evidence is not certified meaningful progress):",
+    );
+    for c in &state.progress.continuations {
+        let _ = write!(
+            text,
+            "\nCheck {}: {} total, {} consecutive unchanged; {}\nCheckpoint: {:?}\nReason: {}\nCompleted: {}\nVerification: {}\nRemaining: {}",
+            c.check_id,
+            c.total,
+            c.consecutive_unchanged,
+            if c.exhausted() {
+                "limit exhausted"
+            } else {
+                "allowance available"
+            },
+            c.checkpoint.evidence,
+            c.checkpoint.handoff.stopping_reason,
+            c.checkpoint.handoff.completed_work,
+            c.checkpoint.handoff.verification,
+            c.checkpoint.handoff.remaining_work
+        );
+        for r in &c.resets {
+            let _ = write!(
+                text,
+                "\nReset by {} at {}: {}",
+                r.actor, r.created_at_millis, r.message
+            );
+        }
+    }
+    text.push_str("\nHolds, retirement and retained resources require separate inspection; accounting never authorizes dispatch.");
+    text
+}
+
 /// Clear only the operator-controlled Dispatch Hold.
 /// # Errors
 /// Returns endpoint or daemon hold-clearing failures.

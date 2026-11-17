@@ -38,6 +38,15 @@ impl Fixture {
             .unwrap();
         drop(repo);
         let c = Connection::open(&source).unwrap();
+        if schema == 15 {
+            c.execute_batch("DROP TABLE check_continuations;").unwrap();
+            c.execute_batch(include_str!("../src/upgrade/continuations.sql"))
+                .unwrap();
+        }
+        if schema < 16 {
+            c.execute_batch("DROP TABLE check_continuation_resets;")
+                .unwrap();
+        }
         if schema < 15 {
             c.execute_batch("DROP TABLE check_continuations;").unwrap();
         }
@@ -111,7 +120,7 @@ fn explicit_seven_to_current_preserves_every_old_table_and_source_bytes() {
     let copy = f.root.join("snapshot.db");
     assert_eq!(upgrade::snapshot(&f.source, &copy).unwrap(), before);
     let after = upgrade::migrate(&copy).unwrap();
-    assert_eq!(after.schema, Some(15));
+    assert_eq!(after.schema, Some(16));
     for table in before.tables {
         assert!(after.tables.contains(&table), "lost {}", table.name);
     }
@@ -147,7 +156,7 @@ fn explicit_eight_to_eleven_preserves_all_old_facts_without_inventing_intent() {
     let copy = f.root.join("nine.db");
     upgrade::snapshot(&f.source, &copy).unwrap();
     let after = upgrade::migrate(&copy).unwrap();
-    assert_eq!(after.schema, Some(15));
+    assert_eq!(after.schema, Some(16));
     for table in before.tables {
         assert!(after.tables.contains(&table), "changed {}", table.name);
     }
@@ -177,7 +186,7 @@ fn nine_to_eleven_preserves_every_table_without_inventing_unchanged_results() {
     let copy = f.root.join("ten.db");
     upgrade::snapshot(&f.source, &copy).unwrap();
     let after = upgrade::migrate(&copy).unwrap();
-    assert_eq!(after.schema, Some(15));
+    assert_eq!(after.schema, Some(16));
     for table in before.tables {
         assert!(after.tables.contains(&table));
     }
@@ -203,7 +212,7 @@ fn ten_to_eleven_preserves_history_without_inventing_forced_completions() {
     let copy = f.root.join("eleven.db");
     upgrade::snapshot(&f.source, &copy).unwrap();
     let after = upgrade::migrate(&copy).unwrap();
-    assert_eq!(after.schema, Some(15));
+    assert_eq!(after.schema, Some(16));
     for table in before.tables {
         assert!(after.tables.contains(&table));
     }
@@ -229,7 +238,7 @@ fn eleven_expansion_preserves_old_intent_and_rejects_ordinary_open_before_writes
     assert_eq!(fs::read(&f.source).unwrap(), bytes);
     let before = upgrade::inspect(&f.source).unwrap();
     let after = upgrade::migrate(&f.source).unwrap();
-    assert_eq!(after.schema, Some(15));
+    assert_eq!(after.schema, Some(16));
     for table in before.tables {
         assert!(after.tables.contains(&table));
     }
@@ -255,7 +264,7 @@ fn semantic_twelve_requires_explicit_conversion_despite_identical_ddl() {
     let copy = f.root.join("thirteen.db");
     upgrade::snapshot(&f.source, &copy).unwrap();
     let after = upgrade::migrate(&copy).unwrap();
-    assert_eq!(after.schema, Some(15));
+    assert_eq!(after.schema, Some(16));
     for table in before.tables {
         assert!(after.tables.contains(&table));
     }
@@ -282,7 +291,7 @@ fn fourteen_requires_explicit_upgrade_without_historical_continuation_backfill()
     let copy = f.root.join("fifteen.db");
     upgrade::snapshot(&f.source, &copy).unwrap();
     let after = upgrade::migrate(&copy).unwrap();
-    assert_eq!(after.schema, Some(15));
+    assert_eq!(after.schema, Some(16));
     for table in before.tables {
         assert!(after.tables.contains(&table));
     }
@@ -300,8 +309,41 @@ fn fourteen_requires_explicit_upgrade_without_historical_continuation_backfill()
 }
 
 #[test]
-fn same_schema_copy_keeps_ids_comments_and_history() {
+fn fifteen_upgrade_retains_accounting_and_adds_no_reset_history() {
     let f = Fixture::new(15);
+    let c = Connection::open(&f.source).unwrap();
+    c.execute_batch("INSERT INTO check_continuations SELECT id,20,1,'{\"attempt_id\":\"retained\",\"evidence\":{\"kind\":\"repository\",\"repository\":\"repo\",\"commit\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"handoff\":{\"stopping_reason\":\"budget\",\"completed_work\":\"partial\",\"verification\":\"unrun\",\"remaining_work\":\"finish\"}}' FROM record_checks WHERE record_id=1 AND position=0;").unwrap();
+    drop(c);
+    let bytes = fs::read(&f.source).unwrap();
+    assert!(SqliteProjectRepository::open(&f.source).is_err());
+    assert_eq!(fs::read(&f.source).unwrap(), bytes);
+    let before = upgrade::inspect(&f.source).unwrap();
+    let copy = f.root.join("sixteen.db");
+    upgrade::snapshot(&f.source, &copy).unwrap();
+    let after = upgrade::migrate(&copy).unwrap();
+    assert_eq!(after.schema, Some(16));
+    let old = before
+        .tables
+        .iter()
+        .find(|t| t.name == "check_continuations")
+        .unwrap();
+    let new = after.tables.iter().find(|t| t.name == old.name).unwrap();
+    assert_eq!((old.rows, &old.digest), (new.rows, &new.digest));
+    assert_eq!(
+        after
+            .tables
+            .iter()
+            .find(|t| t.name == "check_continuation_resets")
+            .unwrap()
+            .rows,
+        0
+    );
+    assert_eq!(fs::read(&f.source).unwrap(), bytes);
+}
+
+#[test]
+fn same_schema_copy_keeps_ids_comments_and_history() {
+    let f = Fixture::new(16);
     let before = upgrade::inspect(&f.source).unwrap();
     let copy = f.root.join("copy.db");
     upgrade::snapshot(&f.source, &copy).unwrap();

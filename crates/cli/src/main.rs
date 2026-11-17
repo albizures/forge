@@ -400,6 +400,8 @@ enum AgentDispatchCommand {
     TaskReopen(DispatchTaskArgs),
     /// Explicitly reset only remediation limits; does not clear holds, retries or recovery blockers.
     ResetRemediation(ResetRemediationArgs),
+    /// Reset one Check's continuation counters; retain holds, history and resources.
+    ResetContinuations(ResetContinuationsArgs),
     /// Clear a Dispatch Hold and reset interrupted-Check retries (not remediation or recovery blockers).
     Resume(DispatchTaskArgs),
     /// Inspect persisted Assignment evidence without contacting the provider.
@@ -495,6 +497,18 @@ struct DispatchTaskArgs {
     #[arg(long)]
     json: bool,
 }
+#[derive(Args, Debug)]
+struct ResetContinuationsArgs {
+    #[command(flatten)]
+    task: DispatchTaskArgs,
+    #[arg(long)]
+    check: u64,
+    #[arg(long)]
+    actor: String,
+    #[arg(long)]
+    message: String,
+}
+
 #[derive(Args, Debug)]
 struct ResetRemediationArgs {
     #[command(flatten)]
@@ -1300,6 +1314,36 @@ async fn agent_dispatch(command: AgentDispatchCommand, workspace: Option<String>
             .map(|value| serde_json::to_value(value).unwrap()),
             args.json,
         ),
+        AgentDispatchCommand::ResetContinuations(args) => {
+            let result = forge_cli::request_reset_continuations(
+                selected_record_endpoint(args.task.server_url.as_deref(), workspace.as_deref())
+                    .await,
+                forge_rpc::ResetContinuationsRequest {
+                    record: args.task.task_id,
+                    check: args.check,
+                    actor: args.actor,
+                    message: args.message,
+                },
+            )
+            .await;
+            return match result {
+                Ok(state) => {
+                    if args.task.json {
+                        println!(
+                            "{}",
+                            serde_json::to_string(&state).expect("serializable WorkState")
+                        );
+                    } else {
+                        println!("{}", forge_cli::render_continuations(&state));
+                    }
+                    0
+                }
+                Err(error) => {
+                    eprintln!("forge dispatcher reset-continuations: {error}");
+                    1
+                }
+            };
+        }
         AgentDispatchCommand::ResetRemediation(args) => {
             return match forge_cli::request_reset_task_remediation(
                 &resolve_endpoint(args.task.server_url.as_deref()).await,
@@ -2289,7 +2333,7 @@ mod tests {
                         .expect("valid shell quoting")
                         .into_iter()
                         .map(|arg| match arg.as_str() {
-                            "<spec-id>" | "<task-id>" | "<record-id>" => "42".into(),
+                            "<spec-id>" | "<task-id>" | "<record-id>" | "<check-id>" => "42".into(),
                             _ => arg,
                         })
                         .collect();

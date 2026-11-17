@@ -294,6 +294,26 @@ async fn check_bound_outcome_inspection(kind: u8) {
         assert_eq!(work.progress.continuations[0].consecutive_unchanged, 0);
         assert_eq!(work.progress.continuations[0].checkpoint.handoff.remaining_work, "Finish and run full gates");
         assert_eq!(store.worktree_claim(task.id).unwrap(), before_claim);
+        let reset = forge_rpc::ResetContinuationsRequest {
+            record: task.id, check: work.progress.continuations[0].check_id,
+            actor: "operator".into(), message: "Investigated checkpoint".into(),
+        };
+        let denied = assignment_rpc(daemon.clone(), "assignment.resetContinuations", serde_json::json!({
+            "assignment_id": "bound-check", "secret": "check-secret", "record": task.id, "check": reset.check,
+            "actor": "operator", "message": "impersonation"
+        })).await;
+        assert!(denied.get("error").is_some(), "{denied}");
+        assert_eq!(store.record_work_state(task.id).unwrap(), work);
+        let mut invalid = reset.clone();
+        invalid.actor = " ".into();
+        let selection = forge_rpc::RecordSelection { workspace: Some("test".into()), ..Default::default() };
+        assert!(forge_rpc::RecordApiServer::reset_continuations(&daemon, forge_rpc::SelectedRecordRequest { selection: selection.clone(), record: invalid }).await.is_err());
+        let state = forge_rpc::RecordApiServer::reset_continuations(&daemon, forge_rpc::SelectedRecordRequest { selection: selection.clone(), record: reset }).await.unwrap();
+        assert_eq!(state.progress.continuations[0].total, 0);
+        assert_eq!(state.progress.continuations[0].resets.len(), 1);
+        let inspected = forge_rpc::RecordApiServer::record_work_state(&daemon, forge_rpc::SelectedRecordRequest { selection, record: forge_rpc::RecordWorkStateRequest { record: task.id } }).await.unwrap();
+        assert_eq!(inspected, state);
+        assert_eq!(store.worktree_claim(task.id).unwrap(), before_claim);
     } else if human_input {
         assert!(accepted["result"]["check"]["latest_assessment"].is_null());
         // Persist the clean retirement facts; no external provider is needed by inspection.
