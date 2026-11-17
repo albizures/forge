@@ -15,6 +15,7 @@ pub mod findings;
 pub mod outcomes;
 pub mod prerequisites;
 mod profile_catalog;
+pub mod retained_work;
 pub mod spec_plans;
 pub mod stacks;
 pub mod storage_upgrade;
@@ -726,6 +727,20 @@ pub trait RecordRepository: ProjectRepository {
         Err(RegistrationError::new(
             "unsupported",
             "Findings are not supported",
+        ))
+    }
+    /// Atomically authorize selected retained Implementation evidence after safe retirement.
+    /// # Errors
+    /// Rejects stale scope, ownership, freshness, conflicting retries or unavailable persistence.
+    fn authorize_retained_work(
+        &self,
+        _record: u64,
+        _input: &retained_work::RecoveryInput,
+        _claim: &WorktreeClaim,
+    ) -> Result<retained_work::RetainedWorkRecovery, RegistrationError> {
+        Err(RegistrationError::new(
+            "unsupported-contract",
+            "Retained-work recovery is unavailable",
         ))
     }
     /// Operator-only reset, scoped to this repository's Workspace and selected Task/Check.

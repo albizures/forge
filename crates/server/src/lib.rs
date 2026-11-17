@@ -1388,6 +1388,17 @@ impl RecordApiServer for Daemon {
             .mutate_record_finding(r.record, r.finding, &r.mutation)
             .map_err(rpc_error)
     }
+    async fn recover_retained_work(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<forge_rpc::RecoverRetainedWorkRequest>,
+    ) -> RpcResult<forge_app::retained_work::RetainedWorkRecovery> {
+        self.record_application(&request.selection, &mut [])?
+            .show_record(request.record.record)
+            .map_err(rpc_error)?;
+        self.application
+            .recover_retained_work(request.record.record, &request.record.recovery)
+            .map_err(rpc_error)
+    }
     async fn reset_continuations(
         &self,
         request: forge_rpc::SelectedRecordRequest<forge_rpc::ResetContinuationsRequest>,

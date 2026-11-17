@@ -85,5 +85,9 @@ Recovery adopts only an unclaimed checkout at the fixed path with the expected
 Repository, deterministic Task Branch, and persisted Base Commit ancestry.
 Confirmation is an operator assertion, not agent-exit evidence. Recovery requires
 no open Assignment and retains a Dispatch Hold until explicitly resumed.
+This Open-Task claim recovery does not authorize salvage of unreported commits on
+an In Progress Task. Use the separate operator `dispatcher recover-retained-work`
+workflow after safe retirement; it currently accepts clean retained commits only
+and preserves/rejects dirty or untracked work without cleanup.
 See [dispatch operations](dispatch.md) and [Assignment recovery](assignment-recovery.md)
 for dispatch and provider-resource procedures.

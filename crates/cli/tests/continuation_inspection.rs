@@ -6,6 +6,7 @@ use forge_app::outcomes::{
 #[test]
 fn continuation_human_and_json_inspection_preserve_accounting_and_context() {
     let mut state = WorkState {
+        recoveries: vec![],
         generation: 1,
         input: None,
         output: None,

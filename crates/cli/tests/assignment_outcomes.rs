@@ -98,7 +98,7 @@ async fn check_outcome_rejection(category: &'static str) {
             "Continuation",
             "operator recovery",
             "Preserve the checkout",
-            "interrupted-work recovery is not available",
+            "recover-retained-work",
         ] {
             assert!(stderr.contains(guidance), "{stderr}");
         }

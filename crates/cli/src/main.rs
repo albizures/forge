@@ -402,6 +402,8 @@ enum AgentDispatchCommand {
     ResetRemediation(ResetRemediationArgs),
     /// Reset one Check's continuation counters; retain holds, history and resources.
     ResetContinuations(ResetContinuationsArgs),
+    /// Authorize clean interrupted work for salvage after verified retirement; retains holds.
+    RecoverRetainedWork(RecoverRetainedWorkArgs),
     /// Clear a Dispatch Hold and reset interrupted-Check retries (not remediation or recovery blockers).
     Resume(DispatchTaskArgs),
     /// Inspect persisted Assignment evidence without contacting the provider.
@@ -496,6 +498,27 @@ struct DispatchTaskArgs {
     server_url: Option<String>,
     #[arg(long)]
     json: bool,
+}
+#[derive(Args, Debug)]
+struct RecoverRetainedWorkArgs {
+    #[command(flatten)]
+    task: DispatchTaskArgs,
+    #[arg(long)]
+    source_assignment: String,
+    #[arg(long)]
+    generation: u64,
+    #[arg(long)]
+    repository: String,
+    #[arg(long)]
+    commit: String,
+    #[arg(long)]
+    actor: String,
+    #[arg(long)]
+    message: String,
+    #[arg(long, required = true)]
+    confirm_old_agent_cannot_act: bool,
+    #[arg(long, required = true)]
+    confirm_resources_safe: bool,
 }
 #[derive(Args, Debug)]
 struct ResetContinuationsArgs {
@@ -1314,6 +1337,48 @@ async fn agent_dispatch(command: AgentDispatchCommand, workspace: Option<String>
             .map(|value| serde_json::to_value(value).unwrap()),
             args.json,
         ),
+        AgentDispatchCommand::RecoverRetainedWork(args) => {
+            let result = forge_cli::request_recover_retained_work(
+                selected_record_endpoint(args.task.server_url.as_deref(), workspace.as_deref())
+                    .await,
+                forge_rpc::RecoverRetainedWorkRequest {
+                    record: args.task.task_id,
+                    recovery: forge_rpc::RecoveryInput {
+                        source_assignment: args.source_assignment,
+                        generation: args.generation,
+                        evidence: forge_rpc::Evidence::Repository {
+                            repository: args.repository,
+                            commit: args.commit,
+                        },
+                        actor: args.actor,
+                        message: args.message,
+                        confirm_old_agent_cannot_act: args.confirm_old_agent_cannot_act,
+                        confirm_resources_safe: args.confirm_resources_safe,
+                    },
+                },
+            )
+            .await;
+            return match result {
+                Ok(recovery) => {
+                    if args.task.json {
+                        println!(
+                            "{}",
+                            serde_json::to_string(&recovery).expect("serializable recovery")
+                        );
+                    } else {
+                        println!(
+                            "Authorized clean retained work for Task {}, Check {} at generation {}. No Check passed; holds and budgets retained. Inspect and explicitly resume separately.",
+                            recovery.record_id, recovery.check_id, recovery.generation
+                        );
+                    }
+                    0
+                }
+                Err(error) => {
+                    eprintln!("forge dispatcher recover-retained-work: {error}");
+                    1
+                }
+            };
+        }
         AgentDispatchCommand::ResetContinuations(args) => {
             let result = forge_cli::request_reset_continuations(
                 selected_record_endpoint(args.task.server_url.as_deref(), workspace.as_deref())
@@ -2285,6 +2350,35 @@ mod tests {
     }
 
     #[test]
+    fn retained_work_recovery_requires_both_explicit_confirmations() {
+        let mut args = vec![
+            "forge",
+            "dispatcher",
+            "recover-retained-work",
+            "42",
+            "--workspace",
+            "test",
+            "--source-assignment",
+            "old",
+            "--generation",
+            "2",
+            "--repository",
+            "/repo",
+            "--commit",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "--actor",
+            "operator",
+            "--message",
+            "Inspected salvage",
+        ];
+        assert!(Cli::try_parse_from(&args).is_err());
+        args.push("--confirm-old-agent-cannot-act");
+        assert!(Cli::try_parse_from(&args).is_err());
+        args.push("--confirm-resources-safe");
+        assert!(Cli::try_parse_from(&args).is_ok());
+    }
+
+    #[test]
     fn operator_guide_commands_parse_without_execution() {
         let documents = [
             ("README.md", include_str!("../../../README.md")),
@@ -2333,7 +2427,11 @@ mod tests {
                         .expect("valid shell quoting")
                         .into_iter()
                         .map(|arg| match arg.as_str() {
-                            "<spec-id>" | "<task-id>" | "<record-id>" | "<check-id>" => "42".into(),
+                            "<spec-id>"
+                            | "<task-id>"
+                            | "<record-id>"
+                            | "<check-id>"
+                            | "<current-generation>" => "42".into(),
                             _ => arg,
                         })
                         .collect();

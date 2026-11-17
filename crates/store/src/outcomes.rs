@@ -58,6 +58,7 @@ pub(super) fn state(c: &Connection, record: u64) -> Result<WorkState, Registrati
     let (generation, input, output) = row.unwrap_or((1, None, None));
     let latest_invalidation = c.query_row("SELECT generation, actor, message, created_at_millis FROM record_work_invalidations WHERE record_id = ?1 ORDER BY id DESC LIMIT 1", [record.cast_signed()], |r| Ok(WorkInvalidation { generation: r.get::<_, i64>(0)?.cast_unsigned(), actor: r.get(1)?, message: r.get(2)?, created_at_millis: r.get::<_, i64>(3)?.cast_unsigned() })).optional().map_err(storage_error)?;
     Ok(WorkState {
+        recoveries: super::retained_work::state(c, record)?,
         progress: super::task_progress::state(c, record)?,
         generation,
         latest_invalidation,
@@ -181,16 +182,6 @@ fn hold_evidence(
         "Unexpected Managed Worktree evidence ({detail}); investigate deliverables and explicitly resume dispatch. Forge has not committed or discarded changes."
     );
     invalidate(c, record, "forge", &message, None)?;
-    if let Ok(evidence) = observed {
-        c.execute(
-            "UPDATE record_work SET input_json = ?2 WHERE record_id = ?1",
-            params![
-                record.cast_signed(),
-                serde_json::to_string(evidence).map_err(json_error)?
-            ],
-        )
-        .map_err(storage_error)?;
-    }
     c.execute(
         "INSERT OR IGNORE INTO dispatch_holds(record_id, reason) VALUES (?1, ?2)",
         params![record.cast_signed(), message],
@@ -286,6 +277,7 @@ impl SqliteProjectRepository {
             actor: input.actor.clone(),
             body: task.body,
             continuation: None,
+            recovery: None,
         };
         let existing: Option<String> = tx
             .query_row(

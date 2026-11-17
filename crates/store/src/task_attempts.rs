@@ -449,6 +449,14 @@ impl SqliteProjectRepository {
             evidence: evidence.clone(),
             actor: id.into(),
             body: task.body,
+            recovery: super::retained_work::state(&tx, record)?
+                .into_iter()
+                .rev()
+                .find(|r| {
+                    r.check_id == check.id
+                        && r.generation <= work.generation
+                        && r.request.evidence == *evidence
+                }),
             continuation: super::continuations::state(&tx, record)?
                 .into_iter()
                 .find(|s| s.check_id == check.id)

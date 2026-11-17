@@ -20,6 +20,13 @@ mod adapters;
 use adapters::Provider;
 #[path = "support/implementation_continuations.rs"]
 mod implementation_continuations;
+#[path = "support/retained_work.rs"]
+mod retained_work;
+
+#[test]
+fn clean_retained_work_requires_atomic_operator_authority_and_safe_retirement() {
+    run_case("retained-work");
+}
 
 #[test]
 fn deliberate_continuations_are_bounded_and_atomic() {
@@ -40,6 +47,17 @@ impl RepositoryInspector for Head {
 
 struct Checkout(Arc<AtomicBool>);
 impl ManagedWorktreeAdapter for Checkout {
+    fn validate_recovery(
+        &self,
+        _: &std::path::Path,
+        _: &std::path::Path,
+        branch: &str,
+        base: &str,
+    ) -> Result<(), RegistrationError> {
+        assert!(branch.starts_with("feat/forge-"));
+        assert_eq!(base, "a".repeat(40));
+        Ok(())
+    }
     fn create(
         &self,
         _: &std::path::Path,
@@ -974,6 +992,11 @@ fn run_case(case: &str) {
             original_profiles
         );
     }
+    if case == "retained-work" {
+        store
+            .set_task_base_commit(task.id, &"a".repeat(40))
+            .unwrap();
+    }
     if case == "normal-preparation" {
         store
             .set_task_base_commit(task.id, &"a".repeat(40))
@@ -1010,6 +1033,21 @@ fn run_case(case: &str) {
         )
         .with_workspace_repository(Box::new(SqliteProjectRepository::open(&path).unwrap()))
     };
+    if case == "retained-work" {
+        retained_work::run(&implementation_continuations::Fixture {
+            store: &store,
+            path: &path,
+            root: &root,
+            application: &application,
+            task: task.id,
+            head: &head,
+            dirty: &dirty,
+            unavailable: &unavailable,
+            launches: &launches,
+        });
+        std::fs::remove_dir_all(root).unwrap();
+        return;
+    }
     if case.starts_with("continuation-") {
         implementation_continuations::run(
             &implementation_continuations::Fixture {
@@ -1573,6 +1611,12 @@ fn run_case(case: &str) {
             if case == "review-mutation" {
                 assert!(store.dispatch_hold(task.id).unwrap().is_some());
                 assert_eq!(launches.lock().unwrap().len(), 2);
+                // Fixture-only operator correction: unexplained reviewer output is not
+                // automatically adopted by clearing its hold. Restore observed accepted input.
+                assert_eq!(work.input.as_ref(), Some(&attempt.evidence));
+                if let Evidence::Repository { commit, .. } = &attempt.evidence {
+                    head.lock().unwrap().clone_from(commit);
+                }
                 store.resume_dispatch(task.id).unwrap();
             }
             let (replacement, _) = application()

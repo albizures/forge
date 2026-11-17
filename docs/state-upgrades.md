@@ -5,7 +5,12 @@ another. It preserves the source database and upgrades a consistent copy. Ordina
 repository opening still rejects incompatible schemas before initialization writes;
 it never migrates, resets, or rewrites an older store's marker.
 
-Supported transfers target schema **16** from schemas **7** through **16**.
+Supported transfers target schema **17** from schemas **7** through **17**.
+The 16 → 17 step adds empty retained-work recovery authority/audit. It never
+adopts unreported commits or invents historical authorization. Existing counters,
+checkpoints, outcomes, Findings, immutable pins and ownership evidence are retained.
+Revision 17 also stops ordinary drift reconciliation from selecting unexplained
+commits as trusted successor input; explicit operator authorization is required.
 The 15 → 16 step preserves continuation accounting/checkpoint bytes, permits zero
 counts after explicit operator reset, and adds empty Check reset audit history.
 It invents no resets and renews no existing allowance.

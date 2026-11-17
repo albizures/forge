@@ -55,6 +55,9 @@ pub struct Attempt {
     /// Most recent accepted handoff for this Check, captured when the attempt starts.
     #[serde(default)]
     pub continuation: Option<ContinuationCheckpoint>,
+    /// Explicitly authorized salvage context, never a passing result or accepted handoff.
+    #[serde(default)]
+    pub recovery: Option<crate::retained_work::RetainedWorkRecovery>,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -109,7 +112,7 @@ impl OutcomeInput {
         if self.disposition == OutcomeDisposition::Interrupted && &self.evidence != bound {
             return Err(RegistrationError::new(
                 "interrupted-evidence-changed",
-                "Interrupted outcomes must repeat their bound input evidence. Deliberate checkpoint handoffs require explicit Continuation support; genuinely interrupted retained work requires operator recovery. Use the explicit continuation disposition for a deliberate clean Implementation checkpoint; interrupted-work recovery is not available in this revision. Preserve the checkout and ask the operator; do not reset, discard changes, or report completion merely to hand off work.",
+                "Interrupted outcomes must repeat their bound input evidence. Deliberate checkpoint handoffs require explicit Continuation support; genuinely interrupted retained work requires operator recovery. Use the explicit continuation disposition for a deliberate clean Implementation checkpoint; clean retained work requires the operator's explicit recover-retained-work authorization after safe retirement. Preserve the checkout and ask the operator; do not reset, discard changes, or report completion merely to hand off work.",
             ));
         }
         Ok(())
@@ -213,6 +216,8 @@ pub struct AcceptedOutcome {
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct WorkState {
+    #[serde(default)]
+    pub recoveries: Vec<crate::retained_work::RetainedWorkRecovery>,
     pub progress: TaskProgress,
     pub generation: u64,
     pub input: Option<Evidence>,

@@ -9,7 +9,7 @@ by migrations—not just the initial `CREATE TABLE` statements.
 - [`src/lib.rs`](src/lib.rs): `SqliteProjectRepository::from_connection`,
   `migrate_*` functions, profile seeds, and repository operations.
 - [`src/workspaces.rs`](src/workspaces.rs): Workspace ownership and Project identity.
-- [`src/upgrade.rs`](src/upgrade.rs): explicit offline schema 7 → 8 → 9 → 10 → 11 → 12 → 13 → 14 → 15 → 16 conversion,
+- [`src/upgrade.rs`](src/upgrade.rs): explicit offline schema 7 → 8 → 9 → 10 → 11 → 12 → 13 → 14 → 15 → 16 → 17 conversion,
   frozen contract validation, consistent snapshots, and preservation inventories.
   See [Revision State upgrades](../../docs/state-upgrades.md) for orchestration.
 - [`src/record_workspaces.rs`](src/record_workspaces.rs): Record ownership,
@@ -45,8 +45,36 @@ is documented separately in [Records](../../docs/records.md),
   Most references do **not** cascade.
 - Ordinary repository opening accepts only the current marked schema revision.
   Triggers and repository validation also enforce invariants. Explicit managed
-  copy-and-upgrade targets revision 16 from revisions 7 through 16; unsupported
+  copy-and-upgrade targets revision 17 from revisions 7 through 17; unsupported
   stores are rejected without automatic conversion or reset.
+
+## Retained-work salvage authorization (revision 17)
+
+`retained_work_recoveries` stores `source_assignment` (PK, FK to
+`agent_assignments.id`), `record_id` (FK to `records.id`) and `recovery_json`.
+Update/delete triggers retain immutable authorization. JSON includes selected
+Repository evidence, source Assignment, expected generation, actor, explanation,
+both explicit safety assertions, canonical worktree path, Check identity, resulting
+generation and timestamp. One source Assignment permits one authorization; exact
+retries return its original result and conflicts reject atomically.
+
+An immediate transaction revalidates Task/Check/scope, latest source, explicit
+retirement and all resources, active canonical claim/Repository and freshness.
+Authorization, freshness invalidation, selected work input and retained hold commit
+together. No Check passes, Continuation is invented, budget resets, or Stack pins
+change. Historical outcomes, Assessments and Findings remain. External Git identity
+and clean commit observations run outside the transaction. The next matching
+Implementation attempt captures `recovery` context; work inspection returns the
+durable `recoveries` audit. Added JSON fields default null/empty when absent from
+historical accepted results, which are never rewritten.
+
+Revision 17 is a breaking safety/storage expansion. Ordinary opening rejects older
+stores before writes. Explicit isolated offline upgrade adds an empty table with
+no historical authorization or adoption, preserving all existing typed values.
+Same-schema transfers retain real audits. Drift reconciliation now invalidates and
+holds without adopting the unexpected observed commit; hold clearance cannot make
+unexplained work trusted input. See [Assignment recovery](../../docs/assignment-recovery.md)
+for clean-only support and the separate trusted operator interface.
 
 ## Continuation resets (revision 16)
 

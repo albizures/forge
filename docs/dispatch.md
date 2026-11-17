@@ -103,6 +103,9 @@ Dirty/missing/invalid checkouts or unexpected review/handoff commits invalidate
 current Assessments and outstanding attempts, advance freshness, and retain a
 diagnostic Dispatch Hold. No changes are committed, discarded, reset or cleaned.
 Investigate the retained checkout and explicitly resume dispatch after repair.
+Unexpected observed commits are not automatically selected as trusted input. For
+interrupted Implementation work, use explicit [clean retained-work authorization](assignment-recovery.md#authorize-clean-retained-implementation-work-for-salvage)
+after safe retirement; hold clearance alone cannot adopt unexplained work.
 Description edits also advance freshness, even at the same commit; replacement
 returns to Implementation only after old ownership/resources are safely retired.
 Historical Assessments and Findings remain, but invalidated passes never revive.
@@ -195,10 +198,20 @@ Wire compatibility: existing unit-string dispositions and omitted disposition
 requires a supporting server/client; older peers may reject it. Attempt context
 adds default-null `continuation`, and progress adds default-empty `continuations`.
 Strict older response decoders may reject the added fields; upgrade CLI and server
-together. Storage revision **16** adds reset audit and resettable accounting (15 introduced
-Continuations). It requires explicit isolated upgrade; ordinary opening never
+together. Storage revision **17** adds explicit retained-work salvage authorization (16 added
+reset audit/resettable accounting; 15 introduced Continuations). It requires explicit isolated upgrade; ordinary opening never
 converts old state or invents historical Continuations. Accepted historical JSON
 is preserved, with absent added fields decoded as empty/null.
+
+Operator RPC `record.recoverRetainedWork` takes selected Workspace and
+`{record, recovery: {source_assignment, generation, evidence, actor, message,
+confirm_old_agent_cannot_act, confirm_resources_safe}}`. It authorizes only clean
+retained interrupted Implementation work after verified retirement, without a Check
+pass or automatic launch. `WorkState.recoveries` defaults empty and
+`Attempt.recovery` defaults null for historical stored JSON. Strict older clients
+must upgrade with the server; the Assignment capability surface has no recovery
+operation. See the recovery runbook for the public CLI, safety assertions and
+separate resume. No historical accepted response is rewritten.
 
 A failed substantive review submits `"disposition": "handback"` with its Findings.
 Acceptance atomically records the failure and Findings, invalidates Implementation

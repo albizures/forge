@@ -1,3 +1,5 @@
+include!("retained_work_tests.rs");
+
 #[tokio::test]
 async fn check_bound_rpc_context_outcome_and_normal_dispatch_share_same_owner() {
     check_bound_outcome_inspection(0).await;
@@ -11,6 +13,11 @@ async fn task_inspection_after_accepted_human_input_and_clean_retirement() {
 #[tokio::test]
 async fn implementation_continuation_rpc_retains_clean_checkpoint_and_handoff() {
     check_bound_outcome_inspection(2).await;
+}
+
+#[tokio::test]
+async fn clean_retained_work_recovery_rpc_checks_git_scope_and_operator_authority() {
+    check_bound_outcome_inspection(3).await;
 }
 
 #[allow(clippy::too_many_lines)]
@@ -102,7 +109,11 @@ async fn check_bound_outcome_inspection(kind: u8) {
     std::fs::create_dir_all(&repository).unwrap();
     super::git(&repository, &["init"]).unwrap();
     super::git(&repository, &["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "Input"]).unwrap();
-    super::git(&repository, &["worktree", "add", "-b", "task-check", checkout.path.to_str().unwrap()]).unwrap();
+    let branch = if kind == 3 { format!("feat/forge-{}", task.id) } else { "task-check".into() };
+    super::git(&repository, &["worktree", "add", "-b", &branch, checkout.path.to_str().unwrap()]).unwrap();
+    if kind == 3 {
+        store.set_task_base_commit(task.id, &super::git(&checkout.path, &["rev-parse", "HEAD"]).unwrap()).unwrap();
+    }
     store.activate_worktree_claim(task.id).unwrap();
     let evidence = forge_app::outcomes::Evidence::Repository {
         repository: workspace.root.join("alpha").display().to_string(),
@@ -235,7 +246,7 @@ async fn check_bound_outcome_inspection(kind: u8) {
         let message = rejected["error"]["message"].as_str().unwrap();
         assert!(message.contains("Continuation"), "{message}");
         assert!(message.contains("operator recovery"), "{message}");
-        assert!(message.contains("interrupted-work recovery is not available"), "{message}");
+        assert!(message.contains("recover-retained-work"), "{message}");
         assert_eq!(store.record_work_state(task.id).unwrap(), before_work);
         assert_eq!(store.list_record_checks(task.id).unwrap(), before_checks);
         assert_eq!(store.agent_assignment_info("bound-check").unwrap(), before_owner);
@@ -252,6 +263,10 @@ async fn check_bound_outcome_inspection(kind: u8) {
     // Fixture-only restoration, not a product repair path.
     std::fs::write(checkout.path.join("deliverable.txt"), "Implemented\n").unwrap();
     std::fs::remove_file(checkout.path.join("untracked.txt")).unwrap();
+    if kind == 3 {
+        verify_clean_recovery_rpc(&daemon, &store, task.id, &checkout.path, &request).await;
+        return;
+    }
     if continuation {
         request["outcome"]["verdict"] = "fail".into();
         request["outcome"]["disposition"] = serde_json::json!({"continuation": {

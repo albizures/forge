@@ -107,6 +107,57 @@ retirement-pending and other blockers remain untouched and reserve capacity unti
 separately resolved. The Dispatch Hold remains, too. Inspect again rather than
 assuming the command's success means recovery is complete.
 
+## Authorize clean retained Implementation work for salvage
+
+Unreported changed HEAD is **not** an accepted Continuation. Ordinary dispatch or
+clearing a drift hold never adopts that commit. After retirement and complete
+known/unknown resource reconciliation above, inspect the actual checkout and any
+external children. Only when the old agent cannot act and all resources are safe:
+
+```sh
+forge record check work <task-id> --workspace <id> --json
+forge dispatcher recover-retained-work <task-id> --workspace <id> \
+  --source-assignment <assignment-id> --generation <current-generation> \
+  --repository <registered-project-root> --commit <full-clean-HEAD> \
+  --actor <operator> --message <salvage-explanation> \
+  --confirm-old-agent-cannot-act --confirm-resources-safe --json
+```
+
+This is a trusted operator assertion, not authenticated human identity or automatic
+proof of process death. Both confirmations and nonblank attribution are mandatory.
+The Task must be Dispatched, In Progress and single-Project, with its latest
+Check-bound Assignment explicitly retired and resources fully reconciled. Its
+unpassed Check must be Implementation, with no accepted outcome other than an
+interruption (no outcome is also permitted). Recovery rejects Open/unclaimed Tasks,
+review attempts, passing Implementation, stale generations, mismatched scope,
+Repository, branch, placement, Base Commit ancestry or changed observed HEAD.
+Git observations run outside the writer transaction; Forge ownership, claim,
+source attempt and freshness are revalidated atomically. Operators must exclude
+external Git writers during inspection/authorization; Forge cannot lock out
+arbitrary same-user filesystem mutation.
+
+**This revision supports clean retained commits only.** Dirty tracked changes and
+untracked files are preserved and rejected; do not clean, reset or commit them just
+to satisfy recovery. Dirty/untracked salvage is a later slice. Keep the diagnostic
+and retained evidence for operator investigation if observations are uncertain.
+
+Authorization atomically records selected evidence, source Assignment, actor,
+explanation, confirmations, canonical path and timestamp. It advances freshness,
+invalidates current passes/attempts while retaining all historical Assessments,
+outcomes and Findings, and selects the retained commit as Implementation input.
+It does not backfill a Continuation, pass a Check, certify correctness, change the
+immutable Stack Base Commit, reset any budget, clear existing holds, or launch an
+agent. A hold is retained (existing safety reasons win). Exact retries for the same
+source Assignment return the original authorization, including after restart or
+replacement; conflicting retries have no effects. Inspect `record check work`:
+`recoveries` contains the durable audit. The next eligible same-Check attempt
+captures it in `bound.checkAttempt.recovery` for inspection and salvage; normal
+Checks, Findings, review/publication and dispatch gates still apply.
+
+Inspect again, then clear the hold separately below if justified. Authorization
+is distinct from `worktree recover`: that older command adopts an **unclaimed Open
+Task checkout**, not interrupted In Progress work or unexplained commits.
+
 ## Clear the hold separately; eligibility is not a launch guarantee
 
 After the previous Assignment is closed and all known and uncertain resources

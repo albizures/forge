@@ -560,7 +560,7 @@ pub async fn assignment_outcome(input: serde_json::Value) -> Result<serde_json::
                 None
             };
             if category.as_deref() == Some("interrupted-evidence-changed") {
-                return "Assignment outcome rejected: interrupted-evidence-changed; interruption must repeat bound input evidence. Deliberate checkpoint handoffs require explicit Continuation support; genuinely interrupted retained work requires operator recovery. Use the explicit continuation disposition for a deliberate clean Implementation checkpoint; interrupted-work recovery is not available in this revision. Preserve the checkout and ask the operator; do not reset, discard changes, or report completion merely to hand off work.".into();
+                return "Assignment outcome rejected: interrupted-evidence-changed; interruption must repeat bound input evidence. Deliberate checkpoint handoffs require explicit Continuation support; genuinely interrupted retained work requires operator recovery. Use the explicit continuation disposition for a deliberate clean Implementation checkpoint; clean retained work requires the operator's explicit recover-retained-work authorization after safe retirement. Preserve the checkout and ask the operator; do not reset, discard changes, or report completion merely to hand off work.".into();
             }
             let category = category.as_deref().filter(|code| {
                 matches!(
@@ -644,6 +644,19 @@ pub async fn request_reset_task_remediation(
         })
         .await
         .map_err(|error| format!("could not reset Task remediation through Forge daemon: {error}"))
+}
+
+/// Authorize clean retained work through the trusted operator interface.
+/// # Errors
+/// Returns routing, authorization or daemon failures.
+pub async fn request_recover_retained_work(
+    endpoint: impl Into<RecordEndpoint>,
+    request: forge_rpc::RecoverRetainedWorkRequest,
+) -> Result<forge_rpc::RetainedWorkRecovery, String> {
+    record_client(endpoint)?
+        .recover_retained_work(request)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// Reset only selected Check continuation counters through the operator interface.

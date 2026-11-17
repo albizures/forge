@@ -30,6 +30,7 @@ mod outcome_findings;
 mod outcomes;
 mod record_browsing;
 mod record_workspaces;
+mod retained_work;
 mod schema_compatibility;
 mod spec_plans;
 mod stacks;
@@ -249,6 +250,9 @@ impl SqliteProjectRepository {
         completion::schema(connection)?;
         checks::schema(connection)?;
         outcomes::schema(connection)?;
+        if !connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'retained_work_recoveries')", [], |r| r.get::<_, bool>(0)).map_err(storage_error)? {
+            connection.execute_batch(include_str!("upgrade/retained_work.sql")).map_err(storage_error)?;
+        }
         task_progress::schema(connection)?;
         connection
             .execute_batch(concat!(
@@ -1312,6 +1316,14 @@ impl RecordRepository for SqliteProjectRepository {
         load_record(&connection, id)
     }
 
+    fn authorize_retained_work(
+        &self,
+        record: u64,
+        input: &forge_app::retained_work::RecoveryInput,
+        claim: &WorktreeClaim,
+    ) -> Result<forge_app::retained_work::RetainedWorkRecovery, RegistrationError> {
+        self.recover_retained_work(record, input, claim)
+    }
     fn reset_record_continuations(
         &self,
         record: u64,

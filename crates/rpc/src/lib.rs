@@ -19,7 +19,9 @@ pub use forge_app::findings::{
     Finding, FindingActivity, FindingAmendment, FindingList, FindingMutation, FindingMutationInput,
     FindingPage, FindingRaiseInput, FindingResolveInput, FindingResponse, FindingState, Severity,
 };
+pub use forge_app::outcomes::Evidence;
 pub use forge_app::outcomes::{AcceptedOutcome, Attempt, WorkState};
+pub use forge_app::retained_work::{RecoveryInput, RetainedWorkRecovery};
 pub use record_selection::*;
 
 pub use forge_app::ExecutionMode;
@@ -287,6 +289,12 @@ pub trait RecordApi {
         request: SelectedRecordRequest<RecordFindingMutationRequest>,
     ) -> RpcResult<Finding>;
     /// Trusted operator route; never an Assignment capability operation.
+    #[method(name = "recoverRetainedWork")]
+    async fn recover_retained_work(
+        &self,
+        request: SelectedRecordRequest<RecoverRetainedWorkRequest>,
+    ) -> RpcResult<forge_app::retained_work::RetainedWorkRecovery>;
+    /// Trusted operator route; never an Assignment capability operation.
     #[method(name = "resetContinuations")]
     async fn reset_continuations(
         &self,
@@ -466,6 +474,12 @@ pub struct RecordFindingMutationRequest {
     pub record: u64,
     pub finding: u64,
     pub mutation: FindingMutationInput,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoverRetainedWorkRequest {
+    pub record: u64,
+    pub recovery: forge_app::retained_work::RecoveryInput,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
