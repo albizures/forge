@@ -34,6 +34,15 @@ impl forge_app::RepositoryInspector for Head {
 }
 struct Checkout(Arc<AtomicBool>);
 impl ManagedWorktreeAdapter for Checkout {
+    fn validate_recovery(
+        &self,
+        repository: &Path,
+        path: &Path,
+        branch: &str,
+        base: &str,
+    ) -> Result<(), RegistrationError> {
+        adapters::Local.validate_recovery(repository, path, branch, base)
+    }
     fn create(&self, _: &Path, path: &Path, _: &str, _: &str) -> Result<(), RegistrationError> {
         std::fs::create_dir_all(path).unwrap();
         Ok(())
