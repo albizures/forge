@@ -1617,7 +1617,7 @@ pub fn render_record(record: &RecordResponse) -> String {
             relationship.kind,
             relationship.from_id,
             relationship.to_id,
-            if relationship.ordering_only {
+            if relationship.ordering_only && relationship.kind != "waits-for" {
                 " [ordering-only]"
             } else {
                 ""

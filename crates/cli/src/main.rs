@@ -653,8 +653,8 @@ struct DoneRecordArgs {
 #[derive(Args, Debug)]
 struct RelationshipArgs {
     from_id: u64,
-    /// Use ordering-only-depends-on to explicitly wait without inheriting code.
-    #[arg(long, value_parser = ["child-of", "depends-on", "ordering-only-depends-on", "generated-by", "initiative"])]
+    /// Use waits-for to require completion without inheriting repository results.
+    #[arg(long, value_parser = ["child-of", "waits-for", "depends-on", "ordering-only-depends-on", "generated-by", "initiative"])]
     kind: String,
     #[arg(long = "to")]
     to_id: u64,

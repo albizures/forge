@@ -295,8 +295,12 @@ _Avoid_: link
 A directed Record Relationship from a Blocked Record to a Prerequisite Record. A Blocked Record cannot become In Progress until every prerequisite is Done; an agent-owned In Progress Task cannot gain a new dependency.
 _Avoid_: blocker, prerequisite link
 
-**Ordering-Only Dependency**:
-A Dependency Relationship explicitly designated to require prerequisite completion without inheriting that prerequisite's repository result. The designation belongs to that relationship, not to the dependent Task as a whole.
+**Waits-For Relationship**:
+A directed prerequisite relationship requiring completion of the Prerequisite Record without inheritance of its repository result. It expresses completion ordering independently of code consumption.
+_Avoid_: ordering-only dependency, implicit no-stack exception
+
+**Ordering-Only Dependency** (transitional storage/legacy contract term):
+The existing explicit non-inheritance designation used to persist a Waits-For Relationship during expand–contract. It is not a separate canonical relationship intent.
 _Avoid_: non-code Task, implicit no-stack exception
 
 **Generated-By Relationship**:

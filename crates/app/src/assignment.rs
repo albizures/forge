@@ -524,6 +524,7 @@ impl AuthenticatedAssignment<'_> {
                 edge.kind,
                 RecordRelationshipKind::ParentChild
                     | RecordRelationshipKind::DependsOn
+                    | RecordRelationshipKind::WaitsFor
                     | RecordRelationshipKind::GeneratedBy
             ) {
                 related_ids.insert(if edge.from_id == record.id {
@@ -771,6 +772,7 @@ impl AuthenticatedAssignment<'_> {
                     edge.kind,
                     RecordRelationshipKind::ParentChild
                         | RecordRelationshipKind::DependsOn
+                        | RecordRelationshipKind::WaitsFor
                         | RecordRelationshipKind::GeneratedBy
                 ) && ((edge.from_id == own.id && edge.to_id == target)
                     || (edge.to_id == own.id && edge.from_id == target))

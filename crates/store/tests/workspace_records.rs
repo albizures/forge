@@ -170,7 +170,7 @@ fn ordering_only_dependencies_are_scoped_durable_ordered_and_removed_atomically(
             .list_record_comments(blocked.id)
             .unwrap()
             .iter()
-            .any(|c| c.body.contains("Ordering-only dependency designated"))
+            .any(|c| c.body.contains("Waits-For Relationship designated"))
     );
     store
         .unrelate_records(blocked.id, ordering.id, DependsOn)
@@ -198,7 +198,7 @@ fn ordering_only_dependencies_are_scoped_durable_ordered_and_removed_atomically(
 }
 
 #[test]
-fn ordering_only_designation_rolls_back_when_required_audit_write_fails() {
+fn waits_for_rolls_back_when_required_audit_write_fails() {
     let fixture = Fixture::new();
     let store = fixture.store.in_record_workspace("one").unwrap();
     let open = || {
@@ -216,7 +216,11 @@ fn ordering_only_designation_rolls_back_when_required_audit_write_fails() {
     let connection = rusqlite::Connection::open(fixture.root.join("store.sqlite")).unwrap();
     connection.execute_batch("CREATE TRIGGER reject_designation_audit BEFORE INSERT ON record_comments BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END;").unwrap();
     let updates = store.list_record_updates(from.id).unwrap();
-    assert!(store.relate_ordering_only_records(from.id, to.id).is_err());
+    assert!(
+        store
+            .relate_records(from.id, to.id, forge_app::RecordRelationshipKind::WaitsFor)
+            .is_err()
+    );
     assert_eq!(store.show_record(from.id).unwrap(), from);
     assert_eq!(store.show_record(to.id).unwrap(), to);
     assert_eq!(store.list_record_updates(from.id).unwrap(), updates);
@@ -227,6 +231,225 @@ fn ordering_only_designation_rolls_back_when_required_audit_write_fails() {
             .unwrap(),
         0
     );
+}
+
+#[test]
+fn waits_for_is_explicit_atomic_and_part_of_the_shared_prerequisite_graph() {
+    use forge_app::{
+        PrerequisiteKind,
+        RecordRelationshipKind::{DependsOn, WaitsFor},
+    };
+    let fixture = Fixture::new();
+    let store = fixture.store.in_record_workspace("one").unwrap();
+    let open = |kind| {
+        store
+            .open_typed_record(&NewTypedRecord {
+                record_type: kind,
+                body: "work without inferred inheritance".into(),
+                project_slugs: vec![],
+                generated_by_ids: vec![],
+            })
+            .unwrap()
+    };
+    let blocked = open(RecordType::Task);
+    let prerequisite = open(RecordType::Task);
+    let legacy = open(RecordType::Task);
+    store
+        .relate_records(blocked.id, prerequisite.id, WaitsFor)
+        .unwrap();
+    store
+        .relate_records(prerequisite.id, legacy.id, DependsOn)
+        .unwrap();
+    let before = store.show_record(blocked.id).unwrap();
+    assert_eq!(
+        before.relationships[0].prerequisite_kind(),
+        Some(PrerequisiteKind::WaitsFor)
+    );
+    assert_prerequisites(&fixture, blocked.id, &[prerequisite.id]);
+    let updates = store.list_record_updates(blocked.id).unwrap();
+    for kind in [WaitsFor, DependsOn] {
+        assert_eq!(
+            store
+                .relate_records(blocked.id, prerequisite.id, kind)
+                .unwrap_err()
+                .code,
+            "duplicate-relationship"
+        );
+        assert_eq!(
+            store
+                .relate_records(legacy.id, blocked.id, kind)
+                .unwrap_err()
+                .code,
+            "relationship-cycle"
+        );
+    }
+    assert!(
+        store
+            .unrelate_records(prerequisite.id, legacy.id, WaitsFor)
+            .is_err()
+    );
+    assert_eq!(store.show_record(blocked.id).unwrap(), before);
+    assert_eq!(store.list_record_updates(blocked.id).unwrap(), updates);
+    store
+        .unrelate_records(blocked.id, prerequisite.id, WaitsFor)
+        .unwrap();
+    assert!(
+        store
+            .show_record(blocked.id)
+            .unwrap()
+            .relationships
+            .is_empty()
+    );
+    assert!(
+        store
+            .unrelate_records(blocked.id, prerequisite.id, WaitsFor)
+            .is_err()
+    );
+    store
+        .relate_records(blocked.id, prerequisite.id, DependsOn)
+        .unwrap();
+    assert_eq!(
+        store.show_record(blocked.id).unwrap().relationships[0].prerequisite_kind(),
+        Some(PrerequisiteKind::LegacyDependsOn)
+    );
+}
+
+#[test]
+fn waits_for_spec_completion_unblocks_without_starting_and_lifecycle_edits_fail() {
+    use forge_app::{RecordRelationshipKind::WaitsFor, RecordStatus};
+    let fixture = Fixture::new();
+    let store = fixture.store.in_record_workspace("one").unwrap();
+    let open = || {
+        store
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Spec,
+                body: "completion ordering only".into(),
+                project_slugs: vec!["one/api".into()],
+                generated_by_ids: vec![],
+            })
+            .unwrap()
+    };
+    let blocked = open();
+    let prerequisite = open();
+    store
+        .relate_records(blocked.id, prerequisite.id, WaitsFor)
+        .unwrap();
+    assert!(store.start_record(blocked.id).is_err());
+    store.start_record(prerequisite.id).unwrap();
+    store.done_record(prerequisite.id, None).unwrap();
+    assert_eq!(
+        store.show_record(blocked.id).unwrap().status,
+        RecordStatus::Open
+    );
+    store.start_record(blocked.id).unwrap();
+    let before = store.show_record(blocked.id).unwrap();
+    let updates = store.list_record_updates(blocked.id).unwrap();
+    assert!(
+        store
+            .unrelate_records(blocked.id, prerequisite.id, WaitsFor)
+            .is_err()
+    );
+    assert_eq!(store.show_record(blocked.id).unwrap(), before);
+    assert_eq!(store.list_record_updates(blocked.id).unwrap(), updates);
+    store.done_record(blocked.id, None).unwrap();
+    assert!(
+        store
+            .relate_records(blocked.id, prerequisite.id, WaitsFor)
+            .is_err()
+    );
+}
+
+#[test]
+fn waits_for_preserves_endpoint_and_project_scope_eligibility() {
+    use RecordType::{Generic, Grilling, Spec, Task, Wayfinder};
+    use forge_app::RecordRelationshipKind::WaitsFor;
+    let fixture = Fixture::new();
+    let store = fixture.store.in_record_workspace("one").unwrap();
+    let web = fixture.root.join("one/web");
+    std::fs::create_dir_all(&web).unwrap();
+    store
+        .register(&Project {
+            reference: "one/web".into(),
+            workspace_id: "one".into(),
+            slug: "web".into(),
+            project_root: web.canonicalize().unwrap(),
+            origin_url: "https://example.test/web.git".into(),
+        })
+        .unwrap();
+    let open = |kind, scope: &[&str]| {
+        let scope = scope.iter().map(|s| format!("one/{s}")).collect();
+        if kind == RecordType::Grilling {
+            let map = store
+                .open_typed_record(&NewTypedRecord {
+                    record_type: RecordType::Wayfinder,
+                    body: "decision map".into(),
+                    project_slugs: scope,
+                    generated_by_ids: vec![],
+                })
+                .unwrap();
+            store
+                .open_grilling_under_wayfinder("decision", map.id, None, vec![])
+                .unwrap()
+        } else if kind == Generic {
+            store
+                .open_record(&NewRecord {
+                    body: "generic work".into(),
+                    project_slugs: scope,
+                    generated_by_ids: vec![],
+                })
+                .unwrap()
+        } else {
+            store
+                .open_typed_record(&NewTypedRecord {
+                    record_type: kind,
+                    body: "work".into(),
+                    project_slugs: scope,
+                    generated_by_ids: vec![],
+                })
+                .unwrap()
+        }
+    };
+    for (from_kind, from_scope, to_kind, to_scope, allowed) in [
+        (Task, vec![], Task, vec![], true),
+        (Task, vec!["api"], Task, vec!["web"], true),
+        (Task, vec![], Task, vec!["api"], true),
+        (Spec, vec!["api"], Spec, vec!["web"], true),
+        (Task, vec![], Grilling, vec![], true),
+        (Task, vec!["api"], Grilling, vec!["api", "web"], true),
+        (Task, vec!["web"], Grilling, vec!["api"], false),
+        (Task, vec![], Grilling, vec!["api"], false),
+        (Task, vec!["api"], Grilling, vec![], false),
+        (Grilling, vec![], Task, vec![], false),
+        (Task, vec!["api"], Spec, vec!["api"], false),
+        (Generic, vec![], Task, vec![], false),
+        (Task, vec![], Wayfinder, vec![], false),
+    ] {
+        let from = open(from_kind, &from_scope);
+        let to = open(to_kind, &to_scope);
+        let updates = store.list_record_updates(from.id).unwrap();
+        assert_eq!(
+            store.relate_records(from.id, to.id, WaitsFor).is_ok(),
+            allowed,
+            "{from_kind:?} {from_scope:?} -> {to_kind:?} {to_scope:?}"
+        );
+        if allowed {
+            assert_eq!(
+                store
+                    .show_record(from.id)
+                    .unwrap()
+                    .relationships
+                    .iter()
+                    .find(|r| r.to_id == to.id)
+                    .unwrap()
+                    .kind,
+                WaitsFor
+            );
+            store.unrelate_records(from.id, to.id, WaitsFor).unwrap();
+        } else {
+            assert_eq!(store.show_record(from.id).unwrap(), from);
+            assert_eq!(store.list_record_updates(from.id).unwrap(), updates);
+        }
+    }
 }
 
 #[test]
@@ -283,6 +506,7 @@ fn relationships_and_child_creation_are_confined_and_transactional() {
     let task_two = open(&two, RecordType::Task, vec![]);
     for kind in [
         RecordRelationshipKind::DependsOn,
+        RecordRelationshipKind::WaitsFor,
         RecordRelationshipKind::GeneratedBy,
     ] {
         assert_eq!(

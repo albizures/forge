@@ -146,6 +146,8 @@ fn started_spec_rejects_every_ordinary_structural_write_without_partial_history(
     );
     for result in [
         store.relate_records(other, first, RecordRelationshipKind::DependsOn),
+        store.relate_records(other, first, RecordRelationshipKind::WaitsFor),
+        store.unrelate_records(second, other, RecordRelationshipKind::WaitsFor),
         store.relate_ordering_only_records(second, first),
         store.unrelate_records(second, other, RecordRelationshipKind::DependsOn),
         store.unrelate_records(second, first, RecordRelationshipKind::DependsOn),
@@ -196,7 +198,8 @@ fn independent_tasks_empty_plans_and_external_dependencies_retain_existing_seman
     store
         .relate_records(first, external, RecordRelationshipKind::DependsOn)
         .unwrap();
-    store.relate_ordering_only_records(second, first).unwrap();
+    store.relate_records(second, first, RecordRelationshipKind::WaitsFor).unwrap();
+    assert!(store.task_stack(second).unwrap().is_none());
     store.start_record(parent).unwrap();
     // Standalone dependency writes do not gain a Spec gate.
     store
@@ -206,6 +209,28 @@ fn independent_tasks_empty_plans_and_external_dependencies_retain_existing_seman
     store
         .relate_records(external_second, external, RecordRelationshipKind::DependsOn)
         .unwrap();
+}
+
+#[test]
+fn same_spec_waits_for_requires_completion_but_neither_stack_nor_automatic_start() {
+    let store = fixture();
+    let parent = spec(&store);
+    let first = child(&store, parent);
+    let second = child(&store, parent);
+    let checks = store.list_record_checks(second).unwrap();
+    store.relate_records(second, first, RecordRelationshipKind::WaitsFor).unwrap();
+    store.start_record(parent).unwrap();
+    assert!(store.start_record(second).is_err());
+    assert!(store.task_stack(first).unwrap().is_none());
+    assert!(store.task_stack(second).unwrap().is_none());
+    for check in store.list_record_checks(first).unwrap() {
+        crate::tests::check_tests::assess_check(&store, first, check.id, forge_app::checks::Verdict::Pass);
+    }
+    store.done_record(first, None).unwrap();
+    assert_eq!(store.show_record(second).unwrap().status, RecordStatus::Open);
+    assert_eq!(store.list_record_checks(second).unwrap(), checks);
+    store.start_record(second).unwrap();
+    assert_eq!(store.show_record(second).unwrap().status, RecordStatus::InProgress);
 }
 
 #[test]

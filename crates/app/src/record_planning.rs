@@ -1,7 +1,5 @@
 //! Record readiness is workflow state, not provider or dispatch configuration readiness.
-use crate::{
-    Application, Record, RecordRelationshipKind, RecordStatus, RecordType, RegistrationError,
-};
+use crate::{Application, Record, RecordStatus, RecordType, RegistrationError};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecordReadiness {
@@ -34,7 +32,7 @@ impl Application {
             }
             let mut blocked_by = Vec::new();
             for edge in &record.relationships {
-                if edge.kind == RecordRelationshipKind::DependsOn
+                if edge.prerequisite_kind().is_some()
                     && edge.from_id == record.id
                     && self.show_record(edge.to_id)?.status != RecordStatus::Done
                 {

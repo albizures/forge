@@ -199,7 +199,7 @@ async fn spec_start_validation_and_structural_guards_round_trip_cli_and_rpc() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn ordering_only_dependency_round_trips_cli_rpc_and_human_inspection() {
+async fn waits_for_round_trips_cli_rpc_and_human_inspection() {
     use forge_app::{NewTypedRecord, RecordType};
     let fixture = Fixture::new();
     let database = fixture.0.join("intent.sqlite");
@@ -245,21 +245,36 @@ async fn ordering_only_dependency_round_trips_cli_rpc_and_human_inspection() {
         "relate",
         &from,
         "--kind",
-        "ordering-only-depends-on",
+        "waits-for",
         "--to",
         &to,
         "--json",
     ]));
-    assert_eq!(record["relationships"][0]["kind"], "depends-on");
+    assert_eq!(record["relationships"][0]["kind"], "waits-for");
     assert_eq!(record["relationships"][0]["ordering_only"], true);
     let inspected = json(run(&["record", "show", &from, "--json"]));
     assert_eq!(inspected["relationships"], record["relationships"]);
+    let ready = json(run(&["ready", "--blocked", "--json"]));
+    assert!(ready["records"].as_array().unwrap().iter().any(|entry| {
+        entry["record"]["id"] == from.parse::<u64>().unwrap()
+            && entry["blocked_by"] == serde_json::json!([to.parse::<u64>().unwrap()])
+    }));
+    let duplicate = run(&[
+        "record",
+        "relate",
+        &from,
+        "--kind",
+        "waits-for",
+        "--to",
+        &to,
+    ]);
+    assert!(!duplicate.status.success());
     let human = run(&["record", "show", &from]);
     assert!(human.status.success());
     assert!(
         String::from_utf8(human.stdout)
             .unwrap()
-            .contains("[ordering-only]")
+            .contains(&format!("Relationship waits-for {from} -> {to}"))
     );
     let history = run(&["record", "updates", &from]);
     assert!(history.status.success());
@@ -273,23 +288,12 @@ async fn ordering_only_dependency_round_trips_cli_rpc_and_human_inspection() {
         "unrelate",
         &from,
         "--kind",
-        "depends-on",
+        "waits-for",
         "--to",
         &to,
         "--json",
     ]));
     assert_eq!(removed["relationships"], serde_json::json!([]));
-    let ordinary = json(run(&[
-        "record",
-        "relate",
-        &from,
-        "--kind",
-        "depends-on",
-        "--to",
-        &to,
-        "--json",
-    ]));
-    assert_eq!(ordinary["relationships"][0]["ordering_only"], false);
     server.abort();
 }
 

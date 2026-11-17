@@ -13,6 +13,7 @@ pub mod checks;
 pub mod completion;
 pub mod findings;
 pub mod outcomes;
+pub mod prerequisites;
 mod profile_catalog;
 pub mod spec_plans;
 pub mod stacks;
@@ -60,9 +61,30 @@ pub enum RecordStatus {
 pub enum RecordRelationshipKind {
     ParentChild,
     DependsOn,
+    /// Completion-only prerequisite; stored using the supported explicit-intent representation.
+    WaitsFor,
     GeneratedBy,
     /// Non-hierarchical membership of a Spec or Wayfinder in an Initiative.
     Initiative,
+}
+
+/// Prerequisite policy shared by readiness and inheritance validation.
+/// Legacy dependencies remain distinct until explicit historical conversion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PrerequisiteKind {
+    WaitsFor,
+    LegacyDependsOn,
+}
+
+impl RecordRelationshipKind {
+    #[must_use]
+    pub fn prerequisite_kind(self) -> Option<PrerequisiteKind> {
+        match self {
+            Self::WaitsFor => Some(PrerequisiteKind::WaitsFor),
+            Self::DependsOn => Some(PrerequisiteKind::LegacyDependsOn),
+            Self::ParentChild | Self::GeneratedBy | Self::Initiative => None,
+        }
+    }
 }
 
 /// An endpoint-neutral typed Relationship between two Records.
@@ -81,6 +103,19 @@ pub struct RecordRelationship {
     pub parent_id: u64,
     /// Hierarchy compatibility field, populated only for `ParentChild`.
     pub child_id: u64,
+}
+
+impl RecordRelationship {
+    /// Interpret the supported stored designation at the application boundary.
+    #[must_use]
+    pub fn prerequisite_kind(&self) -> Option<PrerequisiteKind> {
+        match self.kind.prerequisite_kind() {
+            Some(PrerequisiteKind::LegacyDependsOn) if self.ordering_only => {
+                Some(PrerequisiteKind::WaitsFor)
+            }
+            kind => kind,
+        }
+    }
 }
 
 /// The immutable kind selected when a Record opens.
@@ -2290,6 +2325,7 @@ pub fn assignment_context<R: AgentDispatchRepository>(
                 relationship.kind,
                 RecordRelationshipKind::ParentChild
                     | RecordRelationshipKind::DependsOn
+                    | RecordRelationshipKind::WaitsFor
                     | RecordRelationshipKind::GeneratedBy
             )
         })
