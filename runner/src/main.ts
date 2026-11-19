@@ -1,6 +1,6 @@
 // T04 controlled synthetic runner. No real providers, tools or production launch.
 import { createInterface } from 'node:readline';
-import { readFileSync, statSync, fstatSync, readlinkSync, lstatSync } from 'node:fs';
+import { readlinkSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
 import { BACKGROUND_CONTEXT as context, withAbortSignal } from '@earendil-works/chord/context';
 import { createModels, fauxProvider, fauxAssistantMessage, fauxText } from '@earendil-works/pi-ai';
@@ -8,6 +8,7 @@ import { Harness, createRegistry } from '@earendil-works/pi-durable';
 import { openNodeSqliteStorage } from '@earendil-works/pi-durable/storage/sqlite/node';
 import { canonical, compatibility, Denied, exactKeys, requireCondition, validateRequest, type Launch } from './contract.ts';
 import { Authorization, guardProvider, type Owner } from './authorization.ts';
+import { ownerIdentity } from './owner.ts';
 import { databasePath, journal, observe, persistIntent, persistRoot, validateDirectory } from './storage.ts';
 
 process.umask(0o077);
@@ -31,7 +32,7 @@ function acceptAuthorization(control: unknown): void {
     const lease = control.lease;
     requireCondition(lease && typeof lease === 'object', 'assignment-lease-denied');
     if (!authorization) {
-      const evidence = ownerIdentity();
+      const evidence = ownerIdentity(directory);
       const owner: Owner = {
         boot_id: evidence.owner.boot_id,
         time_namespace: readlinkSync('/proc/self/ns/time'),
@@ -54,24 +55,6 @@ function acceptAuthorization(control: unknown): void {
   }
 }
 
-function processStart(pid: number): string {
-  return readFileSync(`/proc/${pid}/stat`, 'utf8').split(/\) (?=[RSDZTtXxKWPI] )/).at(-1)!.split(' ')[19];
-}
-function ownerIdentity() {
-  const owner = JSON.parse(process.env.FORGE_RUNNER_OWNER ?? 'null');
-  requireCondition(owner && owner.host_pid === process.ppid, 'runner-owner-parent-invalid');
-  requireCondition(owner.host_start === processStart(process.ppid), 'runner-owner-start-invalid');
-  requireCondition(owner.boot_id === readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim(), 'runner-owner-boot-invalid');
-  requireCondition(Number.isInteger(owner.lock_fd) && owner.lock_fd >= 3, 'runner-owner-descriptor-invalid');
-  const inherited = fstatSync(owner.lock_fd, { bigint: true });
-  const lock = statSync(join(directory, 'owner.lock'), { bigint: true });
-  requireCondition(inherited.dev === lock.dev && inherited.ino === lock.ino, 'runner-owner-descriptor-invalid');
-  requireCondition(owner.lock_device === String(lock.dev) && owner.lock_inode === String(lock.ino), 'runner-owner-invalid');
-  const evidence = JSON.parse(readFileSync(join(directory, 'owner.json'), 'utf8'));
-  requireCondition(canonical(evidence.owner) === canonical(owner), 'runner-owner-evidence-invalid');
-  requireCondition(evidence.worker_pid === process.pid && evidence.worker_start === processStart(process.pid) && evidence.process_group === process.pid, 'runner-owner-worker-invalid');
-  return { ...evidence, worker_start: processStart(process.pid) };
-}
 async function admit(launch: Launch) {
   const prior = journal(directory);
   if (prior) {
@@ -109,7 +92,7 @@ try {
     if (!hostReady) {
       requireCondition(line === '{"host_ready":true}', 'runner-owner-invalid');
       hostReady = true;
-      console.log(JSON.stringify({ event: 'owned', identity: ownerIdentity(), compatibility: compatibility() }));
+      console.log(JSON.stringify({ event: 'owned', identity: ownerIdentity(directory), compatibility: compatibility() }));
       continue;
     }
     try {

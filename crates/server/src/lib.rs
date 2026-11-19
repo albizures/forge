@@ -4,6 +4,7 @@
 //! exposes an unauthenticated service, so use that only on a trusted private network.
 
 mod agent_profiles;
+pub mod assignment_delivery;
 mod browser;
 pub mod durable_authorization;
 pub mod durable_profiles;

@@ -1,19 +1,227 @@
 # T07 — Check-bound execution tracer
 
-## Status: partial; do not advance to T08
+## Status: T07 complete; T08 may proceed
 
-The increments below provide the runner-side bootstrap/runtime composition,
-trusted app/store missing-Outcome observation boundary, real CLI/server and
-fake-model/tool Outcome component tracer, and backend-specific Check admission.
-They **do not complete T07**: there is no enabled production durable dispatch
-adapter or supervised fake-model execution tracer. Actual runtime-answer delivery
-now has component evidence, but no supervised production caller. Production durable launch and automatic recovery remain disabled. No live Forge state, profile selection, capability,
-worktree or real-provider credential was changed.
+The explicitly injected controlled adapter now composes application Check dispatch,
+real Git Managed Worktree preparation, server-owned protected capability delivery,
+retained runtime admission, canonical protected runtime mapping, the shared-flock
+Linux supervisor, actual daemon authorization service/driver, pinned Harness,
+guarded fake model, actual Bash tool and authenticated Forge CLI/server Outcomes.
+Committed read-only answer observation feeds the transactional missing-Outcome
+boundary and actual CLI/RPC inspection. All T07 acceptance checks have retained
+local evidence below.
 
-The checkout already contained uncommitted T06 work; that work was preserved.
-The verification below covers the combined checkout, not a new isolated commit.
+**Production durable dispatch and automatic recovery remain disabled.** This is
+the narrow deterministic tracer required by T07, not installed-component, real-
+provider, retirement/recovery, automatic-scheduling or release readiness. No live
+Forge state, profile selection, worktree or real-provider credential was changed.
+Earlier partial-status sections below are historical evidence, superseded by the
+current supervised tracer. Existing checkout/planning changes were preserved;
+verification covers the combined checkout, not an isolated commit.
 
-## Committed answer observation and diagnostic delivery (latest)
+## Supervised dispatch tracer (latest)
+
+Run from the repository root, with Node 24 and the locked runner install available:
+
+```sh
+cargo test -p forge-cli --test durable_supervised_tracer
+```
+
+`crates/cli/tests/durable_supervised_tracer.rs` is a custom-harness executable that
+runs **six isolated scenarios concurrently**. For host execution it re-execs itself
+with explicit absolute paths and calls the **same** `forge_runner_host::supervisor`
+implementation as the shipped `forge-runner-host` binary. Moving that implementation
+into the host library avoids PATH/sibling-artifact discovery or recursive Cargo
+builds in a test. The CLI adds only an existing-workspace dev-dependency on the host
+library, with no new external dependency. Existing real binary/Node host regressions
+continue to exercise the executable wrapper.
+
+The test embeds the actual server router with the explicitly injected adapter and
+matching protected capability root. Application dispatch is the single controlled
+scheduler; the default Herdr background reconciliation loop is deliberately not a
+second controller of these test Assignments. Automatic scheduling integration is
+T16, not claimed here. No CLI/server response is substituted in the accepted,
+missing, rejected or denied cases. The uncertainty case intentionally withholds an
+actual committed bootstrap reply as described below.
+
+`support/supervised_dispatch.rs` provides the finite controlled adapter. New launch
+preflight and the immediate provision boundary delegate to T06's profile/auth
+preparation. The existing server capability wrapper supplies only the short
+bootstrap and protected file metadata. Real one-shot provision/launch intents and
+acknowledgement deadlines precede the process effect. Immutable launch intent is
+reserved and marked Unknown before spawning. The runtime directory comes from
+`DaemonAuthority::prepare_directory`, not a fixture-selected store path. The host
+acquires/shared-inherits its flock before the Node worker receives readiness; a
+second real host start rejects with `runner-owner-busy` before opening storage.
+
+`DaemonAuthority::bind` validates the directly spawned Child and live kernel
+ownership, and the real service transactionally commits/delivers the initial grant
+and starts its actual renewal driver. Neither the JS lease fixture nor a caller-
+invented grant/epoch is used. `runner/src/owner.ts` shares the existing worker-side
+ownership checks with the synthetic runner; it is included in the source component
+hash. The Node worker validates the v1 request and full live lease and invokes
+`createCheckRuntime` before any model/tool construction or runtime writable open.
+At successful bootstrap it synchronizes with the test controller: context is
+consumed but provider/tool counters are zero. Repeated app dispatch returns the
+same bound Assignment with one provision. Only then is the test barrier released;
+that barrier grants no authority and every execution boundary still checks the
+lease. The Linux abstract socket used for this barrier avoids filesystem-socket
+path-length limits and is not a new production protocol/control.
+
+| Scenario | Observed evidence |
+| --- | --- |
+| Accepted | The guarded fake model makes two requests. Its actual Bash tool invokes a controlled effect that creates a new clean Git commit B and submits the **first** accepted Outcome through the actual delivered Forge CLI. One external mutation is recorded. Forge retains input A, binds output B and authenticated actor/Assignment/generation, and exact replay returns that acceptance. The Task remains In Progress with safety resources reserved. |
+| Missing | One model request ends in plausible final prose, with zero tools/effects. The host validates/persists the exact v1 admission response, independently reads the committed answer using physical read-only storage, and retains `missing-outcome` plus a hold. No Assessment, pass, Continuation, completion or successor is created. |
+| Rejected | Two model requests and one actual Bash effect submit a stale-generation Outcome through the actual CLI. Rejection followed by final prose still produces `missing-outcome`, never acceptance. The effect occurs once; no replay/recovery is attempted. |
+| Denied bootstrap | An intentionally incorrect protected capability file fails the actual CLI/server bootstrap. Model/tool counters remain zero, no runtime SQLite DB opens and admission remains Unknown. The real service retains authorization uncertainty/capacity. |
+| Uncertain bootstrap | A controlled loopback proxy forwards exactly one actual authenticated bootstrap to the real server, lets its acknowledgement/start/context effects commit, then withholds the trusted reply with HTTP 503. The actual CLI/gate fails closed: no model, tool or runtime DB, no retry, retained Unknown/diagnostics/capacity. Server context-read is true while the worker never reports successful bootstrap. |
+| Revoked before grant | Explicit fixture closure after retained process intent but before the initial grant makes the real service deny issuance. No bootstrap/model/tool/runtime SQLite open occurs. Ownership intent and capacity remain retained after reopen. Closure is not retirement proof. |
+
+Each scenario also verifies Manual, dependency and Open Spec parent gates before
+provisioning/capability/worktree effects. Missing model credentials likewise reject
+before new Assignment/capability/worktree creation. No Herdr binding or Workspace
+Task/Grilling selection is supplied. Herdr verification, automatic recovery and
+retirement adapter methods panic if invoked. The process launch uses only the
+absolute Node worker and Forge CLI, never Herdr resources or the Pi CLI.
+
+Missing/rejected cases exercise actual human/JSON CLI → RPC Assignment inspection
+and compare unchanged persisted state. All scenarios verify retained capacity
+blocks another Task, explicit fixture closure/reopen retains exact resources and
+runtime/attempt identity, and runtime files plus fully drained process output
+contain neither the actual random capability nor the model-key canary. The model
+submits via metadata/path-only tool environment. Model authentication remains
+separate from Forge authority. Controller stop persists authorization uncertainty;
+test process-group teardown does **not** retire product resources, release capacity
+or claim universal descendant absence. Worktree bytes are never reset/cleaned to
+make a test pass.
+
+### Final verification
+
+```sh
+cargo test -p forge-cli --test durable_supervised_tracer
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+git diff --check
+(cd runner && npm run check && npm test)
+```
+
+All final gates pass: **647 Rust harness tests passed, 0 failed, 1 pre-existing
+opt-in probe ignored; all 6 parallel supervised-tracer scenarios passed within the
+workspace gate; runner typecheck and 45 Node tests passed**. The six custom-harness
+scenarios are reported separately, not silently added to Rust's harness count.
+The renewed workspace gate includes the prior real CLI/Outcome tracer, backend
+admission gates, Herdr/Grilling regressions and real service/host/Node lease tests.
+The historical supervisor-death timeout did not recur in these runs; no diagnosis
+or general flake-resolution claim is made. Clean installation, packaged/matched-
+Revision delivery and real-provider verification remain unrun/reserved for later
+Tasks, not waived release checks.
+
+Initial composition runs found fixture errors: missing protected `.forge` setup
+under ambient group-writable umask, an overlong filesystem-socket test barrier,
+reversed constructor/field assumptions and proxy positional-param decoding. An
+additional parallel run exposed a competing default Herdr background reconciler
+administering the controlled Assignment; the tracer now embeds its explicitly
+selected adapter and single scheduler through the actual server router, rather
+than running two independent controllers. Provision/launch intents are now also
+retained before process effects. A Clippy similar-name finding was corrected.
+All affected focused and final default-parallel workspace/Node gates were rerun;
+no ownership, authorization, retained-resource or freshness policy was weakened.
+
+### Implementation and standards self-review
+
+Against T07's “from Forge dispatch through the durable runner ... authenticated
+bootstrap and accepted Outcome”: complete for the explicitly enabled deterministic
+tracer, with real ownership/service/capability/CLI/server/tool composition rather
+than a directly claimed Check, captured-only transport or fixture lease. Failed and
+uncertain bootstrap, stale/revoked authority, missing/rejected Outcomes, exact
+identity/evidence, source/auth preflight and ordinary dispatch gates are covered.
+Production dispatch remains disabled exactly as requested. No scope creep or
+incorrect completion claim found; later interrupted-effect/recovery/retirement,
+packaging, automatic scheduling and real-provider deliverables remain deferred.
+
+Standards review found **no introduced violations**. Production changes extract
+existing supervision/ownership and expose trusted server composition only; app/
+store policy remains authoritative. The internal dev-dependency reuses the actual
+host, external calls stay outside transactions, environments/listeners/stores are
+isolated, synchronization is explicit and all uncertainty/resources remain retained.
+This is a task-local self-review, not independent T18 review or release approval.
+
+**T07 is complete; T08 may proceed.**
+
+## Application-dispatched component tracer (previous)
+
+The three real CLI/server/model/tool cases now enter through
+`Application::dispatch_record`, not a direct store Check claim. The application
+selects the immutable durable Check pin and prepares the actual Git Managed
+Worktree using the server's `GitWorktreeAdapter` and `GitInspector`. No worktree
+claim or checkout is pre-created by the fixture. The bound Base Commit remains
+explicitly supplied through the existing store contract.
+
+A test-only durable transport adapter captures the actual provision context and
+runs `durable_profiles::prepare` against the bound checkout and explicit protected
+model-key file. The component runner consumes that prepared configuration,
+including the registered tool set and context, rather than a hand-built execution
+profile. Bootstrap identity is derived from the captured Assignment/profile/cwd
+and the app-created persisted Check attempt. Assignment IDs are no longer fixed
+fixture strings; exact authenticated Outcome attribution and replay assertions use
+the app-selected identity.
+
+All three cases assert that:
+
+- Missing explicit model credentials reject before any worktree claim,
+  Assignment, capability file or transport provisioning; restoring the explicit
+  key permits dispatch without weakening the gate.
+- Exactly one provision context is captured; repeating dispatch returns the same
+  Assignment without another provision. The Check, pin, input evidence and
+  execution directory match the retained attempt and prepared configuration.
+- App admission needs no Herdr binding or Workspace Task/Grilling selections.
+  Herdr verification, recovery and retirement methods panic if called.
+- Accepted, prose-only and rejected-Outcome execution still traverses the actual
+  CLI/HTTP daemon, pinned Harness, guarded fake model and actual Bash tool.
+  Committed-answer observation, retained missing-Outcome inspection/closure and
+  secret-canary checks remain in place.
+
+**Limits:** the adapter captures the transport request and the fixture later
+executes it; it does not start a supervised worker from `provision`. The JS lease,
+protected test-selected runtime directory and capability file are still fixtures.
+There is no shared flock, real grant/renewal service, canonical runtime mapping,
+production adapter or installed Revision attestation in this composition. The
+full app-dispatch → supervisor → grant-service tracer is still outstanding; T07
+remains partial and T08 remains blocked. No production or live Forge state changed.
+
+Verification from repository root:
+
+```sh
+cargo test -p forge-cli --test durable_check_bootstrap
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+git diff --check
+(cd runner && npm run check && npm test)
+```
+
+All final gates pass: **647 Rust tests passed, 0 failed, 1 pre-existing opt-in
+probe ignored; 45 Node tests passed, 0 failed**. The focused tracer's three cases
+pass in both the final focused run and the default-parallel workspace run,
+including the missing-key assertions. Initial compilation exposed reversed Git adapter/inspector
+constructor arguments; the first execution exposed an omitted persisted Base
+Commit. Both fixture errors were corrected without changing product policy.
+The previously observed intermittent supervisor test passed in this run; that is
+not a diagnosis or claim that the intermittent failure is resolved. No packaged
+or real-provider release verification was performed.
+
+Implementation self-review against T07's “from Forge dispatch through the durable
+runner”: app dispatch, preparation and component execution now share the exact
+bound Assignment/configuration, but the transport capture and fixture lease leave
+supervised dispatch **partial**. “Use existing ... bootstrap and Outcome commands”
+and accepted/missing/rejected Outcomes retain their actual CLI/server evidence.
+No scope creep or incorrect completion claim identified. Standards self-review:
+no introduced violations found; the new adapter is test-only, delegates profile
+policy, isolates credentials/stores/listeners, and releases its capture mutex
+before asynchronous execution. This is not independent T18 review.
+
+## Committed answer observation and diagnostic delivery (previous)
 
 `runner/src/storage.ts::observeAnswer` reads the exact journal Launch, root and
 accepted submission ID through physical read-only SQLite and the pinned derived
@@ -406,7 +614,9 @@ argv/environment, bounded outputs and static redacted failures. Tests isolate
 files/environment and use readiness synchronization for cancellation. Their
 protocol-fake limitation is explicit. This is not independent T18 review.
 
-## Next work within T07
+## Historical next-work checklist within T07
+
+Closed by the supervised dispatch tracer above; retained here as planning history.
 
 1. Compose an explicitly test-enabled real durable adapter with app Check dispatch.
    Backend-specific app/store Check admission is now implemented and tested with a

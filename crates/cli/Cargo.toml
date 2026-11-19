@@ -33,7 +33,14 @@ axum = "0.8.8"
 forge-app = { path = "../app" }
 forge-server = { path = "../server" }
 forge-store = { path = "../store" }
+forge-runner-host = { path = "../runner-host" }
 shlex = "2.0.1"
+
+# Re-executes itself as the real supervisor, sharing the shipped host library.
+# A custom harness avoids PATH/sibling-binary discovery and nested Cargo builds.
+[[test]]
+name = "durable_supervised_tracer"
+harness = false
 
 [[bin]]
 name = "forge"

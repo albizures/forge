@@ -1,7 +1,7 @@
 //! Trusted pipe delivery and an independent (non-JavaScript) watchdog loop.
+use crate::supervision::{Supervised, boottime_millis};
 use forge_app::authorization_lease::{Lease, LeaseWatchdog, Owner, TERM_GRACE_MILLIS};
 use forge_rpc::durable_execution::{SUPERVISOR_CONTROL_VERSION, SupervisorControl};
-use forge_runner_host::supervision::{Supervised, boottime_millis};
 use std::{
     fs,
     io::{self, BufRead, Read, Write},

@@ -442,6 +442,7 @@ dependencies = [
  "forge-app",
  "forge-build-info",
  "forge-rpc",
+ "forge-runner-host",
  "forge-server",
  "forge-store",
  "forgeup",

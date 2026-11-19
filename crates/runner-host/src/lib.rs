@@ -5,6 +5,8 @@ pub mod control;
 pub mod model_auth;
 pub mod storage;
 pub mod supervision;
+pub mod supervisor;
+mod watchdog;
 use forge_app::{
     RegistrationError,
     authorization_lease::{AuthorityHost, Observation, Owner},

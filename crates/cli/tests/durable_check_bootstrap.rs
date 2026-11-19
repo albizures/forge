@@ -1,10 +1,13 @@
 //! Real runner bootstrap module -> delivered CLI -> HTTP daemon -> store.
-//! This is NOT durable dispatch: the Check is claimed directly and the JS
-//! authorization grant is a test-only fixture. A fake model drives the actual
-//! Harness/Bash/CLI Outcome path. No Herdr binding is configured.
+//! Application Check dispatch and Git worktree preparation feed the captured
+//! transport into a real Harness/Bash/CLI Outcome path. The JS authorization
+//! grant remains a test-only fixture, NOT supervised execution. No Herdr binding.
+#[path = "support/durable_dispatch.rs"]
+mod durable_dispatch;
 use forge_app::{
-    AgentDispatchRepository, ManagedWorktreeRepository, NewTypedRecord, Project, ProjectRepository,
-    RecordRepository, RecordType, WorkspaceDispatchRepository, WorkspaceRepository,
+    AgentDispatchRepository, Application, ManagedWorktreeRepository, NewTypedRecord, Project,
+    ProjectRepository, RecordRepository, RecordType, WorkspaceDispatchRepository,
+    WorkspaceRepository,
     agent_profiles::ResourceCatalog,
     assignment::BoundIdentity,
     check_templates::{CheckCriterion, TemplateReplacement},
@@ -22,6 +25,7 @@ use std::{
     os::unix::fs::{DirBuilderExt, PermissionsExt},
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
+    sync::{Arc, Mutex},
 };
 
 struct Fixture(PathBuf);
@@ -125,12 +129,17 @@ async fn bootstrap(input: Value) -> Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
-async fn outcome(endpoint: &str, secret: &Path, file: &Path) -> Output {
-    let (endpoint, secret, file) = (endpoint.to_owned(), secret.to_owned(), file.to_owned());
+async fn outcome(assignment_id: &str, endpoint: &str, secret: &Path, file: &Path) -> Output {
+    let (assignment_id, endpoint, secret, file) = (
+        assignment_id.to_owned(),
+        endpoint.to_owned(),
+        secret.to_owned(),
+        file.to_owned(),
+    );
     tokio::task::spawn_blocking(move || {
         Command::new(env!("CARGO_BIN_EXE_forge"))
             .env_clear()
-            .env("FORGE_ASSIGNMENT_ID", "t07-check")
+            .env("FORGE_ASSIGNMENT_ID", assignment_id)
             .env("FORGE_ASSIGNMENT_DAEMON_URL", endpoint)
             .env("FORGE_ASSIGNMENT_CAPABILITY_SECRET_FILE", secret)
             .args(["assignment", "outcome", "--file"])
@@ -229,42 +238,77 @@ async fn check_execution(mode: &str) {
         .unwrap();
     let check = store.list_record_checks(task.id).unwrap().remove(0);
     store.set_task_base_commit(task.id, &commit).unwrap();
-    let checkout = store.reserve_worktree_claim(task.id).unwrap();
-    git(
-        &repository,
-        &[
-            "worktree",
-            "add",
-            "-b",
-            &forge_app::stacks::task_branch(task.id),
-            checkout.path.to_str().unwrap(),
-        ],
-    );
-    store.activate_worktree_claim(task.id).unwrap();
+    let model_auth = root.join("model-auth");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&model_auth)
+        .unwrap();
+    let model_key = model_auth.join("key");
+    std::fs::write(&model_key, "T07-MODEL-KEY-CANARY").unwrap();
+    std::fs::set_permissions(&model_key, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let launches = Arc::new(Mutex::new(vec![]));
+    let app = Application::with_managed_worktrees_and_agent_dispatch(
+        Box::new(SqliteProjectRepository::open(&db).unwrap()),
+        Box::new(SqliteProjectRepository::open(&db).unwrap()),
+        Box::new(forge_server::GitWorktreeAdapter),
+        Box::new(SqliteProjectRepository::open(&db).unwrap()),
+        Box::new(durable_dispatch::DurableDispatch {
+            credential: model_key.clone(),
+            launches: launches.clone(),
+        }),
+        Box::new(forge_server::GitInspector),
+    )
+    .with_workspace_repository(Box::new(SqliteProjectRepository::open(&db).unwrap()));
+    assert!(store.worktree_claim(task.id).unwrap().is_none());
     let evidence = Evidence::Repository {
         repository: repository.display().to_string(),
         commit,
     };
-    let (assignment, existing) = store
-        .claim_task_check_acceptance(
-            task.id,
-            "t07-check",
-            &forge_app::CheckDispatchPreflight::PiDurable,
-            &evidence,
-            check.id,
-            profile.revision,
-            None,
-        )
-        .unwrap();
+    // Authentication preflight fails before worktree preparation, Assignment
+    // creation, capability delivery or transport provisioning.
+    std::fs::remove_file(&model_key).unwrap();
+    assert!(app.dispatch_record(task.id).is_err());
+    assert!(store.worktree_claim(task.id).unwrap().is_none());
+    assert!(store.list_agent_assignments(task.id).unwrap().is_empty());
+    assert!(launches.lock().unwrap().is_empty());
+    assert!(!root.join("assignment-capabilities").exists());
+    std::fs::write(&model_key, "T07-MODEL-KEY-CANARY").unwrap();
+    std::fs::set_permissions(&model_key, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let (assignment, existing) = app.dispatch_record(task.id).unwrap();
     assert!(!existing);
+    let assignment_id = assignment.id.as_str();
+    let checkout = store.worktree_claim(task.id).unwrap().unwrap();
+    assert!(checkout.path.is_dir());
+    assert_ne!(checkout.path, repository);
     assert_eq!(
-        store.assignment_dispatch_workspace("t07-check").unwrap(),
+        app.dispatch_record(task.id).unwrap(),
+        (assignment.clone(), true)
+    );
+    let captured = {
+        let mut launches = launches.lock().unwrap();
+        assert_eq!(launches.len(), 1);
+        launches.pop().unwrap()
+    };
+    assert_eq!(captured.context.assignment.id, assignment.id);
+    assert_eq!(
+        captured.context.agent_workspace,
+        Some(checkout.path.clone())
+    );
+    assert_eq!(captured.profile.configuration.cwd, checkout.path);
+    assert_eq!(
+        store.assignment_dispatch_workspace(assignment_id).unwrap(),
         None
     );
     let attempt = store
-        .assignment_check_attempt("t07-check")
+        .assignment_check_attempt(assignment_id)
         .unwrap()
         .unwrap();
+    assert_eq!(attempt.check_id, check.id);
+    assert_eq!(attempt.evidence, evidence);
+    assert_eq!(
+        captured.context.assignment.profile.revision,
+        profile.revision
+    );
     let launch = Launch {
         assignment_id: assignment.id.clone(),
         operation_id: "t07-launch".into(),
@@ -283,17 +327,18 @@ async fn check_execution(mode: &str) {
         Admission::Pending
     );
     assert!(store.begin_send("test", &launch).unwrap());
+    let provisioned = &captured.context.assignment;
     let bound = BoundIdentity {
-        assignment_id: assignment.id,
-        record_id: task.id,
-        profile_revision: profile.revision,
+        assignment_id: provisioned.id.clone(),
+        record_id: provisioned.record_id,
+        profile_revision: provisioned.profile.revision,
         profile_record_type: "task".into(),
-        provider: profile.provider,
-        agent_kind: profile.agent_kind,
-        model: profile.model,
-        attempt_number: assignment.attempt_number,
+        provider: provisioned.profile.provider.clone(),
+        agent_kind: provisioned.profile.agent_kind.clone(),
+        model: provisioned.profile.model.clone(),
+        attempt_number: provisioned.attempt_number,
         check_attempt: Some(attempt.clone()),
-        execution_directory: checkout.path.clone(),
+        execution_directory: captured.context.agent_workspace.clone().unwrap(),
         provider_workspace: None,
     };
     let secrets = root.join("assignment-capabilities");
@@ -301,7 +346,7 @@ async fn check_execution(mode: &str) {
         .mode(0o700)
         .create(&secrets)
         .unwrap();
-    let secret = secrets.join("t07-check");
+    let secret = secrets.join(assignment_id);
     std::fs::write(&secret, "T07-CAPABILITY-CANARY").unwrap();
     std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -325,7 +370,7 @@ async fn check_execution(mode: &str) {
     .await
     .unwrap();
     let input = json!({"bound": bound, "expected": "accepted", "capability": {
-        "FORGE_ASSIGNMENT_ID": "t07-check", "FORGE_ASSIGNMENT_DAEMON_URL": endpoint,
+        "FORGE_ASSIGNMENT_ID": assignment_id, "FORGE_ASSIGNMENT_DAEMON_URL": endpoint,
         "FORGE_ASSIGNMENT_CAPABILITY_SECRET_FILE": secret,
         "FORGE_ASSIGNMENT_FORGE_CLI": Path::new(env!("CARGO_BIN_EXE_forge")).canonicalize().unwrap()
     }});
@@ -336,9 +381,9 @@ async fn check_execution(mode: &str) {
     std::fs::set_permissions(&foreign, std::fs::Permissions::from_mode(0o600)).unwrap();
     wrong_secret["capability"]["FORGE_ASSIGNMENT_CAPABILITY_SECRET_FILE"] = json!(foreign);
     bootstrap(wrong_secret).await;
-    assert!(!store.assignment_context_read("t07-check").unwrap());
+    assert!(!store.assignment_context_read(assignment_id).unwrap());
     bootstrap(input.clone()).await;
-    assert!(store.assignment_context_read("t07-check").unwrap());
+    assert!(store.assignment_context_read(assignment_id).unwrap());
     assert_eq!(
         store.show_record(task.id).unwrap().status,
         forge_app::RecordStatus::InProgress
@@ -374,7 +419,7 @@ async fn check_execution(mode: &str) {
     };
     assert_ne!(evidence, output_evidence);
     let file = root.join("outcome.json");
-    let valid = json!({"attempt_id": "t07-check", "generation": attempt.generation, "evidence": output_evidence, "verdict": "pass", "actor": "spoofed", "message": "Delivered", "disposition": "complete", "findings": [], "verifications": []});
+    let valid = json!({"attempt_id": attempt.id, "generation": attempt.generation, "evidence": output_evidence, "verdict": "pass", "actor": "spoofed", "message": "Delivered", "disposition": "complete", "findings": [], "verifications": []});
     for (invalid, code) in [
         (json!({"attempt_id": "foreign"}), "attempt-not-found"),
         (
@@ -387,7 +432,7 @@ async fn check_execution(mode: &str) {
             request[key] = value.clone();
         }
         std::fs::write(&file, serde_json::to_vec(&request).unwrap()).unwrap();
-        let rejected = outcome(&endpoint, &secret, &file).await;
+        let rejected = outcome(assignment_id, &endpoint, &secret, &file).await;
         assert!(!rejected.status.success());
         assert!(
             String::from_utf8_lossy(&rejected.stderr).contains(code),
@@ -402,20 +447,12 @@ async fn check_execution(mode: &str) {
         );
     }
     std::fs::write(&file, serde_json::to_vec(&valid).unwrap()).unwrap();
-    let unauthorized = outcome(&endpoint, &foreign, &file).await;
+    let unauthorized = outcome(assignment_id, &endpoint, &foreign, &file).await;
     assert!(!unauthorized.status.success());
     assert!(String::from_utf8_lossy(&unauthorized.stderr).contains("assignment-capability-denied"));
     // The first accepted submission is driven by a deterministic fake model
     // through the actual guarded Bash tool and CLI, not by this Rust process.
-    // This component still has a fixture lease, no supervisor or app dispatch.
-    let model_auth = root.join("model-auth");
-    std::fs::DirBuilder::new()
-        .mode(0o700)
-        .create(&model_auth)
-        .unwrap();
-    let model_key = model_auth.join("key");
-    std::fs::write(&model_key, "T07-MODEL-KEY-CANARY").unwrap();
-    std::fs::set_permissions(&model_key, std::fs::Permissions::from_mode(0o600)).unwrap();
+    // Application dispatch is real; transport capture and lease remain fixtures.
     let runtime = root.join("component-runtime");
     std::fs::DirBuilder::new()
         .mode(0o700)
@@ -424,7 +461,7 @@ async fn check_execution(mode: &str) {
     let mut execution = input.clone();
     execution["execution"] = json!({
         "key": model_key, "storage": runtime.join("runtime.sqlite"), "outcome": file,
-        "launch": launch, "mode": mode
+        "launch": launch, "mode": mode, "configuration": captured.profile.configuration
     });
     if mode == "rejected" {
         let mut stale_outcome = valid.clone();
@@ -447,7 +484,7 @@ async fn check_execution(mode: &str) {
     if mode != "accepted" {
         assert_eq!(observation, AnswerObservation::MissingOutcome);
         assert_eq!(store.observe_answer("test", &launch).unwrap(), observation);
-        let info = store.agent_assignment_info("t07-check").unwrap();
+        let info = store.agent_assignment_info(assignment_id).unwrap();
         assert!(
             info.recovery_blockers()
                 .iter()
@@ -469,22 +506,23 @@ async fn check_execution(mode: &str) {
         );
         assert_eq!(store.list_agent_assignments(task.id).unwrap().len(), 1);
         assert_eq!(
-            store.assignment_check_attempt("t07-check").unwrap(),
+            store.assignment_check_attempt(assignment_id).unwrap(),
             Some(attempt)
         );
-        assert!(store.runtime("test", "t07-check").unwrap().is_some());
+        assert!(store.runtime("test", assignment_id).unwrap().is_some());
         assert!(info.dispatch_hold.is_some());
         assert!(info.capacity_reserved());
         // Inspect the diagnostic produced by actual runtime prose, not a seeded
         // presentation fixture. Inspection cannot consume or clear retained state.
         for json_output in [false, true] {
             let endpoint = format!("{endpoint}/rpc");
+            let assignment_id = assignment_id.to_owned();
             let output = tokio::task::spawn_blocking(move || {
                 let mut command = Command::new(env!("CARGO_BIN_EXE_forge"));
                 command.env_clear().args([
                     "dispatcher",
                     "assignment-info",
-                    "t07-check",
+                    &assignment_id,
                     "--server-url",
                     &endpoint,
                 ]);
@@ -515,12 +553,12 @@ async fn check_execution(mode: &str) {
                 );
             }
         }
-        assert_eq!(store.agent_assignment_info("t07-check").unwrap(), info);
+        assert_eq!(store.agent_assignment_info(assignment_id).unwrap(), info);
         // Closure and a new repository connection do not erase uncertainty or
         // release capacity. This is test-controlled closure, not safe retirement.
         store
             .close_agent_assignment(
-                "t07-check",
+                assignment_id,
                 forge_app::AgentAssignmentClosureReason::Retired,
             )
             .unwrap();
@@ -529,7 +567,7 @@ async fn check_execution(mode: &str) {
             reopened.observe_answer("test", &launch).unwrap(),
             observation
         );
-        let retained = reopened.agent_assignment_info("t07-check").unwrap();
+        let retained = reopened.agent_assignment_info(assignment_id).unwrap();
         assert!(retained.capacity_reserved());
         assert!(
             retained
@@ -547,7 +585,7 @@ async fn check_execution(mode: &str) {
         Some(forge_app::checks::Verdict::Pass)
     );
     // Exact replay reads back the model tool's accepted result for assertions.
-    let accepted = outcome(&endpoint, &secret, &file).await;
+    let accepted = outcome(assignment_id, &endpoint, &secret, &file).await;
     assert!(
         accepted.status.success(),
         "{}",
@@ -558,12 +596,12 @@ async fn check_execution(mode: &str) {
     assert_eq!(result.attempt, attempt);
     assert_eq!(result.evidence, output_evidence);
     let assessment = result.check.latest_assessment.as_ref().unwrap();
-    assert_eq!(assessment.actor, "t07-check");
-    assert_eq!(assessment.assignment_id.as_deref(), Some("t07-check"));
+    assert_eq!(assessment.actor, assignment_id);
+    assert_eq!(assessment.assignment_id.as_deref(), Some(assignment_id));
     assert_eq!(assessment.evidence, output_evidence);
     assert_eq!(assessment.generation, attempt.generation);
     assert!(!String::from_utf8_lossy(&accepted.stdout).contains("T07-CAPABILITY-CANARY"));
-    let replay = outcome(&endpoint, &secret, &file).await;
+    let replay = outcome(assignment_id, &endpoint, &secret, &file).await;
     assert!(replay.status.success());
     assert_eq!(
         serde_json::from_slice::<Value>(&accepted.stdout).unwrap(),
@@ -574,12 +612,12 @@ async fn check_execution(mode: &str) {
         Some(forge_app::checks::Verdict::Pass)
     );
     assert_eq!(
-        store.assignment_check_attempt("t07-check").unwrap(),
+        store.assignment_check_attempt(assignment_id).unwrap(),
         Some(attempt)
     );
     store
         .close_agent_assignment(
-            "t07-check",
+            assignment_id,
             forge_app::AgentAssignmentClosureReason::Retired,
         )
         .unwrap();
@@ -587,7 +625,7 @@ async fn check_execution(mode: &str) {
     revoked["expected"] = "denied".into();
     bootstrap(revoked).await;
     // Exact accepted replay survives closure; closure cannot rewrite that result.
-    let closed_replay = outcome(&endpoint, &secret, &file).await;
+    let closed_replay = outcome(assignment_id, &endpoint, &secret, &file).await;
     assert!(closed_replay.status.success());
     assert_eq!(
         serde_json::from_slice::<Value>(&accepted.stdout).unwrap(),
@@ -596,7 +634,7 @@ async fn check_execution(mode: &str) {
     let mut conflicting = valid;
     conflicting["message"] = "Different submission after revocation".into();
     std::fs::write(&file, serde_json::to_vec(&conflicting).unwrap()).unwrap();
-    let rejected = outcome(&endpoint, &secret, &file).await;
+    let rejected = outcome(assignment_id, &endpoint, &secret, &file).await;
     assert!(!rejected.status.success());
     daemon.abort();
     let _ = daemon.await;

@@ -26,7 +26,9 @@ try {
     assert.equal(launch.component_hash, componentHash());
     const directory = dirname(input.execution.storage);
     validateDirectory(directory, input.bound.executionDirectory);
-    const config = { version: 1, model: 'openai/gpt-4.1', thinkingLevel: 'off', tools: ['bash'], context: { instructions: 'Explicit test profile', resources: [] }, cwd: input.bound.executionDirectory };
+    const config = input.execution.configuration;
+    assert.equal(config.cwd, input.bound.executionDirectory);
+    assert.deepEqual(config.tools, ['read', 'write', 'edit', 'bash']);
     const runtime = await createCheckRuntime(launch, generation, input.bound, input.capability, config, input.execution.key, authorization);
     // Only this test composition replaces the selected model. The real guarded
     // coding tool, explicit environment/cwd and authenticated CLI are unchanged.
@@ -51,7 +53,7 @@ try {
           assert.ok(JSON.stringify(results[0]).includes('stale-generation'));
         } else {
           assert.ok(!results[0].isError);
-          assert.ok(JSON.stringify(results[0]).includes('t07-check'));
+          assert.ok(JSON.stringify(results[0]).includes(input.bound.assignmentId));
         }
         verifiedToolResult = true;
         return fauxAssistantMessage('Runtime prose is not a Forge Outcome.');
