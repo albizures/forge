@@ -9,7 +9,7 @@ by migrations—not just the initial `CREATE TABLE` statements.
 - [`src/lib.rs`](src/lib.rs): `SqliteProjectRepository::from_connection`,
   `migrate_*` functions, profile seeds, and repository operations.
 - [`src/workspaces.rs`](src/workspaces.rs): Workspace ownership and Project identity.
-- [`src/upgrade.rs`](src/upgrade.rs): explicit offline schema 7 → 8 → 9 → 10 → 11 → 12 → 13 → 14 → 15 → 16 → 17 → 18 → 19 → 20 conversion,
+- [`src/upgrade.rs`](src/upgrade.rs): explicit offline schema 7 → 8 → 9 → 10 → 11 → 12 → 13 → 14 → 15 → 16 → 17 → 18 → 19 → 20 → 21 conversion,
   frozen contract validation, consistent snapshots, and preservation inventories.
   See [Revision State upgrades](../../docs/state-upgrades.md) for orchestration.
 - [`src/record_workspaces.rs`](src/record_workspaces.rs): Record ownership,
@@ -24,7 +24,8 @@ by migrations—not just the initial `CREATE TABLE` statements.
 - [`src/workspace_dispatch.rs`](src/workspace_dispatch.rs): Workspace dispatch
   configuration, provider generations, and Assignment binding.
 - [`src/durable_execution.rs`](src/durable_execution.rs): durable runtime identity,
-  admission intent/results and conservative capacity reservation (schema 20).
+  admission intent/results and conservative capacity reservation (schema 20),
+  and append-only authorization grant history (schema 21).
 
 Keep this reference in sync when those schema definitions change. Domain behavior
 is documented separately in [Records](../../docs/records.md),
@@ -45,10 +46,42 @@ is documented separately in [Records](../../docs/records.md),
   numbered separately per Workspace.
 - Foreign keys use SQLite's default delete behavior unless stated otherwise.
   Most references do **not** cascade.
-- Ordinary repository opening accepts only the current marked schema revision **20**.
+- Ordinary repository opening accepts only the current marked schema revision **21**.
   Triggers and repository validation also enforce invariants. Explicit managed
-  copy-and-upgrade targets revision 20 from revisions 7 through 20; unsupported
+  copy-and-upgrade targets revision 21 from revisions 7 through 21; unsupported
   stores are rejected without automatic conversion or reset.
+
+## Assignment authorization grant history (revision 21)
+
+`assignment_authorization_leases` stores `(assignment_id, sequence)` as its primary
+key, with an Assignment runtime FK and typed `lease_json`. Update/delete triggers
+retain the complete grant history. Grants bind the immutable Launch, work
+generation, host/worker start identities, lock identity, host boot/time namespace,
+daemon lifetime epoch and sequence. Only a trusted internal daemon adapter may
+supply verified ownership and clock observations; no agent/operator wire method
+currently exposes this repository operation.
+
+Grants last 30 seconds; the intended renewal cadence is 10 seconds. Deadlines use
+absolute host CLOCK_BOOTTIME milliseconds, **not Unix epoch time**. The application
+policy rejects changed bindings/owners/epochs, sequence gaps, future issuance,
+non-30-second bounds and renewals at or after the previous deadline. Exact retries
+return no new deadline, require current authority, and reject expiration. A daemon
+restart cannot renew a previous lifetime's grant or reset its sequence.
+
+An immediate transaction revalidates scope, live Assignment/attempt state, profile
+and runtime identity, freshness, Spec/Stack/dependency execution gates, Execution
+Mode, Dispatch Holds and unresolved resource blockers before recording a grant.
+Grant persistence never acknowledges a capability, starts a Task, records a
+heartbeat, accepts an Outcome or releases a capacity reservation. Expiry alone
+does not prove that execution stopped. No secrets belong in grant history.
+
+Revision 21 rejects older stores before ordinary initialization writes. Explicit
+offline 20 → 21 conversion adds only an empty grant table and its history guards;
+it creates no historical permissions. **This is the T05 application/store
+foundation, not runner lease enforcement.** Verified host ownership, a trusted
+clock/daemon service, runner model/tool gates, independent watchdog cancellation
+and outage/restart integration evidence remain pending. The T04 synthetic runner
+is unchanged; production durable dispatch remains disabled.
 
 ## Durable runtime admission (revision 20)
 

@@ -112,6 +112,203 @@ impl Drop for Fixture {
     }
 }
 
+fn lease(f: &Fixture) -> forge_app::authorization_lease::Lease {
+    use forge_app::authorization_lease::{Lease, Owner};
+    Lease {
+        launch: f.launch.clone(),
+        generation: 1,
+        owner: Owner {
+            boot_id: "test-boot".into(),
+            time_namespace: "time:[1]".into(),
+            host_pid: 10,
+            host_start: "100".into(),
+            worker_pid: 11,
+            worker_start: "101".into(),
+            lock_device: "1".into(),
+            lock_inode: "2".into(),
+        },
+        daemon_epoch: "daemon-lifetime-1".into(),
+        sequence: 1,
+        issued_boottime_millis: 1_000,
+        expires_boottime_millis: 31_000,
+    }
+}
+
+#[test]
+fn lease_history_is_atomic_idempotent_and_not_restart_authority() {
+    use forge_app::authorization_lease::Repository as _;
+    let f = Fixture::new();
+    f.store.reserve("test", &f.launch).unwrap();
+    let first = lease(&f);
+    f.store.grant_lease("test", &first, 1_000).unwrap();
+    f.reopen().grant_lease("test", &first, 1_001).unwrap();
+    let mut renewed = first.clone();
+    renewed.sequence = 2;
+    renewed.issued_boottime_millis += 10_000;
+    renewed.expires_boottime_millis += 10_000;
+    f.reopen().grant_lease("test", &renewed, 11_000).unwrap();
+    let mut changed = renewed.clone();
+    changed.daemon_epoch = "restarted-daemon".into();
+    assert_eq!(
+        f.reopen()
+            .grant_lease("test", &changed, 11_001)
+            .unwrap_err()
+            .code,
+        "assignment-lease-denied"
+    );
+    assert_eq!(
+        f.reopen()
+            .grant_lease("test", &first, 11_001)
+            .unwrap_err()
+            .code,
+        "assignment-lease-denied"
+    );
+    assert_eq!(
+        f.reopen()
+            .grant_lease("test", &renewed, 41_000)
+            .unwrap_err()
+            .code,
+        "assignment-lease-denied"
+    );
+    let c = f.store.connection.lock().unwrap();
+    assert_eq!(
+        c.query_row(
+            "SELECT count(*) FROM assignment_authorization_leases",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        2
+    );
+    assert!(
+        c.execute("DELETE FROM assignment_authorization_leases", [])
+            .is_err()
+    );
+    assert!(
+        c.execute(
+            "UPDATE assignment_authorization_leases SET lease_json = '{}'",
+            []
+        )
+        .is_err()
+    );
+    assert_eq!(c.query_row("SELECT count(*) FROM agent_assignment_resources WHERE retired_at_millis IS NULL AND resource_kind = 'durable-runtime'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+}
+
+#[test]
+fn lease_grants_revalidate_authority_before_exact_retry() {
+    use forge_app::authorization_lease::Repository as _;
+    for denial in [
+        "scope",
+        "binding",
+        "stale",
+        "closed",
+        "attempt-closed",
+        "held",
+        "resource",
+        "state",
+    ] {
+        let f = Fixture::new();
+        f.store.reserve("test", &f.launch).unwrap();
+        let grant = lease(&f);
+        f.store.grant_lease("test", &grant, 1_000).unwrap();
+        let mut changed = grant.clone();
+        let workspace = if denial == "scope" { "other" } else { "test" };
+        {
+            let c = f.store.connection.lock().unwrap();
+            match denial {
+                "scope" => {}
+                "binding" => changed.launch.profile_revision += 1,
+                "stale" => {
+                    c.execute("INSERT INTO record_work(record_id, generation) SELECT record_id, 2 FROM agent_assignments WHERE id = 'assignment' ON CONFLICT(record_id) DO UPDATE SET generation = 2", []).unwrap();
+                }
+                "closed" => {
+                    c.execute("UPDATE agent_assignments SET closed_at_millis = 1, closure_reason = 'retired' WHERE id = 'assignment'", []).unwrap();
+                }
+                "attempt-closed" => {
+                    c.execute(
+                        "UPDATE record_attempts SET closed = 1 WHERE id = 'attempt'",
+                        [],
+                    )
+                    .unwrap();
+                }
+                "held" => {
+                    c.execute("INSERT INTO dispatch_holds(record_id, reason) SELECT record_id, 'test' FROM agent_assignments WHERE id = 'assignment'", []).unwrap();
+                }
+                "resource" => {
+                    c.execute("INSERT INTO agent_assignment_resources(assignment_id, resource_kind, resource_id, created_at_millis) VALUES ('assignment', 'retirement-pending', 'test', 1)", []).unwrap();
+                }
+                "state" => {
+                    c.execute(
+                        "UPDATE agent_assignments SET state = 'unknown' WHERE id = 'assignment'",
+                        [],
+                    )
+                    .unwrap();
+                }
+                _ => unreachable!(),
+            }
+        }
+        assert!(
+            f.reopen().grant_lease(workspace, &changed, 1_001).is_err(),
+            "{denial}"
+        );
+        assert_eq!(
+            f.store
+                .connection
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT count(*) FROM assignment_authorization_leases",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+    }
+}
+
+#[test]
+fn concurrent_lease_renewals_cannot_fork_history_or_extend_an_expired_grant() {
+    use forge_app::authorization_lease::Repository as _;
+    let f = Fixture::new();
+    f.store.reserve("test", &f.launch).unwrap();
+    let first = lease(&f);
+    f.store.grant_lease("test", &first, 1_000).unwrap();
+    let mut next = first.clone();
+    next.sequence = 2;
+    next.issued_boottime_millis = 11_000;
+    next.expires_boottime_millis = 41_000;
+    let mut conflict = next.clone();
+    conflict.issued_boottime_millis += 1;
+    conflict.expires_boottime_millis += 1;
+    let barrier = Arc::new(Barrier::new(2));
+    let results = std::thread::scope(|s| {
+        let a = f.reopen();
+        let b = f.reopen();
+        let left_barrier = Arc::clone(&barrier);
+        let left = s.spawn(move || {
+            left_barrier.wait();
+            a.grant_lease("test", &next, 11_001)
+        });
+        let right = s.spawn(move || {
+            barrier.wait();
+            b.grant_lease("test", &conflict, 11_001)
+        });
+        [left.join().unwrap(), right.join().unwrap()]
+    });
+    assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
+    let c = f.store.connection.lock().unwrap();
+    assert_eq!(
+        c.query_row(
+            "SELECT count(*) FROM assignment_authorization_leases",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        2
+    );
+}
+
 #[derive(Default)]
 struct FakeTransport {
     calls: Mutex<Vec<Launch>>,

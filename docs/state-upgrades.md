@@ -5,7 +5,11 @@ another. It preserves the source database and upgrades a consistent copy. Ordina
 repository opening still rejects incompatible schemas before initialization writes;
 it never migrates, resets, or rewrites an older store's marker.
 
-Supported transfers target schema **20** from schemas **7** through **20**.
+Supported transfers target schema **21** from schemas **7** through **21**.
+The 20 → 21 step adds empty Assignment authorization grant history and immutable
+history guards, without creating execution permission. Ordinary schema-20 opening
+rejects before writes. Runner enforcement is still pending; see the
+[grant storage contract](../crates/store/README.md#assignment-authorization-grant-history-revision-21).
 The 19 → 20 step adds empty durable runtime admission identity/results and resource
 retention guards. It does not backfill runtime identities, reinterpret historical
 profiles or enable durable dispatch. Existing evidence and rows remain unchanged;

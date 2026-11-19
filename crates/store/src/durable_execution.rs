@@ -8,6 +8,8 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 pub(super) fn schema(c: &Connection) -> Result<(), RegistrationError> {
     c.execute_batch(include_str!("upgrade/durable_execution.sql"))
+        .map_err(storage_error)?;
+    c.execute_batch(include_str!("upgrade/authorization_leases.sql"))
         .map_err(storage_error)
 }
 
@@ -182,6 +184,69 @@ impl Repository for SqliteProjectRepository {
         let c = self.connection.lock().map_err(|_| error("storage"))?;
         scope(&c, workspace, assignment)?;
         load(&c, assignment)
+    }
+}
+
+impl forge_app::authorization_lease::Repository for SqliteProjectRepository {
+    fn grant_lease(
+        &self,
+        workspace: &str,
+        lease: &forge_app::authorization_lease::Lease,
+        now: u64,
+    ) -> Result<(), RegistrationError> {
+        let mut c = self.connection.lock().map_err(|_| error("storage"))?;
+        let tx = c
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        authorize(&tx, workspace, &lease.launch, false)?;
+        let live: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM agent_assignments a JOIN record_attempts r ON r.id = ?2 WHERE a.id = ?1 AND a.closed_at_millis IS NULL AND a.state IN ('provisioning', 'working', 'idle') AND r.closed = 0)",
+            params![lease.launch.assignment_id, lease.launch.attempt_id], |r| r.get(0),
+        ).map_err(storage_error)?;
+        if !live {
+            return Err(error("assignment-lease-denied"));
+        }
+        let runtime = load(&tx, &lease.launch.assignment_id)?
+            .ok_or_else(|| error("durable-intent-missing"))?;
+        exact(&runtime, &lease.launch)?;
+        if matches!(runtime.admission, Admission::Rejected { .. }) {
+            return Err(error("assignment-lease-denied"));
+        }
+        crate::spec_plans::assignment_execution(&tx, &lease.launch.assignment_id)?;
+        let attempt = task_attempts::binding(&tx, &lease.launch.assignment_id)?
+            .ok_or_else(|| error("durable-binding-denied"))?;
+        if attempt.generation != lease.generation
+            || crate::outcomes::state(&tx, attempt.record_id)?.generation != lease.generation
+        {
+            return Err(error("durable-binding-stale"));
+        }
+        forge_app::validate_task_dispatch_mode(&crate::load_record(&tx, attempt.record_id)?)?;
+        let blocked: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM agent_assignments a WHERE a.id = ?1 AND (EXISTS(SELECT 1 FROM dispatch_holds h WHERE h.record_id = a.record_id) OR EXISTS(SELECT 1 FROM agent_assignment_resources r WHERE r.assignment_id = a.id AND r.retired_at_millis IS NULL AND r.resource_kind NOT IN ('durable-runtime', 'provision-intent'))))",
+            [&lease.launch.assignment_id], |r| r.get(0),
+        ).map_err(storage_error)?;
+        if blocked {
+            return Err(error("assignment-lease-blocked"));
+        }
+        let previous: Option<String> = tx.query_row(
+            "SELECT lease_json FROM assignment_authorization_leases WHERE assignment_id = ?1 ORDER BY sequence DESC LIMIT 1",
+            [&lease.launch.assignment_id], |r| r.get(0),
+        ).optional().map_err(storage_error)?;
+        let previous: Option<forge_app::authorization_lease::Lease> = previous
+            .map(|json| serde_json::from_str(&json).map_err(|_| error("durable-storage-invalid")))
+            .transpose()?;
+        // Retries return no new deadline and only while current authority is valid.
+        if previous.as_ref() == Some(lease) {
+            if now < lease.issued_boottime_millis || now >= lease.expires_boottime_millis {
+                return Err(error("assignment-lease-denied"));
+            }
+        } else {
+            lease.validate(previous.as_ref(), now)?;
+            tx.execute("INSERT INTO assignment_authorization_leases(assignment_id, sequence, lease_json) VALUES (?1, ?2, ?3)",
+                params![lease.launch.assignment_id, lease.sequence, serde_json::to_string(lease).map_err(|_| error("durable-storage-invalid"))?],
+            ).map_err(storage_error)?;
+        }
+        tx.commit().map_err(storage_error)
     }
 }
 

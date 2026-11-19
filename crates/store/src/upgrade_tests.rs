@@ -140,7 +140,7 @@ fn session_schema_expansion_preserves_history_and_stamp_failure_rolls_back() {
         .unwrap();
     assert_eq!(inspection(&c).unwrap(), before);
     let after = migrate_connection(&mut c).unwrap();
-    assert_eq!(after.schema, Some(20));
+    assert_eq!(after.schema, Some(21));
     for table in before.tables {
         assert!(after.tables.contains(&table));
     }
@@ -174,7 +174,7 @@ fn continuation_reset_schema_stamp_failure_rolls_back_rebuild_and_audit_table() 
     c.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
         .unwrap();
     assert_eq!(inspection(&c).unwrap(), before);
-    assert_eq!(migrate_connection(&mut c).unwrap().schema, Some(20));
+    assert_eq!(migrate_connection(&mut c).unwrap().schema, Some(21));
 }
 
 #[test]
@@ -196,7 +196,7 @@ fn continuation_expansion_is_empty_and_stamp_failure_rolls_back() {
         .unwrap();
     assert_eq!(inspection(&c).unwrap(), before);
     let after = migrate_connection(&mut c).unwrap();
-    assert_eq!(after.schema, Some(20));
+    assert_eq!(after.schema, Some(21));
     for table in before.tables {
         assert!(after.tables.contains(&table));
     }
@@ -240,7 +240,7 @@ fn verify_semantic_stamp_rollback(source: u32, denied: &'static str) {
         .unwrap();
     assert_eq!(inspection(&c).unwrap(), before);
     let after = migrate_connection(&mut c).unwrap();
-    assert_eq!(after.schema, Some(20));
+    assert_eq!(after.schema, Some(21));
     for table in before.tables {
         assert!(after.tables.contains(&table));
     }
@@ -274,7 +274,7 @@ fn retained_work_schema_stamp_failure_rolls_back_all_authority_ddl() {
         .unwrap();
     assert_eq!(inspection(&c).unwrap(), before);
     let after = migrate_connection(&mut c).unwrap();
-    assert_eq!(after.schema, Some(20));
+    assert_eq!(after.schema, Some(21));
     assert_eq!(
         after
             .tables
@@ -284,6 +284,41 @@ fn retained_work_schema_stamp_failure_rolls_back_all_authority_ddl() {
             .rows,
         0
     );
+}
+
+#[test]
+fn authorization_lease_expansion_is_empty_and_failed_stamp_rolls_back() {
+    let mut c = reference(20).unwrap();
+    c.pragma_update(None, "application_id", APPLICATION_ID)
+        .unwrap();
+    let before = inspection(&c).unwrap();
+    c.authorizer(Some(|context: AuthContext<'_>| match context.action {
+        AuthAction::Pragma {
+            pragma_name: "user_version",
+            pragma_value: Some("21"),
+        } => Authorization::Deny,
+        _ => Authorization::Allow,
+    }))
+    .unwrap();
+    assert!(migrate_connection(&mut c).is_err());
+    c.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+        .unwrap();
+    assert_eq!(inspection(&c).unwrap(), before);
+    let after = migrate_connection(&mut c).unwrap();
+    assert_eq!(after.schema, Some(21));
+    assert_eq!(
+        after
+            .tables
+            .iter()
+            .find(|t| t.name == "assignment_authorization_leases")
+            .unwrap()
+            .rows,
+        0
+    );
+    for table in before.tables {
+        assert!(after.tables.contains(&table));
+    }
+    assert_eq!(migrate_connection(&mut c).unwrap(), after);
 }
 
 #[test]
@@ -305,7 +340,7 @@ fn durable_admission_expansion_is_empty_and_failed_stamp_rolls_back() {
         .unwrap();
     assert_eq!(inspection(&c).unwrap(), before);
     let after = migrate_connection(&mut c).unwrap();
-    assert_eq!(after.schema, Some(20));
+    assert_eq!(after.schema, Some(21));
     for table in before.tables {
         assert!(after.tables.contains(&table));
     }

@@ -8,6 +8,7 @@ use std::{
 
 pub mod agent_profiles;
 pub mod assignment;
+pub mod authorization_lease;
 pub mod check_templates;
 pub mod checks;
 pub mod completion;

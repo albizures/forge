@@ -224,6 +224,10 @@ _Avoid_: Assignment owner, live session
 An opaque, revocable credential Forge issues for one open Agent Assignment. It authorizes that Assignment's bounded reads and own-Record actions through the Forge daemon; it does not protect against a hostile process running as the same OS user.
 _Avoid_: agent token, agent credential
 
+**Assignment Authorization Lease**:
+A time-bounded grant permitting an Agent Assignment to continue authorized execution, subject to revocation and the Assignment's bound scope. Expiration withdraws that permission but does not prove that the Agent or its external actions have stopped.
+_Avoid_: Assignment Heartbeat, proof of exit, Assignment Capability
+
 **Assignment Capability Delivery**:
 The session-scoped endpoint, Assignment Identifier, and owner-only secret-file path through which Forge makes an Assignment Capability available to its bound Agent. The capability secret itself is not placed in the Agent's prompt or environment.
 _Avoid_: capability injection, agent token environment
