@@ -3,9 +3,10 @@
 This is a **synthetic-only development component**, not a production dispatch
 backend or installed Forge Revision. No Pi CLI, Herdr, credentials, ambient Pi
 configuration, tools, network provider, Assignment capability or accepted Outcome
-is used. The daemon does not launch this component. T05 adds authorization/leases,
-T06 profile/authentication mapping, T07 actual Check-bound dispatch, and T15 matched
-installation. Do not use this harness to execute live Assignments.
+is used. The daemon does not launch this component. T05's application policy,
+trusted Linux evidence adapter and server service seam are present, but runtime
+lease enforcement/watchdog are still pending. T06 adds profile/authentication
+mapping, T07 actual Check-bound dispatch, and T15 matched installation. Do not use this harness to execute live Assignments.
 
 ## Reproduce
 
@@ -15,6 +16,7 @@ From the Forge repository root:
 
 ```sh
 cargo build -p forge-runner-host
+cargo test -p forge-runner-host --test authority
 cd runner
 npm ci --ignore-scripts --no-audit --no-fund
 npm run prepare-reader
@@ -25,10 +27,12 @@ npm test
 Node's native TypeScript stripping runs the source; TypeScript and `@types/node`
 are development-only dependencies for strict type checking. The runtime's three
 exact 1.5.2 dependencies supply persistence, the synthetic provider and explicit
-execution context; their transitive closure/integrities are locked. No new Rust
-library is invented: `fs2` provides the existing workspace flock mechanism,
-`rustix` supplies safe no-follow descriptor flags/process UID (already in the
-workspace dependency closure), and `serde_json` encodes protected identity facts.
+execution context; their transitive closure/integrities are locked. `fs2` provides
+the existing workspace flock mechanism; `rustix` supplies safe no-follow flags,
+process UID and fallible CLOCK_BOOTTIME reads. `serde`/`serde_json` decode protected
+identity facts. These packages already belong to the workspace dependency closure;
+the host library implements the `forge-app` trusted-evidence interface without
+introducing runtime/provider types into application policy.
 
 ## Boundary and local protocol
 
@@ -86,6 +90,35 @@ alone remain insufficient cleanup evidence. If both owner processes die, Forge's
 T03 capacity reservation/blockers still must gate replacement. No worktree bytes
 are changed by this synthetic runner. Process separation is not a hostile-agent
 sandbox; same-user malicious processes and shared-host/NFS execution are excluded.
+
+## T05 trusted evidence seam (not runtime enforcement)
+
+`forge_runner_host::SpawnedOwner` borrows a live directly spawned Rust `Child`
+after readiness. It is not a PID-based adoption API. Each observation verifies
+canonical 0700 directory identity, protected bounded 0600 owner evidence, live
+host/worker ancestry/start/group identities, boot and matching Linux time
+namespaces, lock inode/device and exclusive WRITE FLOCK entries in **both**
+inherited descriptors' `/proc/PID/fdinfo`. Mere inode equality or a global lock
+lookup is not authority. Only then does it supply CLOCK_BOOTTIME evidence; missing,
+changed, backward or unreadable evidence terminally fences that observer.
+
+The server's `durable_authorization` service seam creates a fresh 256-bit daemon
+lifetime epoch, binds only a directly spawned verified owner and delegates grant
+construction/persistence to the app/store. It is not wired into daemon dispatch,
+a renewal timer/transport or an operator RPC. Canonical Assignment-to-directory
+mapping remains required before using it. It does not open runtime storage, issue
+a capability, signal processes or clear retained capacity. No owner/clock/epoch
+payload supplied by an agent becomes a permission.
+
+The eight `authority` tests use the actual Rust supervisor and an inert Python
+worker with explicit readiness/acknowledgement channels. They require
+`/usr/bin/python3` (test-only, standard library only), not credentials or Node.
+They test kernel evidence, stale/replaced identities/files, lost descriptors,
+unlocking and supervisor/worker exit—not runtime lease expiry or safe cleanup.
+The TypeScript runner remains synthetic-only and **does not yet require a lease**.
+Independent watchdog and model/tool/compaction/resume admission guards remain T05
+blockers. These observational checks are not hostile-agent containment or an
+atomic guarantee that the process cannot exit/change after an observation.
 
 ## Committed read-only inspection and provenance
 

@@ -10,6 +10,7 @@ repository.workspace = true
 forge-app = { path = "../app" }
 forge-build-info = { path = "../build-info" }
 forge-rpc = { path = "../rpc" }
+forge-runner-host = { path = "../runner-host" }
 forge-store = { path = "../store" }
 fs2.workspace = true
 sha2 = "0.10.9"

@@ -104,6 +104,113 @@ pub trait Repository: Send + Sync {
     ) -> Result<(), RegistrationError>;
 }
 
+/// Host evidence collected by a trusted adapter, never decoded from an agent
+/// request. The adapter verifies the live exclusive owner and reads
+/// `CLOCK_BOOTTIME` in that owner's boot/time namespace on every observation.
+pub struct Observation {
+    pub owner: Owner,
+    pub boottime_millis: u64,
+}
+
+/// External host boundary. Missing or uncertain ownership/clock evidence is an
+/// error, not permission to use the previous observation.
+pub trait AuthorityHost {
+    /// # Errors
+    /// Fails when exclusive ownership or a trustworthy clock cannot be verified.
+    fn observe(&mut self) -> Result<Observation, RegistrationError>;
+}
+
+/// One daemon-lifetime coordinator for one immutable Assignment binding. This is
+/// not a renewal transport or a scheduler: callers deliver only committed grants
+/// and invoke it at the configured cadence. Restart creates a fresh epoch and
+/// cannot adopt retained grants as permission. The repository rejects sequence 1
+/// if history already exists; authorized recovery needs a separate protocol.
+///
+/// Any failed observation, expired deadline or uncertain commit permanently
+/// fences this coordinator. Recreating it cannot bypass repository history.
+/// Serial `&mut self` access prevents competing renewal branches within a lifetime.
+pub struct Issuer {
+    workspace: String,
+    launch: Launch,
+    generation: u64,
+    daemon_epoch: String,
+    previous: Option<Lease>,
+    last_observation: Option<u64>,
+    fenced: bool,
+}
+
+impl Issuer {
+    /// Construct from trusted daemon binding and a unique daemon-lifetime epoch,
+    /// not operator/agent-supplied owner, clock or retained lease payloads.
+    /// # Errors
+    /// Rejects malformed immutable binding before consulting external systems.
+    pub fn new(
+        workspace: String,
+        launch: Launch,
+        generation: u64,
+        daemon_epoch: String,
+    ) -> Result<Self, RegistrationError> {
+        launch.validate()?;
+        if workspace.trim().is_empty() || generation == 0 || daemon_epoch.trim().is_empty() {
+            return Err(denied());
+        }
+        Ok(Self {
+            workspace,
+            launch,
+            generation,
+            daemon_epoch,
+            previous: None,
+            last_observation: None,
+            fenced: false,
+        })
+    }
+
+    /// Issue only after fresh external evidence and transactional reauthorization.
+    /// No wall-clock fallback, local renewal, late revival or retry after an
+    /// uncertain persistence result is allowed. Host operations precede the store
+    /// call; no external operation runs inside the repository transaction.
+    /// Storage/delivery latency never shifts the deadline: a consumer must check
+    /// expiry using its own trusted clock before admission, not receipt time.
+    /// # Errors
+    /// Permanently fences on any host, policy or repository failure. A failed
+    /// return must never be delivered as a grant, even if the commit succeeded.
+    pub fn issue(
+        &mut self,
+        repository: &dyn Repository,
+        host: &mut dyn AuthorityHost,
+    ) -> Result<Lease, RegistrationError> {
+        if self.fenced {
+            return Err(denied());
+        }
+        // Default to terminal failure, including a commit whose reply is lost.
+        self.fenced = true;
+        let observation = host.observe()?;
+        let now = observation.boottime_millis;
+        if self.last_observation.is_some_and(|last| now < last) {
+            return Err(denied());
+        }
+        let sequence = match &self.previous {
+            Some(old) => old.sequence.checked_add(1).ok_or_else(denied)?,
+            None => 1,
+        };
+        let lease = Lease {
+            launch: self.launch.clone(),
+            generation: self.generation,
+            owner: observation.owner,
+            daemon_epoch: self.daemon_epoch.clone(),
+            sequence,
+            issued_boottime_millis: now,
+            expires_boottime_millis: now.checked_add(LEASE_MILLIS).ok_or_else(denied)?,
+        };
+        lease.validate(self.previous.as_ref(), now)?;
+        repository.grant_lease(&self.workspace, &lease, now)?;
+        self.previous = Some(lease.clone());
+        self.last_observation = Some(now);
+        self.fenced = false;
+        Ok(lease)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,6 +246,160 @@ mod tests {
             issued_boottime_millis: 1_000,
             expires_boottime_millis: 31_000,
         }
+    }
+
+    struct Host {
+        owner: Owner,
+        now: u64,
+        unavailable: bool,
+        calls: usize,
+    }
+
+    impl AuthorityHost for Host {
+        fn observe(&mut self) -> Result<Observation, RegistrationError> {
+            self.calls += 1;
+            if self.unavailable {
+                return Err(denied());
+            }
+            Ok(Observation {
+                owner: self.owner.clone(),
+                boottime_millis: self.now,
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct Store {
+        grants: std::sync::Mutex<Vec<Lease>>,
+        // Model a commit with a lost reply, not just a definite rejection.
+        lose_reply: std::sync::atomic::AtomicBool,
+    }
+
+    impl Repository for Store {
+        fn grant_lease(
+            &self,
+            workspace: &str,
+            lease: &Lease,
+            now: u64,
+        ) -> Result<(), RegistrationError> {
+            assert_eq!(workspace, "workspace");
+            let mut grants = self.grants.lock().unwrap();
+            lease.validate(grants.last(), now)?;
+            grants.push(lease.clone());
+            if self.lose_reply.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(denied());
+            }
+            Ok(())
+        }
+    }
+
+    fn issuer(epoch: &str) -> Issuer {
+        let lease = grant();
+        Issuer::new(
+            "workspace".into(),
+            lease.launch,
+            lease.generation,
+            epoch.into(),
+        )
+        .unwrap()
+    }
+
+    fn host() -> Host {
+        Host {
+            owner: grant().owner,
+            now: 1_000,
+            unavailable: false,
+            calls: 0,
+        }
+    }
+
+    #[test]
+    fn issuer_observes_and_persists_each_renewal_without_local_extension() {
+        let mut issuer = issuer("epoch");
+        let store = Store::default();
+        let mut host = host();
+        let first = issuer.issue(&store, &mut host).unwrap();
+        host.now += RENEW_AFTER_MILLIS;
+        let second = issuer.issue(&store, &mut host).unwrap();
+        assert_eq!(second.sequence, 2);
+        assert_eq!(second.expires_boottime_millis, 41_000);
+        assert_eq!(first.expires_boottime_millis, 31_000);
+        assert_eq!(host.calls, 2);
+        assert_eq!(*store.grants.lock().unwrap(), vec![first, second]);
+    }
+
+    #[test]
+    fn issuer_failure_is_terminal_even_if_host_becomes_available_again() {
+        let store = Store::default();
+        let mut issuer = issuer("epoch");
+        let mut host = host();
+        issuer.issue(&store, &mut host).unwrap();
+        host.unavailable = true;
+        assert!(issuer.issue(&store, &mut host).is_err());
+        host.unavailable = false;
+        host.now += RENEW_AFTER_MILLIS;
+        assert!(issuer.issue(&store, &mut host).is_err());
+        assert_eq!(host.calls, 2); // fenced retries perform no external calls
+        assert_eq!(store.grants.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn issuer_fences_clock_discontinuity_owner_change_expiry_and_overflow() {
+        let changes: Vec<fn(&mut Host)> = vec![
+            |h| h.now -= 1,
+            |h| h.now = 31_000,
+            |h| h.now = 31_001,
+            |h| h.now = u64::MAX,
+            |h| h.owner.boot_id.push('x'),
+            |h| h.owner.time_namespace.push('x'),
+            |h| h.owner.worker_start.push('x'),
+            |h| h.owner.lock_inode.push('x'),
+        ];
+        for change in changes {
+            let store = Store::default();
+            let mut issuer = issuer("epoch");
+            let mut host = host();
+            issuer.issue(&store, &mut host).unwrap();
+            change(&mut host);
+            assert!(issuer.issue(&store, &mut host).is_err());
+            host.now = 11_000;
+            host.owner = grant().owner;
+            assert!(issuer.issue(&store, &mut host).is_err());
+            assert_eq!(store.grants.lock().unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn uncertain_commit_never_delivers_or_retries_a_grant() {
+        let store = Store::default();
+        store
+            .lose_reply
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let mut issuer = issuer("epoch");
+        let mut host = host();
+        assert!(issuer.issue(&store, &mut host).is_err());
+        assert_eq!(store.grants.lock().unwrap().len(), 1);
+        store
+            .lose_reply
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        host.now += RENEW_AFTER_MILLIS;
+        assert!(issuer.issue(&store, &mut host).is_err());
+        assert_eq!(host.calls, 1);
+        assert_eq!(store.grants.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn daemon_restart_cannot_turn_retained_grants_into_permission() {
+        let store = Store::default();
+        let mut old = issuer("old-epoch");
+        let mut host = host();
+        old.issue(&store, &mut host).unwrap();
+        host.now += RENEW_AFTER_MILLIS;
+        let mut restarted = issuer("new-epoch");
+        assert!(restarted.issue(&store, &mut host).is_err());
+        assert_eq!(store.grants.lock().unwrap().len(), 1);
+        assert!(restarted.issue(&store, &mut host).is_err());
+        assert_eq!(host.calls, 2);
     }
 
     #[test]

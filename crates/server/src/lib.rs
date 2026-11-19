@@ -5,6 +5,7 @@
 
 mod agent_profiles;
 mod browser;
+pub mod durable_authorization;
 mod herdr;
 #[cfg(test)]
 mod provider_wiring_tests;

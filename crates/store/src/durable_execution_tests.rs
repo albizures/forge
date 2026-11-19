@@ -195,6 +195,60 @@ fn lease_history_is_atomic_idempotent_and_not_restart_authority() {
 }
 
 #[test]
+fn lease_issuer_reauthorizes_against_reopened_store_and_retains_revoked_capacity() {
+    use forge_app::authorization_lease::{AuthorityHost, Issuer, Observation, Owner};
+    struct Host {
+        owner: Owner,
+        now: u64,
+        calls: usize,
+    }
+    impl AuthorityHost for Host {
+        fn observe(&mut self) -> Result<Observation, RegistrationError> {
+            self.calls += 1;
+            Ok(Observation {
+                owner: self.owner.clone(),
+                boottime_millis: self.now,
+            })
+        }
+    }
+    let f = Fixture::new();
+    f.store.reserve("test", &f.launch).unwrap();
+    let mut host = Host {
+        owner: lease(&f).owner,
+        now: 1_000,
+        calls: 0,
+    };
+    let mut issuer = Issuer::new("test".into(), f.launch.clone(), 1, "first-epoch".into()).unwrap();
+    assert_eq!(issuer.issue(&f.store, &mut host).unwrap().sequence, 1);
+    host.now = 11_000;
+    assert_eq!(issuer.issue(&f.reopen(), &mut host).unwrap().sequence, 2);
+    // A new daemon cannot continue from retained history, even before expiry.
+    let mut restarted =
+        Issuer::new("test".into(), f.launch.clone(), 1, "new-epoch".into()).unwrap();
+    assert!(restarted.issue(&f.reopen(), &mut host).is_err());
+    f.store.connection.lock().unwrap().execute(
+        "UPDATE agent_assignments SET closed_at_millis = 1, closure_reason = 'retired' WHERE id = 'assignment'",
+        [],
+    ).unwrap();
+    host.now = 21_000;
+    assert!(issuer.issue(&f.reopen(), &mut host).is_err());
+    let calls = host.calls;
+    assert!(issuer.issue(&f.reopen(), &mut host).is_err());
+    assert_eq!(host.calls, calls);
+    let c = f.store.connection.lock().unwrap();
+    assert_eq!(
+        c.query_row(
+            "SELECT count(*) FROM assignment_authorization_leases",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        2
+    );
+    assert_eq!(c.query_row("SELECT count(*) FROM agent_assignment_resources WHERE retired_at_millis IS NULL AND resource_kind = 'durable-runtime'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+}
+
+#[test]
 fn lease_grants_revalidate_authority_before_exact_retry() {
     use forge_app::authorization_lease::Repository as _;
     for denial in [

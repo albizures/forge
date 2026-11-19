@@ -471,8 +471,10 @@ dependencies = [
 name = "forge-runner-host"
 version = "0.1.0"
 dependencies = [
+ "forge-app",
  "fs2",
  "rustix",
+ "serde",
  "serde_json",
 ]
 
@@ -485,6 +487,7 @@ dependencies = [
  "forge-app",
  "forge-build-info",
  "forge-rpc",
+ "forge-runner-host",
  "forge-store",
  "form_urlencoded",
  "fs2",

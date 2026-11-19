@@ -3,9 +3,12 @@
 ## Execution status
 
 In progress: [application/store foundation, verification and resume checklist](../../docs/research/pi-durable-t05/README.md).
-Schema 21 retains grants and the application defines bounded renewal policy;
-server/runner enforcement, independent watchdog and required outage evidence are
-still pending. This Task is not complete and does not unblock T06.
+Schema 21 retains grants; bounded renewal policy, terminally fenced issuance,
+a trusted Linux process/flock/boottime adapter and a fresh-epoch server service
+seam are delivered. All four repository gates pass (600 Rust tests passed,
+1 ignored); eight host-evidence tests and ten TypeScript runner/process tests pass.
+Daemon launch/renewal delivery wiring, runner admission enforcement, independent
+watchdog and required lease-outage evidence are still pending. This Task is not complete and does not unblock T06.
 
 ## Delivered outcome
 
