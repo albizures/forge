@@ -2,15 +2,84 @@
 
 ## Status: partial; do not advance to T08
 
-Two increments provide the runner-side bootstrap gate and the trusted app/store
-missing-Outcome observation boundary described below. They **do not complete T07**:
-there is no enabled durable dispatch adapter, actual bootstrap/Outcome tracer or
-runner caller of the observation boundary. Production durable launch and automatic
+Three increments provide the runner-side bootstrap gate, trusted app/store
+missing-Outcome observation boundary and a real CLI/server bootstrap/Outcome
+component tracer described below. They **do not complete T07**: there is no enabled
+durable dispatch adapter, supervised fake-model execution tracer or runner caller
+of the observation boundary. Production durable launch and automatic
 recovery remain disabled. No live Forge state, profile selection, capability,
 worktree or real-provider credential was changed.
 
 The checkout already contained uncommitted T06 work; that work was preserved.
 The verification below covers the combined checkout, not a new isolated commit.
+
+## Real CLI/server bootstrap and Outcome component tracer
+
+Added `crates/cli/tests/durable_check_bootstrap.rs` and the test-only driver
+`runner/test/check-bootstrap-tracer.mjs`. The Rust fixture registers an actual
+`pi-durable` Task profile, pins a Check, prepares a real Git Managed Worktree,
+claims the Check through the store and supplies its persisted complete binding to
+`bootstrapCheck`. That module invokes the actual built Forge CLI against an actual
+HTTP daemon and SQLite store, using an owner-only capability file. No CLI/server
+response is substituted. Trusted context/behavior is checked but not printed.
+
+Verified behavior:
+
+- Wrong capability fails bootstrap without marking context read; successful
+  bootstrap starts exactly the bound Task and records context consumption.
+- An expected binding with changed input evidence fails closed and terminally
+  fences the local JS authorization consumer. Revoked bootstrap also fails closed.
+- Bootstrap alone creates no Assessment. Authenticated Outcome submission through
+  the actual CLI rejects a missing attempt, stale generation and wrong capability.
+- Implementation output B is a new clean Git commit distinct from bound input A.
+  Acceptance binds B, retains immutable attempt/input A and replaces spoofed actor
+  attribution with the authenticated Assignment ID.
+- Exact Outcome replay returns the original accepted result, including after
+  Assignment closure. A conflicting submission after closure is rejected. Closure
+  is not permission to rewrite accepted results or an assertion of safe cleanup.
+- The component prints only its fixed accepted/denied result. CLI/driver outputs
+  are checked for capability canaries; the Node driver does not print behavior.
+
+**Limits:** this is component integration, not the T07 execution tracer. The Check
+is claimed directly rather than dispatched; the existing persisted Herdr binding
+prerequisite is still supplied. There is no Herdr process/socket/resource or Pi CLI
+in this fixture, but it does **not** establish binding-independent readiness. The
+JS lease is explicitly a protocol fixture, not a real supervisor/service grant.
+There is no model, conversation, runtime admission/store, external-call-counting
+adapter, missing-Outcome observation delivery or new execution authority. Outcome
+CLI submissions are driven by Rust, not a fake model's tool execution. Production
+launch and automatic recovery remain disabled.
+
+Verification from repository root:
+
+```sh
+cargo test -p forge-cli --test durable_check_bootstrap -- --nocapture
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+git diff --check
+(cd runner && npm run check && npm test)
+```
+
+All final checks passed: **641 Rust tests passed, 0 failed, 1 pre-existing opt-in
+probe ignored; 39 Node tests passed, 0 failed**. The new Node driver is exercised by
+the Rust integration test, not counted as another standalone Node test. Initial
+runs caught a fixture branch inconsistent with Forge's canonical Task branch,
+incorrect assumptions about missing-attempt error classification and exact replay
+after closure, and two compilation errors. Fixtures were corrected to preserve
+existing policy; no production gate or redaction was weakened.
+
+Implementation self-review against T07: “actual runner/CLI bootstrap path” and
+accepted authenticated Outcome composition now have component-level evidence.
+“From Forge dispatch” and “deterministic local tracer with a fake model” remain
+missing, as does runtime-answer delivery. No out-of-scope lifecycle or execution
+behavior was added. Standards self-review: no introduced violation found; isolated
+stores, filesystem roots, child environments and daemon port, real Git evidence,
+explicit process argv and no secrets in arguments/output. This is not independent
+T18 review. No storage, wire, dependency or executable component digest changed.
+
+**Summary: T07 remains partial; dispatch/supervisor/model/answer composition is
+still missing. T08 remains blocked.**
 
 ## Bootstrap-gate increment (previous)
 
