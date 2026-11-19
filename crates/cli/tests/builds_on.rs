@@ -1,4 +1,6 @@
 //! Full public declaration/inspection/removal contract for derived Stack topology.
+#[path = "support/manual_cli.rs"]
+mod manual_cli;
 use forge_app::{
     Application, NewTypedRecord, Project, ProjectRepository, RecordRepository, RecordType,
     WorkspaceRepository,
@@ -44,6 +46,11 @@ async fn builds_on_cli_declares_prerequisite_and_inspected_predecessor_in_one_wr
                 .to_string()
         })
         .collect();
+    let standalone_id = tasks[2].parse().unwrap();
+    let standalone_base = "a".repeat(40);
+    selected
+        .set_task_base_commit(standalone_id, &standalone_base)
+        .unwrap();
     let app = Application::new(
         Box::new(SqliteProjectRepository::open(&database).unwrap()),
         Box::new(GitInspector),
@@ -179,6 +186,74 @@ async fn builds_on_cli_declares_prerequisite_and_inspected_predecessor_in_one_wr
         "release/2.x",
         "--json",
     ]);
+    // A standalone Task and its retained Check evidence must not acquire a root
+    // or change when the Project's policy is configured or reset.
+    json(&[
+        "record",
+        "execution-mode",
+        &tasks[2],
+        "manual",
+        "--expected",
+        "dispatched",
+        "--actor",
+        "human",
+        "--message",
+        "Manual delivery",
+        "--json",
+    ]);
+    json(&["record", "start", &tasks[2], "--json"]);
+    let checks = json(&["record", "check", "list", &tasks[2], "--json"]);
+    let check = checks[0]["id"].as_u64().unwrap();
+    manual_cli::pass(run, &tasks[2], check, &root);
+    let check_id = check.to_string();
+    let root_before = json(&["task", "stack", "show", &tasks[0], "--json"]);
+    let standalone_before = run(&["task", "stack", "show", &tasks[2], "--json"]);
+    let record_before = json(&["record", "show", &tasks[2], "--json"]);
+    let checks_before = json(&["record", "check", "list", &tasks[2], "--json"]);
+    let evidence_before = json(&["record", "check", "show", &tasks[2], &check_id, "--json"]);
+    assert!(
+        evidence_before
+            .to_string()
+            .contains("urn:fixture:deliverable")
+    );
+    for action in ["set", "reset"] {
+        let mut args = vec![
+            "project",
+            "base-branch-policy",
+            action,
+            "--project",
+            "one/api",
+            "--json",
+        ];
+        if action == "set" {
+            args.push("default-branch");
+        }
+        json(&args);
+        assert_eq!(
+            json(&["task", "stack", "show", &tasks[0], "--json"]),
+            root_before
+        );
+        let standalone_after = run(&["task", "stack", "show", &tasks[2], "--json"]);
+        assert_eq!(standalone_after.status, standalone_before.status);
+        assert_eq!(standalone_after.stdout, standalone_before.stdout);
+        assert_eq!(standalone_after.stderr, standalone_before.stderr);
+        assert_eq!(
+            json(&["record", "show", &tasks[2], "--json"]),
+            record_before
+        );
+        assert_eq!(
+            json(&["record", "check", "list", &tasks[2], "--json"]),
+            checks_before
+        );
+        assert_eq!(
+            json(&["record", "check", "show", &tasks[2], &check_id, "--json"]),
+            evidence_before
+        );
+        assert_eq!(
+            selected.task_base_commit(standalone_id).unwrap(),
+            Some(standalone_base.clone())
+        );
+    }
     let stack = json(&["task", "stack", "show", &tasks[1], "--json"]);
     assert_eq!(stack["predecessor"], tasks[0].parse::<u64>().unwrap());
     assert_eq!(stack["destination"]["branch"], "release/2.x");

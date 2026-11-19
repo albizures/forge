@@ -1,5 +1,8 @@
 //! Explicit upgrades preserve historical evidence and convert prerequisite intent.
-use forge_app::{NewTypedRecord, RecordRepository, RecordType, WorkspaceRepository};
+use forge_app::{
+    BaseBranchPolicy, NewTypedRecord, ProjectRepository, RecordRepository, RecordType,
+    WorkspaceRepository,
+};
 use forge_store::{SqliteProjectRepository, upgrade};
 use rusqlite::Connection;
 use std::{
@@ -262,6 +265,43 @@ fn semantic_twelve_requires_explicit_conversion_despite_identical_ddl() {
     );
     assert_eq!(fs::read(&f.source).unwrap(), bytes);
     drop(SqliteProjectRepository::open(&copy).unwrap());
+}
+
+#[test]
+fn upgraded_project_defaults_to_ask_without_rewriting_existing_records() {
+    let f = Fixture::new(13);
+    let c = Connection::open(&f.source).unwrap();
+    c.execute("INSERT INTO projects(slug,registered_folder,origin_url,workspace_id,local_slug) VALUES('personal/api',?1,'https://example.com/api','personal','api')", [f.root.to_string_lossy().as_ref()]).unwrap();
+    drop(c);
+    upgrade::migrate(&f.source).unwrap();
+    let store = SqliteProjectRepository::open(&f.source).unwrap();
+    let project = store.project("personal/api").unwrap();
+    let record = store
+        .in_record_workspace("personal")
+        .unwrap()
+        .show_record(1)
+        .unwrap();
+    assert_eq!(
+        store.base_branch_policy("personal/api").unwrap(),
+        BaseBranchPolicy::Ask
+    );
+    store
+        .set_base_branch_policy("personal/api", Some(BaseBranchPolicy::DefaultBranch))
+        .unwrap();
+    store.set_base_branch_policy("personal/api", None).unwrap();
+    assert_eq!(
+        store.base_branch_policy("personal/api").unwrap(),
+        BaseBranchPolicy::Ask
+    );
+    assert_eq!(store.project("personal/api").unwrap(), project);
+    assert_eq!(
+        store
+            .in_record_workspace("personal")
+            .unwrap()
+            .show_record(1)
+            .unwrap(),
+        record
+    );
 }
 
 #[test]
