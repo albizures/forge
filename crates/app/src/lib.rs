@@ -1515,6 +1515,12 @@ pub trait AgentDispatchAdapter: Send + Sync {
             "workspace selection is unsupported".into(),
         ))
     }
+    /// Check provider-specific launch prerequisites before capability delivery.
+    /// This is only for new execution, never observation, recovery or retirement.
+    /// Provision must still enforce its own ownership checks at the effect boundary.
+    fn validate_provision(&self, _context: &AgentDispatchContext) -> Result<(), AgentAdapterError> {
+        self.probe()
+    }
     fn provision(
         &self,
         context: &AgentDispatchContext,

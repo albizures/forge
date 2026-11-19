@@ -6,6 +6,8 @@
 mod agent_profiles;
 mod browser;
 mod herdr;
+#[cfg(test)]
+mod provider_wiring_tests;
 mod stacks;
 #[cfg(test)]
 mod test_projects;
@@ -675,7 +677,7 @@ fn matching_forge_cli() -> Result<PathBuf, forge_app::AgentAdapterError> {
 }
 
 struct ServerAgentDispatchAdapterFactory {
-    herdr: HerdrAdapterFactory,
+    provider: Box<dyn AgentDispatchAdapterFactory>,
     daemon_url: String,
     capability_secret_root: PathBuf,
     cli_override: Option<PathBuf>,
@@ -691,21 +693,21 @@ impl ServerAgentDispatchAdapterFactory {
 
 impl AgentDispatchAdapterFactory for ServerAgentDispatchAdapterFactory {
     fn validate_profile(&self, profile: &AgentProfile) -> Result<(), forge_app::AgentAdapterError> {
-        HerdrAdapterFactory::validate_profile(profile)
+        self.provider.validate_profile(profile)
     }
     fn validate_preflight(
         &self,
         profile: &AgentProfile,
     ) -> Result<(), forge_app::AgentAdapterError> {
-        herdr::pi_launch_arguments(profile, "")?;
+        self.provider.validate_preflight(profile)?;
         self.cli_path()?;
-        self.validate_profile(profile)
+        Ok(())
     }
     fn adapter_for(
         &self,
         profile: &AgentProfile,
     ) -> Result<Box<dyn AgentDispatchAdapter>, forge_app::AgentAdapterError> {
-        self.herdr.adapter_for(profile).map(|adapter| {
+        self.provider.adapter_for(profile).map(|adapter| {
             Box::new(CapabilityDeliveryAdapter {
                 inner: adapter,
                 daemon_url: self.daemon_url.clone(),
@@ -719,7 +721,7 @@ impl AgentDispatchAdapterFactory for ServerAgentDispatchAdapterFactory {
 /// Adds the server-owned, non-persistent capability delivery to the provider context.
 /// The bearer is created once in an owner-only file; only its path reaches the provider.
 struct CapabilityDeliveryAdapter {
-    inner: herdr::HerdrAdapter,
+    inner: Box<dyn AgentDispatchAdapter>,
     daemon_url: String,
     capability_secret_root: PathBuf,
     cli_override: Option<PathBuf>,
@@ -785,6 +787,13 @@ impl CapabilityDeliveryAdapter {
 }
 
 impl AgentDispatchAdapter for CapabilityDeliveryAdapter {
+    fn validate_provision(
+        &self,
+        context: &AgentDispatchContext,
+    ) -> Result<(), forge_app::AgentAdapterError> {
+        self.inner.validate_provision(context)
+    }
+
     fn probe(&self) -> Result<(), forge_app::AgentAdapterError> {
         self.inner.probe()
     }
@@ -801,16 +810,8 @@ impl AgentDispatchAdapter for CapabilityDeliveryAdapter {
         context: &AgentDispatchContext,
         resources: &dyn forge_app::AgentDispatchRepository,
     ) -> Result<(), forge_app::AgentAdapterError> {
-        // Reject deterministic policy failures before provider contact or capability issuance.
-        // Herdr checks again immediately before provisioning the launch.
-        herdr::pi_launch_arguments(&context.assignment.profile, "")?;
-        self.inner.probe()?;
-        let binding = context.dispatch_workspace.as_ref().ok_or_else(|| {
-            forge_app::AgentAdapterError::Conflict(
-                "Assignment has no retained provider binding".into(),
-            )
-        })?;
-        self.inner.verify_workspace(&binding.id)?;
+        // Provider-specific prerequisites must pass before any capability is issued.
+        self.inner.validate_provision(context)?;
         self.inner.provision(&self.context(context)?, resources)
     }
 
@@ -868,7 +869,9 @@ fn application_from_config_with_cli(
         Box::new(GitWorktreeAdapter),
         Box::new(dispatch),
         Box::new(ServerAgentDispatchAdapterFactory {
-            herdr: HerdrAdapterFactory::from_configuration_store(config.store_path.clone()),
+            provider: Box::new(HerdrAdapterFactory::from_configuration_store(
+                config.store_path.clone(),
+            )),
             daemon_url: format!("http://{}", config.bind_addr),
             capability_secret_root,
             cli_override,
@@ -3203,8 +3206,10 @@ mod tests {
                         Box::new(records),
                         Box::new(dispatch),
                         Box::new(super::ServerAgentDispatchAdapterFactory {
-                            herdr: super::HerdrAdapterFactory::from_configuration_store(
-                                database_path.clone(),
+                            provider: Box::new(
+                                super::HerdrAdapterFactory::from_configuration_store(
+                                    database_path.clone(),
+                                ),
                             ),
                             daemon_url: "http://127.0.0.1:45003".into(),
                             capability_secret_root: std::env::temp_dir()

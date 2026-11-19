@@ -3,7 +3,7 @@ fn context_test_application(database: &Path, secrets: &Path) -> Application {
         Box::new(SqliteProjectRepository::open(database).unwrap()),
         Box::new(SqliteProjectRepository::open(database).unwrap()),
         Box::new(super::ServerAgentDispatchAdapterFactory {
-            herdr: super::HerdrAdapterFactory::from_configuration_store(database.to_owned()),
+            provider: Box::new(super::HerdrAdapterFactory::from_configuration_store(database.to_owned())),
             daemon_url: "http://127.0.0.1:1".into(),
             capability_secret_root: secrets.to_owned(),
             cli_override: None,

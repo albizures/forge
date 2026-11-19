@@ -102,7 +102,7 @@ fn seed_existing_launch(fixture: &Fixture, assignment: &forge_app::AgentAssignme
         fixture.root.join("one")
     };
     let adapter = super::super::ServerAgentDispatchAdapterFactory {
-        herdr: super::super::HerdrAdapterFactory::from_configuration_store(fixture.database.clone()),
+        provider: Box::new(super::super::HerdrAdapterFactory::from_configuration_store(fixture.database.clone())),
         daemon_url: "http://127.0.0.1:45003/rpc".into(),
         capability_secret_root: fixture.root.join("assignment-capabilities"),
         cli_override: Some(std::env::current_exe().unwrap()),

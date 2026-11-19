@@ -158,9 +158,9 @@ fn pi_flags_drift_and_unsupported_mcp_fail_before_provider_or_provision_intent()
             resources: vec![],
         };
         let adapter = crate::CapabilityDeliveryAdapter {
-            inner: super::HerdrAdapter {
+            inner: Box::new(super::HerdrAdapter {
                 socket_path: fixture.0.join("no-provider.sock"),
-            },
+            }),
             daemon_url: "http://127.0.0.1:45003".into(),
             capability_secret_root: fixture.0.join("capabilities"),
             cli_override: None,
@@ -255,9 +255,9 @@ fn registered_grilling_receives_protected_capability_from_production_adapter() {
         resources: vec![],
     };
     let adapter = crate::CapabilityDeliveryAdapter {
-        inner: super::HerdrAdapter {
+        inner: Box::new(super::HerdrAdapter {
             socket_path: fixture.0.join("unused.sock"),
-        },
+        }),
         daemon_url: "http://127.0.0.1:45003".into(),
         capability_secret_root: fixture.0.join("secrets"),
         cli_override: None,
