@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Authorization } from '../src/authorization.ts';
 import { bootstrapCheck } from '../src/bootstrap.ts';
+import { createCheckRuntime } from '../src/check-runtime.ts';
 
 const grant = JSON.parse(await readFile(new URL('./authorization-lease.json', import.meta.url), 'utf8'));
 const denied = { code: 'assignment-bootstrap-failed' };
@@ -38,6 +39,51 @@ async function fixture(t, source) {
   t.after(() => authorization.close());
   return { bound, reply, replyFile, marker, capability, authorization, expire: () => { now = 31000; }, run: () => bootstrapCheck(grant.launch, grant.generation, bound, capability, authorization) };
 }
+
+async function runtimeFixture(t) {
+  const f = await fixture(t);
+  const home = join(f.bound.executionDirectory, 'auth');
+  await mkdir(home, { mode: 0o700 });
+  const key = join(home, 'key');
+  await writeFile(key, 'T07-MODEL-KEY', { mode: 0o600 });
+  const config = { version: 1, model: 'openai/gpt-4.1', thinkingLevel: 'off', tools: ['bash'], context: { instructions: 'Approved profile', resources: [] }, cwd: f.bound.executionDirectory };
+  return { ...f, key, config, runtime: () => createCheckRuntime(grant.launch, grant.generation, f.bound, f.capability, config, key, f.authorization) };
+}
+
+test('Check runtime composes authenticated behavior/context only after bootstrap', async t => {
+  const f = await runtimeFixture(t);
+  const pending = f.runtime();
+  // Mutate caller-owned inputs while the actual child bootstrap is pending.
+  f.config.cwd = '/';
+  f.config.context.instructions = 'MUTATED-CALLER-CANARY';
+  f.capability.FORGE_ASSIGNMENT_ID = 'foreign';
+  const runtime = await pending;
+  assert.ok(!runtime.agent.instructions.includes('MUTATED-CALLER-CANARY'));
+  assert.ok(runtime.agent.instructions.includes(f.reply.behavior));
+  assert.ok(runtime.agent.instructions.includes(JSON.stringify(f.reply.context)));
+  assert.ok(runtime.agent.instructions.startsWith('Approved profile'));
+  assert.equal(runtime.agent.cwd, f.bound.executionDirectory);
+  assert.deepEqual(runtime.agent.tools.map(tool => tool.name), ['bash']);
+  assert.equal(runtime.agent.tools[0].replay, 'unsafe');
+  assert.ok(!JSON.stringify(runtime.agent).includes(canary));
+  assert.ok(!JSON.stringify(runtime.agent).includes('T07-MODEL-KEY'));
+  f.authorization.admit();
+});
+
+test('Check runtime fences bootstrap, configuration and model-auth failures without a usable runtime', async t => {
+  for (const change of [
+    f => { f.config.cwd = '/'; },
+    f => f.expire(),
+    f => writeFile(f.replyFile, '{}'),
+    f => { f.config.tools = ['unsupported']; },
+    f => rm(f.key),
+  ]) {
+    const f = await runtimeFixture(t);
+    await change(f);
+    await assert.rejects(f.runtime(), { code: 'assignment-runtime-failed' });
+    fenced(f);
+  }
+});
 
 async function notCalled(f) { await assert.rejects(access(f.marker), { code: 'ENOENT' }); }
 function fenced(f) { assert.throws(() => f.authorization.admit(), { code: 'assignment-lease-denied' }); }

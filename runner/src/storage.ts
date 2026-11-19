@@ -75,6 +75,28 @@ export async function observe(directory: string, assignment: string, runtime: st
     return submission ? { state: 'accepted', admission_id: String(submission.id) } : { state: 'unknown' };
   } finally { await storage.close(context); }
 }
+/** Committed answer observation only: never create a Harness or resume work.
+ * A settled passive write, missing input, failed run or idle scheduler is not an
+ * answer. Caller supplies the exact retained launch and accepted admission ID.
+ * This result is not a Forge Outcome, execution permission or cleanup evidence.
+ */
+export async function observeAnswer(directory: string, launch: Launch, admissionId: string): Promise<'answered' | 'unanswered' | 'unknown'> {
+  requireCondition(typeof admissionId === 'string' && admissionId.length > 0, 'runner-admission-invalid');
+  const expected = structuredClone(launch);
+  const identity = journal(directory);
+  if (!identity) return 'unknown';
+  requireCondition(canonical(identity.launch) === canonical(expected), 'runner-identity-conflict');
+  if (identity.root === null) return 'unknown';
+  const storage = await readStorage(directory);
+  try {
+    const submission = await storage.submissionByRequest(identity.root as ConversationId, expected.operation_id, context);
+    if (!submission) return 'unknown';
+    requireCondition(String(submission.id) === admissionId && submission.type === 'input', 'runner-admission-conflict');
+    if (submission.status === 'unanswered') return 'unanswered';
+    return submission.status === 'done' && Number.isSafeInteger(submission.answer) ? 'answered' : 'unknown';
+  } finally { await storage.close(context); }
+}
+
 export async function snapshot(directory: string) {
   const identity = journal(directory);
   if (!identity || identity.root === null) return { identity, entries: [] };

@@ -1,12 +1,17 @@
 //! Real runner bootstrap module -> delivered CLI -> HTTP daemon -> store.
 //! This is NOT durable dispatch: the Check is claimed directly and the JS
-//! authorization grant is a test-only fixture. No Herdr binding is configured.
+//! authorization grant is a test-only fixture. A fake model drives the actual
+//! Harness/Bash/CLI Outcome path. No Herdr binding is configured.
 use forge_app::{
     AgentDispatchRepository, ManagedWorktreeRepository, NewTypedRecord, Project, ProjectRepository,
     RecordRepository, RecordType, WorkspaceDispatchRepository, WorkspaceRepository,
     agent_profiles::ResourceCatalog,
     assignment::BoundIdentity,
     check_templates::{CheckCriterion, TemplateReplacement},
+    durable_execution::{
+        Admission, Launch, Repository as _,
+        completion::{AnswerObservation, Repository as _},
+    },
     outcomes::Evidence,
 };
 use forge_server::{DaemonConfig, serve};
@@ -54,16 +59,41 @@ fn git(root: &Path, args: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap().trim().into()
 }
 
-async fn bootstrap(input: Value) {
-    let output = tokio::task::spawn_blocking(move || {
-        let runner = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../runner");
-        let node = std::env::split_paths(&std::env::var_os("PATH").unwrap())
-            .map(|path| path.join("node"))
-            .find(|path| path.is_file())
-            .unwrap()
+fn node() -> PathBuf {
+    std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|path| path.join("node"))
+        .find(|path| path.is_file())
+        .unwrap()
+        .canonicalize()
+        .unwrap()
+}
+
+async fn component_hash() -> String {
+    tokio::task::spawn_blocking(|| {
+        let contract = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../runner/src/contract.ts")
             .canonicalize()
             .unwrap();
-        let mut child = Command::new(node)
+        let output = Command::new(node())
+            .env_clear()
+            .args(["--input-type=module", "-e"])
+            .arg(format!(
+                "import {{componentHash}} from {}; process.stdout.write(componentHash());",
+                json!(contract)
+            ))
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap()
+    })
+    .await
+    .unwrap()
+}
+
+async fn bootstrap(input: Value) -> Value {
+    let output = tokio::task::spawn_blocking(move || {
+        let runner = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../runner");
+        let mut child = Command::new(node())
             .arg(runner.join("test/check-bootstrap-tracer.mjs"))
             .env_clear()
             .stdin(Stdio::piped())
@@ -90,8 +120,9 @@ async fn bootstrap(input: Value) {
         let text = String::from_utf8_lossy(bytes);
         assert!(!text.contains("T07-CAPABILITY-CANARY"));
         assert!(!text.contains("T07-BOUND-BEHAVIOR"));
+        assert!(!text.contains("T07-MODEL-KEY-CANARY"));
     }
-    let _: Value = serde_json::from_slice(&output.stdout).unwrap();
+    serde_json::from_slice(&output.stdout).unwrap()
 }
 
 async fn outcome(endpoint: &str, secret: &Path, file: &Path) -> Output {
@@ -113,8 +144,22 @@ async fn outcome(endpoint: &str, secret: &Path, file: &Path) -> Output {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::too_many_lines)] // One isolated real daemon/CLI/bootstrap composition.
 async fn runner_gate_uses_real_authenticated_check_bootstrap_and_outcome() {
+    check_execution("accepted").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn final_prose_without_outcome_retains_missing_outcome_from_actual_runtime_answer() {
+    check_execution("missing").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rejected_outcome_then_final_prose_remains_missing_outcome() {
+    check_execution("rejected").await;
+}
+
+#[allow(clippy::too_many_lines)] // One isolated real daemon/CLI/bootstrap composition.
+async fn check_execution(mode: &str) {
     let fixture = Fixture::new();
     let root = &fixture.0;
     let repository = root.join("repository");
@@ -220,6 +265,24 @@ async fn runner_gate_uses_real_authenticated_check_bootstrap_and_outcome() {
         .assignment_check_attempt("t07-check")
         .unwrap()
         .unwrap();
+    let launch = Launch {
+        assignment_id: assignment.id.clone(),
+        operation_id: "t07-launch".into(),
+        attempt_id: attempt.id.clone(),
+        profile_revision: profile.revision,
+        runtime_id: "t07-runtime".into(),
+        incarnation_id: "t07-incarnation".into(),
+        conversation_id: "t07-conversation".into(),
+        store_id: "t07-store".into(),
+        forge_revision: "controlled-component-test".into(),
+        component_hash: component_hash().await,
+        runtime_schema: forge_app::durable_execution::RUNTIME_SCHEMA_VERSION,
+    };
+    assert_eq!(
+        store.reserve("test", &launch).unwrap().admission,
+        Admission::Pending
+    );
+    assert!(store.begin_send("test", &launch).unwrap());
     let bound = BoundIdentity {
         assignment_id: assignment.id,
         record_id: task.id,
@@ -246,7 +309,7 @@ async fn runner_gate_uses_real_authenticated_check_bootstrap_and_outcome() {
     drop(listener);
     let daemon = tokio::spawn(serve(DaemonConfig {
         bind_addr: addr,
-        store_path: db,
+        store_path: db.clone(),
         durable_model_key_file: None,
         managed: None,
     }));
@@ -342,6 +405,148 @@ async fn runner_gate_uses_real_authenticated_check_bootstrap_and_outcome() {
     let unauthorized = outcome(&endpoint, &foreign, &file).await;
     assert!(!unauthorized.status.success());
     assert!(String::from_utf8_lossy(&unauthorized.stderr).contains("assignment-capability-denied"));
+    // The first accepted submission is driven by a deterministic fake model
+    // through the actual guarded Bash tool and CLI, not by this Rust process.
+    // This component still has a fixture lease, no supervisor or app dispatch.
+    let model_auth = root.join("model-auth");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&model_auth)
+        .unwrap();
+    let model_key = model_auth.join("key");
+    std::fs::write(&model_key, "T07-MODEL-KEY-CANARY").unwrap();
+    std::fs::set_permissions(&model_key, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let runtime = root.join("component-runtime");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&runtime)
+        .unwrap();
+    let mut execution = input.clone();
+    execution["execution"] = json!({
+        "key": model_key, "storage": runtime.join("runtime.sqlite"), "outcome": file,
+        "launch": launch, "mode": mode
+    });
+    if mode == "rejected" {
+        let mut stale_outcome = valid.clone();
+        stale_outcome["generation"] = json!(attempt.generation + 1);
+        std::fs::write(&file, serde_json::to_vec(&stale_outcome).unwrap()).unwrap();
+    }
+    let report = bootstrap(execution).await;
+    for entry in std::fs::read_dir(&runtime).unwrap() {
+        let bytes = std::fs::read(entry.unwrap().path()).unwrap();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(!text.contains("T07-CAPABILITY-CANARY"));
+        assert!(!text.contains("T07-MODEL-KEY-CANARY"));
+    }
+    let admission: Admission =
+        serde_json::from_value(report["execution"]["admission"].clone()).unwrap();
+    assert!(matches!(admission, Admission::Accepted { .. }));
+    store.record_result("test", &launch, &admission).unwrap();
+    assert_eq!(report["execution"]["answer"], "answered");
+    let observation = store.observe_answer("test", &launch).unwrap();
+    if mode != "accepted" {
+        assert_eq!(observation, AnswerObservation::MissingOutcome);
+        assert_eq!(store.observe_answer("test", &launch).unwrap(), observation);
+        let info = store.agent_assignment_info("t07-check").unwrap();
+        assert!(
+            info.recovery_blockers()
+                .iter()
+                .any(|blocker| blocker == "missing-outcome")
+        );
+        assert_eq!(
+            info.resources
+                .iter()
+                .filter(|resource| resource.resource_kind == "missing-outcome")
+                .count(),
+            1
+        );
+        let current = &store.list_record_checks(task.id).unwrap()[0];
+        assert!(current.latest_assessment.is_none());
+        assert!(current.current_verdict.is_none());
+        assert_eq!(
+            store.show_record(task.id).unwrap().status,
+            forge_app::RecordStatus::InProgress
+        );
+        assert_eq!(store.list_agent_assignments(task.id).unwrap().len(), 1);
+        assert_eq!(
+            store.assignment_check_attempt("t07-check").unwrap(),
+            Some(attempt)
+        );
+        assert!(store.runtime("test", "t07-check").unwrap().is_some());
+        assert!(info.dispatch_hold.is_some());
+        assert!(info.capacity_reserved());
+        // Inspect the diagnostic produced by actual runtime prose, not a seeded
+        // presentation fixture. Inspection cannot consume or clear retained state.
+        for json_output in [false, true] {
+            let endpoint = format!("{endpoint}/rpc");
+            let output = tokio::task::spawn_blocking(move || {
+                let mut command = Command::new(env!("CARGO_BIN_EXE_forge"));
+                command.env_clear().args([
+                    "dispatcher",
+                    "assignment-info",
+                    "t07-check",
+                    "--server-url",
+                    &endpoint,
+                ]);
+                if json_output {
+                    command.arg("--json");
+                }
+                command.output().unwrap()
+            })
+            .await
+            .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let text = String::from_utf8(output.stdout).unwrap();
+            assert!(text.contains("missing-outcome"));
+            assert!(!text.contains("T07-CAPABILITY-CANARY"));
+            assert!(!text.contains("T07-BOUND-BEHAVIOR"));
+            if json_output {
+                let response: forge_rpc::AgentAssignmentInfoResponse =
+                    serde_json::from_str(&text).unwrap();
+                assert!(response.capacity_reserved);
+                assert!(
+                    response
+                        .recovery_blockers
+                        .contains(&"missing-outcome".into())
+                );
+            }
+        }
+        assert_eq!(store.agent_assignment_info("t07-check").unwrap(), info);
+        // Closure and a new repository connection do not erase uncertainty or
+        // release capacity. This is test-controlled closure, not safe retirement.
+        store
+            .close_agent_assignment(
+                "t07-check",
+                forge_app::AgentAssignmentClosureReason::Retired,
+            )
+            .unwrap();
+        let reopened = SqliteProjectRepository::open(&db).unwrap();
+        assert_eq!(
+            reopened.observe_answer("test", &launch).unwrap(),
+            observation
+        );
+        let retained = reopened.agent_assignment_info("t07-check").unwrap();
+        assert!(retained.capacity_reserved());
+        assert!(
+            retained
+                .recovery_blockers()
+                .contains(&"missing-outcome".into())
+        );
+        assert_eq!(retained.resources, info.resources);
+        daemon.abort();
+        let _ = daemon.await;
+        return;
+    }
+    assert_eq!(observation, AnswerObservation::OutcomeAccepted);
+    assert_eq!(
+        store.list_record_checks(task.id).unwrap()[0].current_verdict,
+        Some(forge_app::checks::Verdict::Pass)
+    );
+    // Exact replay reads back the model tool's accepted result for assertions.
     let accepted = outcome(&endpoint, &secret, &file).await;
     assert!(
         accepted.status.success(),

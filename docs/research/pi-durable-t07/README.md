@@ -2,18 +2,169 @@
 
 ## Status: partial; do not advance to T08
 
-Four increments provide the runner-side bootstrap gate, trusted app/store
-missing-Outcome observation boundary, real CLI/server bootstrap/Outcome component
-tracer and backend-specific Check admission described below. They **do not complete
-T07**: there is no enabled production durable dispatch adapter, supervised fake-model
-execution tracer or runner caller of the observation boundary. Production durable launch and automatic
-recovery remain disabled. No live Forge state, profile selection, capability,
+The increments below provide the runner-side bootstrap/runtime composition,
+trusted app/store missing-Outcome observation boundary, real CLI/server and
+fake-model/tool Outcome component tracer, and backend-specific Check admission.
+They **do not complete T07**: there is no enabled production durable dispatch
+adapter or supervised fake-model execution tracer. Actual runtime-answer delivery
+now has component evidence, but no supervised production caller. Production durable launch and automatic recovery remain disabled. No live Forge state, profile selection, capability,
 worktree or real-provider credential was changed.
 
 The checkout already contained uncommitted T06 work; that work was preserved.
 The verification below covers the combined checkout, not a new isolated commit.
 
-## Backend-specific Check admission increment (latest)
+## Committed answer observation and diagnostic delivery (latest)
+
+`runner/src/storage.ts::observeAnswer` reads the exact journal Launch, root and
+accepted submission ID through physical read-only SQLite and the pinned derived
+read adapter. Only a committed `input` submission marked `done` with an answer
+entry counts as answered. Absent journal/root/input and unsettled submissions are
+unknown; failed runs are unanswered. A passive write is not an answer. Full Launch
+or admission mismatch rejects. No Harness, scheduler, writable repair, model/tool
+call, new input or lifecycle verdict is created by inspection. The helper returns
+only the observation classification, never prose or a claimed Forge verdict.
+
+The real CLI/server component tracer now reserves actual runtime intent in Forge
+**before** its first bootstrap and marks send intent unknown before execution.
+The worker journals that same Launch/root in its runtime store, submits using the
+stable operation ID and reports the actual committed submission ID. After writer
+closure, `observeAnswer` reads the committed answer. The trusted Rust fixture
+persists the accepted admission and passes that observation to the existing
+transactional missing-Outcome boundary. Three isolated default-parallel scenarios
+exercise this composition:
+
+- An authenticated accepted Outcome reports `OutcomeAccepted`, preserving the
+  existing exact evidence, actor-attribution, replay and revocation checks.
+- Plausible completion prose with no Outcome reports `MissingOutcome`.
+- A fake-model Bash submission rejected for stale generation, followed by final
+  prose, also reports `MissingOutcome`; a rejected request is not acceptance.
+
+The missing cases verify one retained diagnostic resource and Dispatch Hold,
+unchanged unresolved Check/Task/attempt, one Assignment and reserved capacity.
+Actual human/JSON CLI → RPC inspection displays the newly produced diagnostic
+without changing persisted state or revealing behavior/capabilities. Explicit
+fixture closure plus a fresh repository connection retains the same resources,
+blocker and capacity; that closure is **not** evidence of safe retirement.
+All scenarios scan runtime files and process output for secret canaries.
+
+Four new Node tests cover inspection before intent/root, a pending and committed
+answer beside a writer, stopped-writer observation, failed runs, all Launch-field
+mismatches, wrong admissions and settled passive writes. They compare committed
+DB/WAL bytes and count provider calls. SQLite read-only handles may create empty
+WAL/SHM coordination files and change reader-lock metadata; those are not runtime
+initialization, scheduling or committed history writes, and the tests deliberately
+do not claim byte-for-byte immutability of that lock metadata.
+
+Verification from repository root:
+
+```sh
+(cd runner && npm run check && node --test test/completion.test.mjs)
+cargo test -p forge-cli --test durable_check_bootstrap
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+git diff --check
+(cd runner && npm run check && npm test)
+```
+
+All final gates pass: **647 Rust tests passed, 0 failed, 1 pre-existing opt-in
+probe ignored; 45 Node tests passed, 0 failed**. Initial new tests exposed two
+fixture problems: waiting for provider readiness before starting `Submission.wait`
+left scheduling unrequested, and comparing reader-lock sidecars overstated the
+read-only contract. They now start the wait before observing the pending boundary
+and compare committed bytes. Initial Rust compilation found incorrect fixture
+field names; the first CLI inspection used the HTTP base rather than `/rpc`.
+Those fixture errors were corrected and all gates rerun. Earlier interrupted test
+commands are not counted as passes. No safety policy was weakened.
+
+**Remaining:** this is real admission/bootstrap/model/tool/CLI/answer/store
+**component** integration, not app-dispatch → supervisor → grant-service execution.
+The Check is still directly claimed, the lease remains a fixture and runtime
+storage is a protected test-selected directory, not the daemon's canonical mapping.
+Runtime acceptance is retained after the worker report; a lost report remains
+unknown and must not be replayed as permission. The component uses the current
+source hash but not installed/matched-Revision attestation. No production adapter,
+renewal driver, ownership proof, automatic recovery or real-provider test was added.
+T07 stays in progress and T08 stays blocked.
+
+Implementation review against T07: “Persist and expose missing-Outcome
+diagnostics” now has actual committed-answer delivery through the component
+fixture; “from Forge dispatch through the durable runner” remains partial because
+supervision and app dispatch are separate tests. No scope creep or incorrect
+completion claim found. Standards self-review found no introduced violation:
+identity validation precedes read-only inspection; the store retains atomic
+admission/diagnostic policy; external operations remain outside transactions;
+fixtures isolate stores/listeners/environments and use explicit synchronization.
+This is not independent T18 review or release readiness.
+
+## Bootstrap-gated runtime and fake-model Outcome component (previous)
+
+- `runner/src/check-runtime.ts::createCheckRuntime` snapshots the trusted launch,
+  full Check binding, capability metadata and explicit configuration before the
+  bootstrap await. It requires the configured cwd to match the binding, invokes
+  the actual bootstrap gate and only then constructs profile model/tool inputs.
+  The authenticated behavior and complete context are added to agent instructions.
+  No pre-bootstrap model request, storage open or conversation is performed.
+  Bootstrap/configuration/authentication failure fences this lease consumer with
+  a fixed redacted error. This helper is not an executable or production caller;
+  the host still owns pre-capability preflight, live grant issuance, exclusive
+  ownership, admission and durable failure retention.
+- Extended `crates/cli/tests/durable_check_bootstrap.rs` and its Node driver to
+  compose the helper with the pinned Harness and real SQLite storage. A guarded
+  faux provider makes exactly two requests: one Bash tool call and one final
+  prose response. The actual guarded Bash tool executes the delivered CLI against
+  the actual HTTP daemon/store and submits the **first accepted Outcome**.
+  The test verifies one successful tool result and confirms accepted state before
+  Rust reads the result back through exact replay. Existing wrong/stale/revoked
+  submission and immutable input/output evidence assertions remain in place.
+  Runtime files and process outputs are checked for capability/model-key canaries.
+- Two new Node tests cover successful trusted instruction composition and fenced
+  bootstrap, lease, cwd, configuration and model-authentication failures. Existing
+  bootstrap failure/redaction tests remain green. The executable-source component
+  digest now includes the new helper; no wire/storage schema or dependency changed.
+
+**Limits:** the Check is still claimed directly, its lease is a JS fixture, and
+no supervisor/shared flock/runtime reservation is composed with app dispatch.
+Rust prepares the changed Git commit and Outcome file; the fake model submits
+that file, not an independently implemented deliverable. Only the test replaces
+the selected model with faux; production profile compatibility is unchanged.
+The component's private test store is not evidence of host ownership or the
+Forge runtime journal contract. Runtime answer delivery to the missing-Outcome
+port remains missing. No real provider, installed component or live Forge state
+was used. T07 stays in progress; T08 stays blocked.
+
+Verification from repository root:
+
+```sh
+cargo test -p forge-cli --test durable_check_bootstrap
+(cd runner && npm run check && node --test test/bootstrap.test.mjs)
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+git diff --check
+(cd runner && npm run check && npm test)
+```
+
+All final gates pass: **645 Rust tests passed, 0 failed, 1 pre-existing opt-in
+probe ignored; 41 Node tests passed, 0 failed**. The real CLI/fake-model driver is
+exercised by the Rust integration test, not counted as another Node test. An
+initial typecheck found a readonly agent-property assignment; the helper now
+returns a composed agent value instead. No policy or safety gate was weakened.
+Clean installation, packaged integration and real-provider verification were
+not run. The earlier supervisor-test timeout remains historical evidence, not
+claimed fixed by this increment.
+
+Implementation self-review: T07's “fake model and actual runner/CLI bootstrap
+path” now has model/tool/CLI component evidence. “From Forge dispatch through the
+durable runner” remains partial because dispatch, retained admission, supervision
+and this component are not composed. “Persist and expose missing-Outcome
+diagnostics” still lacks actual runner delivery. No scope creep or incorrect
+completion claim found. Standards self-review found no introduced violation;
+external calls remain outside database transactions, environments/listeners/stores
+are isolated and secret-file delivery is retained. This is not independent T18
+review or release readiness.
+
+## Backend-specific Check admission increment (previous)
 
 The app's Check dispatch now distinguishes `CheckDispatchPreflight::Herdr` from
 `PiDurable`, based on the immutable pinned profile, not current Workspace Task
@@ -270,13 +421,14 @@ protocol-fake limitation is explicit. This is not independent T18 review.
    construction. Deliver only the short bootstrap before the successful response;
    trusted behavior/context must not enter execution through a pre-bootstrap
    model request. Retain failures durably rather than just closing the JS guard.
-4. Exercise a deterministic fake model with actual runner/CLI/server and existing
-   Outcome commands, exact evidence, wrong/stale/revoked submissions and counted
-   external calls. No Herdr resource or Pi CLI may be needed for durable admission.
-5. Wire actual conversation answers to the missing-Outcome observation boundary
-   below without an Assessment, Continuation, completion, successor or capacity
-   release. Renew manual/parent/dependency, Herdr/Grilling and all repository/runner
-   gates, then mark T07 complete.
+4. Compose the now-tested deterministic fake-model/Harness/tool/CLI/server
+   component with actual supervised dispatch and retained runtime admission.
+   Preserve exact evidence, wrong/stale/revoked submissions and counted external
+   calls. No Herdr resource or Pi CLI may be needed for durable admission.
+5. Move the now-tested committed-answer → missing-Outcome component delivery
+   into that supervised host composition, without an Assessment, Continuation,
+   completion, successor or capacity release. Renew manual/parent/dependency,
+   Herdr/Grilling and all repository/runner gates, then mark T07 complete.
 
 ## Missing-Outcome persistence increment
 

@@ -61,11 +61,45 @@ invocation. Output is bounded to 1 MiB; bootstrap times out after 10 seconds.
 Failures, malformed replies, binding drift, cancellation and uncertain replies
 fence this local lease consumer and return only a fixed redacted diagnostic.
 They do not retry, accept an Outcome, prove cleanup or release capacity. A future
-host caller must persist uncertainty before reconciliation/replacement. Tests
-use directly spawned **fake CLI executables**, not the actual Forge CLI/server.
-`main.ts` and production dispatch do not call this function yet. Actual Check
-admission, capability issuance ordering, bootstrap/Outcome composition and
-missing-Outcome persistence remain outstanding T07 work; see the
+host caller must persist uncertainty before reconciliation/replacement. Unit tests
+use directly spawned **fake CLI executables**. The separate Rust component tracer
+uses the actual CLI/server and authenticated Outcome path.
+
+`src/check-runtime.ts::createCheckRuntime` snapshots trusted launch inputs, checks
+the bound cwd, then composes the explicit profile runtime only after successful
+bootstrap. Authenticated behavior/context are added to the agent instructions;
+model/tool construction failures also fence this consumer. This function opens no
+storage, creates no conversation and supplies no execution authority of its own.
+The caller still owns pre-capability preflight, exclusive ownership, admission,
+supervision and durable uncertainty retention.
+
+`cargo test -p forge-cli --test durable_check_bootstrap` additionally composes this
+helper with a real pinned Harness/SQLite store and a deterministic faux provider.
+The fake model invokes the actual guarded Bash tool, which submits the first
+accepted Outcome using the delivered CLI against the real HTTP daemon/store.
+Rust prepares the Outcome file and Git output evidence; the fake model does not
+implement the code. The test checks two model calls, one successful tool result,
+exact evidence/replay and absence of secret canaries in runtime storage. Its lease
+is still a fixture, and the store Check claim bypasses app dispatch: this is not
+supervised execution, a real-provider test or proof of exclusive process ownership.
+
+The component now also reserves Forge runtime intent before bootstrap, journals
+its exact Launch/root/input, and reads the committed answer through
+`src/storage.ts::observeAnswer` after writer closure. That read-only helper returns
+`answered`, `unanswered` or `unknown` only; it verifies full Launch and accepted
+submission identity and cannot schedule or repair execution. Settled passive
+writes are not answers. Read-only SQLite can still create empty WAL/SHM reader
+coordination files; no runtime history is committed by this inspection.
+
+The Rust tracer delivers actual answered observations to the existing
+missing-Outcome persistence boundary. Separate accepted, prose-only and
+rejected-Outcome-then-prose cases verify the distinction, actual human/JSON CLI/RPC
+diagnostics and retained capacity across fixture closure/reopen. This is component
+delivery with fixture authorization, not a supervised production caller.
+
+`main.ts` and production dispatch do not call the bootstrap/runtime helpers.
+Actual supervised Check dispatch, capability issuance ordering and supervised
+host answer delivery remain outstanding T07 work; see the
 [T07 evidence/handoff](../docs/research/pi-durable-t07/README.md).
 
 ## Reproduce
