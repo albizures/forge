@@ -35,6 +35,7 @@ interface Grant {
 export class Authorization {
   #controller = new AbortController();
   #binding: string;
+  #execution: string;
   #previous: Grant | undefined;
   #payload: string | undefined;
   #lastNow: number | undefined;
@@ -44,6 +45,7 @@ export class Authorization {
   constructor(launch: Launch, generation: number, owner: Owner, daemonEpoch: string, clock = hostClockUpperBound) {
     requireCondition(Number.isSafeInteger(generation) && generation > 0 && typeof daemonEpoch === 'string' && daemonEpoch.trim(), 'assignment-lease-denied');
     this.#binding = canonical({ launch, generation, owner, daemon_epoch: daemonEpoch });
+    this.#execution = canonical({ launch, generation });
     this.#clock = clock;
     this.#timer = setInterval(() => { try { this.check(); } catch { /* check terminally aborts; no permission is returned. */ } }, 50);
     this.#timer.unref();
@@ -100,6 +102,12 @@ export class Authorization {
   admit(): void {
     this.check();
     if (!this.#previous) throw denied();
+  }
+
+  /** Trusted composition must not borrow a valid lease for another Check. */
+  admitFor(launch: Launch, generation: number): void {
+    this.admit();
+    if (canonical({ launch, generation }) !== this.#execution) this.#fence();
   }
 
   check(): void {

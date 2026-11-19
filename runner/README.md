@@ -13,6 +13,28 @@ still does not select or launch this backend. T06 adds profile/authentication
 mapping, T07 actual Check-bound dispatch, and T15 matched installation. Do not use
 this harness to execute live Assignments.
 
+## T07 bootstrap gate increment (not dispatch integration)
+
+`src/bootstrap.ts::bootstrapCheck` is a trusted composition function, not a tool
+or runnable entrypoint. It consumes the persisted complete Check binding, launch,
+freshness generation, protected capability metadata and an already granted lease.
+It invokes only the delivered absolute CLI with `assignment bootstrap --json` in
+the bound worktree. No shell, ambient environment or Pi discovery is involved.
+The CLI, not this module, reads/authenticates the capability. Only a successful
+version-1 response matching the complete binding releases context and behavior.
+The selected lease must match this exact launch/generation before and after the
+invocation. Output is bounded to 1 MiB; bootstrap times out after 10 seconds.
+
+Failures, malformed replies, binding drift, cancellation and uncertain replies
+fence this local lease consumer and return only a fixed redacted diagnostic.
+They do not retry, accept an Outcome, prove cleanup or release capacity. A future
+host caller must persist uncertainty before reconciliation/replacement. Tests
+use directly spawned **fake CLI executables**, not the actual Forge CLI/server.
+`main.ts` and production dispatch do not call this function yet. Actual Check
+admission, capability issuance ordering, bootstrap/Outcome composition and
+missing-Outcome persistence remain outstanding T07 work; see the
+[T07 evidence/handoff](../docs/research/pi-durable-t07/README.md).
+
 ## Reproduce
 
 Supported/tested host: Linux x64, local filesystem with `flock`, Node **24.18.0**,
