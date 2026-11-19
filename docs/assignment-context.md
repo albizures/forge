@@ -177,12 +177,20 @@ registered revision and does not alter existing immutable Check pins.
 ## Agent CLI examples
 
 In a delivered Assignment environment, first run `forge assignment bootstrap`.
-Its response labels trusted `context` separately from `behavior`; stop if it
-fails. Use `--json` for a versioned machine-readable response. Record IDs below
-are examples; use IDs from the authorized context.
+Its default output is agent-facing Markdown: trusted assignment identity and
+constraints, bound Check attempt metadata, worker behavior, and clearly labelled
+Record content. The pinned Task body is shown once; if the live body differs,
+both are labelled explicitly. Bootstrap and context inspection are preparation,
+not completion of the bound work. Stop if bootstrap fails.
+
+Use `--json` for the unchanged versioned machine-readable response, including the
+full context and behavior. This presentation-only change does not change RPC,
+authentication, lifecycle, profile revisions, or Check pins. Scripts that parsed
+the former default pretty-printed JSON must explicitly pass `--json`.
+Record IDs below are examples; use IDs from the authorized context.
 
 ```sh
-forge assignment bootstrap --json
+forge assignment bootstrap
 forge assignment context --json
 forge assignment record 42 --json
 forge assignment comments 42 --limit 20 --json

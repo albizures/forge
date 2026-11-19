@@ -1,5 +1,7 @@
 //! Command-line adapter that calls the running Forge daemon.
 
+mod assignment_bootstrap;
+pub use assignment_bootstrap::render_assignment_bootstrap;
 mod assignment_findings;
 pub use assignment_findings::{AssignmentFindingAction, assignment_finding};
 mod assignment_checks;

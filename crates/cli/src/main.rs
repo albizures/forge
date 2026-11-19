@@ -309,6 +309,7 @@ enum AssignmentCommand {
     },
     /// Authenticate, acknowledge, start and fetch context before returning behavior.
     Bootstrap {
+        /// Return the full versioned JSON response instead of agent-facing Markdown.
         #[arg(long)]
         json: bool,
     },
@@ -1227,7 +1228,7 @@ async fn assignment(command: AssignmentCommand) -> i32 {
                 let rendered = if json {
                     serde_json::to_string(&response)
                 } else {
-                    serde_json::to_string_pretty(&response)
+                    forge_cli::render_assignment_bootstrap(&response)
                 };
                 println!("{}", rendered.expect("bootstrap is serializable"));
                 0
