@@ -60,6 +60,34 @@ macro_rules! requests {
         }
     }
 }
+impl RecordClient {
+    pub(super) async fn policy_get(
+        &self,
+        record: forge_rpc::ProjectPolicyRequest,
+    ) -> Result<forge_rpc::ProjectPolicyResponse, jsonrpsee::core::client::Error> {
+        forge_rpc::ProjectApiClient::base_branch_policy_get(
+            &self.client,
+            SelectedRecordRequest {
+                selection: self.selection.clone(),
+                record,
+            },
+        )
+        .await
+    }
+    pub(super) async fn policy_set(
+        &self,
+        record: forge_rpc::SetProjectPolicyRequest,
+    ) -> Result<forge_rpc::ProjectPolicyResponse, jsonrpsee::core::client::Error> {
+        forge_rpc::ProjectApiClient::base_branch_policy_set(
+            &self.client,
+            SelectedRecordRequest {
+                selection: self.selection.clone(),
+                record,
+            },
+        )
+        .await
+    }
+}
 macro_rules! worktree_requests {
     ($($local:ident => $method:ident($request:ty) -> $response:ty;)+) => {
         impl RecordClient {

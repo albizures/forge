@@ -43,6 +43,23 @@ forge dispatcher status --project personal/api --json
 forge spec open --project personal/api --body 'Deliver the API'
 ```
 
+Base Branch Policy can be inspected and configured independently per Project:
+
+```sh
+forge project base-branch-policy show --project personal/api --json
+forge project base-branch-policy set --project personal/api planning-branch
+forge project base-branch-policy reset --project personal/api
+```
+
+The supported values are `ask`, `planning-branch`, and `default-branch`;
+unset or reset means `ask`. Configuration alone does not select a branch or
+modify existing root inputs. The additive RPC methods `project.baseBranchPolicyGet`
+and `project.baseBranchPolicySet` use the same Workspace selection envelope as
+other Project configuration; the latter accepts a null policy to reset. Existing
+RPC methods and payloads are unchanged. Older servers do not provide these new
+methods, and clients must not treat method-not-found as an `ask` response. Storage
+revision 14 requires the explicit offline upgrade described in the store README.
+
 The CLI resolves Project selectors before sending a mutation. `project.here` also supports `workspace` and `project` selectors alongside its client-supplied cwd (`folder`). `project.register` takes `folder`, `slug`, optional `workspace`, and client-supplied `cwd`. RPC filesystem paths must be absolute; the daemon never resolves client-relative paths or infers selection from its own working directory.
 
 Project responses expose `reference` (the immutable identity to carry into scope and configuration requests), `workspace_id`, local `slug`, `project_root`, and `origin_url`. A local slug alone is not a daemon-wide identity. Separate Projects with the same local slug retain independent setup hooks, concurrency limits and consumed dispatch capacity across daemon/store reopen.

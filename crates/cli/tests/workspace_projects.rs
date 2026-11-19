@@ -143,6 +143,43 @@ async fn workspace_project_registration_selection_and_configuration_use_the_real
         ],
         &fixture.0,
     ));
+    let policy = |action: &str, project: &str, value: Option<&str>| -> serde_json::Value {
+        let mut args = vec![
+            "project",
+            "base-branch-policy",
+            action,
+            "--project",
+            project,
+            "--json",
+        ];
+        if let Some(value) = value {
+            args.push(value);
+        }
+        serde_json::from_str(&success(run(&args, &one))).unwrap()
+    };
+    assert_eq!(policy("show", "one/api", None)["policy"], "ask");
+    for value in ["ask", "planning-branch", "default-branch"] {
+        assert_eq!(policy("set", "one/api", Some(value))["policy"], value);
+        assert_eq!(policy("show", "one/api", None)["policy"], value);
+    }
+    rejected(
+        run(
+            &[
+                "project",
+                "base-branch-policy",
+                "set",
+                "--project",
+                "one/api",
+                "invalid",
+            ],
+            &one,
+        ),
+        "Base Branch Policy",
+    );
+    assert_eq!(policy("show", "one/api", None)["policy"], "default-branch");
+    assert_eq!(policy("show", "one/tools", None)["policy"], "ask");
+    assert_eq!(policy("show", "two/api", None)["policy"], "ask");
+    assert_eq!(policy("reset", "one/api", None)["policy"], "ask");
     let here = |args: &[&str], cwd: &Path| -> serde_json::Value {
         serde_json::from_str(&success(run(args, cwd))).unwrap()
     };

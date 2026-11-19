@@ -822,6 +822,38 @@ pub async fn request_select_project(
         .await
         .map_err(|error| format!("could not find Project through Forge daemon: {error}"))
 }
+/// Reads or updates a Project Base Branch Policy through the daemon.
+///
+/// # Errors
+/// Returns a routing or daemon error.
+pub async fn request_project_policy(
+    endpoint: impl Into<record_selection::RecordEndpoint>,
+    project: String,
+    update: Option<Option<String>>,
+) -> Result<forge_rpc::ProjectPolicyResponse, String> {
+    let client = record_selection::record_client(endpoint)?;
+    match update {
+        None => {
+            client
+                .policy_get(forge_rpc::ProjectPolicyRequest {
+                    project_slug: project,
+                })
+                .await
+        }
+        Some(policy) => {
+            client
+                .policy_set(forge_rpc::SetProjectPolicyRequest {
+                    project_slug: project,
+                    policy,
+                })
+                .await
+        }
+    }
+    .map_err(|error| {
+        format!("could not configure Project Base Branch Policy through Forge daemon: {error}")
+    })
+}
+
 /// Configures a Project Setup Hook through the daemon.
 ///
 /// # Errors

@@ -2026,6 +2026,52 @@ fn relationship_kind(kind: &str) -> RpcResult<forge_app::RecordRelationshipKind>
 
 #[async_trait]
 impl ProjectApiServer for Daemon {
+    async fn base_branch_policy_get(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<forge_rpc::ProjectPolicyRequest>,
+    ) -> RpcResult<forge_rpc::ProjectPolicyResponse> {
+        let forge_rpc::SelectedRecordRequest {
+            selection,
+            record: mut request,
+        } = request;
+        let app =
+            self.record_application(&selection, std::slice::from_mut(&mut request.project_slug))?;
+        let policy = app
+            .base_branch_policy(&request.project_slug)
+            .map_err(rpc_error)?;
+        Ok(forge_rpc::ProjectPolicyResponse {
+            project: request.project_slug,
+            policy: policy.as_str().into(),
+        })
+    }
+
+    async fn base_branch_policy_set(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<forge_rpc::SetProjectPolicyRequest>,
+    ) -> RpcResult<forge_rpc::ProjectPolicyResponse> {
+        let forge_rpc::SelectedRecordRequest {
+            selection,
+            record: mut request,
+        } = request;
+        let app =
+            self.record_application(&selection, std::slice::from_mut(&mut request.project_slug))?;
+        let policy = request
+            .policy
+            .as_deref()
+            .map(str::parse)
+            .transpose()
+            .map_err(rpc_error)?;
+        app.set_base_branch_policy(&request.project_slug, policy)
+            .map_err(rpc_error)?;
+        let policy = app
+            .base_branch_policy(&request.project_slug)
+            .map_err(rpc_error)?;
+        Ok(forge_rpc::ProjectPolicyResponse {
+            project: request.project_slug,
+            policy: policy.as_str().into(),
+        })
+    }
+
     async fn register(
         &self,
         request: RegisterProjectRequest,

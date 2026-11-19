@@ -130,6 +130,10 @@ enum Command {
 }
 #[derive(Debug, Subcommand)]
 enum ProjectCommand {
+    BaseBranchPolicy {
+        #[command(subcommand)]
+        command: ProjectPolicyCommand,
+    },
     CheckTemplate {
         #[command(subcommand)]
         command: check_templates::CheckTemplateCommand,
@@ -138,6 +142,27 @@ enum ProjectCommand {
         #[command(subcommand)]
         command: ProjectSetupHookCommand,
     },
+}
+#[derive(Debug, Subcommand)]
+enum ProjectPolicyCommand {
+    Show(ProjectPolicyArgs),
+    Set(ProjectPolicySetArgs),
+    Reset(ProjectPolicyArgs),
+}
+#[derive(Args, Debug)]
+struct ProjectPolicyArgs {
+    #[arg(long)]
+    project: String,
+    #[arg(long, value_name = "URL")]
+    server_url: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Args, Debug)]
+struct ProjectPolicySetArgs {
+    #[command(flatten)]
+    common: ProjectPolicyArgs,
+    policy: String,
 }
 #[derive(Debug, Subcommand)]
 enum ProjectSetupHookCommand {
@@ -965,6 +990,29 @@ async fn run_record(command: RecordCommand, workspace: Option<String>) -> i32 {
 
 async fn project(command: ProjectCommand, workspace: Option<String>) -> i32 {
     let command = match command {
+        ProjectCommand::BaseBranchPolicy { command } => {
+            let (args, update) = match command {
+                ProjectPolicyCommand::Show(args) => (args, None),
+                ProjectPolicyCommand::Set(args) => (args.common, Some(Some(args.policy))),
+                ProjectPolicyCommand::Reset(args) => (args, Some(None)),
+            };
+            let endpoint =
+                selected_record_endpoint(args.server_url.as_deref(), workspace.as_deref()).await;
+            return match forge_cli::request_project_policy(endpoint, args.project, update).await {
+                Ok(response) => {
+                    if args.json {
+                        println!("{}", serde_json::to_string(&response).unwrap());
+                    } else {
+                        println!("{}: {}", response.project, response.policy);
+                    }
+                    0
+                }
+                Err(error) => {
+                    eprintln!("forge project base-branch-policy: {error}");
+                    1
+                }
+            };
+        }
         ProjectCommand::CheckTemplate { command } => {
             return check_templates::run(command, workspace).await;
         }

@@ -97,6 +97,16 @@ pub trait ProjectApi {
     -> RpcResult<RegisterProjectResponse>;
     #[method(name = "here")]
     async fn here(&self, request: ProjectHereRequest) -> RpcResult<ProjectHereResponse>;
+    #[method(name = "baseBranchPolicyGet")]
+    async fn base_branch_policy_get(
+        &self,
+        request: SelectedRecordRequest<ProjectPolicyRequest>,
+    ) -> RpcResult<ProjectPolicyResponse>;
+    #[method(name = "baseBranchPolicySet")]
+    async fn base_branch_policy_set(
+        &self,
+        request: SelectedRecordRequest<SetProjectPolicyRequest>,
+    ) -> RpcResult<ProjectPolicyResponse>;
 }
 #[rpc(client, server, namespace = "agentDispatch")]
 pub trait AgentDispatchApi {
@@ -950,6 +960,20 @@ impl From<AgentDispatchReconcileResult> for AgentDispatchReconcileResponse {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProjectPolicyRequest {
+    pub project_slug: String,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SetProjectPolicyRequest {
+    pub project_slug: String,
+    pub policy: Option<String>,
+}
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProjectPolicyResponse {
+    pub project: String,
+    pub policy: String,
+}
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SetProjectSetupHookRequest {
     pub project_slug: String,
