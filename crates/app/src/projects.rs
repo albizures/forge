@@ -192,8 +192,11 @@ impl Application {
         &self,
         reference: &str,
     ) -> Result<BaseBranchPolicy, RegistrationError> {
-        let reference = ProjectReference::parse(reference)?.qualified();
-        self.records.base_branch_policy(&reference)
+        let reference = ProjectReference::parse(reference)?;
+        let project = self
+            .records
+            .project_in_workspace(&reference.workspace_id, &reference.slug)?;
+        self.records.base_branch_policy(&project.reference)
     }
 
     /// Sets or resets the policy for a qualified Project reference.
@@ -204,8 +207,12 @@ impl Application {
         reference: &str,
         policy: Option<BaseBranchPolicy>,
     ) -> Result<(), RegistrationError> {
-        let reference = ProjectReference::parse(reference)?.qualified();
-        self.records.set_base_branch_policy(&reference, policy)
+        let reference = ProjectReference::parse(reference)?;
+        let project = self
+            .records
+            .project_in_workspace(&reference.workspace_id, &reference.slug)?;
+        self.records
+            .set_base_branch_policy(&project.reference, policy)
     }
 
     /// Routes registration by explicit selectors first, otherwise canonical cwd.

@@ -528,3 +528,47 @@ fn aliases_do_not_escape_ownership_or_bypass_reserved_subtrees() {
         "invalid-project-root"
     );
 }
+
+#[test]
+fn base_branch_policy_is_isolated_and_survives_reopen() {
+    use forge_app::BaseBranchPolicy;
+    let fixture = Fixture::new();
+    let one = fixture.path().join("one");
+    let two = fixture.path().join("two");
+    repository(&one);
+    repository(&two);
+    let database = fixture.path().join("policy.sqlite");
+    let store = SqliteProjectRepository::open(&database).unwrap();
+    store.create_workspace("one", "One", &one).unwrap();
+    store.create_workspace("two", "Two", &two).unwrap();
+    let app = application(&database);
+    app.register_workspace_project("one", &one, "api").unwrap();
+    app.register_workspace_project("two", &two, "api").unwrap();
+    assert_eq!(
+        app.base_branch_policy("one/api").unwrap(),
+        BaseBranchPolicy::Ask
+    );
+    for policy in [
+        BaseBranchPolicy::Ask,
+        BaseBranchPolicy::PlanningBranch,
+        BaseBranchPolicy::DefaultBranch,
+    ] {
+        app.set_base_branch_policy("one/api", Some(policy)).unwrap();
+        assert_eq!(
+            application(&database)
+                .base_branch_policy("one/api")
+                .unwrap(),
+            policy
+        );
+        assert_eq!(
+            app.base_branch_policy("two/api").unwrap(),
+            BaseBranchPolicy::Ask
+        );
+    }
+    app.set_base_branch_policy("one/api", None).unwrap();
+    assert_eq!(
+        app.base_branch_policy("one/api").unwrap(),
+        BaseBranchPolicy::Ask
+    );
+    assert!(app.set_base_branch_policy("two/missing", None).is_err());
+}

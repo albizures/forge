@@ -26,6 +26,7 @@ mod findings;
 mod ordering_dependencies;
 mod outcome_findings;
 mod outcomes;
+mod project_policy;
 mod record_browsing;
 mod record_workspaces;
 mod schema_compatibility;
@@ -260,11 +261,27 @@ impl SqliteProjectRepository {
         workspace_dispatch::initialize(connection)?;
         stacks::schema(connection)?;
         ordering_dependencies::schema(connection)?;
+        project_policy::schema(connection)?;
         Ok(())
     }
 }
 
 impl ProjectRepository for SqliteProjectRepository {
+    fn base_branch_policy(
+        &self,
+        reference: &str,
+    ) -> Result<forge_app::BaseBranchPolicy, RegistrationError> {
+        project_policy::get(self, reference)
+    }
+
+    fn set_base_branch_policy(
+        &self,
+        reference: &str,
+        policy: Option<forge_app::BaseBranchPolicy>,
+    ) -> Result<(), RegistrationError> {
+        project_policy::set(self, reference, policy)
+    }
+
     fn project(&self, reference: &str) -> Result<Project, RegistrationError> {
         let connection = self
             .connection

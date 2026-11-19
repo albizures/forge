@@ -9,7 +9,7 @@ by migrations—not just the initial `CREATE TABLE` statements.
 - [`src/lib.rs`](src/lib.rs): `SqliteProjectRepository::from_connection`,
   `migrate_*` functions, profile seeds, and repository operations.
 - [`src/workspaces.rs`](src/workspaces.rs): Workspace ownership and Project identity.
-- [`src/upgrade.rs`](src/upgrade.rs): explicit offline schema 7 → 8 → 9 → 10 → 11 → 12 → 13 conversion,
+- [`src/upgrade.rs`](src/upgrade.rs): explicit offline schema 7 → 8 → 9 → 10 → 11 → 12 → 13 → 14 conversion,
   frozen contract validation, consistent snapshots, and preservation inventories.
   See [Revision State upgrades](../../docs/state-upgrades.md) for orchestration.
 - [`src/record_workspaces.rs`](src/record_workspaces.rs): Record ownership,
@@ -45,8 +45,17 @@ is documented separately in [Records](../../docs/records.md),
   Most references do **not** cascade.
 - Ordinary repository opening accepts only the current marked schema revision.
   Triggers and repository validation also enforce invariants. Explicit managed
-  copy-and-upgrade targets revision 13 from revisions 7 through 13; unsupported
+  copy-and-upgrade targets revision 14 from revisions 7 through 14; unsupported
   stores are rejected without automatic conversion or reset.
+
+## Project Base Branch Policy (revision 14)
+
+`project_base_branch_policy` stores an optional row keyed by the Project's
+persistence reference (`project_slug`, primary and foreign key to `projects.slug`).
+`policy` is constrained to `ask`, `planning-branch`, or `default-branch`.
+An absent row means `ask`. The explicit offline upgrade adds an empty table;
+existing Project and execution data are not rewritten. Ordinary opening rejects
+older schemas before writing.
 
 ## Canonical Builds-On topology (revision 12)
 

@@ -7,7 +7,8 @@ use rusqlite::Connection;
 // retry/remediation accounting; older attempts cannot safely start with zero budgets.
 // Revision 13 requires explicit canonical prerequisite intent after validated
 // conversion; identical table definitions do not imply semantic compatibility.
-const SCHEMA_REVISION: i64 = 13;
+// Revision 14 adds Project Base Branch Policy without backfilling existing Projects.
+const SCHEMA_REVISION: i64 = 14;
 const APPLICATION_ID: i64 = 0x464f_5247; // FORG
 
 pub(super) fn validate(connection: &Connection) -> Result<(), RegistrationError> {
