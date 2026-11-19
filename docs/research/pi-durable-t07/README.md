@@ -2,16 +2,17 @@
 
 ## Status: partial; do not advance to T08
 
-This increment adds the runner-side bootstrap gate. It **does not complete T07**:
-there is no enabled durable dispatch adapter, actual CLI/server tracer, accepted
-Outcome or persisted missing-Outcome diagnostic from this work. Production durable
-launch and automatic recovery remain disabled. No live Forge state, profile
-selection, capability, worktree or real-provider credential was changed.
+Two increments provide the runner-side bootstrap gate and the trusted app/store
+missing-Outcome observation boundary described below. They **do not complete T07**:
+there is no enabled durable dispatch adapter, actual bootstrap/Outcome tracer or
+runner caller of the observation boundary. Production durable launch and automatic
+recovery remain disabled. No live Forge state, profile selection, capability,
+worktree or real-provider credential was changed.
 
 The checkout already contained uncommitted T06 work; that work was preserved.
 The verification below covers the combined checkout, not a new isolated commit.
 
-## Delivered increment
+## Bootstrap-gate increment (previous)
 
 - `runner/src/bootstrap.ts::bootstrapCheck` consumes trusted persisted full
   Assignment/Check identity, launch, freshness generation, delivered capability
@@ -44,7 +45,7 @@ The verification below covers the combined checkout, not a new isolated commit.
 - The local component digest includes the new module. No protocol envelope,
   Forge/runtime storage schema, dependency or public CLI contract changed.
 
-## Verification
+## Bootstrap-gate verification (previous)
 
 From the Forge repository root:
 
@@ -82,7 +83,7 @@ Outcome tracer, installed matched components or real-provider requests. Existing
 workspace tests still cover historical CLI/bootstrap, Check/Outcome and Herdr
 behavior separately; those are **not** evidence of the missing durable composition.
 
-## Implementation self-review
+## Bootstrap-gate implementation self-review (previous)
 
 Against T07:
 
@@ -129,6 +130,100 @@ protocol-fake limitation is explicit. This is not independent T18 review.
 4. Exercise a deterministic fake model with actual runner/CLI/server and existing
    Outcome commands, exact evidence, wrong/stale/revoked submissions and counted
    external calls. No Herdr resource or Pi CLI may be needed for durable admission.
-5. Persist missing-Outcome diagnostics without an Assessment, Continuation,
-   completion, successor or capacity release. Renew manual/parent/dependency,
-   Herdr/Grilling and all repository/runner gates, then mark T07 complete.
+5. Wire actual conversation answers to the missing-Outcome observation boundary
+   below without an Assessment, Continuation, completion, successor or capacity
+   release. Renew manual/parent/dependency, Herdr/Grilling and all repository/runner
+   gates, then mark T07 complete.
+
+## Missing-Outcome persistence increment
+
+Delivered:
+
+- `app/src/durable_execution/completion.rs` defines a trusted host observation
+  port and distinguishes an accepted Outcome from a missing Outcome. The caller
+  supplies only immutable launch identity, never prose or an asserted verdict.
+  This is not a new agent lifecycle tool, RPC method or execution entrypoint.
+- `store/src/durable_execution/completion.rs` authorizes Workspace, exact retained
+  runtime, profile and Check attempt inside one immediate transaction. Only an
+  accepted runtime admission may report an answer. Pending, unknown, rejected,
+  foreign and mismatched launches fail without writing diagnostic state.
+- The same transaction checks the exact attempt's committed Outcome/result pair.
+  If absent it retains a `missing-outcome` resource keyed by attempt id and a
+  diagnostic Dispatch Hold. Existing holds and resources are preserved; duplicate
+  observations preserve the first diagnostic timestamp. Errors roll back both
+  effects. Closure/invalidation does not prevent delayed diagnostic retention or
+  restore execution authority.
+- No Assessment, Continuation, attempt closure, Task/Assignment lifecycle change,
+  successor, capability issuance, cleanup or capacity release is performed.
+  Missing Outcome stays unresolved even if the provider reports plausible success.
+  Rejected Forge Outcomes do not count as accepted. Existing lease policy blocks
+  renewal while the diagnostic is unresolved, even after hold clearance. This
+  transaction does not cancel an active grant or establish process death; the
+  existing bounded lease/watchdog remains necessary.
+- `AgentAssignmentInfo::recovery_blockers` exposes `missing-outcome` for an
+  unretired diagnostic resource. Existing CLI/RPC assignment inspection carries
+  the resource and blocker, without provider/Git calls or execution admission.
+  A later accepted Outcome observation reports acceptance but does not erase an
+  earlier diagnostic/hold or infer a pass/freshness/retirement verdict.
+
+Compatibility: no schema, dependency, CLI argument, RPC method or serialized field
+change. The existing unconstrained resource-kind and blocker-string contracts gain
+`missing-outcome`; existing inspection renders them generically. Runtime wire v1
+and store schema 21 are unchanged. This is not a new recovery-resolution operation.
+Later authorized intervention must reconcile retained diagnostics deliberately;
+ordinary hold clearance cannot do so.
+
+### Verification (combined checkout)
+
+Commands run from the repository root:
+
+```sh
+cargo test -p forge-store durable_execution -- --nocapture
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+git diff --check
+(cd runner && npm run check && npm test)
+```
+
+All final gates passed: **640 Rust tests passed, 0 failed, 1 pre-existing opt-in
+probe ignored; 39 Node tests passed, 0 failed**. The focused store run passed
+24 tests (nine new missing-Outcome tests). One new real CLI/HTTP/RPC inspection
+integration test verifies human/JSON diagnostic visibility, unchanged persisted
+snapshot, no prompt disclosure and zero provider/Git calls through panic guards.
+Its diagnostic resource is a presentation fixture, not an actual runner answer.
+
+Store coverage includes exact identity/scope and admission rejection, unchanged
+Checks/work/Assignment state, replay/reopen and concurrent observers, delayed
+observation of closed attempts, existing-hold preservation, rollback on injected
+hold-write failure, a rejected stale Forge Outcome, and lease denial after hold
+clearance. The accepted-Outcome branch uses explicitly seeded committed-field
+fixtures; **it is not evidence of authenticated Outcome acceptance**. Existing
+CLI/server/Outcome regressions remain green but do not establish the missing
+runner composition. The first compilation caught a test partial move; the first
+Clippy run caught a wildcard import. Both were corrected and all gates rerun.
+
+Not run/established: new npm installation, actual durable dispatch/bootstrap/
+Outcome tracer, actual runtime-answer delivery to this port, installed matched
+components or real-provider verification. There is intentionally no default
+production caller of this new internal port.
+
+### Implementation and standards self-review (this increment)
+
+Against T07's “Persist and expose missing-Outcome diagnostics”: transactional
+persistence and existing CLI/RPC visibility are implemented, but delivery from the
+actual runner remains missing. Against “Build a deterministic local tracer with a
+fake model and actual runner/CLI bootstrap path”: still missing, as are controlled
+durable Check admission and authenticated accepted/rejected Outcome composition.
+No additional lifecycle behavior or automatic recovery was introduced.
+
+Coding standards: no introduced violation found after corrections. App owns the
+observation contract, store owns atomic enforcement, and CLI/RPC use existing
+adaptation. No external calls occur within the transaction. Scope and immutable
+identity precede reads/mutations; retention survives closure and retries without
+clearing safety evidence. Added tests isolate stores/listeners and synchronize
+concurrent observers with a barrier. This is self-review, not independent T18 review.
+
+**Summary: missing-Outcome persistence is now available as an internal boundary;
+T07 remains partial because dispatch and runtime/CLI/Outcome composition are absent.
+T08 remains blocked.**

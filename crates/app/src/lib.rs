@@ -1327,6 +1327,11 @@ impl AgentAssignmentInfo {
         }) {
             blockers.push("uncertain-provisioning".into());
         }
+        if self.resources.iter().any(|resource| {
+            resource.resource_kind == "missing-outcome" && resource.retired_at_millis.is_none()
+        }) {
+            blockers.push("missing-outcome".into());
+        }
         if self.assignment.closed_at_millis.is_none()
             && matches!(
                 self.assignment.state,

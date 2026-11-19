@@ -2,6 +2,8 @@
 use crate::RegistrationError;
 use serde::{Deserialize, Serialize};
 
+pub mod completion;
+
 /// Immutable identities only: no capability, provider credential or prompt content.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

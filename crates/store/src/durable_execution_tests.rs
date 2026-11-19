@@ -112,6 +112,393 @@ impl Drop for Fixture {
     }
 }
 
+fn accept_runtime(f: &Fixture) {
+    f.store.reserve("test", &f.launch).unwrap();
+    assert!(f.store.begin_send("test", &f.launch).unwrap());
+    f.store
+        .record_result(
+            "test",
+            &f.launch,
+            &Admission::Accepted {
+                admission_id: "admitted".into(),
+            },
+        )
+        .unwrap();
+}
+
+#[test]
+fn answered_without_outcome_retains_visible_idempotent_blocker_and_unchanged_work() {
+    use forge_app::durable_execution::completion::{AnswerObservation, Repository as _};
+    let f = Fixture::new();
+    accept_runtime(&f);
+    let before = f.store.agent_assignment_info("assignment").unwrap();
+    let record = before.assignment.record_id;
+    let checks = f.store.list_record_checks(record).unwrap();
+    let work = f.store.record_work_state(record).unwrap();
+    assert_eq!(
+        f.store.observe_answer("test", &f.launch).unwrap(),
+        AnswerObservation::MissingOutcome
+    );
+    let info = f.store.agent_assignment_info("assignment").unwrap();
+    assert_eq!(info.assignment, before.assignment);
+    assert_eq!(info.task_status, before.task_status);
+    assert_eq!(f.store.list_record_checks(record).unwrap(), checks);
+    assert_eq!(f.store.record_work_state(record).unwrap(), work);
+    assert!(info.capacity_reserved());
+    assert!(info.recovery_blockers().contains(&"missing-outcome".into()));
+    assert!(
+        info.dispatch_hold
+            .unwrap()
+            .reason
+            .contains("without an accepted Outcome")
+    );
+    let resources = info.resources;
+    let diagnostic = resources
+        .iter()
+        .find(|r| r.resource_kind == "missing-outcome")
+        .unwrap();
+    assert_eq!(diagnostic.resource_id, f.launch.attempt_id);
+    assert!(diagnostic.retired_at_millis.is_none());
+    let reopened = f.reopen();
+    assert_eq!(
+        reopened.observe_answer("test", &f.launch).unwrap(),
+        AnswerObservation::MissingOutcome
+    );
+    assert_eq!(
+        reopened
+            .list_agent_assignment_resources("assignment")
+            .unwrap(),
+        resources
+    );
+    assert!(
+        reopened
+            .claim_next_agent_assignment("alpha", "successor")
+            .unwrap()
+            .is_none()
+    );
+    let c = reopened.connection.lock().unwrap();
+    let accepted: bool = c.query_row(
+        "SELECT closed OR outcome_json IS NOT NULL OR result_json IS NOT NULL FROM record_attempts WHERE id = 'attempt'",
+        [], |r| r.get(0),
+    ).unwrap();
+    assert!(!accepted);
+}
+
+#[test]
+fn missing_outcome_retention_survives_closure_and_invalidation_without_overwriting_hold() {
+    use forge_app::durable_execution::completion::{AnswerObservation, Repository as _};
+    let f = Fixture::new();
+    accept_runtime(&f);
+    let record = f
+        .store
+        .agent_assignment_info("assignment")
+        .unwrap()
+        .assignment
+        .record_id;
+    f.store
+        .hold_dispatch(record, "preserve unrelated diagnostic")
+        .unwrap();
+    f.store
+        .close_agent_assignment(
+            "assignment",
+            forge_app::AgentAssignmentClosureReason::Crashed,
+        )
+        .unwrap();
+    // Model an invalidated/closed attempt with no accepted Outcome; closure is
+    // deliberately not sufficient evidence of protocol participation.
+    f.store
+        .connection
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE record_attempts SET closed = 1 WHERE id = 'attempt'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(
+        f.reopen().observe_answer("test", &f.launch).unwrap(),
+        AnswerObservation::MissingOutcome
+    );
+    let info = f.reopen().agent_assignment_info("assignment").unwrap();
+    assert!(info.capacity_reserved());
+    assert_eq!(
+        info.dispatch_hold.as_ref().unwrap().reason,
+        "preserve unrelated diagnostic"
+    );
+    assert!(info.recovery_blockers().contains(&"missing-outcome".into()));
+    assert!(
+        f.reopen()
+            .claim_next_agent_assignment("alpha", "replacement")
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn answer_observation_authorizes_exact_binding_before_reading_outcome_or_writing_diagnostic() {
+    use forge_app::durable_execution::completion::Repository as _;
+    let f = Fixture::new();
+    assert!(f.store.observe_answer("test", &f.launch).is_err());
+    f.store.reserve("test", &f.launch).unwrap();
+    assert!(f.store.observe_answer("test", &f.launch).is_err());
+    f.store.begin_send("test", &f.launch).unwrap();
+    assert!(f.store.observe_answer("test", &f.launch).is_err());
+    f.store
+        .record_result(
+            "test",
+            &f.launch,
+            &Admission::Accepted {
+                admission_id: "admitted".into(),
+            },
+        )
+        .unwrap();
+    assert!(f.store.observe_answer("foreign", &f.launch).is_err());
+    for changed in [
+        Launch {
+            assignment_id: "other".into(),
+            ..f.launch.clone()
+        },
+        Launch {
+            attempt_id: "other".into(),
+            ..f.launch.clone()
+        },
+        Launch {
+            profile_revision: 1,
+            ..f.launch.clone()
+        },
+        Launch {
+            conversation_id: "other".into(),
+            ..f.launch.clone()
+        },
+        Launch {
+            incarnation_id: "other".into(),
+            ..f.launch.clone()
+        },
+    ] {
+        assert!(f.store.observe_answer("test", &changed).is_err());
+    }
+    let info = f.store.agent_assignment_info("assignment").unwrap();
+    assert!(info.dispatch_hold.is_none());
+    assert!(
+        !info
+            .resources
+            .iter()
+            .any(|r| r.resource_kind == "missing-outcome")
+    );
+}
+
+#[test]
+fn rejected_forge_outcome_still_requires_missing_outcome_retention() {
+    use forge_app::durable_execution::completion::{AnswerObservation, Repository as _};
+    let f = Fixture::new();
+    accept_runtime(&f);
+    let record = f
+        .store
+        .agent_assignment_info("assignment")
+        .unwrap()
+        .assignment
+        .record_id;
+    let attempt = task_attempts::binding(&f.store.connection.lock().unwrap(), "assignment")
+        .unwrap()
+        .unwrap();
+    let input = forge_app::outcomes::OutcomeInput {
+        attempt_id: attempt.id,
+        generation: 2, // stale relative to the actual bound generation 1
+        evidence: attempt.evidence,
+        verdict: forge_app::checks::Verdict::Pass,
+        actor: "assignment".into(),
+        message: "Finished successfully".into(),
+        disposition: forge_app::outcomes::OutcomeDisposition::Complete,
+        findings: vec![],
+        verifications: vec![],
+    };
+    assert_eq!(
+        f.store
+            .submit_outcome(record, &input, Some("assignment"), None)
+            .unwrap_err()
+            .code,
+        "stale-generation"
+    );
+    assert_eq!(
+        f.store.observe_answer("test", &f.launch).unwrap(),
+        AnswerObservation::MissingOutcome
+    );
+    assert!(
+        f.store
+            .list_record_checks(record)
+            .unwrap()
+            .iter()
+            .all(|check| check.latest_assessment.is_none())
+    );
+}
+
+#[test]
+fn missing_outcome_blocks_lease_renewal_even_after_hold_clearance() {
+    use forge_app::{
+        authorization_lease::Repository as _, durable_execution::completion::Repository as _,
+    };
+    let f = Fixture::new();
+    accept_runtime(&f);
+    let first = lease(&f);
+    f.store.grant_lease("test", &first, 1_000).unwrap();
+    f.store.observe_answer("test", &f.launch).unwrap();
+    let mut next = first.clone();
+    next.sequence = 2;
+    next.issued_boottime_millis += 10_000;
+    next.expires_boottime_millis += 10_000;
+    assert_eq!(
+        f.reopen()
+            .grant_lease("test", &next, 11_000)
+            .unwrap_err()
+            .code,
+        "assignment-lease-blocked"
+    );
+    let record = f
+        .store
+        .agent_assignment_info("assignment")
+        .unwrap()
+        .assignment
+        .record_id;
+    f.store.resume_dispatch(record).unwrap();
+    assert_eq!(
+        f.reopen()
+            .grant_lease("test", &next, 11_000)
+            .unwrap_err()
+            .code,
+        "assignment-lease-blocked"
+    );
+    assert!(
+        f.store
+            .agent_assignment_info("assignment")
+            .unwrap()
+            .recovery_blockers()
+            .contains(&"missing-outcome".into())
+    );
+}
+
+#[test]
+fn concurrent_answer_observers_retain_one_diagnostic() {
+    use forge_app::durable_execution::completion::{AnswerObservation, Repository as _};
+    let f = Fixture::new();
+    accept_runtime(&f);
+    let barrier = Arc::new(Barrier::new(4));
+    std::thread::scope(|scope| {
+        let handles = (0..4)
+            .map(|_| {
+                let store = f.reopen();
+                let launch = f.launch.clone();
+                let barrier = barrier.clone();
+                scope.spawn(move || {
+                    barrier.wait();
+                    store.observe_answer("test", &launch).unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        for handle in handles {
+            assert_eq!(handle.join().unwrap(), AnswerObservation::MissingOutcome);
+        }
+    });
+    let info = f.reopen().agent_assignment_info("assignment").unwrap();
+    assert_eq!(
+        info.resources
+            .iter()
+            .filter(|r| r.resource_kind == "missing-outcome")
+            .count(),
+        1
+    );
+    assert!(info.dispatch_hold.is_some());
+}
+
+#[test]
+fn rejected_runtime_cannot_report_an_answer() {
+    use forge_app::durable_execution::completion::Repository as _;
+    let f = Fixture::new();
+    f.store.reserve("test", &f.launch).unwrap();
+    f.store.begin_send("test", &f.launch).unwrap();
+    f.store
+        .record_result(
+            "test",
+            &f.launch,
+            &Admission::Rejected {
+                code: "denied".into(),
+            },
+        )
+        .unwrap();
+    assert!(f.store.observe_answer("test", &f.launch).is_err());
+    assert!(
+        f.store
+            .agent_assignment_info("assignment")
+            .unwrap()
+            .dispatch_hold
+            .is_none()
+    );
+}
+
+#[test]
+fn missing_outcome_diagnostic_and_hold_rollback_together() {
+    use forge_app::durable_execution::completion::{AnswerObservation, Repository as _};
+    let f = Fixture::new();
+    accept_runtime(&f);
+    let before = f.store.agent_assignment_info("assignment").unwrap();
+    f.store.connection.lock().unwrap().execute_batch("CREATE TRIGGER fail_missing_outcome_hold BEFORE INSERT ON dispatch_holds BEGIN SELECT RAISE(ABORT, 'injected failure'); END;").unwrap();
+    assert!(f.store.observe_answer("test", &f.launch).is_err());
+    assert_eq!(
+        f.reopen().agent_assignment_info("assignment").unwrap(),
+        before
+    );
+    f.store
+        .connection
+        .lock()
+        .unwrap()
+        .execute_batch("DROP TRIGGER fail_missing_outcome_hold")
+        .unwrap();
+    assert_eq!(
+        f.store.observe_answer("test", &f.launch).unwrap(),
+        AnswerObservation::MissingOutcome
+    );
+}
+
+#[test]
+fn accepted_outcome_observation_is_not_a_new_pass_and_never_erases_prior_diagnostic() {
+    use forge_app::durable_execution::completion::{AnswerObservation, Repository as _};
+    let f = Fixture::new();
+    accept_runtime(&f);
+    // This is a store-boundary fixture, NOT authenticated Outcome acceptance
+    // evidence. Only the existing submit_outcome transaction writes these fields
+    // in production; the full CLI/server tracer is still required by T07.
+    f.store.connection.lock().unwrap().execute(
+        "UPDATE record_attempts SET closed = 1, outcome_json = '{}', result_json = '{}' WHERE id = 'attempt'", [],
+    ).unwrap();
+    let before = f.store.agent_assignment_info("assignment").unwrap();
+    assert_eq!(
+        f.reopen().observe_answer("test", &f.launch).unwrap(),
+        AnswerObservation::OutcomeAccepted
+    );
+    assert_eq!(f.store.agent_assignment_info("assignment").unwrap(), before);
+
+    let missing = Fixture::new();
+    accept_runtime(&missing);
+    missing
+        .store
+        .observe_answer("test", &missing.launch)
+        .unwrap();
+    missing.store.connection.lock().unwrap().execute(
+        "UPDATE record_attempts SET closed = 1, outcome_json = '{}', result_json = '{}' WHERE id = 'attempt'", [],
+    ).unwrap();
+    let retained = missing.store.agent_assignment_info("assignment").unwrap();
+    assert_eq!(
+        missing
+            .reopen()
+            .observe_answer("test", &missing.launch)
+            .unwrap(),
+        AnswerObservation::OutcomeAccepted
+    );
+    assert_eq!(
+        missing.store.agent_assignment_info("assignment").unwrap(),
+        retained
+    );
+}
+
 #[test]
 fn authorization_failure_retains_atomic_scoped_history_after_closure_and_reopen() {
     use forge_app::authorization_lease::session::{Failure, SessionRepository as _};
