@@ -131,7 +131,7 @@ async fn check_bound_outcome_inspection(kind: u8) {
                 grilling_revision: 1,
                 binding_id: "provider".into(),
                 provider_generation: generation,
-            },
+            }.into(),
             &evidence,
             check.id,
             profile.revision,

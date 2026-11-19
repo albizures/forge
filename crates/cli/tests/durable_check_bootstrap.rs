@@ -1,10 +1,9 @@
 //! Real runner bootstrap module -> delivered CLI -> HTTP daemon -> store.
-//! This is NOT durable dispatch: the Check is claimed directly, the old binding
-//! prerequisite remains, and the JS authorization grant is a test-only fixture.
+//! This is NOT durable dispatch: the Check is claimed directly and the JS
+//! authorization grant is a test-only fixture. No Herdr binding is configured.
 use forge_app::{
-    AgentDispatchRepository, DispatchPreflightSelection, DispatchWorkspace,
-    ManagedWorktreeRepository, NewTypedRecord, Project, ProjectRepository, RecordRepository,
-    RecordType, WorkspaceDispatchRepository, WorkspaceRepository,
+    AgentDispatchRepository, ManagedWorktreeRepository, NewTypedRecord, Project, ProjectRepository,
+    RecordRepository, RecordType, WorkspaceDispatchRepository, WorkspaceRepository,
     agent_profiles::ResourceCatalog,
     assignment::BoundIdentity,
     check_templates::{CheckCriterion, TemplateReplacement},
@@ -156,25 +155,9 @@ async fn runner_gate_uses_real_authenticated_check_bootstrap_and_outcome() {
     let profile = store
         .register_agent_profile("test", RecordType::Task, &policy)
         .unwrap();
+    // Check pins, not current Workspace selections, determine Task execution.
     store
-        .select_workspace_profile("test", RecordType::Task, Some(profile.revision))
-        .unwrap();
-    store
-        .select_workspace_profile("test", RecordType::Grilling, Some(1))
-        .unwrap();
-    let generation = store
-        .workspace_dispatch_configuration("test")
-        .unwrap()
-        .provider_generation;
-    // Persisted prerequisite only: no Herdr process/socket/resource is used.
-    store
-        .retain_verified_workspace_binding(
-            "test",
-            Some(&DispatchWorkspace {
-                id: "legacy-prerequisite".into(),
-            }),
-            generation,
-        )
+        .select_workspace_profile("test", RecordType::Task, None)
         .unwrap();
     store
         .replace_check_template(
@@ -221,12 +204,7 @@ async fn runner_gate_uses_real_authenticated_check_bootstrap_and_outcome() {
         .claim_task_check_acceptance(
             task.id,
             "t07-check",
-            &DispatchPreflightSelection {
-                task_revision: profile.revision,
-                grilling_revision: 1,
-                binding_id: "legacy-prerequisite".into(),
-                provider_generation: generation,
-            },
+            &forge_app::CheckDispatchPreflight::PiDurable,
             &evidence,
             check.id,
             profile.revision,
@@ -234,6 +212,10 @@ async fn runner_gate_uses_real_authenticated_check_bootstrap_and_outcome() {
         )
         .unwrap();
     assert!(!existing);
+    assert_eq!(
+        store.assignment_dispatch_workspace("t07-check").unwrap(),
+        None
+    );
     let attempt = store
         .assignment_check_attempt("t07-check")
         .unwrap()
@@ -249,7 +231,7 @@ async fn runner_gate_uses_real_authenticated_check_bootstrap_and_outcome() {
         attempt_number: assignment.attempt_number,
         check_attempt: Some(attempt.clone()),
         execution_directory: checkout.path.clone(),
-        provider_workspace: Some("legacy-prerequisite".into()),
+        provider_workspace: None,
     };
     let secrets = root.join("assignment-capabilities");
     std::fs::DirBuilder::new()

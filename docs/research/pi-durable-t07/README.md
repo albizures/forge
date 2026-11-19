@@ -2,18 +2,93 @@
 
 ## Status: partial; do not advance to T08
 
-Three increments provide the runner-side bootstrap gate, trusted app/store
-missing-Outcome observation boundary and a real CLI/server bootstrap/Outcome
-component tracer described below. They **do not complete T07**: there is no enabled
-durable dispatch adapter, supervised fake-model execution tracer or runner caller
-of the observation boundary. Production durable launch and automatic
+Four increments provide the runner-side bootstrap gate, trusted app/store
+missing-Outcome observation boundary, real CLI/server bootstrap/Outcome component
+tracer and backend-specific Check admission described below. They **do not complete
+T07**: there is no enabled production durable dispatch adapter, supervised fake-model
+execution tracer or runner caller of the observation boundary. Production durable launch and automatic
 recovery remain disabled. No live Forge state, profile selection, capability,
 worktree or real-provider credential was changed.
 
 The checkout already contained uncommitted T06 work; that work was preserved.
 The verification below covers the combined checkout, not a new isolated commit.
 
-## Real CLI/server bootstrap and Outcome component tracer
+## Backend-specific Check admission increment (latest)
+
+The app's Check dispatch now distinguishes `CheckDispatchPreflight::Herdr` from
+`PiDurable`, based on the immutable pinned profile, not current Workspace Task
+selection. The store verifies the token against that same pin inside the immediate
+claim transaction. Herdr continues to require its complete Workspace selection,
+exact binding and current endpoint generation. A caller cannot bypass those checks
+by sending the durable token for a Herdr pin. Unknown/mismatched providers reject.
+
+Durable Check admission no longer requires Task/Grilling Workspace selections or a
+Herdr binding. The actual pinned adapter must pass preflight/probe; the pre-worktree
+path also checks the backend before filesystem preparation. Production server
+adapter selection remains disabled for durable execution. No new execution grant,
+capability issuance, supervisor, automatic recovery or cleanup behavior was added.
+A preflight token is an internal consistency input, not authorization to run.
+
+Added four tests in `crates/store/tests/durable_check_preflight.rs`:
+
+- Application dispatch with an explicitly injected durable-only adapter, a prepared
+  fixture checkout and no Workspace profile selections/binding: exactly one
+  provision call at the bound checkout, repeat dispatch returns the same Assignment,
+  one Check attempt, and no Assessment. Herdr verification/recovery/retirement calls
+  panic if attempted. This is a protocol fake, **not runner/model execution**.
+- Cross-backend preflight tokens reject without an Assignment or bound attempt.
+- Both application and store preserve Manual, dependency and Open Spec parent gates
+  for durable dispatch, with zero provisioning calls.
+- Herdr application/store admission still rejects absent Workspace configuration.
+
+The existing real runner-module → CLI → HTTP/store bootstrap/Outcome component
+tracer now runs without any Herdr binding or Workspace profile selections; its
+complete bootstrap identity explicitly contains `provider_workspace: None`. The
+Check is still claimed directly and the JS lease is still a fixture. This renews
+bootstrap/Outcome component evidence, not the missing supervised execution tracer.
+Existing Assignment insertion may still snapshot an already configured Herdr
+binding; this increment does not rewrite historical bindings or change their schema.
+The durable adapter must use its own retained runtime ownership, never that binding.
+Workspace-wide status remains the existing mixed/Herdr readiness surface; it is not
+proof that durable launch is enabled.
+
+Verification from repository root:
+
+```sh
+cargo test -p forge-store --test durable_check_preflight
+cargo test -p forge-cli --test durable_check_bootstrap
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+git diff --check
+(cd runner && npm run check && npm test)
+```
+
+Final Rust gates pass: **645 tests passed, 0 failed, 1 pre-existing opt-in probe
+ignored**. Runner typecheck passes. The first Node suite had 38 passes and one
+20-second timeout in unchanged `supervisor death cannot free ownership while its
+worker survives`; the complete rerun passed **39/39**. This observed intermittent
+process-test failure is retained, not claimed resolved. Initial implementation runs
+also caught an unavailable fixture API, an outdated bootstrap binding expectation,
+Clippy findings and a Herdr readiness error-order regression. These were corrected;
+the full workspace suite was rerun successfully without weakening the regression.
+
+Compatibility: an internal Rust repository method now takes a typed Check token;
+all in-workspace callers were updated. No storage/schema, public CLI/RPC, runner
+wire, dependency or runner-component digest changed. No live Forge state changed.
+
+Implementation self-review: T07's “Durable readiness must not require a Herdr
+Workspace binding” now has application/store and real bootstrap component evidence.
+“From Forge dispatch through the durable runner” and “deterministic local tracer
+with a fake model” remain partial/missing: the dispatch fake and CLI component are
+separate, not composed with runtime admission, real supervision, model tools or
+answer delivery. No scope creep identified. Standards self-review found no
+introduced violation; atomic pin/token validation and existing safety gates remain.
+This is not independent T18 review or release verification.
+
+**T07 remains in progress; T08 remains blocked.**
+
+## Real CLI/server bootstrap and Outcome component tracer (previous)
 
 Added `crates/cli/tests/durable_check_bootstrap.rs` and the test-only driver
 `runner/test/check-bootstrap-tracer.mjs`. The Rust fixture registers an actual
@@ -182,12 +257,11 @@ protocol-fake limitation is explicit. This is not independent T18 review.
 
 ## Next work within T07
 
-1. Integrate an explicitly test-enabled durable adapter with app Check dispatch.
-   In particular, inspect `store/src/workspace_dispatch.rs::verify_preflight_selection`:
-   Check acceptance currently joins the Herdr Workspace binding and provider
-   generation. Durable readiness must not inherit that prerequisite, while
-   retained Herdr/Grilling guards must remain intact. The general T02 provider
-   seam alone does not establish backend-neutral Check admission.
+1. Compose an explicitly test-enabled real durable adapter with app Check dispatch.
+   Backend-specific app/store Check admission is now implemented and tested with a
+   protocol fake, without Herdr binding requirements. Wire it to actual retained
+   runtime admission and supervised execution; do not mistake the injected adapter
+   test for that composition. Preserve retained Herdr/Grilling guards.
 2. Bind selected Check/profile, actual Managed Worktree, retained runtime identity
    and T06 prepared configuration. Preflight all mutable launch inputs before new
    capability issuance; recheck at the effect boundary. Reuse protected capability

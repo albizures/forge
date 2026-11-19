@@ -273,7 +273,7 @@ pub fn run(
                 .claim_task_check_acceptance(
                     task,
                     "duplicate-salvage",
-                    &selection,
+                    &selection.into(),
                     &evidence,
                     recovery.check_id,
                     replacement.profile.revision,

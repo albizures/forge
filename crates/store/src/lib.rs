@@ -2398,7 +2398,7 @@ impl AgentDispatchRepository for SqliteProjectRepository {
         &self,
         record: u64,
         assignment: &str,
-        selection: &forge_app::DispatchPreflightSelection,
+        selection: &forge_app::CheckDispatchPreflight,
         evidence: &forge_app::outcomes::Evidence,
         check: u64,
         profile_revision: u32,

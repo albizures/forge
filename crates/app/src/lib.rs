@@ -2054,6 +2054,22 @@ pub struct DispatchPreflightSelection {
     pub binding_id: String,
 }
 
+/// Provider prerequisites observed for the pinned Check profile, not the mutable
+/// Workspace Task selection. This is a consistency token, not launch authority.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CheckDispatchPreflight {
+    Herdr(DispatchPreflightSelection),
+    /// Durable profile/configuration validation is performed by the adapter. No
+    /// Herdr Workspace selection or endpoint generation authorizes this backend.
+    PiDurable,
+}
+
+impl From<DispatchPreflightSelection> for CheckDispatchPreflight {
+    fn from(selection: DispatchPreflightSelection) -> Self {
+        Self::Herdr(selection)
+    }
+}
+
 /// Durable persistence boundary for provider-neutral dispatch foundations.
 #[allow(clippy::missing_errors_doc)]
 pub trait AgentDispatchRepository: RecordRepository + WorkspaceDispatchRepository {
@@ -2136,7 +2152,7 @@ pub trait AgentDispatchRepository: RecordRepository + WorkspaceDispatchRepositor
         &self,
         _record: u64,
         _assignment: &str,
-        _selection: &DispatchPreflightSelection,
+        _selection: &CheckDispatchPreflight,
         _evidence: &outcomes::Evidence,
         _check: u64,
         _profile_revision: u32,
@@ -2828,8 +2844,6 @@ impl Application {
                 dispatch.validate_task_check_preparation(record_id)?;
                 // No Git side effects until provider configuration and the actual Check pin
                 // are usable. The subsequent transactional claim rechecks mutable gates.
-                self.workspace_dispatch_readiness(&record.workspace_id)?
-                    .require_dispatchable()?;
                 let check = self
                     .list_record_checks(record_id)?
                     .into_iter()
@@ -2847,17 +2861,7 @@ impl Application {
                     })
                     .and_then(|revision| dispatch.agent_profile(RecordType::Task, revision))
                     .map_err(|e| RegistrationError::new("invalid-check-profile", e.message))?;
-                if profile.launch_policy.is_none()
-                    || self
-                        .adapter_factory()?
-                        .validate_preflight(&profile)
-                        .is_err()
-                {
-                    return Err(RegistrationError::new(
-                        "invalid-check-profile",
-                        "restore the next Check's pinned profile prerequisites",
-                    ));
-                }
+                self.preflight_check_worktree_preparation(&record.workspace_id, &profile)?;
                 self.prepare_dispatch_worktree(record_id)?;
             }
             return self.execute_task_check_acceptance(record_id);

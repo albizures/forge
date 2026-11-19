@@ -34,7 +34,7 @@ fn open_spec_blocks_every_claim_preparation_and_manual_start_without_mutation() 
     assert_eq!(store.validate_task_check_preparation(dispatched).unwrap_err().code, "spec-execution-blocked");
     assert_eq!(store.claim_record_agent_assignment(dispatched, "explicit").unwrap_err().code, "spec-execution-blocked");
     assert!(store.claim_next_agent_assignment("alpha", "auto").unwrap().is_none());
-    assert_eq!(store.claim_task_check_acceptance(dispatched, "check", &selection(), &evidence(&"a".repeat(40)), checks[0].id, 1, None).unwrap_err().code, "spec-execution-blocked");
+    assert_eq!(store.claim_task_check_acceptance(dispatched, "check", &selection().into(), &evidence(&"a".repeat(40)), checks[0].id, 1, None).unwrap_err().code, "spec-execution-blocked");
     assert_eq!(store.create_agent_assignment(&NewAgentAssignment { id: "direct".into(), record_id: dispatched,
         project_slug: "alpha".into(), profile_revision: 1 }).unwrap_err().code, "spec-execution-blocked");
     assert!(store.list_agent_assignments(dispatched).unwrap().is_empty());
