@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { createInterface } from 'node:readline';
-import { mkdtemp, mkdir, rm, readFile, writeFile, stat, symlink, chmod } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, readFile, writeFile, stat, symlink, chmod, readlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -71,7 +71,7 @@ function start(t, f) {
     lines.close();
   });
   return {
-    child, exited, stderr: () => stderr,
+    child, exited, stderr: () => stderr, identity: () => ownedIdentity,
     diagnostic(match) {
       if (match.test(stderr)) return Promise.resolve();
       return new Promise(resolve => diagnostics.push({ match, resolve }));
@@ -87,6 +87,28 @@ function start(t, f) {
 const owned = p => p.next(x => x.event === 'owned');
 const response = p => p.next(x => x.admission || x.error);
 const settled = p => p.next(x => x.event === 'settled');
+async function authorizationGrant(p, launch, lifetime = 30000) {
+  const evidence = p.identity();
+  const now = Math.floor(Number((await readFile('/proc/uptime', 'utf8')).split(' ')[0]) * 1000);
+  const lease = {
+    launch, generation: 1,
+    owner: {
+      boot_id: evidence.owner.boot_id, time_namespace: await readlink('/proc/self/ns/time'),
+      host_pid: evidence.owner.host_pid, host_start: evidence.owner.host_start,
+      worker_pid: evidence.worker_pid, worker_start: evidence.worker_start,
+      lock_device: evidence.owner.lock_device, lock_inode: evidence.owner.lock_inode,
+    },
+    daemon_epoch: 'controlled-test-daemon', sequence: 1,
+    issued_boottime_millis: now - (30000 - lifetime), expires_boottime_millis: now + lifetime,
+  };
+  return lease;
+}
+async function authorize(p, launch, lifetime = 30000) {
+  const lease = await authorizationGrant(p, launch, lifetime);
+  p.send({ host_control: 1, lease });
+  assert.equal((await p.next(x => x.event === 'authorized')).sequence, 1);
+  return lease;
+}
 async function runInspect(f) {
   const child = spawn(process.execPath, [inspect, f.directory, f.worktree], { env: {}, stdio: ['ignore', 'pipe', 'pipe'] });
   let out = '', err = '';
@@ -110,6 +132,127 @@ test('shared Rust/TypeScript v1 fixture and strict compatibility checks', async 
   assert.throws(() => validateRequest(extra), { code: 'runner-request-invalid' });
 });
 
+test('new execution requires a matching lease before any writable store open', async t => {
+  const f = await fixture(t), p = start(t, f);
+  await owned(p);
+  const id = launch();
+  p.send(request(id));
+  assert.equal((await response(p)).error.code, 'assignment-lease-denied');
+  await assert.rejects(readFile(join(f.directory, 'runtime.sqlite')), { code: 'ENOENT' });
+  await authorize(p, id);
+  p.send(request({ ...id, attempt_id: 'not-authorized' }));
+  assert.equal((await response(p)).error.code, 'assignment-lease-denied');
+  await assert.rejects(readFile(join(f.directory, 'runtime.sqlite')), { code: 'ENOENT' });
+  p.send(request(id));
+  assert.equal((await response(p)).admission.state, 'accepted');
+  await settled(p);
+});
+
+test('independent watchdog expires with stopped JavaScript, escalates, and preserves read-only restart', async t => {
+  const f = await fixture(t), p = start(t, f);
+  const evidence = (await owned(p)).identity;
+  const id = launch();
+  await authorize(p, id, 1000);
+  p.send(request(id)); const accepted = await response(p); await settled(p);
+  const before = await runInspect(f);
+  process.kill(evidence.worker_pid, 'SIGSTOP');
+  // Fill the worker pipe: blocked forwarding must not hold the watchdog mutex.
+  p.send({ padding: 'x'.repeat(131072) });
+  await p.diagnostic(/runner-lease-expired/);
+  const marker = await readFile(join(f.directory, 'watchdog.json'));
+  assert.equal(JSON.parse(marker).cleanup, 'unverified');
+  assert.equal((await stat(join(f.directory, 'watchdog.json'))).mode & 0o777, 0o600);
+  await p.diagnostic(/runner-watchdog-kill-sent/);
+  for (const stage of ['term-sent', 'kill-sent']) {
+    const path = join(f.directory, `watchdog-${evidence.owner.host_pid}-${evidence.owner.host_start}-${stage}.json`);
+    const retained = JSON.parse(await readFile(path, 'utf8'));
+    assert.equal(retained.code, stage);
+    assert.equal(retained.cleanup, 'unverified');
+    assert.equal((await stat(path)).mode & 0o777, 0o600);
+  }
+  await p.diagnostic(/runner-worker-exited/);
+  const contender = start(t, f);
+  assert.equal((await contender.exited)[0], 1);
+  assert.match(contender.stderr(), /runner-owner-busy/);
+  assert.deepEqual(await runInspect(f), before);
+  p.child.kill('SIGKILL'); await p.exited;
+  const restarted = start(t, f); await owned(restarted);
+  restarted.send(request(id));
+  assert.deepEqual((await response(restarted)).admission, accepted.admission);
+  restarted.send({ host_control: 1, lease: await authorizationGrant(restarted, id) });
+  await restarted.diagnostic(/runner-authorization-denied/);
+  assert.deepEqual(await readFile(join(f.directory, 'watchdog.json')), marker);
+  assert.deepEqual(await runInspect(f), before);
+});
+
+test('owner uncertainty refuses signals and retains diagnostics rather than inferring exit', async t => {
+  const f = await fixture(t), p = start(t, f);
+  const evidence = (await owned(p)).identity;
+  await authorize(p, launch());
+  await writeFile(join(f.directory, 'owner.json'), JSON.stringify({ ...evidence, worker_start: 'foreign' }));
+  await p.diagnostic(/runner-owner-uncertain/);
+  await p.diagnostic(/runner-watchdog-kill-unverified/);
+  const current = await readFile(`/proc/${evidence.worker_pid}/stat`, 'utf8');
+  assert.equal(current.slice(current.lastIndexOf(')') + 2).split(' ')[19], evidence.worker_start);
+  assert.equal(JSON.parse(await readFile(join(f.directory, 'watchdog.json'), 'utf8')).cleanup, 'unverified');
+  const contender = start(t, f);
+  assert.equal((await contender.exited)[0], 1);
+  assert.match(contender.stderr(), /runner-owner-busy/);
+});
+
+test('trusted pipe renewal and exact delivery retries preserve one execution', async t => {
+  const f = await fixture(t), p = start(t, f);
+  await owned(p);
+  const id = launch();
+  const first = await authorize(p, id, 1000);
+  const renewal = await authorizationGrant(p, id);
+  renewal.sequence = 2;
+  p.send({ host_control: 1, lease: renewal });
+  assert.equal((await p.next(x => x.event === 'authorized')).sequence, 2);
+  // Retry while the host polling loop competes for the policy lock.
+  for (let i = 0; i < 20; i++) {
+    p.send({ host_control: 1, lease: renewal });
+    assert.equal((await p.next(x => x.event === 'authorized')).sequence, 2);
+  }
+  // Synchronize on the *old* absolute boottime deadline, not on a wall clock.
+  while (Math.floor(Number((await readFile('/proc/uptime', 'utf8')).split(' ')[0]) * 1000) < first.expires_boottime_millis + 100) {
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  const next = await authorizationGrant(p, id); next.sequence = 3;
+  p.send({ host_control: 1, lease: next });
+  assert.equal((await p.next(x => x.event === 'authorized')).sequence, 3);
+  await assert.rejects(readFile(join(f.directory, 'watchdog.json')), { code: 'ENOENT' });
+  p.send(request(id));
+  assert.equal((await response(p)).admission.state, 'accepted');
+  await settled(p);
+});
+
+test('foreign/malformed controls and retained marker entries cannot grant authority or leak payloads', async t => {
+  for (const fault of ['owner', 'unknown-field', 'version', 'retained-malformed', 'retained-symlink']) {
+    const f = await fixture(t);
+    const target = join(f.base, 'must-not-be-created');
+    if (fault === 'retained-malformed') await writeFile(join(f.directory, 'watchdog.json'), 'malformed retained evidence', { mode: 0o600 });
+    if (fault === 'retained-symlink') await symlink(target, join(f.directory, 'watchdog.json'));
+    const p = start(t, f);
+    await owned(p);
+    const lease = await authorizationGrant(p, launch());
+    if (fault === 'unknown-field') lease.private = 'sensitive-test-sentinel';
+    if (fault === 'owner') lease.owner.worker_start = 'foreign';
+    p.send({ host_control: fault === 'version' ? 2 : 1, lease });
+    await p.diagnostic(/runner-authorization-denied/);
+    await assert.rejects(readFile(join(f.directory, 'runtime.sqlite')), { code: 'ENOENT' });
+    assert.doesNotMatch(p.stderr(), /sensitive-test-sentinel|foreign/);
+    if (fault === 'retained-symlink') {
+      assert.equal(await readlink(join(f.directory, 'watchdog.json')), target);
+      await assert.rejects(readFile(target), { code: 'ENOENT' });
+    } else {
+      const marker = await readFile(join(f.directory, 'watchdog.json'), 'utf8');
+      assert.doesNotMatch(marker, /sensitive-test-sentinel|foreign/);
+      if (fault === 'retained-malformed') assert.equal(marker, 'malformed retained evidence');
+    }
+  }
+});
+
 test('concurrent starts: one supervisor, one conversation, idempotent committed submission; read-only observation beside writer', async t => {
   const f = await fixture(t);
   const a = start(t, f), b = start(t, f);
@@ -122,6 +265,7 @@ test('concurrent starts: one supervisor, one conversation, idempotent committed 
   assert.equal((await loser.exited)[0], 1);
   assert.match(loser.stderr(), /runner-owner-busy/);
   const id = launch();
+  await authorize(winner.p, id);
   winner.p.send(request(id));
   const accepted = await response(winner.p);
   assert.equal(accepted.admission.state, 'accepted');
@@ -151,6 +295,7 @@ test('unknown protocol, wrong identities and conflicting IDs reject before openi
   p.send(wrong);
   assert.equal((await response(p)).error.code, 'runner-protocol-incompatible');
   await assert.rejects(readFile(join(f.directory, 'runtime.sqlite')), { code: 'ENOENT' });
+  await authorize(p, id);
   p.send(request(id)); await response(p); await settled(p);
   const conflicting = { ...id, attempt_id: 'different' };
   p.send(request(conflicting));
@@ -165,7 +310,7 @@ test('unknown protocol, wrong identities and conflicting IDs reject before openi
 test('SIGKILL retains supervisor ownership; restart only observes same accepted identity/content', async t => {
   const f = await fixture(t), p = start(t, f);
   const evidence = (await owned(p)).identity;
-  const id = launch(); p.send(request(id));
+  const id = launch(); await authorize(p, id); p.send(request(id));
   const accepted = await response(p); await settled(p);
   const before = await runInspect(f);
   process.kill(evidence.worker_pid, 'SIGKILL');
@@ -202,8 +347,10 @@ test('one Assignment crashing does not interrupt the second synthetic model run'
   const a = start(t, f), b = start(t, g);
   const [first, second] = await Promise.all([owned(a), owned(b)]);
   assert.notEqual(first.identity.worker_pid, second.identity.worker_pid);
+  await authorize(a, launch('a'));
   a.send(request(launch('a'))); await response(a);
   process.kill(first.identity.worker_pid, 'SIGKILL');
+  await authorize(b, launch('b'));
   b.send(request(launch('b'))); assert.equal((await response(b)).admission.state, 'accepted');
   await settled(b);
   const view = await runInspect(g);
@@ -252,7 +399,9 @@ test('read adapter rejects missing and incompatible schemas without file creatio
 test('supervisor death cannot free ownership while its worker survives', async t => {
   const f = await fixture(t), p = start(t, f);
   await owned(p);
-  const id = launch(); p.send(request(id)); await response(p); await settled(p);
+  const id = launch(); await authorize(p, id); p.send(request(id)); await response(p); await settled(p);
+  // Hold the actual worker alive independently of EOF/normal JS shutdown.
+  process.kill(p.identity().worker_pid, 'SIGSTOP');
   p.child.kill('SIGKILL'); await p.exited;
   // The worker still owns an inherited descriptor for the same flock; no
   // writable contender is permitted even though the supervisor has died.

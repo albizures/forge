@@ -2,6 +2,8 @@
 use crate::{RegistrationError, durable_execution::Launch};
 use serde::{Deserialize, Serialize};
 
+pub mod session;
+
 pub const LEASE_MILLIS: u64 = 30_000;
 pub const RENEW_AFTER_MILLIS: u64 = 10_000;
 pub const TERM_GRACE_MILLIS: u64 = 5_000;
@@ -87,6 +89,76 @@ impl Lease {
             }
             _ => Err(denied()),
         }
+    }
+}
+
+/// Consumer policy for an independently supervised process. This validates
+/// delivered authority; it cannot issue it. The transport must be a trusted
+/// daemon-owned channel, never an agent-supplied or retained grant file.
+pub struct LeaseWatchdog {
+    owner: Owner,
+    previous: Option<Lease>,
+    last_observation: Option<u64>,
+    fenced: bool,
+}
+
+impl LeaseWatchdog {
+    #[must_use]
+    pub fn new(owner: Owner) -> Self {
+        Self {
+            owner,
+            previous: None,
+            last_observation: None,
+            fenced: false,
+        }
+    }
+
+    /// Retain the last grant for diagnostics, never as restart permission.
+    #[must_use]
+    pub fn last_lease(&self) -> Option<&Lease> {
+        self.previous.as_ref()
+    }
+
+    /// Clock/transport uncertainty can withdraw permission but never restore it.
+    pub fn fence(&mut self) {
+        self.fenced = true;
+    }
+
+    /// # Errors
+    /// Terminally rejects backward clocks or exact/late expiry. An unarmed
+    /// watchdog permits observation only; absence of a grant is not admission.
+    pub fn check(&mut self, now: u64) -> Result<(), RegistrationError> {
+        if self.fenced
+            || self.last_observation.is_some_and(|last| now < last)
+            || self
+                .previous
+                .as_ref()
+                .is_some_and(|old| now >= old.expires_boottime_millis)
+        {
+            self.fence();
+            return Err(denied());
+        }
+        self.last_observation = Some(now);
+        Ok(())
+    }
+
+    /// # Errors
+    /// Accepts sequential, owner-bound grants or an exact live delivery retry.
+    /// Any mismatch, delayed grant or renewal gap terminally fences the owner.
+    pub fn accept(&mut self, lease: Lease, now: u64) -> Result<(), RegistrationError> {
+        self.check(now)?;
+        self.fenced = true;
+        if lease.owner != self.owner {
+            return Err(denied());
+        }
+        if self.previous.as_ref() == Some(&lease) {
+            self.fenced = false;
+            return Ok(());
+        }
+        lease.validate(self.previous.as_ref(), now)?;
+        self.previous = Some(lease);
+        self.fenced = false;
+        Ok(())
     }
 }
 
@@ -182,9 +254,26 @@ impl Issuer {
         if self.fenced {
             return Err(denied());
         }
+        let observation = match host.observe() {
+            Ok(observation) => observation,
+            Err(error) => {
+                self.fenced = true;
+                return Err(error);
+            }
+        };
+        self.issue_observed(repository, observation)
+    }
+
+    fn issue_observed(
+        &mut self,
+        repository: &dyn Repository,
+        observation: Observation,
+    ) -> Result<Lease, RegistrationError> {
+        if self.fenced {
+            return Err(denied());
+        }
         // Default to terminal failure, including a commit whose reply is lost.
         self.fenced = true;
-        let observation = host.observe()?;
         let now = observation.boottime_millis;
         if self.last_observation.is_some_and(|last| now < last) {
             return Err(denied());
@@ -214,6 +303,17 @@ impl Issuer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runner_consumer_fixture_matches_application_grant_contract() {
+        let value: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../runner/test/authorization-lease.json"
+        ))
+        .unwrap();
+        let lease: Lease = serde_json::from_value(value.clone()).unwrap();
+        lease.validate(None, 1_000).unwrap();
+        assert_eq!(serde_json::to_value(lease).unwrap(), value);
+    }
 
     fn grant() -> Lease {
         Lease {
@@ -245,6 +345,54 @@ mod tests {
             sequence: 1,
             issued_boottime_millis: 1_000,
             expires_boottime_millis: 31_000,
+        }
+    }
+
+    #[test]
+    fn watchdog_renewal_retry_expiry_and_restart_are_terminally_fenced() {
+        let first = grant();
+        let mut watchdog = LeaseWatchdog::new(first.owner.clone());
+        watchdog.check(1_000).unwrap();
+        assert!(watchdog.last_lease().is_none());
+        watchdog.accept(first.clone(), 1_000).unwrap();
+        watchdog.accept(first.clone(), 2_000).unwrap();
+        let mut renewal = first.clone();
+        renewal.sequence = 2;
+        renewal.issued_boottime_millis = 11_000;
+        renewal.expires_boottime_millis = 41_000;
+        watchdog.accept(renewal.clone(), 11_000).unwrap();
+        watchdog.check(40_999).unwrap();
+        assert!(watchdog.check(41_000).is_err());
+        assert!(watchdog.accept(renewal.clone(), 40_999).is_err());
+        assert_eq!(watchdog.last_lease(), Some(&renewal));
+        let mut restarted = LeaseWatchdog::new(first.owner.clone());
+        assert!(restarted.accept(renewal, 12_000).is_err());
+        assert!(restarted.accept(first.clone(), 12_000).is_err());
+        let mut late = LeaseWatchdog::new(first.owner.clone());
+        assert!(late.accept(first, 31_000).is_err());
+    }
+
+    #[test]
+    fn watchdog_owner_epoch_clock_and_explicit_uncertainty_cannot_restore_authority() {
+        for fault in 0..5 {
+            let first = grant();
+            let mut watchdog = LeaseWatchdog::new(first.owner.clone());
+            watchdog.accept(first.clone(), 1_000).unwrap();
+            let mut renewal = first.clone();
+            renewal.sequence = 2;
+            renewal.issued_boottime_millis = 11_000;
+            renewal.expires_boottime_millis = 41_000;
+            match fault {
+                0 => renewal.owner.worker_start = "foreign".into(),
+                1 => renewal.daemon_epoch = "new-lifetime".into(),
+                2 => renewal.sequence = 3,
+                3 => assert!(watchdog.check(999).is_err()),
+                4 => watchdog.fence(),
+                _ => unreachable!(),
+            }
+            assert!(watchdog.accept(renewal, 11_000).is_err());
+            assert!(watchdog.accept(first.clone(), 12_000).is_err());
+            assert_eq!(watchdog.last_lease(), Some(&first));
         }
     }
 

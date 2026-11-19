@@ -250,6 +250,35 @@ impl forge_app::authorization_lease::Repository for SqliteProjectRepository {
     }
 }
 
+impl forge_app::authorization_lease::session::SessionRepository for SqliteProjectRepository {
+    fn retain_failure(
+        &self,
+        workspace: &str,
+        launch: &Launch,
+        failure: forge_app::authorization_lease::session::Failure,
+    ) -> Result<(), RegistrationError> {
+        let mut c = self.connection.lock().map_err(|_| error("storage"))?;
+        let tx = c
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        // Diagnostics must survive revocation/freshness changes, but cannot be
+        // attached to a foreign Assignment or a different retained runtime.
+        scope(&tx, workspace, &launch.assignment_id)?;
+        let runtime =
+            load(&tx, &launch.assignment_id)?.ok_or_else(|| error("durable-intent-missing"))?;
+        exact(&runtime, launch)?;
+        tx.execute(
+            "INSERT OR IGNORE INTO agent_assignment_resources(assignment_id, resource_kind, resource_id, created_at_millis) VALUES (?1, 'authorization-uncertain', ?2, ?3)",
+            params![launch.assignment_id, failure.code(), now_millis()?],
+        ).map_err(storage_error)?;
+        tx.execute(
+            "INSERT OR IGNORE INTO dispatch_holds(record_id, reason) SELECT record_id, 'Durable execution authorization is uncertain; inspect retained Assignment, grant and runtime evidence before retirement or replacement.' FROM agent_assignments WHERE id = ?1",
+            [&launch.assignment_id],
+        ).map_err(storage_error)?;
+        tx.commit().map_err(storage_error)
+    }
+}
+
 #[cfg(test)]
 #[path = "durable_execution_tests.rs"]
 mod tests;

@@ -61,7 +61,7 @@ daemon lifetime epoch and sequence. Only a trusted internal daemon adapter may
 supply verified ownership and clock observations; no agent/operator wire method
 currently exposes this repository operation.
 
-Grants last 30 seconds; the intended renewal cadence is 10 seconds. Deadlines use
+Grants last 30 seconds; the daemon-side renewal service uses a 10-second cadence. Deadlines use
 absolute host CLOCK_BOOTTIME milliseconds, **not Unix epoch time**. The application
 policy rejects changed bindings/owners/epochs, sequence gaps, future issuance,
 non-30-second bounds and renewals at or after the previous deadline. Exact retries
@@ -77,11 +77,31 @@ does not prove that execution stopped. No secrets belong in grant history.
 
 Revision 21 rejects older stores before ordinary initialization writes. Explicit
 offline 20 → 21 conversion adds only an empty grant table and its history guards;
-it creates no historical permissions. **This is the T05 application/store
-foundation, not runner lease enforcement.** Verified host ownership, a trusted
-clock/daemon service, runner model/tool gates, independent watchdog cancellation
-and outage/restart integration evidence remain pending. The T04 synthetic runner
-is unchanged; production durable dispatch remains disabled.
+it creates no historical permissions. The T05 controlled runtime now includes
+verified host ownership, a commit-before-delivery renewal service, consumer guards
+and an independent watchdog. Production Check-bound dispatch remains disabled;
+profile/authentication mapping and the dispatch/bootstrap tracer are T06/T07.
+
+Authorization uncertainty uses the existing generic resource representation, not
+new DDL or invented grant history. The trusted `SessionRepository::retain_failure`
+operation checks owning Workspace and exact retained Launch, then atomically adds
+an `authorization-uncertain` resource (fixed redacted cause code as resource ID)
+and an initial Dispatch Hold. It works after closure/freshness invalidation,
+preserves an existing hold, and exact retries preserve resource timestamps. It
+never retires resources, clears history, closes an attempt or releases capacity.
+Those unresolved resources also prevent future grant issuance. A failed retention
+transaction rolls back both effects; the prior durable-runtime reservation still
+reserves capacity when persistence is unavailable. This additive use of existing
+resource/hold contracts does not change schema 21.
+
+The server's preparation/binding path derives protected storage at
+`<workspace-root>/.forge/assignment-runtimes/<sha256(store_id)>` from the exact
+retained runtime and immutable registered root, never an operator path. Missing
+or unsafe binding paths cannot silently create/adopt a runtime. Runtime watchdog
+files supplement these Forge diagnostics; neither file deletion nor process exit
+resolves persisted resources. See [T05 evidence](../../docs/research/pi-durable-t05/README.md)
+for fake-clock and real SQLite/daemon-service/host/Node outage tests and remaining
+production/release gates.
 
 ## Durable runtime admission (revision 20)
 

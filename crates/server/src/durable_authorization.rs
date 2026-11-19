@@ -1,14 +1,20 @@
-//! Trusted composition seam for future durable dispatch. No operator RPC,
-//! Assignment capability, renewal transport or launch path exposes this service.
+//! Trusted durable grant delivery/renewal service. No operator RPC, Assignment
+//! capability or production launch path exposes this service yet.
 //! One `DaemonAuthority` belongs to one daemon lifetime, never retained on disk.
+mod runtime_directory;
 use forge_app::{
     RegistrationError,
-    authorization_lease::{Issuer, Lease},
+    authorization_lease::session::{Failure, Session, Tick},
     durable_execution::Launch,
 };
-use forge_runner_host::SpawnedOwner;
+use forge_runner_host::{SpawnedOwner, control::ControlPipe, supervision::boottime_millis};
 use forge_store::SqliteProjectRepository;
-use std::{path::Path, process::Child};
+use std::{
+    path::PathBuf,
+    process::Child,
+    sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError},
+    time::Duration,
+};
 
 /// A fresh cryptographic epoch fences previous daemon lifetimes. This is not a
 /// credential, heartbeat or proof that old supervised processes have exited.
@@ -40,46 +46,114 @@ impl DaemonAuthority {
         })
     }
 
-    /// Bind immutable Forge state to a directly spawned, ready supervisor. The
-    /// directory must come from Forge's canonical runtime mapping, not an RPC
+    /// Prepare protected runtime storage from the retained immutable store ID
+    /// and registered Workspace root. This cannot issue execution permission.
+    /// # Errors
+    /// Rejects missing/mismatched reservations and unsafe filesystem boundaries.
+    pub fn prepare_directory(
+        &self,
+        repository: &SqliteProjectRepository,
+        workspace: &str,
+        launch: &Launch,
+    ) -> Result<PathBuf, RegistrationError> {
+        runtime_directory::mapped(repository, workspace, launch, true)
+    }
+
+    /// Bind immutable Forge state to a directly spawned, ready supervisor. Its
+    /// directory is derived from Forge's canonical runtime mapping, never an RPC
     /// path. A retained owner file or lease alone cannot construct this service.
     /// # Errors
     /// Rejects malformed bindings, unsafe storage or unverified live ownership.
     pub fn bind<'a>(
         &self,
+        repository: &SqliteProjectRepository,
         workspace: String,
         launch: Launch,
         generation: u64,
         supervisor: &'a mut Child,
-        directory: &Path,
     ) -> Result<Authorization<'a>, RegistrationError> {
-        let issuer = Issuer::new(workspace, launch, generation, self.epoch.clone())?;
-        let host = SpawnedOwner::capture(supervisor, directory)?;
-        Ok(Authorization { issuer, host })
+        let directory = runtime_directory::mapped(repository, &workspace, &launch, false)?;
+        let mut session = Session::new(workspace, launch, generation, self.epoch.clone())?;
+        let pipe = match ControlPipe::take(supervisor) {
+            Ok(pipe) => pipe,
+            Err(error) => {
+                session.withdraw(repository, Failure::DeliveryUncertain)?;
+                return Err(error);
+            }
+        };
+        let host = match SpawnedOwner::capture(supervisor, &directory) {
+            Ok(host) => host,
+            Err(error) => {
+                session.withdraw(repository, Failure::AuthorityUnavailable)?;
+                return Err(error);
+            }
+        };
+        Ok(Authorization {
+            session,
+            host,
+            pipe,
+        })
     }
 }
 
-/// The server selects the repository; there are no grant/owner/clock parameters
-/// supplied by the agent. Call at the application-defined renewal cadence and
-/// deliver only success. Dropping this handle does not stop work or release any
-/// capacity: the independent host watchdog and retained blockers remain required.
+/// The server owns both trusted evidence and the directly spawned host's private
+/// input writer. No grant, owner, clock or epoch arrives from an agent. Dropping
+/// this handle is not retirement or capacity release: the independent watchdog
+/// and persisted runtime reservations remain necessary.
 pub struct Authorization<'a> {
-    issuer: Issuer,
+    session: Session,
     host: SpawnedOwner<'a>,
+    pipe: ControlPipe,
 }
 
 impl Authorization<'_> {
-    /// Reobserve the kernel owner/clock, then let the application/store validate
-    /// and append current bounded authority. No transport or heartbeat implies
-    /// successful authorization. Consumers must check the immutable deadline.
+    /// Commit current Forge authority before bounded pipe delivery, or wait until
+    /// the app-owned renewal deadline. A write is not worker acknowledgement.
     /// # Errors
-    /// Any failed observation or uncertain persistence permanently fences this
-    /// handle. It cannot renew locally or revive after the old deadline expires.
-    pub fn issue(
+    /// Any failed observation/commit/delivery terminally fences renewal and
+    /// attempts atomic durable uncertainty retention. A later tick retries only
+    /// retention; it cannot issue or replay an uncertain control.
+    pub fn tick(
         &mut self,
         repository: &SqliteProjectRepository,
-    ) -> Result<Lease, RegistrationError> {
-        self.issuer.issue(repository, &mut self.host)
+    ) -> Result<Tick, RegistrationError> {
+        self.session
+            .tick(repository, &mut self.host, &mut self.pipe)
+    }
+
+    /// Blocking driver for a dedicated daemon worker, never an async executor
+    /// thread or database transaction. Wake on app-owned absolute renewal times;
+    /// stop/disconnected controller retains uncertainty without reviving work.
+    /// Production launch must explicitly start and retain this driver.
+    /// # Errors
+    /// Returns on fenced issuance/delivery or failed diagnostic persistence.
+    pub fn run(
+        &mut self,
+        repository: &SqliteProjectRepository,
+        stop: &Receiver<()>,
+    ) -> Result<(), RegistrationError> {
+        loop {
+            match stop.try_recv() {
+                Ok(()) | Err(TryRecvError::Disconnected) => return self.session.stop(repository),
+                Err(TryRecvError::Empty) => {}
+            }
+            let tick = self.tick(repository)?;
+            let Ok(now) = boottime_millis() else {
+                self.session
+                    .withdraw(repository, Failure::AuthorityUnavailable)?;
+                return Err(RegistrationError::new(
+                    "authorization-clock-unavailable",
+                    "renewal driver stopped without a trustworthy clock; runtime capacity remains retained",
+                ));
+            };
+            let wait = Duration::from_millis(tick.next_renewal_millis().saturating_sub(now));
+            match stop.recv_timeout(wait) {
+                Ok(()) | Err(RecvTimeoutError::Disconnected) => {
+                    return self.session.stop(repository);
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+            }
+        }
     }
 }
 

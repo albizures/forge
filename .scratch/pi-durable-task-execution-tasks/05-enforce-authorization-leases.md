@@ -2,13 +2,21 @@
 
 ## Execution status
 
-In progress: [application/store foundation, verification and resume checklist](../../docs/research/pi-durable-t05/README.md).
-Schema 21 retains grants; bounded renewal policy, terminally fenced issuance,
-a trusted Linux process/flock/boottime adapter and a fresh-epoch server service
-seam are delivered. All four repository gates pass (600 Rust tests passed,
-1 ignored); eight host-evidence tests and ten TypeScript runner/process tests pass.
-Daemon launch/renewal delivery wiring, runner admission enforcement, independent
-watchdog and required lease-outage evidence are still pending. This Task is not complete and does not unblock T06.
+Complete for the plan's controlled pre-dispatch boundary:
+[implementation, verification and successor handoff](../../docs/research/pi-durable-t05/README.md).
+Schema 21 retains grants; app-owned issuance/renewal, canonical store-to-directory
+binding, verified Linux ownership/boottime, commit-before-delivery through a
+nonblocking private pipe, consumer guards, executable enforcement and an
+independent watchdog are delivered. Atomic failure resources/holds preserve
+history, earlier holds and capacity across closure/reopen.
+All four repository gates pass (618 Rust tests passed, 1 pre-existing opt-in probe
+ignored); 27 Node runner/process tests and seven additional Rust-composed
+store/service/host/Node tests pass, including real 30-second outages during a
+controlled model request and a real child, 10-second renewal, refused signalling,
+revoked/stopped initial work and fresh-epoch restart rejection.
+T06 may proceed. Production dispatch remains disabled: explicit profile/auth
+mapping is T06 and actual Check-bound launch/bootstrap/Outcome integration is T07.
+This completion is not live-dispatch, recovery, packaging or release readiness.
 
 ## Delivered outcome
 

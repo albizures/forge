@@ -1,5 +1,9 @@
 //! Trusted Linux evidence for a directly spawned runner supervisor. This does not
-//! adopt retained processes, signal them, release resources or authorize work.
+//! adopt retained processes, release resources or authorize work. Supervision
+//! can signal only its own directly spawned, still-verified process group.
+pub mod control;
+pub mod storage;
+pub mod supervision;
 use forge_app::{
     RegistrationError,
     authorization_lease::{AuthorityHost, Observation, Owner},

@@ -472,7 +472,11 @@ name = "forge-runner-host"
 version = "0.1.0"
 dependencies = [
  "forge-app",
+ "forge-rpc",
+ "forge-server",
+ "forge-store",
  "fs2",
+ "rusqlite",
  "rustix",
  "serde",
  "serde_json",

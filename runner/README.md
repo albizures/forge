@@ -1,12 +1,17 @@
-# Forge durable runner — T04 controlled execution boundary
+# Forge durable runner — T04/T05 controlled execution boundary
 
 This is a **synthetic-only development component**, not a production dispatch
 backend or installed Forge Revision. No Pi CLI, Herdr, credentials, ambient Pi
 configuration, tools, network provider, Assignment capability or accepted Outcome
 is used. The daemon does not launch this component. T05's application policy,
-trusted Linux evidence adapter and server service seam are present, but runtime
-lease enforcement/watchdog are still pending. T06 adds profile/authentication
-mapping, T07 actual Check-bound dispatch, and T15 matched installation. Do not use this harness to execute live Assignments.
+trusted Linux evidence adapter, consumer guards and independent host watchdog are
+present. The executable requires a grant before new execution. The daemon-side
+service now owns canonical storage binding, commit-before-delivery, nonblocking
+controls, renewal scheduling and durable failure retention; cross-layer tests
+exercise it with the actual supervisor and pinned runtime. Production dispatch
+still does not select or launch this backend. T06 adds profile/authentication
+mapping, T07 actual Check-bound dispatch, and T15 matched installation. Do not use
+this harness to execute live Assignments.
 
 ## Reproduce
 
@@ -22,6 +27,8 @@ npm ci --ignore-scripts --no-audit --no-fund
 npm run prepare-reader
 npm run check
 npm test
+cd ..
+cargo test -p forge-runner-host --test authorization_session
 ```
 
 Node's native TypeScript stripping runs the source; TypeScript and `@types/node`
@@ -32,7 +39,13 @@ the existing workspace flock mechanism; `rustix` supplies safe no-follow flags,
 process UID and fallible CLOCK_BOOTTIME reads. `serde`/`serde_json` decode protected
 identity facts. These packages already belong to the workspace dependency closure;
 the host library implements the `forge-app` trusted-evidence interface without
-introducing runtime/provider types into application policy.
+introducing runtime/provider types into application policy. The host also depends
+on the existing `forge-rpc` crate to reuse the strict supervisor control contract,
+not a second hand-maintained grant decoder; no package/version was added to the
+workspace closure. Test-only dependencies on the existing server/store crates and
+`rusqlite` permit real commit/service/host integration without compiling a second
+server or substituting protocol-only fakes. The host's production dependencies do
+not depend on the server; the reverse test edge adds no package/version.
 
 ## Boundary and local protocol
 
@@ -41,8 +54,14 @@ requires an existing canonical owner-owned 0700 runtime directory separate from
 the canonical worktree, and explicit absolute component paths. It acquires a
 nonblocking exclusive flock on a persistent 0600 no-follow single-link lock inode
 **before spawning the worker or opening SQLite**. It never unlinks a stale lock.
-The caller must map the T03-reserved store identity to one canonical directory;
-this development command does not look up Forge's store or authorize Assignments.
+This development command does not look up Forge's store or authorize Assignments.
+The trusted server service now derives its path from the exact T03 reservation:
+`<workspace-root>/.forge/assignment-runtimes/<sha256(store_id)>`. Preparation creates
+only missing protected directories; binding does not create missing paths. Root
+and `.forge` must be canonical, owned and not writable by other users; the runtime
+subtree is exactly 0700. Symlinks, foreign scope, changed Launches and permissive
+runtime directories fail closed, and opaque IDs never become path components.
+Partial preparation preserves its reservation/directories rather than cleaning up.
 
 The host creates a separate process group, clears the environment, and records
 boot ID, host/worker start identities, group and lock inode/device. It supplies a
@@ -56,7 +75,10 @@ Host stdout is the worker's newline-delimited JSON stream; stderr is diagnostic.
 After `event: owned`, requests use the internal Rust `RunnerRequest` v1 envelope
 (`crates/rpc/src/durable_execution.rs`). `admit` and `observe` return correlated
 `RunnerResponse` objects. Readiness/settled events are synthetic harness events,
-not accepted Outcomes or Forge lifecycle facts. Errors carry only stable codes,
+not accepted Outcomes or Forge lifecycle facts. New `admit` execution additionally
+requires prior trusted supervisor authorization; an ungranted request returns
+`assignment-lease-denied` before creating SQLite. Exact read-only replay and
+observation do not require a new grant. Errors carry only stable codes,
 not echoed input or upstream exception details. Unknown protocol/schema/component,
 unknown fields, unavailable operations and identity conflicts fail closed.
 The shared `test/wire-v1.json` fixture is checked by Rust and TypeScript.
@@ -91,7 +113,7 @@ T03 capacity reservation/blockers still must gate replacement. No worktree bytes
 are changed by this synthetic runner. Process separation is not a hostile-agent
 sandbox; same-user malicious processes and shared-host/NFS execution are excluded.
 
-## T05 trusted evidence seam (not runtime enforcement)
+## T05 trusted daemon evidence seam
 
 `forge_runner_host::SpawnedOwner` borrows a live directly spawned Rust `Child`
 after readiness. It is not a PID-based adoption API. Each observation verifies
@@ -104,21 +126,155 @@ changed, backward or unreadable evidence terminally fences that observer.
 
 The server's `durable_authorization` service seam creates a fresh 256-bit daemon
 lifetime epoch, binds only a directly spawned verified owner and delegates grant
-construction/persistence to the app/store. It is not wired into daemon dispatch,
-a renewal timer/transport or an operator RPC. Canonical Assignment-to-directory
-mapping remains required before using it. It does not open runtime storage, issue
-a capability, signal processes or clear retained capacity. No owner/clock/epoch
-payload supplied by an agent becomes a permission.
+construction/persistence to the app/store. `prepare_directory` validates the
+reservation before filesystem creation. `bind` accepts a repository/Workspace/
+Launch and the actual directly spawned Child, not a directory supplied by an RPC;
+it derives and verifies the existing canonical path, takes the private pipe and
+captures host evidence. Pipe/owner binding failures retain a scoped blocker.
+`tick` implements commit-before-delivery; `run` is a blocking driver for a dedicated
+daemon worker at absolute app-owned renewal times. Stop/disconnected controller
+requests are checked before initial issuance, not after starting work. Any failure
+terminally fences renewal and attempts atomic resource/hold retention, preserving
+older holds. A suspended/late driver cannot move the boottime deadline; on resume,
+consumer/watchdog checks deny expired work and the driver cannot renew it. Failed
+retention can retry diagnostics only. The service is not an
+operator RPC and is not selected by production dispatch yet. No owner/clock/epoch
+payload supplied by an agent becomes permission.
 
 The eight `authority` tests use the actual Rust supervisor and an inert Python
 worker with explicit readiness/acknowledgement channels. They require
 `/usr/bin/python3` (test-only, standard library only), not credentials or Node.
 They test kernel evidence, stale/replaced identities/files, lost descriptors,
 unlocking and supervisor/worker exit—not runtime lease expiry or safe cleanup.
-The TypeScript runner remains synthetic-only and **does not yet require a lease**.
-Independent watchdog and model/tool/compaction/resume admission guards remain T05
-blockers. These observational checks are not hostile-agent containment or an
-atomic guarantee that the process cannot exit/change after an observation.
+These observational checks are not hostile-agent containment or an atomic
+guarantee that the process cannot exit/change after an observation. Separate
+executable tests below now exercise lease enforcement and watchdog expiry.
+
+## T05 protected control and consumer guards
+
+`src/authorization.ts` consumes the app's serialized grant shape. A new separate
+`SupervisorControl` v1 line on the directly spawned host's private stdin pipe is
+`{"host_control":1,"lease":<committed app Lease>}`. The host strictly validates
+version, shape, live owner coordinates, sequence and absolute bounds before
+forwarding it to the worker. The worker independently binds it to its verified
+parent/worker/boot/time namespace, then emits `{"event":"authorized","sequence":N}`.
+The acknowledgement is delivery observation, not bootstrap, heartbeat or Outcome.
+
+The pipe's write end belongs only to the trusted spawning controller. JSON fields
+are **not authentication**: never forward agent/operator payloads as controls or
+load retained grants as permission. Production daemon composition must create a
+fresh epoch, validate current Forge authority and persist every grant through the
+existing app/store service before delivery, renewing every 10 seconds. The trusted
+server service now implements that commit/delivery/renewal loop. The standalone
+Node tests still simulate the controller; separate Rust integration tests use the
+actual SQLite-backed service. The local command does not authorize Assignments
+in Forge.
+Existing `RunnerRequest`/`RunnerResponse` v1 envelopes are unchanged, but lease-free
+new execution is intentionally denied. Changed executable sources change the
+matched component digest; no silent compatibility fallback is supported.
+
+The consumer starts without permission, checks absolute 30-second boottime
+bounds, accepts only sequential renewals or exact retries, and permanently aborts
+on invalid/late grants, expiry, clock failure or backward observations. It never
+adopts a retained grant on startup. `/proc/uptime` is rounded up to the next
+centisecond for conservative admission; the trusted host must first verify boot
+and time namespace equality. Unsafe JSON integers fail closed. A 50ms cooperative
+poll requests cancellation even without another admission; it is not a hard
+cancellation deadline when JavaScript is stalled or the host is suspended.
+
+`guardProvider` gates the pinned provider's stream, simple stream, deferred fetch,
+image and classifier request methods; cancellation stays callable. `guardTool`
+checks at actual execution rather than relying on a preflight hook. Both combine
+caller and lease cancellation and deny already-cancelled calls. Future registry
+composition must guard **every** provider/tool, including dynamic tools. These
+wrappers do not implement replay/recovery policy or prove child exit. `close()`
+terminally aborts instead of merely removing the cancellation timer. `main.ts`
+now gates before intent/writable opening, Harness opening, root creation and
+submission, combines execution cancellation and wraps its sole synthetic provider.
+It accepts no tools; future profile mapping must apply the tested tool guard to
+every admitted tool. Existing runtime stores still cannot be reopened writable
+by an ordinary retry, even with a valid lease.
+
+Twelve new tests cover clock/renewal/restart failures, the cooperative timer,
+all five request methods and signal composition. Actual pinned Harness tests use
+controlled provider responses to cover initial and same-store resumed requests,
+in-flight model cancellation, explicit compaction, direct/nested tool preflight
+expiry and one cooperative long-running Node child. The shared
+`test/authorization-lease.json` fixture is also validated and round-tripped by the
+Rust app. These consumer tests are not production-daemon or real-provider release
+tests. Production durable launch remains disabled.
+
+## Independent supervisor watchdog
+
+The Rust host applies app-owned `LeaseWatchdog` policy independently of JavaScript.
+It polls CLOCK_BOOTTIME and live owner evidence every 50ms while scheduled. A
+blocked input-to-worker write never holds its policy mutex. Only short serialized
+clock/policy checks share that mutex, avoiding false backward-clock races between
+renewal delivery and polling. Bounds, discontinuities and terminal fencing mirror
+the consumer; neither process can renew itself.
+
+On expiry/uncertainty the host attempts to retain an owner-only no-follow
+`watchdog.json` marker, then requests TERM for its directly spawned, reverified
+process group. After 5 seconds of boottime grace it attempts KILL once. When the
+clock is unavailable/backward it uses monotonic `Instant` elapsed time for the
+cancellation grace only, never to extend authority. These are initiation bounds
+subject to OS scheduling and filesystem progress, not universal death guarantees.
+
+Every signal rechecks the actual unreaped Child, parent/start/group identities,
+boot/time namespace, protected directory and both shared flock descriptors. If
+the leader exited or evidence is uncertain, signalling is refused rather than
+using retained numeric IDs. Descendants may survive; cleanup stays unverified.
+Per-stage 0600 JSON evidence records signal sent/unverified, with file/directory
+sync attempts and stable diagnostics on failure. The host retains its flock
+indefinitely even after worker exit or successful signals. No worktree repair,
+Forge lifecycle update, capacity release or diagnostic deletion occurs.
+
+A retained marker (even malformed or a dangling symlink) blocks future grants;
+read-only observation/replay remains available. Marker persistence failure still
+initiates cancellation and retains the live lock; Forge's T03 durable reservations
+must continue to block replacement after both processes die. This marker is not a
+replacement for Forge store blockers or an operator resolution API (T09/T11).
+
+Five additional executable tests cover no-lease/mismatched admission with no
+SQLite creation, expiry with SIGSTOP-stalled JavaScript **and a full worker pipe**,
+TERM/KILL escalation, changed-owner signal refusal, retained locks/diagnostics,
+read-only restart, live renewal/exact retries and malformed/foreign controls with
+redacted diagnostics. Together with existing tests, **27 Node tests pass**. No
+binary-daemon crash, real-provider or packaged release verification is claimed by
+those Node tests.
+
+## Composed service/store/runtime verification
+
+`cargo test -p forge-runner-host --test authorization_session` now runs seven
+isolated, default-parallel integration tests using the actual SQLite repository,
+server service, private nonblocking pipe, Rust supervisor and pinned Node runtime.
+It requires Node 24 on the **test** executable-discovery PATH and the locked runner
+npm installation; the launched host still clears its environment and uses absolute
+component paths. It is not ignored or replaced by an opt-in release probe.
+Consequently `cargo test --workspace` now needs that documented Node/npm setup.
+
+A test-only `test/session-worker.mjs` uses explicit faux provider/tool definitions
+and the production consumer guards; it is not a profile or shipped production
+entrypoint. During real unshortened 30-second renewal outages, tests count one
+controlled pending model request or one tool child, observe cancellation (including
+actual child SIGTERM exit), then request another pinned-runtime turn and verify no
+second model/tool admission. They reopen Forge storage, retain diagnostics and
+closed-Assignment capacity, and restart a fresh authority/supervisor without
+reviving old grants or changing committed runtime bytes. Separate tests exercise
+10-second committed renewal, driver stop/disconnection before first issuance,
+revoked initial permission, failed pipe/owner binding, uncertain-owner signal
+refusal and canonical mapping attacks.
+
+The pipe adapter makes exactly one nonblocking control write: a full pipe,
+partial write or write error becomes retained uncertainty, never local replay or
+an unbounded wait.
+Application fake-clock tests cover exact renewal/expiry, backward/failed evidence,
+missed deadlines across slow commits and uncertain commit replies. Store tests
+verify atomic resource/hold rollback, scope, idempotency, old-hold preservation and
+retained capacity across closure/reopen. No new DDL, protocol version, capability,
+bootstrap acknowledgement, Task completion or cleanup permission is introduced.
+T05's controlled pre-dispatch authorization deliverable is complete; real
+profile/bootstrap/Outcome dispatch remains T06/T07 and release verification T19.
 
 ## Committed read-only inspection and provenance
 

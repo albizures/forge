@@ -6,6 +6,17 @@ use forge_app::{
 };
 use serde::{Deserialize, Serialize};
 
+/// Separate trusted daemon-to-supervisor pipe control, not operator JSON-RPC or
+/// an agent capability. Only the holder of the directly spawned host's stdin
+/// write end may deliver a transactionally committed grant. Never read from disk.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupervisorControl {
+    pub host_control: u32,
+    pub lease: forge_app::authorization_lease::Lease,
+}
+
+pub const SUPERVISOR_CONTROL_VERSION: u32 = 1;
 pub const RUNNER_PROTOCOL_VERSION: u32 = 1;
 pub const DURABLE_RUNTIME_SCHEMA: u32 = forge_app::durable_execution::RUNTIME_SCHEMA_VERSION;
 
@@ -141,6 +152,21 @@ impl RunnerResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn supervisor_control_is_strict_and_uses_the_application_grant_shape() {
+        let lease: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../runner/test/authorization-lease.json"
+        ))
+        .unwrap();
+        let value = serde_json::json!({"host_control": SUPERVISOR_CONTROL_VERSION, "lease": lease});
+        let control: SupervisorControl = serde_json::from_value(value.clone()).unwrap();
+        control.lease.validate(None, 1_000).unwrap();
+        assert_eq!(serde_json::to_value(control).unwrap(), value);
+        let mut unknown = value;
+        unknown["agent_input"] = true.into();
+        assert!(serde_json::from_value::<SupervisorControl>(unknown).is_err());
+    }
+
     #[test]
     fn negotiation_fails_closed_with_structured_diagnostics() {
         let mut c = RunnerCompatibility {

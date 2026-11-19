@@ -112,6 +112,125 @@ impl Drop for Fixture {
     }
 }
 
+#[test]
+fn authorization_failure_retains_atomic_scoped_history_after_closure_and_reopen() {
+    use forge_app::authorization_lease::session::{Failure, SessionRepository as _};
+    let f = Fixture::new();
+    f.store.reserve("test", &f.launch).unwrap();
+    let record = f
+        .store
+        .agent_assignment_info("assignment")
+        .unwrap()
+        .assignment
+        .record_id;
+    f.store
+        .hold_dispatch(record, "preserve unrelated hold")
+        .unwrap();
+    f.store
+        .close_agent_assignment(
+            "assignment",
+            forge_app::AgentAssignmentClosureReason::Crashed,
+        )
+        .unwrap();
+    f.store
+        .retain_failure("test", &f.launch, Failure::DeliveryUncertain)
+        .unwrap();
+    let reopened = f.reopen();
+    let resources = reopened
+        .list_agent_assignment_resources("assignment")
+        .unwrap();
+    reopened
+        .retain_failure("test", &f.launch, Failure::DeliveryUncertain)
+        .unwrap();
+    assert_eq!(
+        reopened
+            .list_agent_assignment_resources("assignment")
+            .unwrap(),
+        resources
+    );
+    assert!(resources.iter().any(
+        |resource| resource.resource_kind == "authorization-uncertain"
+            && resource.resource_id == "authorization-delivery-uncertain"
+            && resource.retired_at_millis.is_none()
+    ));
+    assert_eq!(
+        reopened.dispatch_hold(record).unwrap().unwrap().reason,
+        "preserve unrelated hold"
+    );
+    assert!(
+        reopened
+            .agent_assignment_info("assignment")
+            .unwrap()
+            .capacity_reserved()
+    );
+    assert!(
+        reopened
+            .claim_next_agent_assignment("alpha", "replacement")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        reopened
+            .retain_failure("foreign", &f.launch, Failure::Stopped)
+            .is_err()
+    );
+    let mut changed = f.launch.clone();
+    changed.store_id = "foreign".into();
+    assert!(
+        reopened
+            .retain_failure("test", &changed, Failure::Stopped)
+            .is_err()
+    );
+    assert_eq!(
+        reopened
+            .list_agent_assignment_resources("assignment")
+            .unwrap(),
+        resources
+    );
+}
+
+#[test]
+fn authorization_failure_resource_and_hold_rollback_together() {
+    use forge_app::authorization_lease::session::{Failure, SessionRepository as _};
+    let f = Fixture::new();
+    f.store.reserve("test", &f.launch).unwrap();
+    f.store.connection.lock().unwrap().execute_batch("CREATE TRIGGER fail_authorization_hold BEFORE INSERT ON dispatch_holds BEGIN SELECT RAISE(ABORT, 'injected failure'); END;").unwrap();
+    assert!(
+        f.store
+            .retain_failure("test", &f.launch, Failure::LeaseExpired)
+            .is_err()
+    );
+    assert!(
+        !f.store
+            .list_agent_assignment_resources("assignment")
+            .unwrap()
+            .iter()
+            .any(|resource| resource.resource_kind == "authorization-uncertain")
+    );
+    f.store
+        .connection
+        .lock()
+        .unwrap()
+        .execute_batch("DROP TRIGGER fail_authorization_hold")
+        .unwrap();
+    f.store
+        .retain_failure("test", &f.launch, Failure::LeaseExpired)
+        .unwrap();
+    assert!(
+        f.reopen()
+            .agent_assignment_info("assignment")
+            .unwrap()
+            .capacity_reserved()
+    );
+    let record = f
+        .store
+        .agent_assignment_info("assignment")
+        .unwrap()
+        .assignment
+        .record_id;
+    assert!(f.reopen().dispatch_hold(record).unwrap().is_some());
+}
+
 fn lease(f: &Fixture) -> forge_app::authorization_lease::Lease {
     use forge_app::authorization_lease::{Lease, Owner};
     Lease {

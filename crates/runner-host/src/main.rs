@@ -1,15 +1,19 @@
 //! Linux single-owner supervision boundary. Not wired to production dispatch.
 //! The lock deliberately outlives the worker: exit is not verified cleanup.
+mod watchdog;
+
+use forge_runner_host::supervision::Supervised;
 use fs2::FileExt;
 use std::{
     env, fs,
-    io::{self, Read, Write},
+    io::{self, Write},
     os::{
         fd::AsRawFd,
         unix::{fs::MetadataExt, process::CommandExt},
     },
     path::Path,
     process::{Command, Stdio},
+    sync::{Arc, Mutex},
 };
 
 fn protected_directory(path: &Path) -> io::Result<()> {
@@ -35,23 +39,33 @@ fn process_start(pid: u32) -> io::Result<String> {
         .ok_or_else(|| io::Error::other("missing Linux process start identity"))
 }
 
-fn forward_input(mut input: std::process::ChildStdin) {
-    // Do not use io::copy: Linux socket-to-pipe splice can hold the
-    // destination pipe lock while awaiting input, blocking the handshake.
-    let result = (|| -> io::Result<()> {
-        let mut buffer = [0; 8192];
-        let mut source = io::stdin().lock();
-        loop {
-            let count = source.read(&mut buffer)?;
-            if count == 0 {
-                return Ok(());
-            }
-            input.write_all(&buffer[..count])?;
-        }
-    })();
-    if let Err(error) = result {
-        eprintln!("runner-host-input: {error}");
-    }
+fn persist_owner(
+    directory: &Path,
+    identity: &serde_json::Value,
+    child: &std::process::Child,
+) -> io::Result<()> {
+    let evidence = serde_json::json!({
+        "owner": identity,
+        "worker_pid": child.id(),
+        "worker_start": process_start(child.id())?,
+        "process_group": child.id(),
+    });
+    let pending = directory.join(format!("owner.{}.pending", std::process::id()));
+    // The canonical directory is private to the trusted host user; no-follow
+    // also refuses unexpected final-component redirection.
+    let evidence_fd = rustix::fs::open(
+        &pending,
+        rustix::fs::OFlags::CREATE
+            | rustix::fs::OFlags::EXCL
+            | rustix::fs::OFlags::WRONLY
+            | rustix::fs::OFlags::NOFOLLOW,
+        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+    )?;
+    let mut evidence_file = fs::File::from(evidence_fd);
+    evidence_file.write_all(evidence.to_string().as_bytes())?;
+    evidence_file.sync_all()?;
+    fs::rename(pending, directory.join("owner.json"))?;
+    fs::File::open(directory)?.sync_all()
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -119,46 +133,35 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .spawn()?;
-    let initialization = (|| -> Result<(), Box<dyn std::error::Error>> {
-        let evidence = serde_json::json!({
-            "owner": identity,
-            "worker_pid": child.id(),
-            "worker_start": process_start(child.id())?,
-            "process_group": child.id(),
-        });
-        let pending = directory.join(format!("owner.{host_pid}.pending"));
-        // Safe because the canonical directory is private to the trusted host user;
-        // NOFOLLOW below also refuses unexpected final-component redirection.
-        let evidence_fd = rustix::fs::open(
-            &pending,
-            rustix::fs::OFlags::CREATE
-                | rustix::fs::OFlags::EXCL
-                | rustix::fs::OFlags::WRONLY
-                | rustix::fs::OFlags::NOFOLLOW,
-            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-        )?;
-        let mut evidence_file = fs::File::from(evidence_fd);
-        evidence_file.write_all(evidence.to_string().as_bytes())?;
-        evidence_file.sync_all()?;
-        fs::rename(pending, directory.join("owner.json"))?;
-        Ok(())
-    })();
-    if let Err(error) = initialization {
+    if let Err(error) = persist_owner(directory, &identity, &child) {
         child.kill()?;
         child.wait()?;
-        return Err(error);
+        return Err(error.into());
     }
     let mut input = child.stdin.take().ok_or("missing worker input pipe")?;
+    let supervised = match Supervised::capture(&mut child, directory) {
+        Ok(supervised) => supervised,
+        Err(error) => {
+            child.kill()?;
+            child.wait()?;
+            return Err(error.into());
+        }
+    };
+    // Existing diagnostics are never converted into permission or removed by a
+    // restart. Read-only observation can still run without receiving any grant.
+    let retained_blocker = match fs::symlink_metadata(directory.join("watchdog.json")) {
+        Ok(_) => true,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error.into()),
+    };
+    let state = Arc::new(Mutex::new(watchdog::State::new(
+        supervised.owner().clone(),
+        retained_blocker,
+    )));
     writeln!(input, "{{\"host_ready\":true}}")?;
-    std::thread::spawn(move || forward_input(input));
-    let status = child.wait()?;
-    eprintln!("runner-worker-exited: {status}; ownership retained pending reconciliation");
-    // No cleanup/adoption API exists in T04. An external controller must retain
-    // uncertainty even if this host itself dies. T05 adds the independent lease
-    // watchdog; T09 supplies verified retirement. No PID-based kill here.
-    loop {
-        std::thread::park();
-    }
+    let input_state = Arc::clone(&state);
+    std::thread::spawn(move || watchdog::forward_input(input, &input_state));
+    watchdog::supervise(supervised, directory, &state)
 }
 
 fn main() {
