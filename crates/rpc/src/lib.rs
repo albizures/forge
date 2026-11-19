@@ -2,6 +2,7 @@
 
 mod agent_profiles;
 mod assignment;
+pub mod durable_execution;
 mod task_inspection;
 pub use agent_profiles::*;
 pub use assignment::*;

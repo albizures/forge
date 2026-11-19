@@ -11,6 +11,7 @@ pub mod assignment;
 pub mod check_templates;
 pub mod checks;
 pub mod completion;
+pub mod durable_execution;
 pub mod findings;
 pub mod outcomes;
 pub mod prerequisites;

@@ -23,7 +23,7 @@ Mark a Task complete only after its acceptance checks and required verification 
 
 - [x] [T01 — Validate runtime contracts](01-validate-runtime-contract.md) — [contract and evidence](../../docs/research/pi-durable-t01/README.md): 19 Node probes and 4 Linux host probes pass; the stock read-only opening limitation is resolved by an explicit pinned derived read adapter. Research complete, not production/release readiness.
 - [x] [T02 — Separate provider wiring](02-separate-provider-wiring.md) — provider-neutral factory/capability-delivery seam; Herdr guards retained; alternate-provider and fail-closed tests pass. All four repository gates pass (565 tests passed, 1 opt-in probe ignored); durable launch remains disabled.
-- [ ] [T03 — Persist runtime admission](03-persist-runtime-admission.md)
+- [x] [T03 — Persist runtime admission](03-persist-runtime-admission.md) — [implementation and evidence](../../docs/research/pi-durable-t03/README.md): immutable backend/runtime identity, transactional idempotent admission and retained uncertainty/capacity; store revision 20 and runner wire v1. All four repository gates pass (577 tests passed, 1 opt-in probe ignored); durable launch remains disabled.
 - [ ] [T04 — Build the single-owner runner](04-build-owned-runner.md)
 - [ ] [T05 — Enforce authorization leases](05-enforce-authorization-leases.md)
 - [ ] [T06 — Map profiles and authentication](06-map-profiles-and-authentication.md)

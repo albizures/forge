@@ -1,0 +1,495 @@
+use super::*;
+use forge_app::{
+    AgentDispatchRepository, NewAgentAssignment, NewTypedRecord, Project, ProjectRepository,
+    RecordRepository, RecordType, WorkspaceRepository,
+    durable_execution::{Transport, admit},
+    outcomes::Attempt,
+};
+use std::sync::{
+    Arc, Barrier, Mutex,
+    atomic::{AtomicU64, Ordering},
+};
+
+struct Fixture {
+    root: std::path::PathBuf,
+    store: SqliteProjectRepository,
+    launch: Launch,
+}
+impl Fixture {
+    fn new() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "forge-durable-admission-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let store = SqliteProjectRepository::open(&root.join("forge.sqlite")).unwrap();
+        store.create_workspace("test", "Test", &root).unwrap();
+        let store = store.in_record_workspace("test").unwrap();
+        store
+            .register(&Project {
+                reference: "alpha".into(),
+                workspace_id: "test".into(),
+                slug: "alpha".into(),
+                project_root: root.clone(),
+                origin_url: "https://example.test/repo.git".into(),
+            })
+            .unwrap();
+        // T07 will provide the dispatch tracer. This fixture models its bound claim,
+        // without registering a launchable durable profile in production.
+        store.connection.lock().unwrap().execute("INSERT INTO agent_profiles(record_type, revision, provider, agent_kind, model, prompt_template, retry_limit, retry_backoff_millis, startup_timeout_millis, unknown_state_grace_millis) SELECT record_type, 2, 'pi-durable', agent_kind, model, prompt_template, retry_limit, retry_backoff_millis, startup_timeout_millis, unknown_state_grace_millis FROM agent_profiles WHERE record_type = 'task' AND revision = 1", []).unwrap();
+        let task = store
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Task,
+                body: "work".into(),
+                project_slugs: vec!["alpha".into()],
+                generated_by_ids: vec![],
+            })
+            .unwrap();
+        store
+            .create_agent_assignment(&NewAgentAssignment {
+                id: "assignment".into(),
+                record_id: task.id,
+                project_slug: "alpha".into(),
+                profile_revision: 2,
+            })
+            .unwrap();
+        let check = store.list_record_checks(task.id).unwrap().remove(0);
+        let attempt = Attempt {
+            id: "attempt".into(),
+            record_id: task.id,
+            check_id: check.id,
+            generation: 1,
+            evidence: forge_app::outcomes::Evidence::Repository {
+                repository: "https://example.test/repo.git".into(),
+                commit: "a".repeat(40),
+            },
+            actor: "assignment".into(),
+            body: "work".into(),
+            continuation: None,
+            recovery: None,
+        };
+        {
+            let c = store.connection.lock().unwrap();
+            c.execute("INSERT INTO record_attempts(id, record_id, check_id, attempt_json) VALUES ('attempt', ?1, ?2, ?3)", params![task.id.cast_signed(), check.id.cast_signed(), serde_json::to_string(&attempt).unwrap()]).unwrap();
+            c.execute(
+                "INSERT INTO assignment_check_attempts VALUES ('assignment', 'attempt')",
+                [],
+            )
+            .unwrap();
+        }
+        let launch = Launch {
+            assignment_id: "assignment".into(),
+            operation_id: "launch".into(),
+            attempt_id: "attempt".into(),
+            profile_revision: 2,
+            runtime_id: "runtime".into(),
+            incarnation_id: "incarnation".into(),
+            conversation_id: "conversation".into(),
+            store_id: "store".into(),
+            forge_revision: "test-revision".into(),
+            component_hash: "pinned-component".into(),
+            runtime_schema: 2,
+        };
+        Self {
+            root,
+            store,
+            launch,
+        }
+    }
+    fn reopen(&self) -> SqliteProjectRepository {
+        SqliteProjectRepository::open(&self.root.join("forge.sqlite"))
+            .unwrap()
+            .in_record_workspace("test")
+            .unwrap()
+    }
+}
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.root).unwrap();
+    }
+}
+
+#[derive(Default)]
+struct FakeTransport {
+    calls: Mutex<Vec<Launch>>,
+    accepted: Mutex<Option<Admission>>,
+    drop_reply: bool,
+}
+impl Transport for FakeTransport {
+    fn admit(&self, launch: &Launch) -> Result<Admission, RegistrationError> {
+        self.calls.lock().unwrap().push(launch.clone());
+        let result = Admission::Accepted {
+            admission_id: "original".into(),
+        };
+        *self.accepted.lock().unwrap() = Some(result.clone());
+        if self.drop_reply {
+            Err(error("dropped-reply"))
+        } else {
+            Ok(result)
+        }
+    }
+    fn observe_admission(&self, _: &Launch) -> Result<Admission, RegistrationError> {
+        Ok(self
+            .accepted
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or(Admission::Unknown))
+    }
+}
+
+#[test]
+fn durable_admission_replays_exact_result_and_rejects_scope_and_payload_conflicts() {
+    let f = Fixture::new();
+    let transport = FakeTransport::default();
+    let result = admit(&f.store, &transport, "test", &f.launch).unwrap();
+    assert_eq!(
+        admit(&f.reopen(), &transport, "test", &f.launch).unwrap(),
+        result
+    );
+    assert_eq!(transport.calls.lock().unwrap().len(), 1);
+    assert_eq!(
+        f.store
+            .reserve("wrong-workspace", &f.launch)
+            .unwrap_err()
+            .code,
+        "durable-scope-denied"
+    );
+    let mut conflict = f.launch.clone();
+    conflict.conversation_id = "other".into();
+    assert_eq!(
+        f.store.reserve("test", &conflict).unwrap_err().code,
+        "durable-operation-conflict"
+    );
+    assert_eq!(
+        f.store
+            .record_result(
+                "test",
+                &f.launch,
+                &Admission::Rejected {
+                    code: "different".into()
+                }
+            )
+            .unwrap_err()
+            .code,
+        "durable-result-conflict"
+    );
+    assert_eq!(
+        f.reopen().runtime("test", "assignment").unwrap(),
+        Some(result)
+    );
+}
+
+#[test]
+fn durable_admission_dropped_reply_is_observed_not_resubmitted_after_restart() {
+    let f = Fixture::new();
+    let transport = FakeTransport {
+        drop_reply: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        admit(&f.store, &transport, "test", &f.launch)
+            .unwrap_err()
+            .code,
+        "dropped-reply"
+    );
+    assert_eq!(
+        f.reopen()
+            .runtime("test", "assignment")
+            .unwrap()
+            .unwrap()
+            .admission,
+        Admission::Unknown
+    );
+    assert!(matches!(
+        admit(&f.reopen(), &transport, "test", &f.launch)
+            .unwrap()
+            .admission,
+        Admission::Accepted { .. }
+    ));
+    assert_eq!(transport.calls.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn durable_admission_interruptions_before_send_and_before_result_commit_retain_intent() {
+    let f = Fixture::new();
+    f.store.reserve("test", &f.launch).unwrap();
+    assert_eq!(
+        f.reopen()
+            .runtime("test", "assignment")
+            .unwrap()
+            .unwrap()
+            .admission,
+        Admission::Pending
+    );
+    assert!(f.reopen().begin_send("test", &f.launch).unwrap());
+    // Crash before the request leaves Forge: no remote result can be inferred.
+    let transport = FakeTransport::default();
+    assert_eq!(
+        admit(&f.reopen(), &transport, "test", &f.launch)
+            .unwrap()
+            .admission,
+        Admission::Unknown
+    );
+    assert!(transport.calls.lock().unwrap().is_empty());
+    // Remote commit succeeds, then Forge loses its local result commit.
+    transport.admit(&f.launch).unwrap();
+    assert!(matches!(
+        admit(&f.reopen(), &transport, "test", &f.launch)
+            .unwrap()
+            .admission,
+        Admission::Accepted { .. }
+    ));
+    assert_eq!(transport.calls.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn durable_admission_concurrent_claims_have_one_identity_and_one_initial_sender() {
+    let f = Fixture::new();
+    let barrier = Arc::new(Barrier::new(2));
+    let handles: Vec<_> = (0..2)
+        .map(|_| {
+            let store = f.reopen();
+            let launch = f.launch.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                store.reserve("test", &launch).unwrap();
+                store.begin_send("test", &launch).unwrap()
+            })
+        })
+        .collect();
+    assert_eq!(
+        handles
+            .into_iter()
+            .map(|h| usize::from(h.join().unwrap()))
+            .sum::<usize>(),
+        1
+    );
+    let c = f.store.connection.lock().unwrap();
+    assert_eq!(
+        c.query_row(
+            "SELECT COUNT(*) FROM durable_assignment_runtimes",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn durable_admission_closed_unknown_reserves_capacity_and_preserves_historical_backend() {
+    let f = Fixture::new();
+    f.store.reserve("test", &f.launch).unwrap();
+    f.store.begin_send("test", &f.launch).unwrap();
+    f.store
+        .close_agent_assignment(
+            "assignment",
+            forge_app::AgentAssignmentClosureReason::Crashed,
+        )
+        .unwrap();
+    let reopened = f.reopen();
+    let info = reopened.agent_assignment_info("assignment").unwrap();
+    assert!(info.capacity_reserved());
+    assert!(
+        reopened
+            .claim_next_agent_assignment("alpha", "replacement")
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        reopened.begin_send("test", &f.launch).unwrap_err().code,
+        "durable-binding-denied"
+    );
+    assert_eq!(
+        reopened
+            .runtime("test", "assignment")
+            .unwrap()
+            .unwrap()
+            .backend,
+        Backend::PiDurable
+    );
+    assert!(
+        reopened
+            .retire_agent_assignment_resource("assignment", "durable-runtime", "runtime")
+            .is_err()
+    );
+    // Late result records history without reopening authorization or releasing capacity.
+    reopened
+        .record_result(
+            "test",
+            &f.launch,
+            &Admission::Accepted {
+                admission_id: "late".into(),
+            },
+        )
+        .unwrap();
+    assert!(
+        reopened
+            .agent_assignment_info("assignment")
+            .unwrap()
+            .capacity_reserved()
+    );
+}
+
+#[test]
+fn durable_admission_intent_and_result_commit_failures_are_atomic() {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    let f = Fixture::new();
+    // Fail between identity insert and its capacity reservation.
+    f.store
+        .connection
+        .lock()
+        .unwrap()
+        .authorizer(Some(|context: AuthContext<'_>| match context.action {
+            AuthAction::Insert {
+                table_name: "agent_assignment_resources",
+            } => Authorization::Deny,
+            _ => Authorization::Allow,
+        }))
+        .unwrap();
+    assert!(f.store.reserve("test", &f.launch).is_err());
+    f.store
+        .connection
+        .lock()
+        .unwrap()
+        .authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+        .unwrap();
+    assert!(f.reopen().runtime("test", "assignment").unwrap().is_none());
+    f.store.reserve("test", &f.launch).unwrap();
+    f.store.begin_send("test", &f.launch).unwrap();
+    let transport = FakeTransport::default();
+    let accepted = transport.admit(&f.launch).unwrap();
+    // Remote result exists, but the local writer cannot commit it.
+    f.store
+        .connection
+        .lock()
+        .unwrap()
+        .commit_hook(Some(|| true))
+        .unwrap();
+    assert!(f.store.record_result("test", &f.launch, &accepted).is_err());
+    f.store
+        .connection
+        .lock()
+        .unwrap()
+        .commit_hook(None::<fn() -> bool>)
+        .unwrap();
+    assert_eq!(
+        f.reopen()
+            .runtime("test", "assignment")
+            .unwrap()
+            .unwrap()
+            .admission,
+        Admission::Unknown
+    );
+    assert_eq!(
+        admit(&f.reopen(), &transport, "test", &f.launch)
+            .unwrap()
+            .admission,
+        accepted
+    );
+    assert_eq!(transport.calls.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn durable_admission_rejected_result_is_stable_and_external_calls_have_no_writer_lock() {
+    struct Reject<'a>(&'a SqliteProjectRepository);
+    impl Transport for Reject<'_> {
+        fn admit(&self, _: &Launch) -> Result<Admission, RegistrationError> {
+            assert!(
+                self.0.connection.try_lock().is_ok(),
+                "external call inside writer transaction"
+            );
+            Ok(Admission::Rejected {
+                code: "ownership-unavailable".into(),
+            })
+        }
+        fn observe_admission(&self, _: &Launch) -> Result<Admission, RegistrationError> {
+            panic!("accepted rejection must replay locally")
+        }
+    }
+    let f = Fixture::new();
+    let transport = Reject(&f.store);
+    let rejected = admit(&f.store, &transport, "test", &f.launch).unwrap();
+    assert_eq!(
+        admit(&f.reopen(), &transport, "test", &f.launch).unwrap(),
+        rejected
+    );
+    assert!(
+        f.store
+            .agent_assignment_info("assignment")
+            .unwrap()
+            .capacity_reserved()
+    );
+}
+
+#[test]
+fn durable_admission_binding_changes_and_conflicting_concurrent_reservations_fail_closed() {
+    let f = Fixture::new();
+    let barrier = Arc::new(Barrier::new(2));
+    let handles: Vec<_> = (0..2)
+        .map(|i| {
+            let store = f.reopen();
+            let mut launch = f.launch.clone();
+            let barrier = barrier.clone();
+            launch.conversation_id = format!("conversation-{i}");
+            std::thread::spawn(move || {
+                barrier.wait();
+                store.reserve("test", &launch)
+            })
+        })
+        .collect();
+    let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
+    assert_eq!(
+        results.iter().find_map(|r| r.as_ref().err()).unwrap().code,
+        "durable-operation-conflict"
+    );
+    let original = f.store.runtime("test", "assignment").unwrap().unwrap();
+    // Mutable current selection cannot replace a historical runtime binding.
+    forge_app::WorkspaceDispatchRepository::select_workspace_profile(
+        &f.store,
+        "test",
+        RecordType::Task,
+        Some(1),
+    )
+    .unwrap();
+    assert_eq!(
+        f.reopen().runtime("test", "assignment").unwrap(),
+        Some(original.clone())
+    );
+    let mut wrong_attempt = original.launch.clone();
+    wrong_attempt.attempt_id = "another-attempt".into();
+    assert_eq!(
+        f.store.reserve("test", &wrong_attempt).unwrap_err().code,
+        "durable-binding-denied"
+    );
+    f.store.connection.lock().unwrap().execute("INSERT INTO record_work(record_id, generation) SELECT record_id, 2 FROM agent_assignments WHERE id = 'assignment' ON CONFLICT(record_id) DO UPDATE SET generation = 2", []).unwrap();
+    assert_eq!(
+        f.store
+            .begin_send("test", &original.launch)
+            .unwrap_err()
+            .code,
+        "durable-binding-stale"
+    );
+}
+
+#[test]
+fn durable_admission_incompatible_store_rejects_without_writes() {
+    let f = Fixture::new();
+    let path = f.root.join("incompatible.sqlite");
+    {
+        let c = Connection::open(&path).unwrap();
+        c.execute_batch("CREATE TABLE sentinel(value TEXT); INSERT INTO sentinel VALUES ('unchanged'); PRAGMA application_id=1179603527; PRAGMA user_version=19;").unwrap();
+    }
+    let before = std::fs::read(&path).unwrap();
+    assert_eq!(
+        SqliteProjectRepository::open(&path).err().unwrap().code,
+        "fresh-store-required"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}

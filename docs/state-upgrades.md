@@ -5,7 +5,12 @@ another. It preserves the source database and upgrades a consistent copy. Ordina
 repository opening still rejects incompatible schemas before initialization writes;
 it never migrates, resets, or rewrites an older store's marker.
 
-Supported transfers target schema **19** from schemas **7** through **19**.
+Supported transfers target schema **20** from schemas **7** through **20**.
+The 19 → 20 step adds empty durable runtime admission identity/results and resource
+retention guards. It does not backfill runtime identities, reinterpret historical
+profiles or enable durable dispatch. Existing evidence and rows remain unchanged;
+ordinary schema-19 opening rejects before initialization writes. See the
+[store contract](../crates/store/README.md#durable-runtime-admission-revision-20).
 The 18 → 19 step fences corrected Repository/branch/Base Commit revalidation for
 clean checkpoints and salvage, configuration-independent cleanliness checks, and
 v2 dirty fingerprints including extended index flags (not mutable stat-cache data).

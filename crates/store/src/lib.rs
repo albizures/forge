@@ -23,6 +23,7 @@ mod check_templates;
 mod checks;
 mod completion;
 mod continuations;
+mod durable_execution;
 mod execution_modes;
 mod findings;
 mod ordering_dependencies;
@@ -247,6 +248,7 @@ impl SqliteProjectRepository {
         connection
             .execute_batch(include_str!("upgrade/assignment_sessions.sql"))
             .map_err(storage_error)?;
+        durable_execution::schema(connection)?;
         completion::schema(connection)?;
         checks::schema(connection)?;
         outcomes::schema(connection)?;

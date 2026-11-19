@@ -9,7 +9,7 @@ by migrations—not just the initial `CREATE TABLE` statements.
 - [`src/lib.rs`](src/lib.rs): `SqliteProjectRepository::from_connection`,
   `migrate_*` functions, profile seeds, and repository operations.
 - [`src/workspaces.rs`](src/workspaces.rs): Workspace ownership and Project identity.
-- [`src/upgrade.rs`](src/upgrade.rs): explicit offline schema 7 → 8 → 9 → 10 → 11 → 12 → 13 → 14 → 15 → 16 → 17 → 18 → 19 conversion,
+- [`src/upgrade.rs`](src/upgrade.rs): explicit offline schema 7 → 8 → 9 → 10 → 11 → 12 → 13 → 14 → 15 → 16 → 17 → 18 → 19 → 20 conversion,
   frozen contract validation, consistent snapshots, and preservation inventories.
   See [Revision State upgrades](../../docs/state-upgrades.md) for orchestration.
 - [`src/record_workspaces.rs`](src/record_workspaces.rs): Record ownership,
@@ -23,6 +23,8 @@ by migrations—not just the initial `CREATE TABLE` statements.
   replacement history, and Task provisioning.
 - [`src/workspace_dispatch.rs`](src/workspace_dispatch.rs): Workspace dispatch
   configuration, provider generations, and Assignment binding.
+- [`src/durable_execution.rs`](src/durable_execution.rs): durable runtime identity,
+  admission intent/results and conservative capacity reservation (schema 20).
 
 Keep this reference in sync when those schema definitions change. Domain behavior
 is documented separately in [Records](../../docs/records.md),
@@ -43,10 +45,53 @@ is documented separately in [Records](../../docs/records.md),
   numbered separately per Workspace.
 - Foreign keys use SQLite's default delete behavior unless stated otherwise.
   Most references do **not** cascade.
-- Ordinary repository opening accepts only the current marked schema revision.
+- Ordinary repository opening accepts only the current marked schema revision **20**.
   Triggers and repository validation also enforce invariants. Explicit managed
-  copy-and-upgrade targets revision 19 from revisions 7 through 19; unsupported
+  copy-and-upgrade targets revision 20 from revisions 7 through 20; unsupported
   stores are rejected without automatic conversion or reset.
+
+## Durable runtime admission (revision 20)
+
+`durable_assignment_runtimes` has one row per Assignment (`assignment_id` PK/FK).
+`backend` is explicitly `pi-durable`. Unique `operation_id`, `runtime_id`,
+`conversation_id` and `store_id` prevent reuse across Assignments.
+`launch_json` retains the complete typed, immutable launch: Assignment/Check attempt,
+profile revision, execution incarnation, runtime/conversation/store identities,
+Forge Revision, matched component hash and runtime schema (initially 2).
+Store IDs are opaque identities, not operator-supplied filesystem paths; this
+reservation does not create or open runtime storage. Runtime layout and host
+ownership are subsequent runner work.
+
+The launch's canonical typed fields are compared in full, not merely operation ID
+or a lossy fingerprint. Exact retries return the originally accepted result;
+conflicts reject. `admission_json` is typed `pending`, `unknown`, `accepted` (original
+admission ID) or `rejected` (structured code). Accepted/rejected results cannot be
+replaced through the repository. Scope and immutable Check/profile binding are
+validated before replay, independent of current Workspace selections.
+
+An immediate transaction reserves identity and a `durable-runtime` Assignment
+resource together. Exactly one sender changes pending to unknown **before** the
+external call. Unknown retries only observe the original admission, never blindly
+send again; an unobserved request remains uncertain even if it never reached the
+runner. Transport failures and failed result commits retain unknown across reopen.
+Result commit revalidates scope/binding, including for a late reply after closure;
+recording that reply does not restore authority or release capacity. A terminal
+runtime response is not an Outcome or Check Assessment.
+
+The existing resource guards retain capacity, replacement/worktree blockers and
+historical backend identity even for closed Assignments. SQL guards prevent generic
+resource retirement/deletion from clearing the durable marker. No durable cleanup
+or safety override is implemented here: verified retirement is later work. A
+rejected admission alone is not proof of host-process absence. All external calls
+are outside writer transactions. No credentials, prompts or model responses belong
+in launch identity or result diagnostics.
+
+Revision 20 is a breaking storage contract. Ordinary open rejects incompatible
+stores before initialization writes. The separately requested offline 19 → 20
+upgrade adds only empty runtime tables/guards, preserving all historical rows and
+inventing no backend/runtime identities. Older explicit upgrade paths compose this
+expansion. Durable dispatch remains disabled; protocol definitions and fake
+transport tests do not establish production runner or recovery readiness.
 
 ## Retained-work salvage authorization (revision 17)
 

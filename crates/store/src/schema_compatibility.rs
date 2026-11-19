@@ -13,7 +13,8 @@ use rusqlite::Connection;
 // Revision 17 records explicit retained-work salvage authority without historical backfill.
 // Revision 18 requires content-bound dirty salvage enforcement, even with unchanged SQL tables.
 // Revision 19 revalidates clean salvage identity and binds extended index flags.
-const SCHEMA_REVISION: i64 = 19;
+// Revision 20 reserves durable runtime identities and admission results atomically.
+const SCHEMA_REVISION: i64 = 20;
 const APPLICATION_ID: i64 = 0x464f_5247; // FORG
 
 pub(super) fn validate(connection: &Connection) -> Result<(), RegistrationError> {
