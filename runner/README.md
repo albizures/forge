@@ -1,17 +1,50 @@
-# Forge durable runner — T04/T05 controlled execution boundary
+# Forge durable runner — T04–T06 controlled execution boundary
 
 This is a **synthetic-only development component**, not a production dispatch
-backend or installed Forge Revision. No Pi CLI, Herdr, credentials, ambient Pi
-configuration, tools, network provider, Assignment capability or accepted Outcome
-is used. The daemon does not launch this component. T05's application policy,
+backend or installed Forge Revision. `src/main.ts` remains synthetic-only: it uses
+no Pi CLI, Herdr, credentials, ambient Pi configuration, tools, network provider,
+Assignment capability or accepted Outcome. The daemon does not launch it. T06's
+separate explicit profile factory configures the pinned OpenAI provider and
+coding tools; tests use synthetic credentials and intercepted provider requests,
+never a real account or live Assignment. T05's application policy,
 trusted Linux evidence adapter, consumer guards and independent host watchdog are
 present. The executable requires a grant before new execution. The daemon-side
 service now owns canonical storage binding, commit-before-delivery, nonblocking
 controls, renewal scheduling and durable failure retention; cross-layer tests
 exercise it with the actual supervisor and pinned runtime. Production dispatch
-still does not select or launch this backend. T06 adds profile/authentication
-mapping, T07 actual Check-bound dispatch, and T15 matched installation. Do not use
+still does not select or launch this backend. T06 provides tested explicit
+profile/authentication mapping, T07 actual Check-bound dispatch, and T15 matched installation. Do not use
 this harness to execute live Assignments.
+
+## T06 explicit profile/authentication construction
+
+`src/profiles.ts::createProfileRuntime` consumes the Forge-owned resolved
+configuration (`test/profile-v1.json` is shared with Rust), a deliberately selected
+credential-file path, the existing lease consumer and an explicit capability
+metadata/path allowlist. It opens no runtime store, creates no conversation and
+admits no work by construction alone. The model key stays in a private auth
+context, not environment values or persisted configuration. Actual provider/tool
+entry points retain lease guards. The trusted T07 launcher must bind Check,
+profile and worktree identity, preflight before capability issuance, and gate
+behavioral context behind successful authenticated bootstrap.
+
+Supported configuration and the raw-file authentication/permission matrix are
+in [Agent Profile policy](../docs/agent-profile-policy.md#durable-profiles-and-authentication-controlled-pre-dispatch-boundary).
+No OAuth, Pi credential discovery, extensions/MCP, custom nested tools,
+image/classifier/deferred APIs, automatic compaction or request retries are
+supported. The four coding tools are all explicitly unsafe for replay; cwd and
+shell environment are explicit, not a sandbox. Provider-event redaction prevents
+exact configured-key echoes from being persisted; it does not make arbitrary
+repository/tool output safe to disclose. Direct same-user access to credentials
+is outside hostile-agent containment guarantees.
+
+The host library performs the same protected raw-file preflight. Server operator
+preview/registration additionally require explicit local model authentication
+for durable profiles, without contacting the provider. The composed test fixture
+`test/profile-preflight.mjs` consumes actual Rust-prepared input in an isolated
+Node process and verifies configured model access still grants no execution
+lease. Production launch, bootstrap and Outcome integration remain T07; this
+module is not a second production entrypoint.
 
 ## T07 bootstrap gate increment (not dispatch integration)
 

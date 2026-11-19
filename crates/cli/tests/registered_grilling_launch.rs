@@ -241,6 +241,7 @@ async fn exercise_launch() {
     let daemon = tokio::spawn(serve(DaemonConfig {
         bind_addr: address,
         store_path: db.clone(),
+        durable_model_key_file: None,
         managed: None,
     }));
     for _ in 0..100 {

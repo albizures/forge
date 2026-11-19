@@ -219,6 +219,12 @@ impl Application {
         let policy = crate::agent_profiles::ResourceCatalog::discover(operator_root, &root)
             .and_then(|catalog| catalog.resolve(&root, document))
             .map_err(|reason| RegistrationError::new("invalid-agent-profile", reason))?;
+        if policy.runtime == "pi-durable" && kind != RecordType::Task {
+            return Err(RegistrationError::new(
+                "invalid-agent-profile",
+                "pi-durable supports Task profiles only",
+            ));
+        }
         Ok((policy, lifecycle))
     }
 
@@ -233,8 +239,28 @@ impl Application {
         kind: RecordType,
     ) -> Result<AgentProfile, RegistrationError> {
         let (policy, _) = self.preview_agent_profile(workspace, operator_root, document, kind)?;
+        self.register_resolved_agent_profile(workspace, kind, &policy)
+    }
+
+    /// Persist the same resolved policy that a trusted adapter preflighted, without
+    /// resolving a mutable authoring document a second time. The repository still
+    /// validates direct inputs before its atomic immutable registration/selection.
+    /// # Errors
+    /// Rejects invalid policy, scope, Record Type or failed persistence.
+    pub fn register_resolved_agent_profile(
+        &self,
+        workspace: &str,
+        kind: RecordType,
+        policy: &crate::agent_profiles::ResolvedLaunchPolicy,
+    ) -> Result<AgentProfile, RegistrationError> {
+        if policy.runtime == "pi-durable" && kind != RecordType::Task {
+            return Err(RegistrationError::new(
+                "invalid-agent-profile",
+                "pi-durable supports Task profiles only",
+            ));
+        }
         self.dispatch()?
-            .register_agent_profile(workspace, kind, &policy)
+            .register_agent_profile(workspace, kind, policy)
     }
 
     /// Returns the effective selected immutable profile, without contacting the provider.

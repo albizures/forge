@@ -67,6 +67,18 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn herdr_flags_reject_even_a_supported_durable_policy() {
+    let fixture = Fixture::new();
+    let mut profile = fixture.profile(false);
+    let policy = profile.launch_policy.as_mut().unwrap();
+    policy.runtime = "pi-durable".into();
+    policy.model = "openai/gpt-4.1".into();
+    policy.thinking_level = Some(forge_app::agent_profiles::ThinkingLevel::Off);
+    policy.validate_direct_inputs().unwrap();
+    assert!(pi_launch_arguments(&profile, "bootstrap").is_err());
+}
+
+#[test]
 fn thinking_flags_apply_to_both_record_types_and_preserve_historical_launches() {
     let fixture = Fixture::new();
     let historical = r#"{"version":1,"runtime":"herdr/pi","model":"test/model","tools":[],"behavior":"old","skills":[],"extensions":[],"mcpServers":[]}"#;

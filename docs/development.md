@@ -88,6 +88,14 @@ advisory sidecar lock and rejects a second owner before binding the listener.
 This prevents competing daemon ownership, not deliberate direct SQLite access.
 Managed daemons instead use Forgeup's isolated per-Revision state.
 
+For controlled durable-profile preview/registration only, a manual daemon may
+set `FORGE_DURABLE_OPENAI_KEY_FILE` to an explicit protected key-file **path**.
+Never put the key value in the environment. See the
+[profile/authentication contract](agent-profile-policy.md#durable-profiles-and-authentication-controlled-pre-dispatch-boundary)
+for permissions, supported inputs and fail-closed behavior. This setting neither
+enables durable dispatch nor supplies a Forge Assignment capability. Managed
+launches do not inherit it; matched managed packaging is later release work.
+
 ## Browser and RPC
 
 On the default manual listener, open <http://127.0.0.1:45003/>. Browser routes

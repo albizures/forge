@@ -36,7 +36,7 @@ pub(crate) fn validate_header(
     model: &str,
     tools: &[String],
 ) -> Result<(), String> {
-    if version != 1 || runtime != "herdr/pi" {
+    if version != 1 || !["herdr/pi", "pi-durable"].contains(&runtime) {
         return Err("unsupported Agent Profile version or runtime".into());
     }
     if !model
@@ -206,6 +206,14 @@ impl ProfileDocument {
             }
         }
         document.behavior = lines.collect();
+        if document.runtime == "pi-durable" {
+            crate::durable_profiles::validate_configuration(
+                &document.model,
+                Some(document.thinking_level),
+                &document.tools,
+                !document.extensions.is_empty() || !document.mcp_servers.is_empty(),
+            )?;
+        }
         Ok(document)
     }
 }

@@ -45,6 +45,11 @@ pub(super) fn pi_launch_arguments(
     let Some(policy) = &profile.launch_policy else {
         return Ok(vec!["--model".into(), profile.model.clone(), prompt.into()]);
     };
+    if policy.runtime != "herdr/pi" {
+        return Err(AgentAdapterError::InvalidRequest(
+            "Herdr requires an explicit herdr/pi profile".into(),
+        ));
+    }
     policy
         .validate_direct_inputs()
         .map_err(AgentAdapterError::InvalidRequest)?;

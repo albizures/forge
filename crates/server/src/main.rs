@@ -75,7 +75,7 @@ fn parse_options() -> Result<ServerOptions, String> {
             }
             "--help" | "-h" => {
                 println!(
-                    "Usage: forge-server [--bind-addr IP:PORT] [--managed --store-path PATH --runtime-record-path PATH --lifecycle-control-endpoint PATH --lifecycle-credential VALUE --daemon-instance-id ID]\n\nFORGE_BIND_ADDR and FORGE_STORE_PATH supply manual-launch defaults. A managed launch must explicitly provide every managed input. Remote bindings are unauthenticated; use only a trusted private network."
+                    "Usage: forge-server [--bind-addr IP:PORT] [--managed --store-path PATH --runtime-record-path PATH --lifecycle-control-endpoint PATH --lifecycle-credential VALUE --daemon-instance-id ID]\n\nFORGE_BIND_ADDR and FORGE_STORE_PATH supply manual-launch defaults. FORGE_DURABLE_OPENAI_KEY_FILE optionally selects an owner-only API-key file for durable profile preflight (not a key value or dispatch enablement). A managed launch must explicitly provide every managed input. Remote bindings are unauthenticated; use only a trusted private network."
                 );
                 std::process::exit(0);
             }

@@ -6,6 +6,7 @@
 mod agent_profiles;
 mod browser;
 pub mod durable_authorization;
+pub mod durable_profiles;
 mod herdr;
 #[cfg(test)]
 mod provider_wiring_tests;
@@ -118,14 +119,30 @@ impl ManagedDaemonConfig {
 }
 
 /// Daemon startup configuration resolved before the listener is opened.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct DaemonConfig {
     /// Address owned by the one daemon listener.
     pub bind_addr: SocketAddr,
     /// Database path selected for this daemon instance.
     pub store_path: PathBuf,
+    /// Explicit host credential-file path for new durable profiles; never a key value.
+    pub durable_model_key_file: Option<PathBuf>,
     /// Present only when Forgeup explicitly owns this daemon launch.
     pub managed: Option<ManagedDaemonConfig>,
+}
+
+impl std::fmt::Debug for DaemonConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DaemonConfig")
+            .field("bind_addr", &self.bind_addr)
+            .field("store_path", &self.store_path)
+            .field("managed", &self.managed)
+            .field(
+                "durable_model_auth_configured",
+                &self.durable_model_key_file.is_some(),
+            )
+            .finish()
+    }
 }
 
 impl DaemonConfig {
@@ -147,6 +164,7 @@ impl DaemonConfig {
             bind_addr,
             store_path: env::var_os("FORGE_STORE_PATH")
                 .map_or_else(|| PathBuf::from("forge.sqlite3"), PathBuf::from),
+            durable_model_key_file: env::var_os("FORGE_DURABLE_OPENAI_KEY_FILE").map(PathBuf::from),
             managed: None,
         })
     }
@@ -179,6 +197,7 @@ impl DaemonConfig {
         Ok(Self {
             bind_addr,
             store_path: PathBuf::from(inputs.store_path),
+            durable_model_key_file: None,
             managed: Some(ManagedDaemonConfig {
                 runtime_record_path: PathBuf::from(inputs.runtime_record_path),
                 lifecycle_control_endpoint: PathBuf::from(inputs.lifecycle_control_endpoint),
@@ -215,6 +234,7 @@ pub struct Daemon {
     management: ManagementStatus,
     capability_secret_root: Option<PathBuf>,
     profile_operator_root: Option<PathBuf>,
+    durable_model_key_file: Option<PathBuf>,
 }
 
 impl Daemon {
@@ -233,6 +253,7 @@ impl Daemon {
         Self {
             application: Arc::new(application),
             capability_secret_root: None,
+            durable_model_key_file: None,
             profile_operator_root: std::env::var_os("HOME").map(PathBuf::from),
             management: ManagementStatus::new(
                 RevisionIdentity::from(forge_build_info::current()),
@@ -2212,6 +2233,9 @@ pub async fn serve(config: DaemonConfig) -> Result<(), std::io::Error> {
         .as_ref()
         .map(|managed| managed.daemon_instance_id.clone());
     let mut daemon = Daemon::with_daemon_instance_id(application, daemon_instance_id);
+    daemon
+        .durable_model_key_file
+        .clone_from(&config.durable_model_key_file);
     let store_root = config.store_path.parent().unwrap_or_else(|| Path::new("."));
     daemon.capability_secret_root = Some(
         if store_root.is_absolute() {
@@ -2944,6 +2968,7 @@ mod tests {
         let app = super::application_from_config(&super::DaemonConfig {
             bind_addr: "127.0.0.1:0".parse().unwrap(),
             store_path: database,
+            durable_model_key_file: None,
             managed: None,
         })
         .unwrap();
@@ -4417,6 +4442,7 @@ mod tests {
         let error = serve(DaemonConfig {
             bind_addr,
             store_path: store_path.clone(),
+            durable_model_key_file: None,
             managed: None,
         })
         .await

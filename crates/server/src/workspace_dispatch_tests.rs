@@ -228,6 +228,7 @@ impl Fixture {
             &DaemonConfig {
                 bind_addr: "127.0.0.1:0".parse().unwrap(),
                 store_path: self.database.clone(),
+                durable_model_key_file: None,
                 managed: None,
             },
             Some(std::env::current_exe().unwrap()),

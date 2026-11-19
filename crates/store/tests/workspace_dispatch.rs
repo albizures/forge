@@ -10,6 +10,52 @@ use std::{
 };
 
 #[test]
+fn durable_registration_preserves_backend_and_history_without_sources() {
+    use forge_app::agent_profiles::{ResolvedLaunchPolicy, ThinkingLevel};
+    let fixture = Fixture::new();
+    let store = fixture.open();
+    fixture.register(&store);
+    let historical = store.agent_profile(RecordType::Task, 1).unwrap();
+    let policy = ResolvedLaunchPolicy {
+        version: 1,
+        runtime: "pi-durable".into(),
+        model: "openai/gpt-4.1".into(),
+        thinking_level: Some(ThinkingLevel::Off),
+        tools: vec!["bash".into()],
+        behavior: "Explicit behavior".into(),
+        skills: vec![],
+        extensions: vec![],
+        mcp_servers: vec![],
+    };
+    assert!(
+        store
+            .register_agent_profile("one", RecordType::Grilling, &policy)
+            .is_err()
+    );
+    let registered = store
+        .register_agent_profile("one", RecordType::Task, &policy)
+        .unwrap();
+    assert_eq!(registered.provider, "pi-durable");
+    assert_eq!(
+        store.agent_profile(RecordType::Task, 1).unwrap(),
+        historical
+    );
+    drop(store);
+    let store = fixture.open();
+    assert_eq!(
+        store
+            .agent_profile(RecordType::Task, registered.revision)
+            .unwrap(),
+        registered
+    );
+    let copied = store
+        .configure_workspace_acknowledgement_timeout("one", Some(1234))
+        .unwrap();
+    assert_eq!(copied.provider, "pi-durable");
+    assert_eq!(copied.launch_policy, Some(policy));
+}
+
+#[test]
 fn registered_policy_is_selected_and_survives_reopen_and_lifecycle_revision() {
     use forge_app::agent_profiles::ResourceCatalog;
     let fixture = Fixture::new();

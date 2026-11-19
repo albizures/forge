@@ -2,6 +2,7 @@
 //! adopt retained processes, release resources or authorize work. Supervision
 //! can signal only its own directly spawned, still-verified process group.
 pub mod control;
+pub mod model_auth;
 pub mod storage;
 pub mod supervision;
 use forge_app::{

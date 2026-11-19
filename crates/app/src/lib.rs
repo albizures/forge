@@ -13,6 +13,7 @@ pub mod check_templates;
 pub mod checks;
 pub mod completion;
 pub mod durable_execution;
+pub mod durable_profiles;
 pub mod findings;
 pub mod outcomes;
 pub mod prerequisites;
