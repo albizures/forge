@@ -1,0 +1,20 @@
+{
+  "name": "forge-durable-runner",
+  "private": true,
+  "type": "module",
+  "engines": { "node": "24.18.0" },
+  "scripts": {
+    "prepare-reader": "node prepare-reader.mjs",
+    "check": "tsc --noEmit",
+    "test": "node --test --test-timeout=20000 test/*.test.mjs"
+  },
+  "dependencies": {
+    "@earendil-works/pi-durable": "1.5.2",
+    "@earendil-works/pi-ai": "1.5.2",
+    "@earendil-works/chord": "1.5.2"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.1",
+    "typescript": "5.9.3"
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "compatibility": { "protocol": 1, "runtime_schema": 2, "component_hash": "fixture-component" },
+  "assignment_id": "fixture-assignment",
+  "runtime_id": "fixture-runtime",
+  "operation_id": "fixture-operation",
+  "operation": {
+    "kind": "admit",
+    "launch": {
+      "assignment_id": "fixture-assignment",
+      "operation_id": "fixture-operation",
+      "attempt_id": "fixture-attempt",
+      "profile_revision": 1,
+      "runtime_id": "fixture-runtime",
+      "incarnation_id": "fixture-incarnation",
+      "conversation_id": "fixture-conversation",
+      "store_id": "fixture-store",
+      "forge_revision": "fixture-revision",
+      "component_hash": "fixture-component",
+      "runtime_schema": 2
+    }
+  }
+}

@@ -167,6 +167,15 @@ mod tests {
         );
     }
     #[test]
+    fn typescript_runner_fixture_matches_rust_admission_wire() {
+        let value: serde_json::Value =
+            serde_json::from_str(include_str!("../../../runner/test/wire-v1.json")).unwrap();
+        let request: RunnerRequest = serde_json::from_value(value.clone()).unwrap();
+        request.validate("fixture-component").unwrap();
+        assert_eq!(serde_json::to_value(request).unwrap(), value);
+    }
+
+    #[test]
     fn wire_is_typed_strict_and_correlated() {
         let request = RunnerRequest {
             compatibility: RunnerCompatibility {
