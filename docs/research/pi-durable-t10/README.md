@@ -1,8 +1,15 @@
-# T10 — Recovery candidate inspection increment
+# T10 — Recovery candidate inspection increments
 
 ## Status: partial; T10 remains pending
 
-This increment implements only committed runtime candidate inspection. It does
+The original runtime-inspection increment is recorded below. The subsequent
+[Forge-side candidate gate](forge-candidate-gate.md) adds consistent read-only
+application/store binding inspection and nine persistence-policy tests; all four
+repository gates, 714 Rust harness tests plus seven supervised scenarios, runner
+typecheck and 64 Node tests pass. Neither increment authorizes execution. Claims,
+recovery leases, daemon composition and writable reopen remain unimplemented.
+
+The original increment implements only committed runtime candidate inspection. It does
 **not** deliver authorized writable recovery, change lease issuance or enable
 automatic daemon recovery. T11 must not advance on this evidence. Production
 durable dispatch remains disabled. No Forge Records, operator configuration,

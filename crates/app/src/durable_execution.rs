@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 pub mod completion;
 pub mod effect_resolution;
 pub mod effects;
+pub mod recovery;
 pub mod retirement;
 
 /// Immutable identities only: no capability, provider credential or prompt content.

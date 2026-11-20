@@ -9,6 +9,7 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 mod completion;
 mod effect_resolution;
 mod effects;
+mod recovery;
 mod retirement;
 
 pub(super) fn schema(c: &Connection) -> Result<(), RegistrationError> {
