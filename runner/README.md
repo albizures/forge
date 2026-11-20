@@ -344,6 +344,38 @@ These observational checks are not hostile-agent containment or an atomic
 guarantee that the process cannot exit/change after an observation. Separate
 executable tests below now exercise lease enforcement and watchdog expiry.
 
+## T10 recovery lease consumer (partial; not wired)
+
+`Authorization.forRecovery(launch, generation, owner, epoch, expectedGrant)`
+prepares a waiting consumer bound to an exact claim/lease/evidence envelope from
+trusted, freshly verified host composition. It grants nothing. Only
+`acceptRecovery` with that exact committed envelope permits the initial recovery
+sequence greater than one; ordinary consumers still require sequence one and
+ordinary lease delivery cannot initialize a waiting recovery consumer. Subsequent
+renewals use the same strict sequential, bounded, fail-closed lease enforcement.
+Exact envelope retries cannot extend deadlines; an old envelope after renewal
+terminally fences rather than resetting authority.
+
+These are internal composition methods, not RPC or agent controls. Never create
+an expectation from a retained audit or expose either method through ordinary
+input. Payload equality is not authentication, proof of the Forge commit or
+predecessor process safety. The trusted controller must verify cleanup/current
+bindings, retain exclusive ownership, commit before delivery and use a private
+channel. No host/supervisor entrypoint invokes these methods yet; its existing
+control protocol still rejects an initial non-one sequence. The application now
+has a matching unarmed watchdog-policy handshake and an opaque-verification-bound
+commit-before-delivery/renewal coordinator; neither is executable host recovery.
+Host verification/handoff, executable watchdog/private control support, daemon
+reconciliation and writable resume remain unimplemented. See
+[coordinator/watchdog evidence](../docs/research/pi-durable-t10/recovery-session.md).
+Production and automatic recovery remain disabled.
+
+Run the isolated fake-clock/wrapper tests with:
+
+```sh
+node --test runner/test/recovery-authorization.test.mjs
+```
+
 ## T05 protected control and consumer guards
 
 `src/authorization.ts` consumes the app's serialized grant shape. A new separate

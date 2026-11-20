@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub mod authorization;
+pub mod session;
 
 /// A consistent read of the original binding. Retained grants are evidence only:
 /// neither this value nor an unexpired old lease permits a new process to run.

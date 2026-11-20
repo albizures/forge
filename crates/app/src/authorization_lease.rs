@@ -100,6 +100,7 @@ pub struct LeaseWatchdog {
     previous: Option<Lease>,
     last_observation: Option<u64>,
     fenced: bool,
+    recovery: Option<Box<crate::durable_execution::recovery::authorization::Grant>>,
 }
 
 impl LeaseWatchdog {
@@ -110,7 +111,67 @@ impl LeaseWatchdog {
             previous: None,
             last_observation: None,
             fenced: false,
+            recovery: None,
         }
+    }
+
+    /// Prepare an unarmed recovery watchdog from trusted fresh host composition.
+    /// Equality with this expectation is not authentication, a commit receipt or
+    /// process-safety proof. Never construct it by loading a retained audit.
+    /// # Errors
+    /// Rejects invalid claim/lease binding or a foreign waiting owner.
+    pub fn for_recovery(
+        owner: Owner,
+        expected: crate::durable_execution::recovery::authorization::Grant,
+    ) -> Result<Self, RegistrationError> {
+        expected.claim.validate()?;
+        if expected.lease.owner != owner
+            || expected.claim.launch != expected.lease.launch
+            || expected.claim.daemon_epoch != expected.lease.daemon_epoch
+            || expected.lease.sequence <= 1
+            || expected.evidence_sha256.len() != 64
+            || !expected
+                .evidence_sha256
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(denied());
+        }
+        let mut fresh = expected.lease.clone();
+        fresh.sequence = 1;
+        fresh.validate(None, fresh.issued_boottime_millis)?;
+        let mut watchdog = Self::new(owner);
+        watchdog.recovery = Some(Box::new(expected));
+        Ok(watchdog)
+    }
+
+    /// The exact committed envelope arms a waiting recovery watchdog. Subsequent
+    /// renewals use ordinary acceptance. Failed delivery or an old envelope after
+    /// renewal terminally fences; exact live retries cannot extend a deadline.
+    /// # Errors
+    /// Rejects mismatched/expired envelopes, backward clocks or prior fencing.
+    pub fn accept_recovery(
+        &mut self,
+        grant: &crate::durable_execution::recovery::authorization::Grant,
+        now: u64,
+    ) -> Result<(), RegistrationError> {
+        self.check(now)?;
+        self.fenced = true;
+        if self.recovery.as_deref() != Some(grant) {
+            return Err(denied());
+        }
+        if let Some(previous) = &self.previous {
+            if previous != &grant.lease {
+                return Err(denied());
+            }
+        } else {
+            let mut fresh = grant.lease.clone();
+            fresh.sequence = 1;
+            fresh.validate(None, now)?;
+        }
+        self.previous = Some(grant.lease.clone());
+        self.fenced = false;
+        Ok(())
     }
 
     /// Retain the last grant for diagnostics, never as restart permission.
@@ -148,7 +209,7 @@ impl LeaseWatchdog {
     pub fn accept(&mut self, lease: Lease, now: u64) -> Result<(), RegistrationError> {
         self.check(now)?;
         self.fenced = true;
-        if lease.owner != self.owner {
+        if lease.owner != self.owner || (self.recovery.is_some() && self.previous.is_none()) {
             return Err(denied());
         }
         if self.previous.as_ref() == Some(&lease) {
@@ -299,6 +360,10 @@ impl Issuer {
         Ok(lease)
     }
 }
+
+#[cfg(test)]
+#[path = "authorization_lease/recovery_watchdog_tests.rs"]
+mod recovery_watchdog_tests;
 
 #[cfg(test)]
 mod tests {

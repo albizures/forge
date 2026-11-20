@@ -2,7 +2,28 @@
 
 ## Status: partial; T10 remains pending
 
-The latest [canonical Rust-to-Node inspection increment](canonical-recovery-inspection.md)
+The latest [recovery coordinator/watchdog increment](recovery-session.md) adds
+application-owned commit-before-delivery from opaque fresh verification,
+post-commit owner/time checks, ordinary bounded renewal and a matching unarmed
+watchdog-policy handshake. Twelve new Rust tests exercise actual SQLite commits,
+lost replies, uncertain delivery, retention retry and terminal fences. All four
+repository gates pass (752 Rust harness tests plus seven supervised scenarios;
+one pre-existing opt-in ignored), runner typecheck and 76 Node tests pass.
+Concrete host verification, protected ownership handoff, executable recovery
+controls, daemon integration and writable resume remain absent. T10 stays pending;
+production and automatic recovery remain disabled.
+
+The preceding [exact-grant recovery consumer increment](recovery-consumer.md) adds
+an internal waiting-consumer handshake bound to a freshly verified expected
+claim/lease/evidence envelope. Six new tests cover delivery, renewal, mismatch,
+expiry and guarded effect boundaries; ordinary startup still rejects recovery
+sequences. All four repository gates pass (740 Rust harness tests plus seven
+supervised scenarios; one pre-existing opt-in ignored), runner typecheck and
+76 Node tests pass. This is not executable host/consumer delivery, watchdog or
+daemon composition, predecessor cleanup proof or writable resume. T10 remains
+pending; production and automatic recovery stay disabled.
+
+The preceding [canonical Rust-to-Node inspection increment](canonical-recovery-inspection.md)
 adds explicit typed internal wire contracts, canonical original-admission/path
 verification, bounded subprocess I/O and a retained exclusive inspection guard.
 Five new Rust tests include actual store/kernel-lock/Node composition and binding
@@ -139,7 +160,9 @@ power-loss durability or hostile same-user containment is inferred.
    Generalize beyond the current single retained recovery operation only through
    explicit safe subsequent recovery, never timeout/restart takeover.
 2. Compose that verifier and transactional first grant with daemon reconciliation,
-   a specialized recovery consumer handshake and commit-before-delivery leases. A retained flock or descriptive
+   the internal exact-grant recovery consumer/watchdog handshakes and application
+   commit-before-delivery coordinator, including executable host/private-transport
+   support for the new initial sequence. A retained flock or descriptive
    PID is not descendant cleanup proof; do not adopt old grants or controllers.
 3. Implement an authorized writable reopen/resume path that cannot re-admit the
    original input, replay arbitrary effects or silently repair/adopt dirty work.

@@ -152,13 +152,23 @@ cannot forge or consume these records. A retained audit/lease is not permission
 to restart, and a cancelled claim cannot grant execution. Revocation, expiry,
 changed context/freshness and unrelated blockers reject grant delivery/replay.
 
-There is no concrete recovery host verifier, specialized consumer handshake,
-daemon reconciliation or authorized writable reopen yet. Existing consumers
-reject recovery's continued global sequence as an ordinary first grant. No CLI/RPC
-operation exposes recovery authorization, and production/automatic durable recovery
-remain disabled. Do not replay retained grant files, reset sequence/watchdogs,
-edit resource markers or repair the worktree to bypass this boundary. See
-[T10 authorization evidence](research/pi-durable-t10/recovery-authorization.md).
+An internal application coordinator now consumes opaque fresh host verification,
+commits before initial recovery-envelope delivery, reobserves owner/time after
+commit and seeds ordinary renewal only from the identical live result. Failed
+commit/delivery results permanently fence it, even when the commit succeeded;
+only diagnostic retention may retry. Internal TypeScript and watchdog-policy
+handshakes require the exact expected claim/lease/evidence envelope and cannot
+initialize through ordinary lease controls. These are trusted composition ports,
+not agent/operator operations or proof of process safety.
+
+There is still no concrete recovery host verifier, executable recovery
+control/handoff, daemon reconciliation or authorized writable reopen. Existing
+executables reject recovery's continued global sequence as an ordinary first
+grant. No CLI/RPC operation exposes recovery authorization, and production/automatic
+durable recovery remain disabled. Do not replay retained grant files, reset
+sequence/watchdogs, edit resource markers or repair the worktree to bypass this
+boundary. See [T10 authorization evidence](research/pi-durable-t10/recovery-authorization.md)
+and [coordinator/watchdog evidence](research/pi-durable-t10/recovery-session.md).
 
 ## Revoke and clean up known resources
 

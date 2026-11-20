@@ -9,6 +9,9 @@ use forge_app::{
     },
 };
 
+#[path = "recovery_session_tests.rs"]
+mod session_tests;
+
 struct Host {
     owner: Owner,
     now: u64,

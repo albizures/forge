@@ -102,6 +102,34 @@ impl Session {
         })
     }
 
+    /// Only the recovery coordinator may seed renewal from its freshly verified,
+    /// identically committed and delivered grant. Not a retained-grant constructor.
+    pub(crate) fn after_recovery(
+        workspace: String,
+        prepared: &crate::durable_execution::recovery::authorization::Prepared,
+        committed: &crate::durable_execution::recovery::authorization::Grant,
+        now: u64,
+    ) -> Result<Self, RegistrationError> {
+        prepared.validate(now)?;
+        if prepared.grant() != committed {
+            return Err(denied());
+        }
+        let lease = &committed.lease;
+        let mut session = Self::new(
+            workspace,
+            lease.launch.clone(),
+            lease.generation,
+            lease.daemon_epoch.clone(),
+        )?;
+        session.issuer.previous = Some(lease.clone());
+        session.issuer.last_observation = Some(now);
+        session.state = State::Active {
+            next_renewal: lease.issued_boottime_millis + RENEW_AFTER_MILLIS,
+            last_observed: now,
+        };
+        Ok(session)
+    }
+
     /// Withdraw permission after an adapter failure, preserving the first
     /// terminal cause. This may retry diagnostic retention, never authorization.
     /// # Errors

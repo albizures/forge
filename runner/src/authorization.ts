@@ -38,6 +38,7 @@ export class Authorization {
   #execution: string;
   #previous: Grant | undefined;
   #payload: string | undefined;
+  #recovery: { envelope: string; lease: string } | undefined;
   #lastNow: number | undefined;
   #clock: () => number;
   #timer: ReturnType<typeof setInterval>;
@@ -49,6 +50,45 @@ export class Authorization {
     this.#clock = clock;
     this.#timer = setInterval(() => { try { this.check(); } catch { /* check terminally aborts; no permission is returned. */ } }, 50);
     this.#timer.unref();
+  }
+
+  /** Prepare a waiting recovery consumer from trusted, freshly verified host
+   * composition only. This snapshot is NOT delivery or permission. Never build
+   * it from a retained audit, agent input or ordinary runner request. The host
+   * must keep exclusive ownership and deliver only after the Forge commit.
+   * No production entrypoint currently exposes this handshake.
+   */
+  static forRecovery(launch: Launch, generation: number, owner: Owner, daemonEpoch: string, expected: unknown, clock = hostClockUpperBound): Authorization {
+    const authorization = new Authorization(launch, generation, owner, daemonEpoch, clock);
+    try {
+      exactKeys(expected, ['claim', 'lease', 'evidence_sha256']);
+      exactKeys(expected.claim, ['operation_id', 'daemon_epoch', 'launch', 'candidate_sha256']);
+      exactKeys(expected.lease, leaseKeys);
+      const claim = expected.claim;
+      for (const identity of [claim.operation_id, claim.daemon_epoch]) {
+        requireCondition(typeof identity === 'string' && identity.trim().length > 0 && Buffer.byteLength(identity) <= 200 && !/\p{Cc}/u.test(identity), 'assignment-lease-denied');
+      }
+      for (const digest of [claim.candidate_sha256, expected.evidence_sha256]) {
+        requireCondition(typeof digest === 'string' && /^[a-f0-9]{64}$/.test(digest), 'assignment-lease-denied');
+      }
+      requireCondition(claim.daemon_epoch === daemonEpoch && canonical(claim.launch) === canonical(launch), 'assignment-lease-denied');
+      requireCondition(canonical({ launch: expected.lease.launch, generation: expected.lease.generation, owner: expected.lease.owner, daemon_epoch: expected.lease.daemon_epoch }) === authorization.#binding, 'assignment-lease-denied');
+      requireCondition(Number.isSafeInteger(expected.lease.sequence) && expected.lease.sequence > 1 && expected.lease.sequence <= 4294967295, 'assignment-lease-denied');
+      authorization.#recovery = { envelope: canonical(expected), lease: canonical(expected.lease) };
+      return authorization;
+    } catch { return authorization.#fence(); }
+  }
+
+  /** First delivery is the exact committed claim/lease/evidence envelope, not an
+   * ordinary lease or recovered disk record. Retries never reset the deadline;
+   * after this handshake ordinary sequential renewals apply in the new epoch.
+   */
+  acceptRecovery(value: unknown): void {
+    try {
+      requireCondition(this.#recovery && canonical(value) === this.#recovery.envelope, 'assignment-lease-denied');
+      exactKeys(value, ['claim', 'lease', 'evidence_sha256']);
+      this.#accept(value.lease, true);
+    } catch { this.#fence(); }
   }
 
   get signal(): AbortSignal { return this.#controller.signal; }
@@ -74,8 +114,13 @@ export class Authorization {
    * Safe-integer checks reject lossy u64 JSON rather than rounding authority.
    */
   accept(value: unknown): void {
+    this.#accept(value, false);
+  }
+
+  #accept(value: unknown, recovery: boolean): void {
     try {
       const now = this.#now();
+      requireCondition(!this.#recovery || this.#previous || recovery, 'assignment-lease-denied');
       exactKeys(value, leaseKeys);
       exactKeys(value.owner, ownerKeys);
       requireCondition(canonical({ launch: value.launch, generation: value.generation, owner: value.owner, daemon_epoch: value.daemon_epoch }) === this.#binding, 'assignment-lease-denied');
@@ -90,7 +135,9 @@ export class Authorization {
         if (canonical(value) === this.#payload) return;
         requireCondition(value.daemon_epoch === previous.daemon_epoch && value.sequence === previous.sequence + 1 && value.issued_boottime_millis >= previous.issued_boottime_millis && value.expires_boottime_millis > previous.expires_boottime_millis, 'assignment-lease-denied');
       } else {
-        requireCondition(value.sequence === 1, 'assignment-lease-denied');
+        requireCondition(recovery
+          ? this.#recovery && canonical(value) === this.#recovery.lease
+          : value.sequence === 1, 'assignment-lease-denied');
       }
       // Retain primitives only; mutation of a caller-owned payload cannot renew.
       this.#previous = { sequence: value.sequence, daemon_epoch: value.daemon_epoch, issued_boottime_millis: value.issued_boottime_millis, expires_boottime_millis: value.expires_boottime_millis };
