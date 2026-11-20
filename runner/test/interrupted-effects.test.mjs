@@ -10,12 +10,13 @@ import { join } from 'node:path';
 import { componentHash } from '../src/contract.ts';
 import { guardEffectTool, inspectInterruptedEffects, requireNoInterruptedEffects } from '../src/interrupted-effects.ts';
 import { createCheckRuntime } from '../src/check-runtime.ts';
+import { inspectRecoveryCandidate } from '../src/recovery.ts';
 import { Authorization, guardProvider } from '../src/authorization.ts';
 import { Harness, createRegistry, defineExtension, defineTool } from '@earendil-works/pi-durable';
 import { createModels, fauxProvider, fauxAssistantMessage, fauxToolCall } from '@earendil-works/pi-ai';
 import { BACKGROUND_CONTEXT as context } from '@earendil-works/chord/context';
 import { openNodeSqliteStorage } from '@earendil-works/pi-durable/storage/sqlite/node';
-import { databasePath, persistIntent, persistRoot } from '../src/storage.ts';
+import { databasePath, observe, persistIntent, persistRoot } from '../src/storage.ts';
 
 const fixtureGrant = JSON.parse(await readFile(new URL('./authorization-lease.json', import.meta.url), 'utf8'));
 
@@ -110,6 +111,9 @@ for (const interrupted of [true, false]) test(`external mutation ${interrupted ?
     if (interrupted) {
       assert.deepEqual(Object.keys(effects[0]).sort(), ['call_id', 'conversation_id', 'task_id']);
       await assert.rejects(requireNoInterruptedEffects(directory, launch), { code: 'runner-interrupted-effect' });
+      const admission = await observe(directory, launch.assignment_id, launch.runtime_id, launch.operation_id);
+      assert.equal(admission.state, 'accepted');
+      await assert.rejects(inspectRecoveryCandidate(directory, launch, admission.admission_id), { code: 'runner-interrupted-effect' });
       // The real Check entry boundary must fence before bootstrap, not merely
       // rely on the Harness refusing to replay this particular tool task.
       const grant = fixtureGrant;

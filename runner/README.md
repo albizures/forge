@@ -16,6 +16,25 @@ still does not select or launch this backend. T06 provides tested explicit
 profile/authentication mapping, T07 actual Check-bound dispatch, and T15 matched installation. Do not use
 this harness to execute live Assignments.
 
+## T10 recovery evidence increment — not automatic recovery
+
+`src/recovery.ts::inspectRecoveryCandidate` reads the original full Launch,
+committed root and exact accepted input admission through the protected read-only
+adapter. Only a `queued` or `placed` original input is a candidate. Finished or
+failed inputs require intervention; passive writes, continue submissions, missing
+admissions and interrupted initialization cannot manufacture recovery input. The
+existing whole-store interrupted-effect scan runs before returning any candidate.
+No Harness, model, tool, writable repair or new submission is created.
+
+This helper is **not yet wired to daemon reconciliation or writable reopen** and
+its result is not authorization. The future controller must validate current
+Forge authority, freshness, profile/worktree bindings and exclusive ownership,
+then commit a new lease before any writable open or scheduling. Existing lease
+history still rejects a restarted issuer. Tests include an actual killed Node
+model process, not an owned-supervisor recovery or proof of process cleanup.
+T10 remains incomplete; [increment evidence and remaining work](../docs/research/pi-durable-t10/README.md).
+Production dispatch and automatic recovery remain disabled.
+
 ## T06 explicit profile/authentication construction
 
 `src/profiles.ts::createProfileRuntime` consumes the Forge-owned resolved
