@@ -3516,7 +3516,7 @@ mod tests {
             "retirement-pending still reserves capacity"
         );
         reopened
-            .retire_agent_assignment_resource(assignment, "retirement-pending", "operator")
+            .finish_agent_assignment_retirement(assignment)
             .unwrap();
         assert!(
             !reopened

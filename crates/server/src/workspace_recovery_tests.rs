@@ -407,7 +407,11 @@ fn late_bootstrap_absence_repair_and_resume_do_not_authorize_replacement() {
     );
     assert!(app.reopen_task(original.record_id).is_err());
     assert_eq!(launch_count(&provider), 1);
-    app.retire_agent_assignment(&original.id).unwrap();
+    assert_eq!(
+        app.retire_agent_assignment(&original.id).unwrap_err().code,
+        "assignment-retirement-unreconciled",
+        "provider absence cannot waive unknown launch resources",
+    );
     assert!(session.context().is_err());
     assert!(
         session.acknowledge().is_err(),
@@ -443,6 +447,9 @@ fn late_bootstrap_absence_repair_and_resume_do_not_authorize_replacement() {
     );
     app.resolve_unknown_agent_resources(&original.id, true, true)
         .unwrap();
+    assert!(app.agent_assignment_info(&original.id).unwrap().capacity_reserved());
+    app.retire_agent_assignment(&original.id).unwrap();
+    app.resume_task_dispatch(original.record_id).unwrap();
     let new = fixture
         .store()
         .claim_record_agent_assignment(original.record_id, "safe-replacement")

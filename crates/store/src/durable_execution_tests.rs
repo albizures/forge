@@ -3,6 +3,10 @@ use super::*;
 mod effect_resolution_tests;
 #[path = "durable_execution/effects_tests.rs"]
 mod effects_tests;
+#[path = "durable_execution/retirement_application_tests.rs"]
+mod retirement_application_tests;
+#[path = "durable_execution/retirement_tests.rs"]
+mod retirement_tests;
 use forge_app::{
     AgentDispatchRepository, NewAgentAssignment, NewTypedRecord, Project, ProjectRepository,
     RecordRepository, RecordType, WorkspaceRepository,

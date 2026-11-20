@@ -22,8 +22,11 @@ async fn verify_clean_recovery_rpc(
     store.close_agent_assignment("bound-check", forge_app::AgentAssignmentClosureReason::Retired).unwrap();
     assert!(RecordApiServer::recover_retained_work(daemon, request.clone()).await.is_err());
     for resource in store.list_agent_assignment_resources("bound-check").unwrap() {
-        store.retire_agent_assignment_resource("bound-check", &resource.resource_kind, &resource.resource_id).unwrap();
+        if resource.resource_kind != "retirement-pending" {
+            store.retire_agent_assignment_resource("bound-check", &resource.resource_kind, &resource.resource_id).unwrap();
+        }
     }
+    store.finish_agent_assignment_retirement("bound-check").unwrap();
     let mut wrong_scope = request.clone();
     wrong_scope.selection.workspace = Some("missing".into());
     assert!(RecordApiServer::recover_retained_work(daemon, wrong_scope).await.is_err());

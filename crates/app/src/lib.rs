@@ -8,6 +8,7 @@ use std::{
 
 pub mod agent_profiles;
 pub mod assignment;
+pub mod assignment_retirement;
 pub mod authorization_lease;
 pub mod check_templates;
 pub mod checks;
@@ -2327,6 +2328,14 @@ pub trait AgentDispatchRepository: RecordRepository + WorkspaceDispatchRepositor
         resource_kind: &str,
         resource_id: &str,
     ) -> Result<AgentAssignmentResource, RegistrationError>;
+    /// Finalizes operator retirement only after revocation and reconciliation of every
+    /// other retained resource. Atomically checks those facts and retires only the
+    /// `retirement-pending/operator` marker; adapter success alone is insufficient.
+    /// Exact retries preserve the original retirement timestamp. Never clears a hold.
+    fn finish_agent_assignment_retirement(
+        &self,
+        assignment_id: &str,
+    ) -> Result<(), RegistrationError>;
     /// Atomically audits an explicit operator assertion and resolves provisioning uncertainty.
     /// Requires a closed (capability-revoked) Assignment; never retires known resources.
     fn resolve_unknown_agent_resources(&self, assignment_id: &str)
@@ -3113,11 +3122,9 @@ impl Application {
         adapter.retire(&context, dispatch).map_err(|error| {
             RegistrationError::new("agent-retirement-failed", format!("{error:?}"))
         })?;
-        dispatch.retire_agent_assignment_resource(
-            assignment_id,
-            "retirement-pending",
-            "operator",
-        )?;
+        // A successful cancellation/cleanup request is not proof that retained
+        // resources are reconciled. Check and finalize together, after external I/O.
+        dispatch.finish_agent_assignment_retirement(assignment_id)?;
         Ok(assignment)
     }
 

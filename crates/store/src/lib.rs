@@ -18,6 +18,7 @@ use forge_app::{
 };
 use rusqlite::{Connection, ErrorCode, OptionalExtension, params};
 
+mod assignment_retirement;
 mod assignment_sessions;
 mod check_templates;
 mod checks;
@@ -3066,6 +3067,7 @@ impl AgentDispatchRepository for SqliteProjectRepository {
         resource_kind: &str,
         resource_id: &str,
     ) -> Result<AgentAssignmentResource, RegistrationError> {
+        forge_app::assignment_retirement::validate_resource_retirement(resource_kind)?;
         forge_app::durable_execution::effects::validate_resource_retirement(resource_kind)?;
         let connection = self
             .connection
@@ -3073,6 +3075,13 @@ impl AgentDispatchRepository for SqliteProjectRepository {
             .map_err(|_| RegistrationError::new("storage", "Project storage lock is poisoned"))?;
         connection.execute("UPDATE agent_assignment_resources SET retired_at_millis = COALESCE(retired_at_millis, ?1) WHERE assignment_id = ?2 AND resource_kind = ?3 AND resource_id = ?4", params![now_millis()?, assignment_id, resource_kind, resource_id]).map_err(storage_error)?;
         connection.query_row("SELECT assignment_id, resource_kind, resource_id, created_at_millis, retired_at_millis FROM agent_assignment_resources WHERE assignment_id = ?1 AND resource_kind = ?2 AND resource_id = ?3", params![assignment_id, resource_kind, resource_id], |row| Ok(AgentAssignmentResource { assignment_id: row.get(0)?, resource_kind: row.get(1)?, resource_id: row.get(2)?, created_at_millis: row.get::<_, i64>(3)?.cast_unsigned(), retired_at_millis: row.get::<_, Option<i64>>(4)?.map(i64::cast_unsigned) })).map_err(|error| match error { rusqlite::Error::QueryReturnedNoRows => RegistrationError::new("assignment-resource-not-found", "Agent Assignment resource does not exist"), error => storage_error(error) })
+    }
+
+    fn finish_agent_assignment_retirement(
+        &self,
+        assignment_id: &str,
+    ) -> Result<(), RegistrationError> {
+        self.finish_retirement(assignment_id)
     }
 
     fn resolve_unknown_agent_resources(

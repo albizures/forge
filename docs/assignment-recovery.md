@@ -164,6 +164,14 @@ restart and reserve capacity. Correct the provider/endpoint problem and retry th
 same `assignment-retire`, including for an already closed Assignment. Do not
 bypass ownership checks or treat a successful mutation alone as verified absence.
 
+Provider success alone also cannot finalize retirement. Forge atomically requires
+revoked authority and every other retained resource to be reconciled before
+retiring its `retirement-pending/operator` marker. Otherwise `assignment-retire`
+returns `assignment-retirement-unreconciled`, with no success JSON, even if known
+provider cleanup succeeded. The marker, capacity reservation and Dispatch Hold
+remain. Generic provider resource cleanup cannot retire this marker. Exact
+finalization retries preserve its original retirement timestamp.
+
 ## Resolve unknown resources only after external safety checks
 
 A crash may leave a provisioning-intent marker without the resource identity
@@ -189,7 +197,11 @@ calls preserve the original audit.
 Only provisioning-intent uncertainty is resolved. Known resources,
 retirement-pending and other blockers remain untouched and reserve capacity until
 separately resolved. The Dispatch Hold remains, too. Inspect again rather than
-assuming the command's success means recovery is complete.
+assuming the command's success means recovery is complete. After resolving
+unknown provisioning resources, retry the same `assignment-retire` to reconcile
+and finalize its retained retirement marker. This does not clear the hold or
+waive any other blocker. Durable supervised cancellation/absence verification
+is still incomplete; this finalization gate does not supply process-death proof.
 
 ## Authorize retained Implementation work for salvage
 
