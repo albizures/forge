@@ -570,6 +570,37 @@ async fn check_execution(mode: &str) {
             .await
             .unwrap();
         let before = store.agent_assignment_info(assignment_id).unwrap();
+        let inspect_exclusive =
+            forge_server::durable_authorization::effects::inspect_exclusive_and_retain;
+        // This component worker is not supervised. Missing lock evidence must
+        // fail closed; install an explicit lock FIXTURE for adapter composition,
+        // not a claim of verified process absence or production retirement.
+        assert!(
+            inspect_exclusive(&store, "test", &launch, &node(), &inspector)
+                .await
+                .is_err()
+        );
+        assert!(!runtime_directory.join("owner.lock").exists());
+        std::fs::write(runtime_directory.join("owner.lock"), b"lock-fixture").unwrap();
+        std::fs::set_permissions(
+            runtime_directory.join("owner.lock"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let ownership = inspect_exclusive(&store, "test", &launch, &node(), &inspector)
+            .await
+            .unwrap();
+        assert!(
+            forge_runner_host::inspection::ExclusiveInspection::acquire(&runtime_directory)
+                .is_err()
+        );
+        assert!(
+            inspect_exclusive(&store, "test", &launch, &node(), &inspector)
+                .await
+                .is_err()
+        );
+        assert_eq!(store.agent_assignment_info(assignment_id).unwrap(), before);
+        drop(ownership);
         assert_eq!(
             std::fs::read(runtime_directory.join("runtime.sqlite")).unwrap(),
             database_before
@@ -600,9 +631,11 @@ async fn check_execution(mode: &str) {
         daemon.abort();
         let _ = daemon.await;
         let reopened = SqliteProjectRepository::open(&db).unwrap();
-        inspect(&reopened, "test", &launch, &node(), &inspector)
+        let ownership = inspect_exclusive(&reopened, "test", &launch, &node(), &inspector)
             .await
             .unwrap();
+        ownership.verify().unwrap();
+        drop(ownership);
         assert!(
             inspect(
                 &reopened,
@@ -613,6 +646,24 @@ async fn check_execution(mode: &str) {
             )
             .await
             .is_err()
+        );
+        // An inspector failure must release the guard, but never the retained
+        // effects, hold or capacity. The ordinary observation path above remains
+        // available for non-exclusive operator investigation.
+        assert!(
+            inspect_exclusive(
+                &reopened,
+                "test",
+                &launch,
+                Path::new("/missing-node"),
+                &inspector
+            )
+            .await
+            .is_err()
+        );
+        drop(
+            forge_runner_host::inspection::ExclusiveInspection::acquire(&runtime_directory)
+                .unwrap(),
         );
         assert!(
             reopened

@@ -1,7 +1,7 @@
 //! Real Linux process/lock evidence, with a deliberately inert Python worker.
 //! This is not pi-durable admission, process-death proof or release verification.
 use forge_app::authorization_lease::AuthorityHost;
-use forge_runner_host::SpawnedOwner;
+use forge_runner_host::{SpawnedOwner, inspection::ExclusiveInspection};
 use fs2::FileExt;
 use serde_json::Value;
 use std::{
@@ -222,11 +222,22 @@ fn unlock_or_missing_worker_descriptor_cannot_be_replaced_by_lock_file_identity(
 #[test]
 fn exited_worker_is_not_permission_even_while_supervisor_retains_lock() {
     let mut f = Fixture::new();
+    assert!(ExclusiveInspection::acquire(&f.directory).is_err());
     assert!(SpawnedOwner::capture(&mut f.child, &f.directory).is_ok());
     f.command("exit");
     assert!(SpawnedOwner::capture(&mut f.child, &f.directory).is_err());
     let contender = fs::File::open(f.directory.join("owner.lock")).unwrap();
     assert!(contender.try_lock_exclusive().is_err());
+    assert!(ExclusiveInspection::acquire(&f.directory).is_err());
+    f.child.kill().unwrap();
+    f.child.wait().unwrap();
+    let evidence = fs::read(f.directory.join("owner.json")).unwrap();
+    let guard = ExclusiveInspection::acquire(&f.directory).unwrap();
+    guard.verify().unwrap();
+    assert!(contender.try_lock_exclusive().is_err());
+    assert_eq!(fs::read(f.directory.join("owner.json")).unwrap(), evidence);
+    drop(guard);
+    contender.try_lock_exclusive().unwrap();
 }
 
 #[test]
@@ -244,6 +255,7 @@ fn unrelated_child_or_exited_supervisor_cannot_adopt_a_surviving_workers_lock() 
     f.child.wait().unwrap();
     assert!(SpawnedOwner::capture(&mut f.child, &f.directory).is_err());
     // The surviving worker retains the inherited flock; it is not adoptable.
+    assert!(ExclusiveInspection::acquire(&f.directory).is_err());
     let contender = fs::File::open(f.directory.join("owner.lock")).unwrap();
     assert!(contender.try_lock_exclusive().is_err());
 }

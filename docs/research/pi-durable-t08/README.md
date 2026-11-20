@@ -358,3 +358,94 @@ not the independent T18 review.
 
 Summary: no introduced coding-standard violations found; remaining T08 work and
 unrun release gates are not waived.
+
+## Exclusive inspection increment
+
+`crates/runner-host/src/inspection.rs::ExclusiveInspection` now provides an
+explicit host-exclusive inspection guard. It acquires the **existing** protected
+`owner.lock` with the same nonblocking kernel flock used by the supervisor and
+its worker. Missing lock evidence rejects without creating anything. The lock
+opens read-only with no-follow/nonblocking/close-on-exec flags; owner-only
+canonical directory, regular-file ownership, exact permissions and single-link
+checks fail closed. Directory and lock inode/device identity are revalidated.
+The guard retains its original descriptor even if path validation fails; dropping
+it releases only that descriptor's ownership, not Forge resources or capacity.
+
+`crates/server/src/durable_authorization/effects.rs::inspect_exclusive_and_retain`
+checks canonical Workspace/runtime binding before acquiring the guard, then runs
+the existing bounded committed inspector. It revalidates host path identity before
+transactional Forge retention and again before returning the still-held guard.
+Callers can keep competing supervisors fenced throughout dependent investigation;
+errors release the inspection guard without clearing retained blockers. Ordinary
+`inspect_and_retain` remains non-exclusive for read-only investigation alongside
+an active writer. No writable Harness, model/tool input, signal, repository
+mutation, lease grant or resource retirement is added.
+
+This is a reusable inspection boundary, **not production controller integration,
+a resolution waiver, or recovery permission**. Acquiring the flock does not prove
+that escaped external children stopped or that an external outcome is known.
+Trusted same-user filesystem writers must still be excluded; inode observations
+are not a sandbox or a filesystem/database distributed transaction. Production
+scheduling remains disabled. No schema, dependency, CLI/RPC wire or runtime
+component hash changes are required: the runner sources are unchanged.
+
+### Verification
+
+All passed from the repository root:
+
+```sh
+cargo test -p forge-runner-host
+cargo test -p forge-cli --test durable_check_bootstrap
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+(cd runner && npm run check && npm test)
+git diff --check
+```
+
+Final results: **663 Rust harness tests passed, 0 failed, 1 pre-existing opt-in
+probe ignored; all 6 custom-harness supervised scenarios passed; runner typecheck
+and 51 Node tests passed**. Four new guard unit tests cover missing evidence,
+competing descriptors, unchanged lock bytes, release-on-drop, permissions,
+symlinks/hardlinks, replaced locks and replaced directories. Existing actual-host
+process tests now also reject inspection while the supervisor is live, after its
+worker exits but the supervisor retains the lock, and after supervisor death
+while a surviving worker retains the inherited lock. Once the controlled worker
+has exited and its supervisor is killed/reaped, inspection acquires the lock,
+retains original owner evidence, and fences another descriptor until dropped.
+These are isolated process/lock tests, not universal process-death evidence.
+
+Both actual publication-like mutation/receipt fault cases now exercise exclusive
+observation and retention, including after daemon restart. They verify unchanged
+runtime DB bytes, unchanged Forge Assignment/resource state on exact retry,
+retained capacity/blockers and guard release after inspector failure. Their
+component worker is **not** supervised: an explicitly labelled protected lock
+fixture composes this adapter, after first asserting missing evidence rejects
+without creating a lock. Actual supervisor/worker lock behavior is tested
+separately above. Existing mutation counts remain one and tracked/staged/untracked
+work is preserved. This does not establish successful production recovery or
+operator resolution. No packaged or real-provider release checks were run.
+
+### Task-local reviews
+
+Implementation review against T08: “Establish a bounded, explicit operator
+inspection/resolution path” is still partial: the exclusive inspection prerequisite
+exists, but audited resolution and wrong-scope/conflicting/unsafe-ownership
+resolution tests remain missing. “Translate runtime interruption into Forge-visible
+uncertainty before recovery can schedule more model/tools” now has an exclusive
+observation/retention adapter, but no production recovery controller invokes it.
+No unrelated scope expansion or new execution permission was found.
+
+Summary: **T08 remains incomplete; audited operator resolution and production
+recovery integration remain blockers. T09 must not proceed.**
+
+Standards review: no introduced violations found. The host owns the process/lock
+boundary, server owns canonical mapping and bounded process adaptation, and app/
+store retain the existing domain policy/transaction. External inspection remains
+outside the database transaction. Failure neither releases retained capacity nor
+clears holds, and no credentials or tool payloads are added to output. Tests use
+isolated paths and actual process synchronization; workspace verification ran in
+default parallel mode. This is a task-local self-review, not independent T18.
+
+Summary: no introduced coding-standard violations found; missing T08 deliverables
+and unrun release checks remain explicitly blocking.

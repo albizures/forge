@@ -8,6 +8,7 @@ use forge_app::{
         effects::{InterruptedEffect, Repository},
     },
 };
+use forge_runner_host::inspection::ExclusiveInspection;
 use forge_store::SqliteProjectRepository;
 use std::{path::Path, process::Stdio, time::Duration};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -46,6 +47,53 @@ pub async fn inspect_and_retain(
     inspector: &Path,
 ) -> Result<(), RegistrationError> {
     let directory = runtime_directory::mapped(repository, workspace, launch, false)?;
+    inspect_mapped(
+        repository, workspace, launch, node, inspector, &directory, None,
+    )
+    .await
+}
+
+/// Obtain a host-exclusive committed snapshot and retain its blockers while the
+/// same lock remains held. The returned guard keeps competing supervisors out
+/// until the caller finishes its dependent inspection. Never treat success as
+/// permission to resume: this does not verify external process absence, resolve
+/// any effect, clear a hold, or issue execution authority. Missing ownership
+/// evidence fails closed rather than creating a new lock.
+/// # Errors
+/// Rejects scope/binding/path errors before lock acquisition, live owners,
+/// replaced ownership evidence and all ordinary observation/retention failures.
+pub async fn inspect_exclusive_and_retain(
+    repository: &SqliteProjectRepository,
+    workspace: &str,
+    launch: &Launch,
+    node: &Path,
+    inspector: &Path,
+) -> Result<ExclusiveInspection, RegistrationError> {
+    let directory = runtime_directory::mapped(repository, workspace, launch, false)?;
+    let ownership = ExclusiveInspection::acquire(&directory).map_err(|_| denied())?;
+    inspect_mapped(
+        repository,
+        workspace,
+        launch,
+        node,
+        inspector,
+        &directory,
+        Some(&ownership),
+    )
+    .await?;
+    ownership.verify().map_err(|_| denied())?;
+    Ok(ownership)
+}
+
+async fn inspect_mapped(
+    repository: &SqliteProjectRepository,
+    workspace: &str,
+    launch: &Launch,
+    node: &Path,
+    inspector: &Path,
+    directory: &Path,
+    ownership: Option<&ExclusiveInspection>,
+) -> Result<(), RegistrationError> {
     launch.validate()?;
     if !node.is_absolute() || !inspector.is_absolute() {
         return Err(denied());
@@ -58,7 +106,7 @@ pub async fn inspect_and_retain(
     let effects = read_effects(
         node,
         inspector,
-        &directory,
+        directory,
         &input,
         launch,
         Duration::from_secs(30),
@@ -67,6 +115,9 @@ pub async fn inspect_and_retain(
     .await?;
     // External work is complete; authorize scope and immutable binding again in
     // the retention transaction, even after closure or a lost admission reply.
+    if let Some(ownership) = ownership {
+        ownership.verify().map_err(|_| denied())?;
+    }
     repository.retain_interrupted_effects(workspace, launch, &effects)
 }
 
