@@ -26,8 +26,27 @@ admissions and interrupted initialization cannot manufacture recovery input. The
 existing whole-store interrupted-effect scan runs before returning any candidate.
 No Harness, model, tool, writable repair or new submission is created.
 
-This helper is **not yet wired to daemon reconciliation or writable reopen** and
-its result is not authorization. The future controller must validate current
+`node runner/src/inspect-recovery.ts RUNTIME_DIRECTORY` exposes this check as a
+trusted read-only subprocess: stdin is one JSON document of at most 16 KiB with
+exactly `protocol: 1`, the full original `launch` object and original string
+`admission_id`. Success returns `protocol`, `launch` and bounded `candidate`
+(`root`, `admission_id`, pending `status`); failures emit no stdout and only
+`runner-recovery-inspection-failed` on stderr with exit 1. The component digest
+covers both recovery sources. The trusted caller must separately bound process
+duration/output and hold exclusive ownership through dependent operations; this
+command neither acquires that ownership nor proves predecessor cleanup.
+See [wire contract and verification](../docs/research/pi-durable-t10/recovery-inspection-wire.md).
+
+The trusted Rust server `durable_authorization::recovery_inspection` adapter now
+checks the exact persisted original admission and canonical runtime mapping,
+acquires the existing protected host lock, bounds subprocess time/output and
+revalidates mapping/admission after inspection. Its returned guard retains the
+lock; live/competing owners reject. This is historical read-only observation,
+not descendant cleanup proof or live recovery authority. See
+[canonical composition evidence](../docs/research/pi-durable-t10/canonical-recovery-inspection.md).
+
+These helpers are **not yet wired to daemon reconciliation or writable reopen** and
+their results are not authorization. The future controller must validate current
 Forge authority, freshness, profile/worktree bindings and exclusive ownership,
 then commit a new lease before any writable open or scheduling. Existing lease
 history still rejects a restarted issuer. Tests include an actual killed Node

@@ -3,7 +3,9 @@
 //! One `DaemonAuthority` belongs to one daemon lifetime, never retained on disk.
 mod effect_admission;
 pub mod effects;
+mod inspection_process;
 pub mod operator;
+pub mod recovery_inspection;
 pub mod retirement;
 mod runtime_directory;
 use forge_app::{

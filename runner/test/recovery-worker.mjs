@@ -5,10 +5,11 @@ import { Harness, createRegistry } from '@earendil-works/pi-durable';
 import { openNodeSqliteStorage } from '@earendil-works/pi-durable/storage/sqlite/node';
 import { createModels, fauxProvider } from '@earendil-works/pi-ai';
 import { databasePath, persistIntent, persistRoot } from '../src/storage.ts';
+import { componentHash } from '../src/contract.ts';
 
 process.umask(0o077);
 const directory = process.argv[2];
-const launch = JSON.parse(readFileSync(new URL('./wire-v1.json', import.meta.url), 'utf8')).operation.launch;
+const launch = { ...JSON.parse(readFileSync(new URL('./wire-v1.json', import.meta.url), 'utf8')).operation.launch, component_hash: componentHash() };
 const provider = fauxProvider();
 provider.setResponses([async () => {
   // The request has started only after its input and model intent committed.

@@ -6,6 +6,8 @@ use forge_app::{
 };
 use serde::{Deserialize, Serialize};
 
+pub mod recovery_inspection;
+
 /// Separate trusted daemon-to-supervisor pipe control, not operator JSON-RPC or
 /// an agent capability. Only the holder of the directly spawned host's stdin
 /// write end may deliver a transactionally committed grant. Never read from disk.

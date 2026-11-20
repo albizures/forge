@@ -11,8 +11,7 @@ use forge_app::{
 };
 use forge_runner_host::inspection::ExclusiveInspection;
 use forge_store::SqliteProjectRepository;
-use std::{path::Path, process::Stdio, time::Duration};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::{path::Path, time::Duration};
 
 #[cfg(test)]
 #[path = "effects_tests.rs"]
@@ -228,49 +227,11 @@ async fn read_effects(
     deadline: Duration,
     max_response: u64,
 ) -> Result<Vec<InterruptedEffect>, RegistrationError> {
-    let mut child = tokio::process::Command::new(node)
-        .arg(inspector)
-        .arg(directory)
-        // In particular, exclude NODE_OPTIONS, ambient Pi settings and secrets.
-        .env_clear()
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|_| denied())?;
-    let result = tokio::time::timeout(deadline, async {
-        let mut stdin = child.stdin.take().ok_or_else(denied)?;
-        let stdout = child.stdout.take().ok_or_else(denied)?;
-        stdin.write_all(input).await.map_err(|_| denied())?;
-        drop(stdin);
-        let mut bytes = Vec::new();
-        stdout
-            .take(max_response + 1)
-            .read_to_end(&mut bytes)
+    let bytes =
+        super::inspection_process::read(node, inspector, directory, input, deadline, max_response)
             .await
             .map_err(|_| denied())?;
-        if bytes.len() as u64 > max_response {
-            return Err(denied());
-        }
-        if !child.wait().await.map_err(|_| denied())?.success() {
-            return Err(denied());
-        }
-        decode(&bytes, launch)
-    })
-    .await;
-    let Ok(Ok(effects)) = result else {
-        // Reap only this directly spawned read-only inspector. This is not
-        // Assignment retirement or evidence that external effects stopped.
-        // Even a read-only child can be stuck in kernel I/O. Do not turn the
-        // observation deadline into an unbounded wait or infer exit on timeout.
-        tokio::time::timeout(Duration::from_secs(1), child.kill())
-            .await
-            .map_err(|_| denied())?
-            .map_err(|_| denied())?;
-        return Err(denied());
-    };
-    Ok(effects)
+    decode(&bytes, launch)
 }
 
 fn decode(bytes: &[u8], launch: &Launch) -> Result<Vec<InterruptedEffect>, RegistrationError> {

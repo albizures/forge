@@ -2,7 +2,26 @@
 
 ## Status: partial; T10 remains pending
 
-The latest [transactional recovery-grant increment](recovery-authorization.md)
+The latest [canonical Rust-to-Node inspection increment](canonical-recovery-inspection.md)
+adds explicit typed internal wire contracts, canonical original-admission/path
+verification, bounded subprocess I/O and a retained exclusive inspection guard.
+Five new Rust tests include actual store/kernel-lock/Node composition and binding
+change during external observation. All four repository gates pass (740 Rust
+harness tests plus seven supervised scenarios; one pre-existing opt-in probe
+ignored), runner typecheck and 70 Node tests pass. This is a read-only host-verifier
+component, not predecessor cleanup proof, a `RecoveryHost`, waiting-owner handoff,
+recovery consumer/daemon integration or writable recovery. T10 remains pending.
+
+The preceding [bounded inspection entrypoint increment](recovery-inspection-wire.md)
+exposes exact committed pending-input/effect inspection through a strict read-only
+subprocess contract and includes both recovery sources in the component digest.
+Six new wire tests and the extended actual model-process crash test pass. All four
+repository gates pass (735 Rust harness tests plus seven supervised scenarios;
+one pre-existing opt-in probe ignored), runner typecheck and 70 Node tests pass.
+This is a runtime inspection component only: no concrete `RecoveryHost`, consumer
+handshake, daemon reconciliation or writable recovery exists. T10 stays pending.
+
+The preceding [transactional recovery-grant increment](recovery-authorization.md)
 adds an application-owned external-verification boundary and atomic first recovery
 lease/audit/claim consumption, with ten new policy tests. Final repository gates
 pass: **735 Rust harness tests plus seven supervised scenarios**, one pre-existing
