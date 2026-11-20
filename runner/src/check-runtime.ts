@@ -4,10 +4,13 @@ import { Authorization } from './authorization.ts';
 import { bootstrapCheck, type CapabilityEnvironment, type CheckBinding } from './bootstrap.ts';
 import { Denied, requireCondition, type Launch } from './contract.ts';
 import { createProfileRuntime, type Configuration } from './profiles.ts';
+import { requireNoInterruptedEffects } from './interrupted-effects.ts';
+import { validateDirectory } from './storage.ts';
 
-/** Build model/tool inputs only after authenticated bootstrap. No conversation or
- * storage is opened here. A failure fences this consumer, never releases capacity
- * or establishes cleanup. The host must persist any uncertain execution state.
+/** Inspect committed effect state before bootstrap; build model/tool inputs only
+ * after bootstrap succeeds. No writable storage or conversation is opened here.
+ * A failure fences this consumer, never releases capacity or establishes cleanup.
+ * The host must hold exclusive ownership and persist uncertain execution state.
  */
 export async function createCheckRuntime(
   launch: Launch,
@@ -17,6 +20,7 @@ export async function createCheckRuntime(
   configuration: Configuration,
   credentialFile: string,
   authorization: Authorization,
+  directory: string,
 ): Promise<ReturnType<typeof createProfileRuntime>> {
   try {
     // Snapshot before bootstrap's await; caller mutation cannot change the cwd,
@@ -26,6 +30,9 @@ export async function createCheckRuntime(
     const env = structuredClone(capability);
     const config = structuredClone(configuration);
     requireCondition(config.cwd === expected.executionDirectory, 'assignment-runtime-failed');
+    validateDirectory(directory, config.cwd);
+    authorization.admitFor(identity, generation);
+    await requireNoInterruptedEffects(directory, identity);
     const trusted = await bootstrapCheck(identity, generation, expected, env, authorization);
     authorization.admitFor(identity, generation);
     const runtime = createProfileRuntime(config, credentialFile, authorization, { ...env });

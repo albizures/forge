@@ -40,7 +40,7 @@ await once(barrier, 'listening');
 async function execute() {
   try {
     const runtime = await createCheckRuntime(launch, input.generation, input.bound, input.capability,
-      input.configuration, input.credential_file, authorization);
+      input.configuration, input.credential_file, authorization, directory);
     emit({ event: 'bootstrapped', calls, tools });
     // Test synchronization only; this cannot create/extend execution authority.
     await released;

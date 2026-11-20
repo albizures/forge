@@ -10,7 +10,7 @@ export function requireCondition(condition: unknown, code: string): asserts cond
 }
 export function componentHash(): string {
   const hash = createHash('sha256');
-  for (const path of ['package-lock.json', 'prepare-reader.mjs', 'src/contract.ts', 'src/storage.ts', 'src/main.ts', 'src/authorization.ts', 'src/profiles.ts', 'src/bootstrap.ts', 'src/check-runtime.ts', 'src/owner.ts']) {
+  for (const path of ['package-lock.json', 'prepare-reader.mjs', 'src/contract.ts', 'src/storage.ts', 'src/main.ts', 'src/authorization.ts', 'src/profiles.ts', 'src/bootstrap.ts', 'src/check-runtime.ts', 'src/interrupted-effects.ts', 'src/owner.ts']) {
     hash.update(path).update(readFileSync(new URL('../' + path, import.meta.url)));
   }
   return hash.digest('hex');

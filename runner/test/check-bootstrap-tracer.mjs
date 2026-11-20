@@ -29,7 +29,7 @@ try {
     const config = input.execution.configuration;
     assert.equal(config.cwd, input.bound.executionDirectory);
     assert.deepEqual(config.tools, ['read', 'write', 'edit', 'bash']);
-    const runtime = await createCheckRuntime(launch, generation, input.bound, input.capability, config, input.execution.key, authorization);
+    const runtime = await createCheckRuntime(launch, generation, input.bound, input.capability, config, input.execution.key, authorization, directory);
     // Only this test composition replaces the selected model. The real guarded
     // coding tool, explicit environment/cwd and authenticated CLI are unchanged.
     const model = fauxProvider();

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { mkdtemp, mkdir, writeFile, readFile, rm, access } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { Authorization } from '../src/authorization.ts';
 import { bootstrapCheck } from '../src/bootstrap.ts';
 import { createCheckRuntime } from '../src/check-runtime.ts';
@@ -47,7 +47,9 @@ async function runtimeFixture(t) {
   const key = join(home, 'key');
   await writeFile(key, 'T07-MODEL-KEY', { mode: 0o600 });
   const config = { version: 1, model: 'openai/gpt-4.1', thinkingLevel: 'off', tools: ['bash'], context: { instructions: 'Approved profile', resources: [] }, cwd: f.bound.executionDirectory };
-  return { ...f, key, config, runtime: () => createCheckRuntime(grant.launch, grant.generation, f.bound, f.capability, config, key, f.authorization) };
+  const directory = join(dirname(f.bound.executionDirectory), 'runtime');
+  await mkdir(directory, { mode: 0o700 });
+  return { ...f, key, config, runtime: () => createCheckRuntime(grant.launch, grant.generation, f.bound, f.capability, config, key, f.authorization, directory) };
 }
 
 test('Check runtime composes authenticated behavior/context only after bootstrap', async t => {

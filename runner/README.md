@@ -68,8 +68,10 @@ uses the actual CLI/server and authenticated Outcome path.
 `src/check-runtime.ts::createCheckRuntime` snapshots trusted launch inputs, checks
 the bound cwd, then composes the explicit profile runtime only after successful
 bootstrap. Authenticated behavior/context are added to the agent instructions;
-model/tool construction failures also fence this consumer. This function opens no
-storage, creates no conversation and supplies no execution authority of its own.
+model/tool construction failures also fence this consumer. Before bootstrap it
+now validates the supplied runtime directory and reads committed interrupted-tool
+state (see the T08 increment below). It opens no writable storage, creates no
+conversation and supplies no execution authority of its own.
 The caller still owns pre-capability preflight, exclusive ownership, admission,
 supervision and durable uncertainty retention.
 
@@ -101,6 +103,31 @@ delivery with fixture authorization, not a supervised production caller.
 Actual supervised Check dispatch, capability issuance ordering and supervised
 host answer delivery remain outstanding T07 work; see the
 [T07 evidence/handoff](../docs/research/pi-durable-t07/README.md).
+
+## T08 interrupted-effect admission fence (partial)
+
+`src/interrupted-effects.ts` scans committed `pi.tool` v3 tasks through the pinned
+physical read-only adapter, before `Harness.open` can settle interrupted calls or
+schedule a model. Full Launch identity must match. Unsettled execution intents and
+failed/aborted/faulted/orphaned receipts block reopening; completed tool results do
+not. The scan includes child conversations, is paginated and bounded, and fails
+closed for unknown tool contracts. No automatic replay-safe exception is approved.
+Intent, arguments and results remain in protected runtime storage; the returned
+identities contain no command text or tool output.
+
+`createCheckRuntime` requires an explicit protected runtime directory and performs
+this fence before authenticated bootstrap. Its caller must already hold exclusive
+host ownership, as for writable opening. Failure closes that lease consumer; it
+does not revoke Forge authority or prove process/child absence. Inspection never
+repairs runtime state or changes Git/worktree contents.
+
+**This is not complete T08 or usable recovery.** Forge-visible interrupted-effect
+resource/audit persistence, operator resolution, and integration into a future
+recovery controller are not implemented. There is no resolution command, no
+permission to rerun an interrupted command, and no exactly-once guarantee. Do not
+edit runtime SQLite or clear an ordinary Dispatch Hold to bypass this fence.
+Production durable dispatch and automatic recovery remain disabled. See the
+[T08 evidence and remaining work](../docs/research/pi-durable-t08/README.md).
 
 ## Reproduce
 
