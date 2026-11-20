@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { DatabaseSync } from 'node:sqlite';
 import { once } from 'node:events';
 import { createServer } from 'node:http';
 import { spawn, execFileSync } from 'node:child_process';
@@ -127,6 +128,49 @@ for (const interrupted of [true, false]) test(`external mutation ${interrupted ?
   assert.equal(mutations, 1);
 });
 
+test('missing, malformed and non-root journal targets deny inspection before bootstrap', async t => {
+  const home = await mkdtemp(join(tmpdir(), 'forge-effect-root-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const directory = join(home, 'runtime'), worktree = join(home, 'worktree');
+  await mkdir(directory, { mode: 0o700 });
+  await mkdir(worktree, { mode: 0o700 });
+  const launch = { ...fixtureGrant.launch, component_hash: componentHash() };
+  persistIntent(directory, launch);
+  const storage = await openNodeSqliteStorage(databasePath(directory));
+  const root = await storage.mintId();
+  const child = await storage.mintId();
+  const owned = await storage.mintId();
+  await storage.commit([[
+    { type: 'conversation', value: { id: root } },
+    { type: 'conversation', value: { id: child, parent: { conversationId: root, at: 100 } } },
+    { type: 'conversation', value: { id: owned, owner: { conversationId: root, taskId: 101 } } },
+  ]], () => {}, context);
+  await storage.close(context);
+  // These are committed-storage corruption fixtures, not valid recovery inputs.
+  // Even a scan with zero tool tasks must not certify an invalid root as safe.
+  for (const target of [null, 'SECRET-CANARY', -1, 1.5, Number.MAX_SAFE_INTEGER + 1, 999, child, owned]) {
+    const db = new DatabaseSync(databasePath(directory));
+    try { db.prepare('UPDATE forge_runner_identity SET root=?').run(target); }
+    finally { db.close(); }
+    const before = await readFile(databasePath(directory));
+    // node:sqlite itself rejects integers it cannot represent, before the
+    // inspector's root check. The public Check/wire boundaries redact both.
+    await assert.rejects(inspectInterruptedEffects(directory, launch), { code: target === Number.MAX_SAFE_INTEGER + 1 ? 'ERR_OUT_OF_RANGE' : 'runner-recovery-required' });
+    const authorization = new Authorization(launch, fixtureGrant.generation, fixtureGrant.owner, fixtureGrant.daemon_epoch, () => 1000);
+    authorization.accept({ ...fixtureGrant, launch, sequence: 1, issued_boottime_millis: 1000, expires_boottime_millis: 31000 });
+    try {
+      // Invalid bootstrap/configuration inputs must not be consumed at all.
+      await assert.rejects(createCheckRuntime(launch, fixtureGrant.generation, { executionDirectory: worktree }, {}, { cwd: worktree }, '/missing-key', authorization, directory), { code: 'assignment-runtime-failed' });
+      assert.throws(() => authorization.admit());
+    } finally { authorization.close(); }
+    assert.deepEqual(await readFile(databasePath(directory)), before);
+  }
+  const db = new DatabaseSync(databasePath(directory));
+  try { db.prepare('UPDATE forge_runner_identity SET root=?').run(root); }
+  finally { db.close(); }
+  assert.deepEqual(await inspectInterruptedEffects(directory, launch), []);
+});
+
 test('committed task fixtures: pagination, nested calls, failed receipts and unknown contracts fail closed', async t => {
   // Storage-contract fixtures, not additional external-effect/process evidence.
   const directory = await mkdtemp(join(tmpdir(), 'forge-effect-fixtures-'));
@@ -137,7 +181,9 @@ test('committed task fixtures: pagination, nested calls, failed receipts and unk
   await assert.rejects(inspectInterruptedEffects(directory, launch), { code: 'runner-recovery-required' });
   const storage = await openNodeSqliteStorage(databasePath(directory));
   t.after(() => storage.close(context));
-  persistRoot(directory, 1);
+  const root = await storage.mintId();
+  persistRoot(directory, root);
+  await storage.commit([[{ type: 'conversation', value: { id: root } }]], () => {}, context);
   const tasks = [];
   for (let index = 0; index < 101; index++) tasks.push({
     id: await storage.mintId(), conversationId: 1, kind: 'pi.tool', version: 3,

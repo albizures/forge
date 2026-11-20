@@ -224,15 +224,14 @@ impl SupervisedDispatch {
                 .close_agent_assignment(id, forge_app::AgentAssignmentClosureReason::Retired)
                 .unwrap();
         }
-        let mut service = self
-            .authority
-            .bind(
+        let mut service = tokio::runtime::Handle::current()
+            .block_on(self.authority.bind_inspected(
                 &store,
                 "test".into(),
                 launch.clone(),
                 attempt.generation,
                 &mut process.child,
-            )
+            ))
             .unwrap();
         let mut events = vec![owned];
         let mut answer = None;

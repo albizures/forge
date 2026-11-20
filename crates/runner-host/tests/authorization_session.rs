@@ -10,6 +10,8 @@ use forge_app::{
 };
 use forge_server::durable_authorization::DaemonAuthority;
 use forge_store::SqliteProjectRepository;
+#[path = "authorization_session/effect_admission.rs"]
+mod effect_admission;
 use rusqlite::params;
 use serde_json::Value;
 use std::{
@@ -83,6 +85,10 @@ struct Fixture {
 
 impl Fixture {
     fn new(mode: &str) -> Self {
+        Self::with_component(mode, "controlled-component".into())
+    }
+
+    fn with_component(mode: &str, component_hash: String) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let root = std::env::temp_dir().join(format!(
             "forge-lease-session-{}-{}",
@@ -159,7 +165,7 @@ impl Fixture {
             conversation_id: "conversation".into(),
             store_id: "store".into(),
             forge_revision: "test-revision".into(),
-            component_hash: "controlled-component".into(),
+            component_hash,
             runtime_schema: 2,
         };
         store.reserve("test", &launch).unwrap();

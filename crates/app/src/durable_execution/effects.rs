@@ -30,6 +30,23 @@ impl InterruptedEffect {
     }
 }
 
+/// A committed interrupted intent is not a runtime receipt, even after an
+/// external resolution audit. Until a specialized recovery policy can safely
+/// consume it without tool/model replay, it must block execution admission.
+/// # Errors
+/// Rejects every nonempty observation; no current coding tool is replay-safe.
+pub fn validate_execution_observation(
+    effects: &[InterruptedEffect],
+) -> Result<(), RegistrationError> {
+    if !effects.is_empty() {
+        return Err(RegistrationError::new(
+            "durable-interrupted-effect-blocked",
+            "committed interrupted effects block execution; inspect and resolve externally, never replay commands",
+        ));
+    }
+    Ok(())
+}
+
 /// Specialized effect operations exclusively own their resource/audit writes.
 /// # Errors
 /// Rejects generic insertion of effect uncertainty or accepted resolution audits.

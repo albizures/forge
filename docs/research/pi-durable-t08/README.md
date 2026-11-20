@@ -1,15 +1,23 @@
-# T08 — Interrupted-effect safety (in progress)
+# T08 — Interrupted-effect safety
 
 ## Status
 
-**T08 remains incomplete; T09 must not proceed.** This increment establishes the
-runtime read-only inspection/admission fence, Forge-visible transactional effect
-retention, and live-consumer failure fencing. The latest increment adds the public
-operator resolution CLI/RPC and explicit matched inspection-component wiring for
-revoked Assignments. Live/same-Assignment resolution policy and production recovery
-integration remain undelivered; original runtime intent still blocks writable recovery.
-Production durable dispatch and automatic recovery remain disabled. No live Forge
-records, profiles, credentials or worktrees were changed.
+**T08 is complete at its controlled interrupted-effect boundary; T09 may proceed.**
+Committed inspection, Forge retention, audited live/closed operator resolution and
+the grant-controller effect precondition are implemented and verified. Live
+resolution preserves the original Assignment/attempt and its execution fence;
+closed resolution retires only its targeted effect. No external audit repairs a
+runtime receipt or grants permission to replay. The controller retains observed
+uncertainty before rejecting its first grant; the old synchronous binding is
+fresh-only, so it cannot bypass inspection for retained stores.
+
+Safe supervised retirement (T09), authorized writable same-attempt recovery (T10),
+automatic scheduling/rollout and packaged real-provider release verification remain
+later deliverables. Production durable dispatch and automatic recovery remain
+disabled. No live Forge records, profiles, credentials or worktrees were changed.
+See [completion evidence](#completion-live-resolution-and-controller-fencing) below.
+Earlier incomplete status/review statements are historical increment snapshots,
+not the current completion decision.
 
 ## Initial implemented boundary
 
@@ -104,7 +112,7 @@ non-completed terminal receipt classes, completed receipts, missing root, unknow
 tool version and unknown checkpoint. These are storage-contract fixtures, not
 additional process/effect evidence.
 
-## Remaining T08 work / handoff
+## Historical remaining T08 work / handoff (superseded below)
 
 1. Wire the trusted observation/retention service into the future production
    supervisor/recovery controller. The bounded server-to-runner adapter described
@@ -702,3 +710,202 @@ required.
 
 Standards-review summary: no introduced coding-standard violations found; remaining
 T08 deliverables and unrun release gates are not waived.
+
+## Committed-root inspection hardening
+
+`runner/src/interrupted-effects.ts` now requires a positive safe-integer journal
+root and reads its committed conversation through the existing physical read-only
+adapter before scanning tools. A missing conversation, fork ancestry or task owner
+rejects with `runner-recovery-required`. Previously any non-null journal root could
+pass an empty tool scan, including malformed or missing targets. A journal pointer
+alone is not proof that Assignment conversation initialization committed.
+
+The new storage regression failed against the prior implementation (missing
+expected rejection), then passed with the fence. It covers null, text, negative,
+fractional and oversized integer pointers, an absent target, a fork and a task-owned
+conversation, followed by a valid ownerless root. SQLite itself rejects integers
+outside JavaScript's safe range; the existing Check/wire error boundaries redact
+that failure. Each invalid fixture denies Check construction, closes its lease
+consumer and leaves runtime database bytes unchanged. These are deliberate storage
+corruption fixtures, not process-crash or physical power-loss evidence. The actual
+read-only inspector subprocess also rejects a journal root without its committed
+conversation, with empty stdout and fixed redacted stderr. Existing task fixtures
+now commit their root conversation instead of relying on an invented pointer.
+
+Compatibility: no storage schema, dependency or public protocol changes. The
+existing source-derived runner component hash changes with the inspector source;
+retained Launch hashes are not rewritten and still require matched components.
+No writable Harness, receipt repair, command replay, grant, hold clearance or
+resolution-policy relaxation is introduced.
+
+Verification from the repository root:
+
+```sh
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+(cd runner && npm run check && npm test)
+git diff --check
+```
+
+Final results: **676 Rust harness tests passed, 0 failed, 1 pre-existing opt-in
+probe ignored; all 6 supervised scenarios passed; runner typecheck and 52 Node
+tests passed**. The first post-fix focused run exposed the SQLite oversized-integer
+error code in the test expectation; the expectation was corrected without relaxing
+the rejection, then the full suites passed. No packaged, clean-install or
+real-provider release verification was run. No live Forge state was changed.
+
+Implementation review: T08's “On reopen, neither tool replay nor a fresh model
+request bypasses the blocker” now also rejects invalid committed-root evidence
+before Check bootstrap. “Establish a bounded, explicit operator inspection/
+resolution path” remains partial for live/same-Assignment policy, and production
+recovery-controller integration remains missing. No scope creep or incorrect new
+recovery permission found. **Summary: T08 incomplete; live effect policy and
+production recovery composition remain blockers; T09 must not proceed.**
+
+Coding-standards review: no introduced violations found. The change stays in the
+pinned runtime adapter, adds no Forge domain policy or external calls inside store
+transactions, preserves uncertainty and uses isolated storage/process fixtures.
+This task-local review does not replace T18. **Summary: no introduced standards
+violations; remaining T08 requirements and release checks remain unfulfilled.**
+
+## Completion: live resolution and controller fencing
+
+### Delivered policy and integration
+
+`app::durable_execution::effect_resolution::ResolutionDisposition` owns the
+live/closed distinction. Under the same immediate transaction as scope, exact
+Launch, effect and accepted-result checks, the store records the original audit
+and either retires a closed Assignment's targeted effect or **retains a live
+Assignment's effect as an execution fence**. Live acceptance does not revoke,
+renew, rebind or replace the Assignment/Check attempt. It preserves every prior
+resource and Dispatch Hold. Explicit hold clearance still cannot issue a lease.
+Later closure/exact replay never changes the original live disposition or its
+evidence/timestamp. A future specialized retirement/recovery operation must consume
+that fence; ordinary cleanup and this resolution command cannot do so. Both safety
+assertions, fresh committed inspection and exclusive existing host ownership remain
+mandatory for new public acceptance. Unknown external outcomes still reject.
+
+`DaemonAuthority::bind_inspected` is the trusted grant-controller integration. It
+captures the directly spawned ready supervisor and its private pipe, verifies its
+live shared-flock ownership, inspects retained storage with explicitly selected
+matched components, transactionally retains observed effects, and applies the
+app-owned `validate_execution_observation` fence **before returning a usable grant
+session**. Ownership is reobserved after a successful scan. Failure withdraws the
+session and retains authorization uncertainty/capacity without delivering a grant.
+No existing audit waives committed unsettled intent. The six actual supervised
+Check-dispatch scenarios now enter through this controller boundary.
+
+The older synchronous `bind` is explicitly fresh-only: retained SQLite files or
+sidecars reject, as does an accepted/rejected runtime with absent storage. There
+is no alternate retained-store path around the inspector. Subsequent `tick` still
+uses the existing transactional scope, authority, generation, mode, hold, resource,
+owner and lease checks. This closes T08's pre-scheduling effect-integration gap; it
+is not writable recovery, adoption of historical grants or automatic scheduling.
+T10 must compose its other recovery gates and implement safe writable resumption;
+T08 deliberately does not open a Harness to settle an unsafe call and ask a model
+to repeat it. No current coding tool has an approved replay-safe exception.
+
+### Acceptance evidence
+
+| T08 acceptance check | Retained evidence |
+| --- | --- |
+| External mutation then abrupt death occurs once, not twice | Actual Bash/Harness and loopback publication-like endpoint tests die after external acceptance and after tool return/before completed-result commit. Mutation count is one; repeated inspection, daemon restart and public resolution submit no new tool command. |
+| Neither replay nor fresh model input bypasses the blocker | Runner pre-bootstrap inspection and live throw/cancellation fences; actual owned controller retains interrupted intent before any initial grant. New supervisor/daemon identities reject even after live **or closed** audit acceptance, with zero leases and unchanged runtime bytes. |
+| Wrong scope, conflicting retry and unsafe ownership reject | Public CLI/RPC and store regressions, actual shared-flock supervisor/worker ownership tests, exact scoped replay after daemon restart/runtime unavailability, and conflicting concurrent decisions for live/closed Assignments. |
+| Tracked, staged and untracked work survives | Both actual Bash fault cases compare Git status, tracked bytes, staged index contents and untracked bytes through death, inspection, daemon restart and resolution. No repository repair/adoption path is added. |
+| Unknown outcomes remain unknown | Unsupported/unknown conclusions and missing safety assertions reject; observed effects/holds/capacity remain. Failed/non-completed receipts and alleged replay-safe intents conservatively block; accepted completed results stay receipts. |
+
+The three new tests in
+`crates/runner-host/tests/authorization_session/effect_admission.rs` use actual
+supervisor/worker processes, kernel ownership and the actual bounded Node inspector.
+Their runtime tasks are explicitly labelled **storage fixtures**, not additional
+external mutations or real-provider evidence. The rejection matrix covers unsettled
+intent, missing root, unconfigured/unavailable/incompatible components, the legacy
+binding bypass, orphaned sidecars, missing accepted storage and injected retention
+failure. It verifies zero committed leases, absent model execution, retained
+capacity/holds and unchanged runtime DB/attempt evidence. A completed-receipt control
+allows one initial lease only after inspection; it replays no runtime tool.
+
+A separate restart matrix kills/reaps its own never-granted fixture worker and
+supervisor, obtains actual exclusive inspection/resolution, then starts a new host
+and daemon identity. Both live and closed audits remain readable with original
+resources/timestamps, but their still-unsettled runtime intent denies all grants.
+This is controlled test teardown, not product retirement or proof against escaped
+same-user descendants. The pre-existing Bash fault cases separately exercise actual
+external effects and public commands: one now resolves on its **live original
+attempt**, while the other uses explicit fixture closure. Both preserve runtime
+and worktree/index bytes. Live resolution keeps capacity and the effect fence even
+after hold clearance. Store tests additionally cover live audit rollback, lease
+renewal rejection and unchanged live disposition after closure/exact replay.
+
+### Compatibility and verification
+
+No schema revision, runtime schema, dependency version, public CLI argument or RPC
+field changes. Live resolution is a newly supported conservative acceptance case;
+existing closed resolution and accepted receipts remain compatible. CLI help,
+operator documentation and store contracts now distinguish live fences from closed
+resource retirement. An actual CLI help regression checks that distinction.
+
+The host integration target adds **dev-only Tokio** to run the server's existing
+async process/timeout reactor. Standard library facilities provide no equivalent
+executor/reactor; the dependency/version is already selected by the server and adds
+no package to the lockfile. The lockfile records only this additional host test
+edge. Product host dependencies are unchanged. `with_inspection` supplies explicit
+trusted components; it does not discover PATH/npm or enable durable dispatch.
+
+Final corrected-snapshot commands from the repository root:
+
+```sh
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+(cd runner && npm run check && npm test)
+git diff --check
+cargo run -q -p forge-cli --bin forge -- dispatcher assignment-resolve-effect --help
+```
+
+Results: **682 Rust harness tests passed, 0 failed, 1 pre-existing opt-in probe
+ignored; all 6 supervised scenarios passed; runner typecheck and 52 Node tests
+passed**. Default-parallel workspace verification includes the expanded actual
+Bash/CLI cases. No clean-install, packaged-component, real-provider or release
+readiness verification was run. The historical supervisor timeout did not recur;
+this is not a general flake-resolution claim.
+
+Intermediate checks found a missing dev executor dependency, a test borrow error,
+Clippy argument/length issues, and an invented fixture task-ID assumption. These
+were corrected before full verification; resolution tests now use the actual
+inspected retained identities rather than predicting IDs. The CLI help inspection
+also caught an obsolete revocation-only summary; it was updated and regression
+covered. No safety guard was relaxed to make a test pass.
+
+### Completion reviews and successor handoff
+
+Implementation review against T08: “Persist sufficient intent and tool/effect
+identity” uses protected committed execution checkpoints; “Translate runtime
+interruption into Forge-visible uncertainty before recovery can schedule more
+model/tools” now reaches the actual owned grant-controller boundary; “Establish a
+bounded, explicit operator inspection/resolution path preserving accepted results,
+ownership guards and audit” covers live and closed Assignments without runtime
+repair/replay. The acceptance evidence above covers all five checks. No unrelated
+scope expansion or incorrect new execution permission found. Full authorized
+writable recovery remains T10, not an omitted T08 acceptance check.
+
+**Implementation-review summary: T08 requirements implemented and verified; no
+remaining task-local findings. T09 may proceed; production rollout remains disabled.**
+
+Coding-standards review: no introduced violations found. App owns resolution and
+execution policy; store owns atomic scope/replay/audit/disposition; server owns
+canonical mapping, bounded external inspection and controller wiring; CLI owns
+presentation. External work stays outside database transactions, scope/binding are
+rechecked at dependent commits, and uncertainty/capacity/evidence survive failures.
+New tests isolate databases, processes, endpoints and component configuration; all
+required gates ran default-parallel. This task-local review does not replace T18.
+
+**Standards-review summary: no introduced violations found.**
+
+T09/T10 must preserve the effect fence and audit. Do not use generic resource
+retirement, hold clearance, missing process/heartbeat or runtime receipt repair as
+an automatic recovery shortcut. Production dispatch, automatic recovery, matched
+packaging and real-provider readiness remain explicitly disabled/unverified until
+their owning Tasks and release gates are satisfied.

@@ -42,7 +42,12 @@ test('read-only effect wire fails closed, bounds input and redacts errors', asyn
   persistIntent(directory, launch);
   await rejected(request); // interrupted initialization
   const storage = await openNodeSqliteStorage(databasePath(directory));
-  persistRoot(directory, 1);
+  const root = await storage.mintId();
+  persistRoot(directory, root);
+  // A journal root without its committed conversation must fail, not return an
+  // empty successful scan. No writable Harness is involved in inspection.
+  await rejected(request);
+  await storage.commit([[{ type: 'conversation', value: { id: root } }]], () => {}, context);
   const task = { id: await storage.mintId(), conversationId: 1, kind: 'pi.tool', version: 3, background: false, abortRequested: false,
     input: { kind: 'model', callId: 'effect-call', assistant: 1 },
     state: { status: 'running', checkpoint: { phase: 'execute', replay: 'unsafe', arguments: { command: 'SECRET-CANARY' } } } };

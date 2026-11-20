@@ -107,18 +107,9 @@ fn effect_resolution_is_atomic_targeted_audited_and_replayed_after_restart() {
 }
 
 #[test]
-fn effect_resolution_rejects_live_unconfirmed_unknown_missing_and_conflicting_requests() {
+fn effect_resolution_rejects_unconfirmed_unknown_missing_and_conflicting_requests() {
     let f = Fixture::new();
     prepare(&f);
-    let before = f.store.agent_assignment_info("assignment").unwrap();
-    assert_eq!(
-        f.store
-            .resolve_interrupted_effect("test", &f.launch, &resolution())
-            .unwrap_err()
-            .code,
-        "durable-effect-resolution-revocation-required"
-    );
-    assert_eq!(f.store.agent_assignment_info("assignment").unwrap(), before);
     revoke(&f);
     let before = f.store.agent_assignment_info("assignment").unwrap();
     let mut invalids = vec![];
@@ -188,6 +179,78 @@ fn effect_resolution_rejects_live_unconfirmed_unknown_missing_and_conflicting_re
         );
     }
     assert_eq!(f.store.agent_assignment_info("assignment").unwrap(), before);
+}
+
+#[test]
+fn live_effect_resolution_records_evidence_without_releasing_execution_fence() {
+    use forge_app::authorization_lease::Repository as _;
+    let f = Fixture::new();
+    accept_runtime(&f);
+    let first = super::lease(&f);
+    f.store.grant_lease("test", &first, 1_000).unwrap();
+    f.store
+        .retain_interrupted_effects("test", &f.launch, &[resolution().effect])
+        .unwrap();
+    let before = f.store.agent_assignment_info("assignment").unwrap();
+    let receipt = f
+        .store
+        .resolve_interrupted_effect("test", &f.launch, &resolution())
+        .unwrap();
+    let after = f.store.agent_assignment_info("assignment").unwrap();
+    assert_eq!(after.assignment, before.assignment);
+    assert_eq!(after.dispatch_hold, before.dispatch_hold);
+    assert!(after.assignment.closed_at_millis.is_none());
+    assert!(after.capacity_reserved());
+    for resource in &before.resources {
+        assert!(after.resources.contains(resource));
+    }
+    assert!(
+        after
+            .recovery_blockers()
+            .contains(&"interrupted-effect".into())
+    );
+    f.store.resume_dispatch(after.assignment.record_id).unwrap();
+    let mut next = first;
+    next.sequence = 2;
+    next.issued_boottime_millis += 10_000;
+    next.expires_boottime_millis += 10_000;
+    assert_eq!(
+        f.reopen()
+            .grant_lease("test", &next, 11_000)
+            .unwrap_err()
+            .code,
+        "assignment-lease-blocked"
+    );
+    assert_eq!(
+        f.reopen()
+            .resolve_interrupted_effect("test", &f.launch, &resolution())
+            .unwrap(),
+        receipt
+    );
+    // Later closure and exact replay must not turn the original live decision
+    // into resource retirement or fresh recovery acceptance.
+    revoke(&f);
+    assert_eq!(
+        f.reopen()
+            .resolve_interrupted_effect("test", &f.launch, &resolution())
+            .unwrap(),
+        receipt
+    );
+    let after = f.reopen().agent_assignment_info("assignment").unwrap();
+    assert!(
+        after
+            .recovery_blockers()
+            .contains(&"interrupted-effect".into())
+    );
+    assert!(after.capacity_reserved());
+    let mut conflict = resolution();
+    conflict.outcome = ExternalOutcome::NotApplied;
+    assert!(
+        f.reopen()
+            .resolve_interrupted_effect("test", &f.launch, &conflict)
+            .is_err()
+    );
+    assert_eq!(f.store.agent_assignment_info("assignment").unwrap(), after);
 }
 
 #[test]
@@ -382,9 +445,17 @@ fn effect_resolution_preserves_unrelated_effects_holds_and_capacity() {
 
 #[test]
 fn effect_resolution_conflicting_concurrent_decisions_accept_only_one() {
+    for live in [true, false] {
+        race_conflicting_decisions(live);
+    }
+}
+
+fn race_conflicting_decisions(live: bool) {
     let f = Fixture::new();
     prepare(&f);
-    revoke(&f);
+    if !live {
+        revoke(&f);
+    }
     let barrier = std::sync::Barrier::new(2);
     let results = std::thread::scope(|scope| {
         let handles: Vec<_> = [ExternalOutcome::Applied, ExternalOutcome::NotApplied]
@@ -422,6 +493,45 @@ fn effect_resolution_conflicting_concurrent_decisions_accept_only_one() {
             .resolve_interrupted_effect("test", &f.launch, &accepted.resolution)
             .unwrap(),
         accepted
+    );
+}
+
+#[test]
+fn live_effect_resolution_failed_audit_preserves_authority_fence_and_history() {
+    let f = Fixture::new();
+    prepare(&f);
+    let before = f.store.agent_assignment_info("assignment").unwrap();
+    f.store.connection.lock().unwrap().execute_batch("CREATE TRIGGER fail_live_resolution BEFORE INSERT ON agent_assignment_resources WHEN NEW.resource_kind = 'interrupted-effect-resolution' BEGIN SELECT RAISE(ABORT, 'injected'); END;").unwrap();
+    assert!(
+        f.store
+            .resolve_interrupted_effect("test", &f.launch, &resolution())
+            .is_err()
+    );
+    assert_eq!(
+        f.reopen().agent_assignment_info("assignment").unwrap(),
+        before
+    );
+    assert_eq!(
+        f.reopen()
+            .accepted_effect_resolution("test", &f.launch, &resolution())
+            .unwrap(),
+        None
+    );
+    f.store
+        .connection
+        .lock()
+        .unwrap()
+        .execute_batch("DROP TRIGGER fail_live_resolution")
+        .unwrap();
+    f.store
+        .resolve_interrupted_effect("test", &f.launch, &resolution())
+        .unwrap();
+    let after = f.store.agent_assignment_info("assignment").unwrap();
+    assert_eq!(after.assignment, before.assignment);
+    assert!(
+        after
+            .recovery_blockers()
+            .contains(&"interrupted-effect".into())
     );
 }
 

@@ -64,10 +64,32 @@ pub struct ResolutionReceipt {
     pub accepted_at_millis: u64,
 }
 
+/// Live resolution records the external conclusion but keeps the effect resource
+/// as an execution fence. Only closed Assignments may retire the targeted resource.
+/// Neither alternative authorizes runtime replay or same-Assignment recovery.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResolutionDisposition {
+    RetainExecutionFence,
+    RetireClosedEffect,
+}
+
+impl ResolutionDisposition {
+    #[must_use]
+    pub const fn for_assignment(closed: bool) -> Self {
+        if closed {
+            Self::RetireClosedEffect
+        } else {
+            Self::RetainExecutionFence
+        }
+    }
+}
+
 /// Trusted operator service only; Assignment capabilities cannot invoke this port.
 /// For new acceptance the host adapter must retain verified exclusive ownership
-/// throughout the dependent commit; original accepted-result reads admit nothing. This conservative first boundary requires revocation;
-/// it does not enable same-Assignment recovery or modify protected runtime receipts.
+/// throughout the dependent commit; original accepted-result reads admit nothing.
+/// Live acceptance preserves the retained execution fence, including after explicit
+/// hold clearance or later closure. Consuming it requires a future specialized
+/// retirement/recovery policy; this port cannot do so or modify protected runtime receipts.
 pub trait Repository: Send + Sync {
     /// Read the originally accepted result, authorizing scope/Launch first.
     /// Does not require current runtime availability or host ownership: it admits
@@ -83,11 +105,12 @@ pub trait Repository: Send + Sync {
 
     /// Authorize exact Workspace/Launch before replay. Exact retries return the
     /// original audit; conflicting operation/effect reuse rejects. New acceptance
-    /// requires a closed Assignment and retained effect. Audit and targeted effect
-    /// retirement commit atomically. Holds, other resources, accepted Outcomes,
-    /// repository evidence and runtime storage remain untouched. No command runs.
+    /// requires a retained effect. Audit and the closed/live disposition commit
+    /// atomically. Closed effects retire; live effects remain execution fences.
+    /// Holds, other resources, accepted Outcomes, repository evidence and runtime
+    /// storage remain untouched. No command runs.
     /// # Errors
-    /// Rejects invalid scope/binding, unsafe live authority, missing/conflicting
+    /// Rejects invalid scope/binding, missing/conflicting
     /// effects or audits and storage errors. Failure preserves uncertainty.
     fn resolve_interrupted_effect(
         &self,

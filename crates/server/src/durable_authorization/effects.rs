@@ -52,6 +52,33 @@ pub async fn inspect_and_retain(
         repository, workspace, launch, node, inspector, &directory, None,
     )
     .await
+    .map(|_| ())
+}
+
+/// Grant-controller fence for an already owned, not-yet-authorized supervisor.
+/// The caller must verify its directly spawned host before and after this await.
+/// Retain committed effects before applying the app-owned execution gate. An
+/// external audit never manufactures a runtime receipt or permits blind replay.
+/// # Errors
+/// Rejects all inspection/retention failures and every interrupted intent.
+pub(super) async fn inspect_before_grant(
+    repository: &SqliteProjectRepository,
+    workspace: &str,
+    launch: &Launch,
+    components: &super::operator::InspectionComponents,
+) -> Result<(), RegistrationError> {
+    let directory = runtime_directory::mapped(repository, workspace, launch, false)?;
+    let effects = inspect_mapped(
+        repository,
+        workspace,
+        launch,
+        &components.node,
+        &components.inspector,
+        &directory,
+        None,
+    )
+    .await?;
+    forge_app::durable_execution::effects::validate_execution_observation(&effects)
 }
 
 /// Obtain a host-exclusive committed snapshot and retain its blockers while the
@@ -88,8 +115,9 @@ pub async fn inspect_exclusive_and_retain(
 
 /// Resolve one externally investigated effect under the existing exclusive host
 /// lock, after a fresh committed scan. Trusted operator input only, never an
-/// Assignment capability operation. The store atomically requires revocation,
-/// validates the retained effect and records the original evidence-based audit.
+/// Assignment capability operation. The store atomically validates the retained
+/// effect and records the original evidence-based audit. A live Assignment keeps
+/// its effect resource as an execution fence; only a closed effect is retired.
 /// Exact accepted-result retries are scope-authorized read-only audit lookups;
 /// they do not require current host ownership, runtime storage or components.
 /// No runtime receipt is repaired and no recovery or command replay is authorized.
@@ -97,7 +125,7 @@ pub async fn inspect_exclusive_and_retain(
 /// request: the host lock alone cannot prove universal process absence.
 /// # Errors
 /// Rejects unconfirmed evidence, unsafe ownership, unavailable inspection, wrong
-/// scope/binding, live authority and conflicting/missing effects. Errors do not
+/// scope/binding and conflicting/missing effects. Errors do not
 /// clear holds or other blockers. A post-commit path error may leave an accepted
 /// audit; retry the exact operation rather than inventing a new resolution.
 pub async fn resolve_exclusive(
@@ -127,7 +155,7 @@ async fn inspect_mapped(
     inspector: &Path,
     directory: &Path,
     ownership: Option<&ExclusiveInspection>,
-) -> Result<(), RegistrationError> {
+) -> Result<Vec<InterruptedEffect>, RegistrationError> {
     launch.validate()?;
     if !node.is_absolute() || !inspector.is_absolute() {
         return Err(denied());
@@ -152,7 +180,8 @@ async fn inspect_mapped(
     if let Some(ownership) = ownership {
         ownership.verify().map_err(|_| denied())?;
     }
-    repository.retain_interrupted_effects(workspace, launch, &effects)
+    repository.retain_interrupted_effects(workspace, launch, &effects)?;
+    Ok(effects)
 }
 
 async fn read_effects(

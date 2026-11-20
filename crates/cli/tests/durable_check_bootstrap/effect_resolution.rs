@@ -41,6 +41,7 @@ pub(super) async fn verify_resolution(
     checkout: &Path,
     inspector: &Path,
     endpoint: &str,
+    keep_live: bool,
 ) -> ResolutionReceipt {
     let before = store.agent_assignment_info(&launch.assignment_id).unwrap();
     let resource = before
@@ -61,7 +62,14 @@ pub(super) async fn verify_resolution(
     };
     let snapshot = Snapshot::read(runtime, checkout);
     verify_wire_denials(endpoint, &launch.assignment_id, &resolution).await;
-    verify_denials(store, launch, runtime, inspector, endpoint, &resolution).await;
+    verify_denials(store, launch, runtime, inspector, &resolution).await;
+    // Exercise both policies through the public command: one fault fixture stays
+    // on its original live attempt; the other is explicitly closed as a fixture.
+    if !keep_live {
+        store
+            .close_agent_assignment(&launch.assignment_id, AgentAssignmentClosureReason::Retired)
+            .unwrap();
+    }
     verify_operator_denials(store, launch, runtime, endpoint, &resolution).await;
     let receipt = verify_acceptance(store, launch, runtime, inspector, endpoint, &resolution).await;
     assert_eq!(Snapshot::read(runtime, checkout), snapshot);
@@ -75,7 +83,6 @@ async fn verify_denials(
     launch: &Launch,
     runtime: &Path,
     inspector: &Path,
-    endpoint: &str,
     resolution: &Resolution,
 ) {
     let before = store.agent_assignment_info(&launch.assignment_id).unwrap();
@@ -91,36 +98,7 @@ async fn verify_denials(
         before
     );
     drop(owner);
-    assert_eq!(
-        resolve_exclusive(store, "test", launch, &node(), inspector, resolution)
-            .await
-            .unwrap_err()
-            .code,
-        "durable-effect-resolution-revocation-required"
-    );
-    assert_eq!(
-        store.agent_assignment_info(&launch.assignment_id).unwrap(),
-        before
-    );
-    let output = cli_command(endpoint, &launch.assignment_id, resolution, Some("test"))
-        .args([
-            "--confirm-old-agent-cannot-act",
-            "--confirm-external-work-safe",
-            "--json",
-        ])
-        .output()
-        .await
-        .unwrap();
-    assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
-    assert_eq!(
-        store.agent_assignment_info(&launch.assignment_id).unwrap(),
-        before
-    );
-    store
-        .close_agent_assignment(&launch.assignment_id, AgentAssignmentClosureReason::Retired)
-        .unwrap();
-    let revoked = store.agent_assignment_info(&launch.assignment_id).unwrap();
+    let unchanged = store.agent_assignment_info(&launch.assignment_id).unwrap();
     let absent = Path::new("/missing-node");
     assert!(
         resolve_exclusive(store, "foreign", launch, absent, inspector, resolution)
@@ -143,7 +121,7 @@ async fn verify_denials(
     );
     assert_eq!(
         store.agent_assignment_info(&launch.assignment_id).unwrap(),
-        revoked
+        unchanged
     );
 }
 
@@ -191,11 +169,29 @@ async fn verify_acceptance(
     );
     assert_eq!(after.dispatch_hold, revoked.dispatch_hold);
     assert!(after.capacity_reserved());
-    assert!(
-        !after
+    assert_eq!(
+        after
             .recovery_blockers()
-            .contains(&"interrupted-effect".into())
+            .contains(&"interrupted-effect".into()),
+        after.assignment.closed_at_millis.is_none()
     );
+    assert_eq!(after.assignment, revoked.assignment);
+    if after.assignment.closed_at_millis.is_none() {
+        for resource in &revoked.resources {
+            assert!(after.resources.contains(resource));
+        }
+        // An explicit hold clearance cannot make the accepted external assertion
+        // into renewed execution authority. Keep the resource fence and capacity.
+        store.resume_dispatch(after.assignment.record_id).unwrap();
+        let retained = store.agent_assignment_info(&launch.assignment_id).unwrap();
+        assert!(
+            retained
+                .recovery_blockers()
+                .contains(&"interrupted-effect".into())
+        );
+        assert!(retained.capacity_reserved());
+    }
+    let after = store.agent_assignment_info(&launch.assignment_id).unwrap();
     let owner = forge_runner_host::inspection::ExclusiveInspection::acquire(runtime).unwrap();
     verify_replay(endpoint, &launch.assignment_id, &receipt).await;
     drop(owner);

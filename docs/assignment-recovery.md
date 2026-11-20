@@ -70,14 +70,17 @@ These resources reserve capacity and block new authorization grants even for a
 closed Assignment. Provider resource retirement cannot waive them, and accepted
 Outcomes are not overwritten by their arrival.
 
-A controlled operator CLI/RPC now records evidence-based resolutions for
-**revoked/closed** Assignments under exclusive host inspection. It is not safe
-live/same-Assignment recovery, supervised retirement or production scheduling.
-Investigate the actual external outcome and make old execution/external children
-safe first. Use `assignment-retire` to revoke before cleanup, then inspect persisted
-closure: an incomplete cleanup error is not proof of absence. Durable supervised
-retirement is still undelivered; retain all its other blockers. Never directly
-close an Assignment in SQLite to satisfy this command.
+A controlled operator CLI/RPC records evidence-based resolutions under exclusive
+host inspection. For a **live Assignment**, resolution preserves its original
+Assignment/attempt and leaves the effect resource as an execution fence. This
+supports investigation without forcing revocation, but does not authorize renewed
+execution. For a **closed Assignment**, only the selected effect resource retires.
+Neither policy is safe writable recovery, supervised retirement or production
+scheduling. Investigate the actual external outcome and make old execution/external
+children safe first. If retiring, use `assignment-retire` to revoke before cleanup
+and inspect persisted closure: an incomplete cleanup error is not proof of absence.
+Durable supervised retirement remains later work; retain all other blockers.
+Never directly close an Assignment in SQLite to satisfy this command.
 
 For new resolutions, the daemon requires [explicit matched inspection components](development.md#run-a-manual-daemon),
 existing protected host-lock evidence, a fresh
@@ -113,8 +116,11 @@ another operation targeting the same resolved effect rejects. On transport failu
 inspect Assignment info and retry the exact resolution, never the tool command.
 
 The `interrupted-effect-resolution` audit remains visible through Assignment info.
-Only its targeted Forge effect is retired. Runtime intent remains unsettled;
-other resources, capacity blockers and holds remain. No command is rerun, runtime
+Only a closed Assignment's targeted Forge effect is retired. A live resolution
+retains the effect resource as an execution fence, even after explicit hold clearance
+or later closure. An exact retry never changes that original disposition; consuming
+the fence requires a separate specialized recovery policy, not this command.
+Runtime intent remains unsettled; other resources, capacity blockers and holds remain. No command is rerun, runtime
 receipt repaired, dirty commit adopted or replay/recovery authorized. Audit evidence
 fields are ordinary output, not protected transcript storage: never include
 credentials, tool payloads or prompts in them.
@@ -124,7 +130,18 @@ runtime SQLite edits or `resume` as an interrupted-effect waiver. Preserve the
 runtime/worktree and externally investigate publication/push outcomes without
 replaying the command. Production durable dispatch and automatic recovery remain
 disabled; current integration evidence is controlled, not a release-readiness
-claim. See [T08 evidence and remaining work](research/pi-durable-t08/README.md).
+claim. See [T08 evidence](research/pi-durable-t08/README.md).
+
+The trusted daemon grant controller inspects retained runtime storage before its
+first grant, using the verified directly spawned supervisor's ownership and the
+explicit matched inspector. It retains observed effects in Forge before rejecting
+execution. Missing/corrupt initialization, incompatible/unavailable inspection and
+unsettled intent all deny permission with retained capacity. The synchronous
+fresh-launch binding cannot open existing runtime storage or orphaned SQLite
+sidecars; accepted admission with missing storage also rejects. Subsequent grants
+still require the ordinary transactional authority/freshness/hold/resource checks.
+This supplies the interrupted-effect recovery precondition, not the later writable
+same-attempt recovery feature. No scheduler or production durable rollout is enabled.
 
 ## Revoke and clean up known resources
 

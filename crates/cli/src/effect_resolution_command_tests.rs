@@ -85,3 +85,18 @@ fn resolution_parser_does_not_default_missing_identity_evidence_or_unknown_outco
     unknown[position] = "unknown";
     assert!(Cli::try_parse_from(unknown).is_err());
 }
+
+#[test]
+fn resolution_help_distinguishes_live_fences_from_closed_resource_retirement() {
+    let help = Cli::try_parse_from(["forge", "dispatcher", "assignment-resolve-effect", "--help"])
+        .unwrap_err();
+    assert_eq!(help.kind(), clap::error::ErrorKind::DisplayHelp);
+    let text = help.to_string();
+    assert!(text.contains("preserve live fences"));
+    assert!(text.contains(
+        "On a live Assignment, the accepted audit preserves its execution fence and attempt"
+    ));
+    assert!(text.contains("on a closed Assignment, only the targeted effect resource retires"));
+    assert!(text.contains("Neither case authorizes recovery"));
+    assert!(!text.contains("after revocation"));
+}

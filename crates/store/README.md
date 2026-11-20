@@ -110,24 +110,28 @@ clearance. Generic resource retirement rejects this kind: provider cleanup canno
 resolve an external outcome.
 
 The internal `effect_resolution::Repository` boundary accepts evidence-based
-trusted operator assertions only for revoked/closed Assignments. For new
+trusted operator assertions for live or closed Assignments. Live acceptance keeps
+the effect resource as an execution fence; it neither revokes nor renews authority.
+Only closed acceptance retires the selected effect. For new
 acceptance, the server's `resolve_exclusive` adapter obtains the existing host
 lock and performs fresh committed inspection, retaining the guard throughout the
 commit. Original accepted-result reads authorize Workspace/Launch in a consistent
 read transaction and admit nothing; they require no current host owner, runtime
 storage or matching inspector. Conflicting reuse still rejects.
-Both explicit safety confirmations are required in addition to revocation and
-host ownership; the lock is not proof that escaped external children stopped.
+Both explicit safety confirmations and host ownership are required; the lock is
+not proof that escaped external children stopped.
 Supported conclusions are `applied` or `not-applied`; unknown stays unresolved.
 An immediate transaction checks scope and the complete Launch before replay,
 returns the original receipt for an exact operation, and rejects conflicting
-operation/effect reuse. Acceptance retires **only** the selected retained effect
-and atomically inserts an already-retired `interrupted-effect-resolution` audit
+operation/effect reuse. Acceptance atomically applies the app-owned live/closed
+disposition and inserts an already-retired `interrupted-effect-resolution` audit
 resource, whose canonical JSON ID retains attribution, evidence reference,
 explanation and confirmations. Its creation/retirement timestamps are identical
 and supply the original acceptance time. At most 1,000 audits exist per runtime.
 Generic resource insertion/retirement cannot forge or rewrite these audits.
-Re-observation preserves the retired effect and original audit. Holds, other
+Re-observation preserves the original effect disposition and audit. Live fences
+still block lease issuance after hold clearance or later closure; exact replay
+cannot turn a live audit into closed resource retirement. Holds, other
 resources, Outcomes and runtime receipts are untouched; audit resources do not
 reserve capacity themselves. Evidence fields are ordinary operational output:
 never place tool payloads, credentials or prompts there.
@@ -140,7 +144,12 @@ matched inspection components on the host; accepted-result reads remain availabl
 without them. These are operator operations, not Assignment capability actions.
 Runtime interruption remains visible in protected storage and still rejects
 writable recovery; no accepted runtime result is manufactured. Live/same-Assignment
-resolution and production recovery integration remain undelivered. See
+external resolution preserves the attempt without permission to resume. The daemon's
+`bind_inspected` grant-controller boundary retains committed effects before any
+initial grant under verified directly spawned ownership. The synchronous `bind`
+is fresh-only and rejects existing SQLite storage/sidecars and missing accepted
+storage. Inspection failures retain authorization uncertainty/capacity. Safe writable
+recovery and automatic scheduling remain later deliverables. See
 [T08 evidence](../../docs/research/pi-durable-t08/README.md).
 No schema, runner component or existing serialized field changes are required;
 these are additive opaque resource kinds, a new CLI/RPC operation and internal

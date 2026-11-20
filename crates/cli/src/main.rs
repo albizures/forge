@@ -414,7 +414,7 @@ enum AgentDispatchCommand {
     AssignmentRetire(AssignmentRetireArgs),
     /// Assert unknown resources are safe after retirement (risk of duplicate agents).
     AssignmentResolveUnknown(AssignmentResolveUnknownArgs),
-    /// Record one evidence-based interrupted-effect resolution after revocation; never replay or resume.
+    /// Record one evidence-based interrupted-effect resolution; preserve live fences, never replay or resume.
     AssignmentResolveEffect(effect_resolution_command::ResolveEffectArgs),
 }
 #[derive(Args, Debug)]

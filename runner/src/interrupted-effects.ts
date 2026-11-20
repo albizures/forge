@@ -2,7 +2,7 @@
 // Run under exclusive host ownership BEFORE Harness.open: opening the Harness
 // can settle unsafe calls as interrupted and immediately schedule another model.
 import { BACKGROUND_CONTEXT as context } from '@earendil-works/chord/context';
-import type { Cursor, ToolRegistration } from '@earendil-works/pi-durable';
+import type { ConversationId, Cursor, ToolRegistration } from '@earendil-works/pi-durable';
 import { Authorization, guardTool } from './authorization.ts';
 import { canonical, Denied, requireCondition, type Launch } from './contract.ts';
 import { journal, readStorage } from './storage.ts';
@@ -22,9 +22,14 @@ export async function inspectInterruptedEffects(directory: string, launch: Launc
   if (!identity) return [];
   requireCondition(canonical(identity.launch) === canonical(launch), 'runner-identity-conflict');
   // Interrupted initialization is not permission to initialize another store.
-  requireCondition(identity.root !== null, 'runner-recovery-required');
+  requireCondition(typeof identity.root === 'number' && Number.isSafeInteger(identity.root) && identity.root > 0, 'runner-recovery-required');
   const storage = await readStorage(directory);
   try {
+    // A journal pointer alone is not a committed conversation. In particular,
+    // an empty tool scan must not certify interrupted/corrupt initialization or
+    // a child transcript substituted for the Assignment root as recoverable.
+    const root = await storage.conversation(identity.root as ConversationId, context);
+    requireCondition(root !== undefined && root.id === identity.root && root.parent === undefined && root.owner === undefined, 'runner-recovery-required');
     const effects: InterruptedEffect[] = [];
     let cursor: Cursor | undefined;
     let pages = 0;

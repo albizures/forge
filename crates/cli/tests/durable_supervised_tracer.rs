@@ -274,7 +274,7 @@ async fn scenario(mode: &str) {
         root: root.clone(),
         database: database.clone(),
         component_hash: component_hash(&node, &runner),
-        node,
+        node: node.clone(),
         git: git_program.clone(),
         runner: runner.join("test/supervised-check-worker.mjs"),
         cli: Path::new(env!("CARGO_BIN_EXE_forge"))
@@ -283,7 +283,17 @@ async fn scenario(mode: &str) {
         endpoint: format!("http://{addr}"),
         bootstrap_endpoint: proxy.as_ref().map(|(endpoint, _)| endpoint.clone()),
         credential: model_key.clone(),
-        authority: Arc::new(DaemonAuthority::new().unwrap()),
+        authority: Arc::new(
+            DaemonAuthority::new()
+                .unwrap()
+                .with_inspection(
+                    forge_server::durable_authorization::operator::InspectionComponents {
+                        node: node.clone(),
+                        inspector: runner.join("src/inspect-effects.ts"),
+                    },
+                )
+                .unwrap(),
+        ),
         mode: mode.into(),
         provisions: Arc::new(AtomicUsize::new(0)),
         reports: Arc::new(Mutex::new(vec![])),

@@ -13,7 +13,7 @@ enum Conclusion {
 
 #[derive(Debug, Args)]
 #[command(
-    after_long_help = "Trusted operator assertion, not authenticated human identity or automatic proof of process death. First revoke the Assignment, inspect the external outcome and make old execution/external children safe. The daemon requires exclusive ownership and matched committed inspection. Use effect identities from assignment-info. Never put credentials, prompts or tool arguments/results in evidence/message fields. Unknown outcomes must remain unresolved. Exact retries require the same operation ID and all original evidence. Resolution never replays a command, repairs runtime receipts, adopts dirty commits, clears unrelated holds/resources, or authorizes recovery."
+    after_long_help = "Trusted operator assertion, not authenticated human identity or automatic proof of process death. Inspect the external outcome and make old execution/external children safe first. The daemon requires exclusive ownership and matched committed inspection. On a live Assignment, the accepted audit preserves its execution fence and attempt; on a closed Assignment, only the targeted effect resource retires. Neither case authorizes recovery. Use effect identities from assignment-info. Never put credentials, prompts or tool arguments/results in evidence/message fields. Unknown outcomes must remain unresolved. Exact retries require the same operation ID and all original evidence. Resolution never replays a command, repairs runtime receipts, adopts dirty commits, clears unrelated holds/resources, or authorizes recovery."
 )]
 pub struct ResolveEffectArgs {
     assignment_id: String,

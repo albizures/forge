@@ -718,6 +718,7 @@ async fn check_execution(mode: &str) {
             &checkout.path,
             &inspector,
             &endpoint,
+            mode == "effect-before-commit",
         )
         .await;
         restarted.abort();

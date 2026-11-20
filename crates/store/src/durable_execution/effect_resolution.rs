@@ -5,7 +5,7 @@ use forge_app::{
     RegistrationError,
     durable_execution::{
         Launch,
-        effect_resolution::{Repository, Resolution, ResolutionReceipt},
+        effect_resolution::{Repository, Resolution, ResolutionDisposition, ResolutionReceipt},
     },
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -102,8 +102,8 @@ impl Repository for SqliteProjectRepository {
         if count == 1000 {
             return Err(error("durable-effect-limit"));
         }
-        // Operator confirmation is additional to revocation, never a substitute.
-        // This check and all dependent writes share the immediate transaction.
+        // Live acceptance must not remove the execution fence. The app-owned
+        // disposition and dependent audit/resource writes share this transaction.
         let closed: bool = tx
             .query_row(
                 "SELECT closed_at_millis IS NOT NULL FROM agent_assignments WHERE id = ?1",
@@ -111,9 +111,6 @@ impl Repository for SqliteProjectRepository {
                 |r| r.get(0),
             )
             .map_err(storage_error)?;
-        if !closed {
-            return Err(error("durable-effect-resolution-revocation-required"));
-        }
         let effect_json = serde_json::to_string(&resolution.effect)
             .map_err(|_| error("durable-storage-invalid"))?;
         let retained: Option<Option<i64>> = tx.query_row(
@@ -129,9 +126,13 @@ impl Repository for SqliteProjectRepository {
         tx.execute("INSERT INTO agent_assignment_resources(assignment_id, resource_kind, resource_id, created_at_millis, retired_at_millis) VALUES (?1, 'interrupted-effect-resolution', ?2, ?3, ?3)",
             params![launch.assignment_id, audit, accepted_at_millis],
         ).map_err(storage_error)?;
-        tx.execute("UPDATE agent_assignment_resources SET retired_at_millis = ?3 WHERE assignment_id = ?1 AND resource_kind = 'interrupted-effect' AND resource_id = ?2 AND retired_at_millis IS NULL",
-            params![launch.assignment_id, effect_json, accepted_at_millis],
-        ).map_err(storage_error)?;
+        if ResolutionDisposition::for_assignment(closed)
+            == ResolutionDisposition::RetireClosedEffect
+        {
+            tx.execute("UPDATE agent_assignment_resources SET retired_at_millis = ?3 WHERE assignment_id = ?1 AND resource_kind = 'interrupted-effect' AND resource_id = ?2 AND retired_at_millis IS NULL",
+                params![launch.assignment_id, effect_json, accepted_at_millis],
+            ).map_err(storage_error)?;
+        }
         tx.commit().map_err(storage_error)?;
         Ok(ResolutionReceipt {
             resolution: resolution.clone(),
