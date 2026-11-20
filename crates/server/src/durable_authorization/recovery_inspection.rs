@@ -67,29 +67,10 @@ pub async fn inspect_exclusive(
     if !node.is_absolute() || !inspector.is_absolute() || admission_id.trim().is_empty() {
         return Err(denied());
     }
-    let input = serde_json::to_vec(&Request {
-        protocol: RUNNER_PROTOCOL_VERSION,
-        launch: launch.clone(),
-        admission_id: admission_id.into(),
-    })
-    .map_err(|_| denied())?;
-    if input.len() > MAX_REQUEST_BYTES {
-        return Err(denied());
-    }
     require_admission(repository, workspace, launch, admission_id)?;
     let directory = runtime_directory::mapped(repository, workspace, launch, false)?;
     let ownership = ExclusiveInspection::acquire(&directory).map_err(|_| denied())?;
-    let bytes = inspection_process::read(
-        node,
-        inspector,
-        &directory,
-        &input,
-        Duration::from_secs(30),
-        MAX_RESPONSE_BYTES,
-    )
-    .await
-    .map_err(|_| denied())?;
-    let input = decode(&bytes, launch, admission_id)?;
+    let input = read_input(&directory, launch, admission_id, node, inspector).await?;
     // External work completed outside a database transaction. Recheck persisted
     // scope/binding and canonical ownership before returning the retained guard.
     require_admission(repository, workspace, launch, admission_id)?;
@@ -99,6 +80,42 @@ pub async fn inspect_exclusive(
     let inspection = Inspection { ownership, input };
     inspection.verify()?;
     Ok(inspection)
+}
+
+/// Shared bounded read-only transport. Callers must independently retain and
+/// reverify exclusive inspection OR directly spawned host ownership throughout.
+/// It cannot verify host safety or current Forge authority by itself.
+pub(super) async fn read_input(
+    directory: &Path,
+    launch: &Launch,
+    admission_id: &str,
+    node: &Path,
+    inspector: &Path,
+) -> Result<PendingInput, RegistrationError> {
+    launch.validate()?;
+    if !node.is_absolute() || !inspector.is_absolute() || admission_id.trim().is_empty() {
+        return Err(denied());
+    }
+    let input = serde_json::to_vec(&Request {
+        protocol: RUNNER_PROTOCOL_VERSION,
+        launch: launch.clone(),
+        admission_id: admission_id.into(),
+    })
+    .map_err(|_| denied())?;
+    if input.len() > MAX_REQUEST_BYTES {
+        return Err(denied());
+    }
+    let bytes = inspection_process::read(
+        node,
+        inspector,
+        directory,
+        &input,
+        Duration::from_secs(30),
+        MAX_RESPONSE_BYTES,
+    )
+    .await
+    .map_err(|_| denied())?;
+    decode(&bytes, launch, admission_id)
 }
 
 fn require_admission(

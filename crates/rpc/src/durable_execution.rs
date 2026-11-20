@@ -37,6 +37,17 @@ pub struct SupervisorRecovery {
     pub grant: forge_app::durable_execution::recovery::authorization::Grant,
 }
 
+/// Prepare an unarmed waiting receiver from fresh trusted daemon composition.
+/// This is not delivery or proof of commit. Retained grants never configure a
+/// restarted owner: the candidate/predecessor and freshly captured owner differ.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupervisorRecoveryPreparation {
+    pub host_prepare_recovery: u32,
+    pub candidate: forge_app::durable_execution::recovery::Candidate,
+    pub grant: forge_app::durable_execution::recovery::authorization::Grant,
+}
+
 /// Stop an exactly owned predecessor for a persisted recovery reservation.
 /// Unlike retirement, this preserves live Assignment authority and all fences.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -46,6 +57,7 @@ pub struct SupervisorQuiescence {
     pub operation: forge_app::durable_execution::recovery::quiescence::Operation,
 }
 
+pub const SUPERVISOR_RECOVERY_PREPARATION_VERSION: u32 = 1;
 pub const SUPERVISOR_QUIESCENCE_VERSION: u32 = 1;
 pub const SUPERVISOR_RECOVERY_VERSION: u32 = 1;
 pub const SUPERVISOR_RETIREMENT_VERSION: u32 = 1;
@@ -185,6 +197,81 @@ impl RunnerResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn recovery_preparation_is_strict_distinct_and_not_a_grant_delivery() {
+        use forge_app::{
+            authorization_lease::Lease,
+            durable_execution::recovery::{Candidate, Claim, authorization::Grant},
+            outcomes::{Attempt, Evidence},
+        };
+        let original: Lease = serde_json::from_str(include_str!(
+            "../../../runner/test/authorization-lease.json"
+        ))
+        .unwrap();
+        let candidate = Candidate {
+            launch: original.launch.clone(),
+            admission_id: "original".into(),
+            attempt: Attempt {
+                id: original.launch.attempt_id.clone(),
+                record_id: 1,
+                check_id: 1,
+                generation: original.generation,
+                evidence: Evidence::Repository {
+                    repository: "repository".into(),
+                    commit: "a".repeat(40),
+                },
+                actor: original.launch.assignment_id.clone(),
+                body: "bound task".into(),
+                continuation: None,
+                recovery: None,
+            },
+            execution_directory: "/bound/worktree".into(),
+            last_lease: original.clone(),
+        };
+        let claim = Claim::for_candidate(&candidate, "recover".into(), "new-epoch".into()).unwrap();
+        let mut lease = original;
+        lease.sequence += 1;
+        lease.owner.host_pid += 100;
+        lease.owner.worker_pid += 100;
+        lease.daemon_epoch.clone_from(&claim.daemon_epoch);
+        let control = SupervisorRecoveryPreparation {
+            host_prepare_recovery: SUPERVISOR_RECOVERY_PREPARATION_VERSION,
+            candidate,
+            grant: Grant {
+                claim,
+                lease,
+                evidence_sha256: "a".repeat(64),
+            },
+        };
+        control
+            .grant
+            .validate_candidate(&control.candidate, 1_000)
+            .unwrap();
+        let value = serde_json::to_value(&control).unwrap();
+        assert_eq!(
+            serde_json::from_value::<SupervisorRecoveryPreparation>(value.clone()).unwrap(),
+            control
+        );
+        assert!(serde_json::from_value::<SupervisorRecovery>(value.clone()).is_err());
+        assert!(serde_json::from_value::<SupervisorControl>(value.clone()).is_err());
+        for path in [
+            vec![],
+            vec!["candidate"],
+            vec!["candidate", "attempt"],
+            vec!["grant"],
+            vec!["grant", "claim"],
+            vec!["grant", "lease"],
+        ] {
+            let mut changed = value.clone();
+            let mut target = &mut changed;
+            for key in path {
+                target = &mut target[key];
+            }
+            target["unknown"] = true.into();
+            assert!(serde_json::from_value::<SupervisorRecoveryPreparation>(changed).is_err());
+        }
+    }
+
     #[test]
     fn supervisor_control_is_strict_and_uses_the_application_grant_shape() {
         let lease: serde_json::Value = serde_json::from_str(include_str!(

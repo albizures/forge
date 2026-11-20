@@ -9,6 +9,13 @@ use forge_app::durable_execution::{
 use forge_runner_host::{control::ControlPipe, inspection::ExclusiveInspection};
 
 fn prepare(f: &mut Fixture) -> (ControlPipe, Operation, Value) {
+    prepare_admission(f, None)
+}
+
+pub(super) fn prepare_admission(
+    f: &mut Fixture,
+    runtime_mode: Option<&str>,
+) -> (ControlPipe, Operation, Value) {
     let authority = DaemonAuthority::new().unwrap();
     let mut service = authority
         .bind(&f.store, "test".into(), f.launch.clone(), 1, &mut f.child)
@@ -18,16 +25,20 @@ fn prepare(f: &mut Fixture) -> (ControlPipe, Operation, Value) {
     let started = event(&f.output, "started");
     let pipe = service.retirement_control();
     drop(service);
-    f.store.begin_send("test", &f.launch).unwrap();
-    f.store
-        .record_result(
-            "test",
-            &f.launch,
-            &Admission::Accepted {
-                admission_id: "original-input".into(),
-            },
-        )
-        .unwrap();
+    if let Some(mode) = runtime_mode {
+        super::recovery_inspection::seed(f, mode);
+    } else {
+        f.store.begin_send("test", &f.launch).unwrap();
+        f.store
+            .record_result(
+                "test",
+                &f.launch,
+                &Admission::Accepted {
+                    admission_id: "original-input".into(),
+                },
+            )
+            .unwrap();
+    }
     let c = rusqlite::Connection::open(&f.database).unwrap();
     let worktree = f.root.join("worktree").to_str().unwrap().to_owned();
     c.execute(

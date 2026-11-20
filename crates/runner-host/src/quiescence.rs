@@ -36,6 +36,25 @@ pub(crate) fn quiesce(
     )
 }
 
+/// Require predecessor proof with no retained host-fault or retirement marker.
+/// Call only while retaining separately verified exclusive ownership; absence of
+/// these markers alone grants nothing. Any metadata error remains uncertainty.
+/// # Errors
+/// Rejects unrelated safety fences and all failures of exact receipt inspection.
+pub fn waiting_receipt(directory: &Path, operation: &Operation) -> io::Result<Receipt> {
+    for name in [
+        "watchdog.json",
+        "retirement-intent.json",
+        "retirement-receipt.json",
+    ] {
+        match std::fs::symlink_metadata(directory.join(name)) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            _ => return Err(invalid()),
+        }
+    }
+    receipt(directory, operation)
+}
+
 /// Read the exact protected original-host receipt under separately held exclusive
 /// inspection. A receipt is not fresh authorization or evidence of safe effects.
 /// The caller must keep inspection through its dependent verification/commit and

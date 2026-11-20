@@ -8,6 +8,7 @@ use std::fmt::Write as _;
 
 mod authorization_tests;
 mod cancellation_tests;
+mod claimed_inspection_tests;
 
 fn prepared() -> Fixture {
     let f = prepared_without_grant();

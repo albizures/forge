@@ -59,6 +59,20 @@ impl ExclusiveInspection {
     }
 }
 
+impl Drop for ExclusiveInspection {
+    fn drop(&mut self) {
+        // CLOEXEC does not prevent a concurrent fork from briefly retaining the
+        // same open description before exec. Closing only our descriptor would
+        // then leave a dropped read-only guard's flock behind. Explicit unlock
+        // ends this guard's lifetime, not a supervisor's shared execution lock.
+        if FileExt::unlock(&self.lock).is_err() {
+            // Closing remains the fallback. Any inherited lock stays fail-closed;
+            // do not infer cleanup or repair paths from a release failure.
+            eprintln!("runner-inspection-unlock-unavailable; ownership may remain retained");
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "inspection_tests.rs"]
 mod tests;

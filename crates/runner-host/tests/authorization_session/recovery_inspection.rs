@@ -7,7 +7,7 @@ use forge_runner_host::inspection::ExclusiveInspection;
 use forge_server::durable_authorization::recovery_inspection::inspect_exclusive;
 use std::io::Write;
 
-fn seed(f: &Fixture, mode: &str) -> Value {
+pub(super) fn seed(f: &Fixture, mode: &str) -> Value {
     let components = effect_admission::components();
     // Resolve the explicit test component, never production PATH discovery.
     let script = components
@@ -70,7 +70,7 @@ fn stop_ungranted(f: &mut Fixture) {
     f.child.wait().unwrap();
 }
 
-fn runtime_bytes(directory: &Path) -> Vec<(String, Vec<u8>)> {
+pub(super) fn runtime_bytes(directory: &Path) -> Vec<(String, Vec<u8>)> {
     let mut files = vec![];
     for name in ["runtime.sqlite", "runtime.sqlite-wal"] {
         if let Ok(bytes) = fs::read(directory.join(name))

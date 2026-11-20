@@ -76,6 +76,27 @@ impl ControlPipe {
         })
     }
 
+    /// Configure only an unarmed expectation from opaque fresh host verification.
+    /// This delivers no authority; the coordinator must separately commit and
+    /// deliver the exact recovery grant. Caller retains verified waiting ownership.
+    /// Success is transport only: require the matched worker's preparation response
+    /// before committing authority; rejection/uncertainty must fence orchestration.
+    /// # Errors
+    /// Failed delivery terminally fences all controls/clones without byte replay.
+    pub fn prepare_recovery(
+        &mut self,
+        prepared: &forge_app::durable_execution::recovery::authorization::Prepared,
+    ) -> Result<(), RegistrationError> {
+        let control = forge_rpc::durable_execution::SupervisorRecoveryPreparation {
+            host_prepare_recovery:
+                forge_rpc::durable_execution::SUPERVISOR_RECOVERY_PREPARATION_VERSION,
+            candidate: prepared.candidate().clone(),
+            grant: prepared.grant().clone(),
+        };
+        let mut input = self.input.lock().map_err(|_| uncertain())?;
+        input.send(&control, 1_048_576)
+    }
+
     /// Stop an owned predecessor only after persisting the exact recovery claim.
     /// Success is delivery, not descendant proof, revocation or resume authority.
     /// # Errors

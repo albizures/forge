@@ -135,10 +135,25 @@ impl Prepared {
     /// # Errors
     /// Rejects changed bindings, reused owners/epochs and stale proposed grants.
     pub fn validate(&self, now: u64) -> Result<(), RegistrationError> {
-        let old = &self.candidate.last_lease;
-        let lease = &self.grant.lease;
-        let claim = &self.grant.claim;
-        let digest = &self.grant.evidence_sha256;
+        self.grant.validate_candidate(&self.candidate, now)
+    }
+}
+
+impl Grant {
+    /// Defensive transition validation at the waiting host's private boundary.
+    /// This checks shape/binding only: a serialized grant does not reconstruct
+    /// Prepared, verify external safety or prove a transactional Forge commit.
+    /// # Errors
+    /// Rejects changed candidate commitments, old owners/epochs and stale bounds.
+    pub fn validate_candidate(
+        &self,
+        candidate: &Candidate,
+        now: u64,
+    ) -> Result<(), RegistrationError> {
+        let old = &candidate.last_lease;
+        let lease = &self.lease;
+        let claim = &self.claim;
+        let digest = &self.evidence_sha256;
         if digest.len() != 64
             || !digest
                 .bytes()
@@ -147,12 +162,12 @@ impl Prepared {
             return Err(denied());
         }
         if Claim::for_candidate(
-            &self.candidate,
+            candidate,
             claim.operation_id.clone(),
             claim.daemon_epoch.clone(),
         )? != *claim
-            || old.launch != self.candidate.launch
-            || old.generation != self.candidate.attempt.generation
+            || old.launch != candidate.launch
+            || old.generation != candidate.attempt.generation
             || lease.launch != old.launch
             || lease.generation != old.generation
             || lease.daemon_epoch != claim.daemon_epoch

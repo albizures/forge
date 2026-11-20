@@ -12,12 +12,18 @@ use forge_server::durable_authorization::DaemonAuthority;
 use forge_store::SqliteProjectRepository;
 #[path = "authorization_session/effect_admission.rs"]
 mod effect_admission;
+#[path = "authorization_session/quiesced_inspection.rs"]
+mod quiesced_inspection;
 #[path = "authorization_session/quiescence.rs"]
 mod quiescence;
 #[path = "authorization_session/recovery_inspection.rs"]
 mod recovery_inspection;
+#[path = "authorization_session/recovery_receiver.rs"]
+mod recovery_receiver;
 #[path = "authorization_session/retirement.rs"]
 mod retirement;
+#[path = "authorization_session/waiting_recovery_inspection.rs"]
+mod waiting_recovery_inspection;
 use rusqlite::params;
 use serde_json::Value;
 use std::{
@@ -198,6 +204,18 @@ impl Fixture {
 }
 
 fn spawn(directory: &Path, worktree: &Path) -> (Child, Receiver<String>, Receiver<String>) {
+    let worker = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../runner/test/session-worker.mjs")
+        .canonicalize()
+        .unwrap();
+    spawn_component(directory, worktree, &worker)
+}
+
+fn spawn_component(
+    directory: &Path,
+    worktree: &Path,
+    worker: &Path,
+) -> (Child, Receiver<String>, Receiver<String>) {
     // PATH is used only by this test's executable-discovery probe, never by the
     // cleared supervisor/worker environment or production component selection.
     let probe = Command::new("node")
@@ -208,12 +226,8 @@ fn spawn(directory: &Path, worktree: &Path) -> (Child, Receiver<String>, Receive
         .expect("Node 24 is required for runner integration tests");
     assert!(probe.status.success());
     let node = PathBuf::from(String::from_utf8(probe.stdout).unwrap().trim());
-    let worker = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../runner/test/session-worker.mjs")
-        .canonicalize()
-        .unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_forge-runner-host"))
-        .args([directory, worktree, &node, &worker])
+        .args([directory, worktree, &node, worker])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

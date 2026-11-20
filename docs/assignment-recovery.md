@@ -174,11 +174,35 @@ The intent remains a startup fence; the receipt does not authorize recovery or
 clear anything. No operator CLI/RPC or daemon reconciliation invokes this stop
 control yet. See [quiescence evidence](research/pi-durable-t10/recovery-quiescence.md).
 
-There is still no concrete recovery host verifier, executable recovery grant
-reception/ownership handoff, daemon reconciliation or authorized writable reopen. Existing
-executables reject recovery's continued global sequence as an ordinary first
-grant. No CLI/RPC operation exposes recovery authorization, and production/automatic
-durable recovery remain disabled. Do not replay retained grant files, reset
+A new internal quiesced inspector connects the exact active candidate reservation,
+original-host protected receipt and original pending-input/effect scan under one
+retained exclusive lock. It revalidates live claim/context after external I/O and
+on guard verification. Historical claim replay, cancelled claims and a free flock
+cannot substitute for this proof. Inspection changes no Forge/worktree/runtime
+state and does not validate/adopt dirty progress as evidence. See
+[quiesced inspection evidence](research/pi-durable-t10/quiesced-inspection.md).
+
+A separate waiting-owner inspector freshly rechecks the original receipt, pending
+input/effects and live claim under a new directly spawned supervisor's verified
+kernel ownership. Earlier read-only observations are not carried across spawning.
+Its physical ownership/proof port stays usable after transactional claim consumption;
+live authorization is still enforced in the grant transaction, not by a retained
+receipt. Missing/restored proof or owner drift terminally fences that verifier.
+
+Matched supervisor/Node executables now support private **unarmed preparation**
+followed by a separate exact committed recovery envelope. Ordinary first controls,
+changed expectations, host faults and uncertain effects deny authority. Ownership
+faults fence even an unarmed host before its first grant; restoring files cannot
+revive that host or waive its retained marker. Preparation
+success is transport only until the matched worker confirms it; preparation itself
+opens no writable Harness and resumes no model/tool. The controlled receiver tracer
+uses an actual SQLite recovery commit but explicitly synthetic Git/protected-digest
+verification. See [waiting-owner/receiver evidence](research/pi-durable-t10/waiting-receiver.md).
+
+There is still no complete trusted recovery verifier/ownership handoff orchestration,
+daemon reconciliation or authorized writable reopen. Executables still reject a
+continued global sequence sent as an ordinary first grant. No CLI/RPC operation
+exposes recovery authorization, and production/automatic durable recovery remain disabled. Do not replay retained grant files, reset
 sequence/watchdogs, edit resource markers or repair the worktree to bypass this
 boundary. See [T10 authorization evidence](research/pi-durable-t10/recovery-authorization.md)
 and [coordinator/watchdog evidence](research/pi-durable-t10/recovery-session.md).

@@ -115,12 +115,19 @@ if hold_after_eof:
     fn command(&mut self, command: &str) {
         writeln!(self.input, "{command}").unwrap();
         if command == "exit" {
-            assert!(
-                self.errors
-                    .recv_timeout(Duration::from_secs(10))
-                    .unwrap()
-                    .contains("runner-worker-exited")
-            );
+            // An unarmed host now retains ownership uncertainty before reporting
+            // child exit. Still require the exit diagnostic within one deadline,
+            // not an incidental ordering against the independent watchdog.
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                let line = self
+                    .errors
+                    .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                    .unwrap();
+                if line.contains("runner-worker-exited") {
+                    break;
+                }
+            }
         } else {
             assert_eq!(
                 self.output.recv_timeout(Duration::from_secs(10)).unwrap(),

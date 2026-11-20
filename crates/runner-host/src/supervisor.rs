@@ -171,7 +171,8 @@ pub fn run(
     )));
     writeln!(input, "{{\"host_ready\":true}}")?;
     let input_state = Arc::clone(&state);
-    std::thread::spawn(move || watchdog::forward_input(input, &input_state));
+    let input_directory = directory.to_owned();
+    std::thread::spawn(move || watchdog::forward_input(input, &input_state, &input_directory));
     watchdog::supervise(supervised, directory, &state);
     Ok(())
 }

@@ -26,6 +26,43 @@ impl Repository for SqliteProjectRepository {
         Ok(result)
     }
 
+    fn claimed_recovery_candidate(
+        &self,
+        workspace: &str,
+        claim: &Claim,
+    ) -> Result<Candidate, RegistrationError> {
+        let mut c = self.connection.lock().map_err(|_| error("storage"))?;
+        let tx = c.transaction().map_err(storage_error)?;
+        // Scope precedes claim inspection; unlike claim replay this is a live
+        // precondition read. Missing/retired history never reconstructs a fence.
+        authorize(&tx, workspace, &claim.launch, false)?;
+        claim.validate()?;
+        let claims = tx.prepare(
+            "SELECT resource_id, retired_at_millis FROM agent_assignment_resources WHERE assignment_id = ?1 AND resource_kind = 'recovery-claim' LIMIT 2",
+        ).map_err(storage_error)?.query_map([&claim.launch.assignment_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?))
+        }).map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)?;
+        let [(json, None)] = claims.as_slice() else {
+            return Err(error("durable-recovery-claim-missing"));
+        };
+        let stored: Claim =
+            serde_json::from_str(json).map_err(|_| error("durable-storage-invalid"))?;
+        if stored != *claim {
+            return Err(error("durable-recovery-claim-conflict"));
+        }
+        let current = candidate(&tx, workspace, &claim.launch, Some(claim))?;
+        if Claim::for_candidate(
+            &current,
+            claim.operation_id.clone(),
+            claim.daemon_epoch.clone(),
+        )? != *claim
+        {
+            return Err(error("durable-recovery-candidate-stale"));
+        }
+        tx.commit().map_err(storage_error)?;
+        Ok(current)
+    }
+
     fn claim_recovery(&self, workspace: &str, claim: &Claim) -> Result<Claim, RegistrationError> {
         let mut c = self.connection.lock().map_err(|_| error("storage"))?;
         let tx = c

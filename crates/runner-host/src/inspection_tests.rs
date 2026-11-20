@@ -52,6 +52,26 @@ fn exclusive_inspection_requires_existing_evidence_and_releases_only_on_drop() {
 }
 
 #[test]
+fn inspection_drop_releases_flock_even_with_a_duplicated_open_description() {
+    let f = Fixture::new();
+    f.lock();
+    let guard = ExclusiveInspection::acquire(&f.0).unwrap();
+    // A concurrent fork can retain the same open description until exec despite
+    // CLOEXEC. A duplicate deterministically exercises that kernel lifetime,
+    // without unsafe pre-exec hooks, timing sleeps or serializing other tests.
+    let inherited = guard.lock.try_clone().unwrap();
+    let contender = fs::File::open(f.0.join("owner.lock")).unwrap();
+    assert!(contender.try_lock_exclusive().is_err());
+    drop(guard);
+    contender.try_lock_exclusive().unwrap();
+    assert!(inherited.try_lock_exclusive().is_err());
+    assert_eq!(
+        fs::read(f.0.join("owner.lock")).unwrap(),
+        b"retained-lock-bytes"
+    );
+}
+
+#[test]
 fn exclusive_inspection_rejects_unsafe_paths_without_repair() {
     let f = Fixture::new();
     f.lock();

@@ -2,7 +2,38 @@
 
 ## Status: partial; T10 remains pending
 
-The latest [claim-bound predecessor quiescence](recovery-quiescence.md) adds an
+The latest [waiting-owner inspection and executable receiver](waiting-receiver.md)
+adds fresh original-receipt/pending-input/effect inspection under a directly spawned
+new waiting owner, separate unarmed preparation and exact-envelope supervisor/Node
+reception. The controlled positive tracer uses the actual SQLite grant transaction
+and application commit-before-delivery coordinator; external Git/protected-digest
+verification remains explicitly synthetic and no writable Harness resumes.
+Sixteen new Rust tests cover real process/transport, revocation, independent Node
+effect denial, strict wire and fake-clock receiver fences. Final gates pass:
+794 Rust harness tests plus seven supervised scenarios, one opt-in ignored; runner
+typecheck and 76 Node tests pass. An ordinary-denial diagnostic regression and a
+retirement test's controller/pipe lifetime race found by full runs were corrected;
+complete default-parallel reruns pass. An unarmed-host ownership-fault regression
+also failed before retaining pre-grant uncertainty and passed after that correction;
+the authority-test fixture now permits its preceding diagnostic within the same
+bounded exit wait. T10 remains pending: complete trusted proof/
+handoff orchestration, daemon integration and writable recovery are still absent.
+Production/automatic recovery remain disabled.
+
+The preceding [quiesced runtime inspection](quiesced-inspection.md) connects the exact
+active candidate reservation, original-host process receipt and pinned pending-input/
+effect inspection under one retained exclusive lock, with live post-I/O revalidation.
+Nine new Rust tests include actual subreaper/SQLite composition and a deterministic
+inspection descriptor-lifetime regression (failed before explicit-unlock correction,
+passed after). Final repository gates pass: 778 Rust harness tests plus seven
+supervised scenarios, one opt-in ignored; runner typecheck and 76 Node tests pass.
+An initial full run hit the existing reacquisition failure; the final default-parallel
+run passed after correcting the demonstrated open-description lifetime mechanism,
+without claiming traced attribution for every historical intermittent failure.
+This is a recovery-host component, not a complete verifier/handoff or writable
+resume. T10 remains pending and production/automatic recovery remain disabled.
+
+The preceding [claim-bound predecessor quiescence](recovery-quiescence.md) adds an
 executable private stop control and protected original-subreaper cleanup receipt
 without revoking the Assignment, consuming its claim or releasing capacity. Nine
 new Rust tests include actual committed claims, normal/escaped children, conflicting
@@ -174,21 +205,24 @@ power-loss durability or hostile same-user containment is inferred.
 
 ## Remaining T10 acceptance work
 
-1. Implement the concrete trusted recovery host verifier: consume the exact
-   protected predecessor quiescence receipt (original-supervisor loss/prior host
-   faults still block), inspect the original pending input and committed effects, verify
-   canonical ownership and apply external freshness/retained-work rules. The
+1. Complete the concrete trusted recovery host verifier. The new quiesced inspector
+   now consumes the exact protected predecessor receipt, inspects original pending
+   input/committed effects and retains canonical exclusive ownership with live claim
+   revalidation. Original-supervisor loss/prior host faults still block. External
+   freshness/retained-work rules and complete trusted composition remain missing. The
    application/store first-grant transition now consumes an exact claim and commits
-   a fresh bounded lease/audit transactionally, but only fake-host policy tests
-   exercise it. Historical evidence cannot reconstruct its opaque prepared authority.
+   a fresh bounded lease/audit transactionally. A controlled actual executable
+   receiver tracer exercises that commit, but Git/protected-digest verification
+   remains synthetic. Historical evidence cannot reconstruct opaque prepared authority.
    Generalize beyond the current single retained recovery operation only through
    explicit safe subsequent recovery, never timeout/restart takeover.
 2. Compose that verifier and transactional first grant with daemon reconciliation,
    the internal exact-grant recovery consumer/watchdog handshakes and application
-   commit-before-delivery coordinator. The private sender port now exists, but
-   executable host reception/watchdog and runner initialization for the new
-   initial sequence remain absent. A retained flock or descriptive
-   PID is not descendant cleanup proof; do not adopt old grants or controllers.
+   commit-before-delivery coordinator. Executable host/Node unarmed preparation
+   and exact-envelope reception now exist, with actual committed delivery evidence.
+   Production orchestration, correlated preparation handling and the authorized
+   writable execution path remain absent. A retained flock or descriptive PID
+   is not descendant cleanup proof; do not adopt old grants or controllers.
 3. Implement an authorized writable reopen/resume path that cannot re-admit the
    original input, replay arbitrary effects or silently repair/adopt dirty work.
 4. Exercise fake-clock restart order/ownership/freshness/revocation matrices and

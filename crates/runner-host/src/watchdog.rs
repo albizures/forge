@@ -37,6 +37,9 @@ impl Shutdown {
 #[cfg(test)]
 #[path = "quiescence_tests.rs"]
 mod quiescence_tests;
+#[cfg(test)]
+#[path = "recovery_receiver_tests.rs"]
+mod recovery_receiver_tests;
 
 pub struct State {
     policy: LeaseWatchdog,
@@ -45,6 +48,7 @@ pub struct State {
     shutdown: Option<Shutdown>,
     shutdown_denied: bool,
     owner: Owner,
+    recovery: Option<forge_rpc::durable_execution::SupervisorRecoveryPreparation>,
 }
 
 impl State {
@@ -56,7 +60,56 @@ impl State {
             shutdown: None,
             shutdown_denied: false,
             owner,
+            recovery: None,
         }
+    }
+
+    fn prepare_recovery(
+        &mut self,
+        control: forge_rpc::durable_execution::SupervisorRecoveryPreparation,
+        now: u64,
+    ) -> io::Result<()> {
+        let clock_valid = self.policy.check(now).is_ok();
+        let valid = clock_valid
+            && control.host_prepare_recovery
+                == forge_rpc::durable_execution::SUPERVISOR_RECOVERY_PREPARATION_VERSION
+            && self.retained_blocker
+            && self.fault.is_none()
+            && self.shutdown.is_none()
+            && self.policy.last_lease().is_none()
+            && control.grant.lease.owner == self.owner
+            && control
+                .grant
+                .validate_candidate(&control.candidate, now)
+                .is_ok();
+        if !valid || self.recovery.as_ref().is_some_and(|old| old != &control) {
+            self.fence("runner-recovery-preparation-denied");
+            return Err(io::Error::other("recovery preparation denied"));
+        }
+        // Exact preparation retries do not replace policy, clock observations or
+        // deadlines. Preparation after any first grant is forbidden above.
+        if self.recovery.is_none() {
+            let mut policy = LeaseWatchdog::for_recovery(self.owner.clone(), control.grant.clone())
+                .map_err(|_| io::Error::other("recovery preparation denied"))?;
+            policy
+                .check(now)
+                .map_err(|_| io::Error::other("recovery preparation denied"))?;
+            self.policy = policy;
+            self.recovery = Some(control);
+        }
+        Ok(())
+    }
+
+    fn accept_lease(&mut self, control: SupervisorControl, now: u64) -> io::Result<()> {
+        if control.host_control != SUPERVISOR_CONTROL_VERSION
+            || self.fault.is_some()
+            || (self.retained_blocker && self.recovery.is_none())
+            || self.policy.accept(control.lease, now).is_err()
+        {
+            self.fence("runner-authorization-denied");
+            return Err(io::Error::other("authorization denied"));
+        }
+        Ok(())
     }
 
     fn request_shutdown(&mut self, operation: Shutdown) -> io::Result<()> {
@@ -96,7 +149,7 @@ impl State {
 
 // A stalled worker may block this thread's pipe write, but it cannot block the
 // watchdog: never hold the policy mutex during reads, writes or process I/O.
-pub fn forward_input(mut input: ChildStdin, state: &Mutex<State>) {
+pub fn forward_input(mut input: ChildStdin, state: &Mutex<State>, directory: &Path) {
     let result = (|| -> io::Result<()> {
         let mut source = io::stdin().lock();
         loop {
@@ -114,77 +167,9 @@ pub fn forward_input(mut input: ChildStdin, state: &Mutex<State>) {
                 return Err(io::Error::other("invalid bounded host input"));
             }
             let value = serde_json::from_slice::<serde_json::Value>(&line).ok();
-            if value
-                .as_ref()
-                .is_some_and(|v| v.get("host_retire").is_some())
-            {
-                let control: forge_rpc::durable_execution::SupervisorRetirement =
-                    serde_json::from_slice(&line)
-                        .map_err(|_| io::Error::other("invalid retirement control"))?;
-                let mut state = state
-                    .lock()
-                    .map_err(|_| io::Error::other("watchdog state unavailable"))?;
-                if control.host_retire
-                    != forge_rpc::durable_execution::SUPERVISOR_RETIREMENT_VERSION
-                {
-                    state.fence("runner-retirement-conflict");
-                    return Err(io::Error::other("invalid retirement control"));
-                }
-                state.request_shutdown(Shutdown::Retirement(Box::new(control.operation)))?;
-                drop(state);
-                // The watchdog verifies ownership and persists host intent
-                // before signalling TERM, whose runner handler aborts authority.
-                // No cancellation is forwarded on descriptive evidence alone.
-                continue;
+            if forward_control(&line, value.as_ref(), state, directory)? {
+                input.write_all(&line)?;
             }
-            if value
-                .as_ref()
-                .is_some_and(|v| v.get("host_quiesce").is_some())
-            {
-                let control: forge_rpc::durable_execution::SupervisorQuiescence =
-                    serde_json::from_slice(&line)
-                        .map_err(|_| io::Error::other("invalid recovery shutdown control"))?;
-                let mut state = state
-                    .lock()
-                    .map_err(|_| io::Error::other("watchdog state unavailable"))?;
-                if control.host_quiesce
-                    != forge_rpc::durable_execution::SUPERVISOR_QUIESCENCE_VERSION
-                {
-                    state.fence("runner-quiescence-conflict");
-                    return Err(io::Error::other("invalid recovery shutdown control"));
-                }
-                state.request_shutdown(Shutdown::Quiescence(Box::new(control.operation)))?;
-                // Cancellation goes through the original subreaper only, never
-                // through a worker message or a retained PID supplied by a client.
-                continue;
-            }
-            if value
-                .as_ref()
-                .is_some_and(|v| v.get("host_control").is_some())
-            {
-                let control = serde_json::from_slice::<SupervisorControl>(&line);
-                let mut state = state
-                    .lock()
-                    .map_err(|_| io::Error::other("watchdog state unavailable"))?;
-                // Read inside the short policy critical section so a concurrent
-                // poll cannot make this observation appear to move backwards.
-                let accepted = match (control, boottime_millis()) {
-                    (Ok(control), Ok(now))
-                        if control.host_control == SUPERVISOR_CONTROL_VERSION
-                            && !state.retained_blocker =>
-                    {
-                        state.policy.accept(control.lease, now).is_ok()
-                    }
-                    _ => false,
-                };
-                if !accepted {
-                    state.fence("runner-authorization-denied");
-                    return Err(io::Error::other("authorization denied"));
-                }
-                // Release the guard before writing to a possibly stalled worker.
-                drop(state);
-            }
-            input.write_all(&line)?;
         }
     })();
     if result.is_err() {
@@ -193,6 +178,96 @@ pub fn forward_input(mut input: ChildStdin, state: &Mutex<State>) {
             state.fence("runner-input-uncertain");
         }
     }
+}
+
+// Return false for host-only shutdown; never forward cancellation on descriptive
+// evidence. All guards are dropped before writing to a possibly stalled worker.
+fn forward_control(
+    line: &[u8],
+    value: Option<&serde_json::Value>,
+    state: &Mutex<State>,
+    directory: &Path,
+) -> io::Result<bool> {
+    use forge_rpc::durable_execution::{
+        SUPERVISOR_QUIESCENCE_VERSION, SUPERVISOR_RECOVERY_VERSION, SUPERVISOR_RETIREMENT_VERSION,
+        SupervisorQuiescence, SupervisorRecovery, SupervisorRecoveryPreparation,
+        SupervisorRetirement,
+    };
+    let has = |key| value.is_some_and(|v| v.get(key).is_some());
+    let invalid = || io::Error::other("invalid private supervisor control");
+    let deny = |code| {
+        if let Ok(mut state) = state.lock() {
+            state.fence(code);
+        }
+        invalid()
+    };
+    let shutdown = if has("host_retire") {
+        let control: SupervisorRetirement = serde_json::from_slice(line).map_err(|_| invalid())?;
+        if control.host_retire != SUPERVISOR_RETIREMENT_VERSION {
+            return Err(deny("runner-retirement-conflict"));
+        }
+        Some(Shutdown::Retirement(Box::new(control.operation)))
+    } else if has("host_quiesce") {
+        let control: SupervisorQuiescence = serde_json::from_slice(line).map_err(|_| invalid())?;
+        if control.host_quiesce != SUPERVISOR_QUIESCENCE_VERSION {
+            return Err(deny("runner-quiescence-conflict"));
+        }
+        Some(Shutdown::Quiescence(Box::new(control.operation)))
+    } else {
+        None
+    };
+    if let Some(shutdown) = shutdown {
+        state
+            .lock()
+            .map_err(|_| invalid())?
+            .request_shutdown(shutdown)?;
+        return Ok(false);
+    }
+    if has("host_prepare_recovery") {
+        let control: SupervisorRecoveryPreparation =
+            serde_json::from_slice(line).map_err(|_| invalid())?;
+        let operation =
+            forge_app::durable_execution::recovery::quiescence::Operation::for_candidate(
+                &control.candidate,
+                control.grant.claim.clone(),
+            )
+            .map_err(|_| invalid())?;
+        // Filesystem/process I/O never holds the watchdog policy mutex.
+        crate::quiescence::waiting_receipt(directory, &operation)?;
+        let mut state = state.lock().map_err(|_| invalid())?;
+        state.prepare_recovery(control, boottime_millis()?)?;
+    } else if has("host_recovery") {
+        let control: SupervisorRecovery = serde_json::from_slice(line).map_err(|_| invalid())?;
+        let operation = {
+            let state = state.lock().map_err(|_| invalid())?;
+            let expected = state.recovery.as_ref().ok_or_else(invalid)?;
+            forge_app::durable_execution::recovery::quiescence::Operation::for_candidate(
+                &expected.candidate,
+                expected.grant.claim.clone(),
+            )
+            .map_err(|_| invalid())?
+        };
+        crate::quiescence::waiting_receipt(directory, &operation)?;
+        let mut state = state.lock().map_err(|_| invalid())?;
+        if control.host_recovery != SUPERVISOR_RECOVERY_VERSION
+            || state.fault.is_some()
+            || state.recovery.is_none()
+            || state
+                .policy
+                .accept_recovery(&control.grant, boottime_millis()?)
+                .is_err()
+        {
+            state.fence("runner-recovery-authorization-denied");
+            return Err(invalid());
+        }
+    } else if has("host_control") {
+        let control: SupervisorControl =
+            serde_json::from_slice(line).map_err(|_| deny("runner-authorization-denied"))?;
+        let mut state = state.lock().map_err(|_| invalid())?;
+        // Read inside the policy critical section to preserve clock ordering.
+        state.accept_lease(control, boottime_millis()?)?;
+    }
+    Ok(true)
 }
 
 fn diagnostic(
@@ -303,7 +378,10 @@ pub fn supervise(mut worker: Supervised<'_>, directory: &Path, state: &Mutex<Sta
                 } else {
                     state.fence("runner-clock-unavailable");
                 }
-                if observation.is_err() && state.policy.last_lease().is_some() {
+                if observation.is_err() {
+                    // An unarmed waiting owner can lose verified identity too.
+                    // Remember that fault before any first/recovery grant; later
+                    // file restoration must not revive a fenced Supervised handle.
                     state.fence("runner-owner-uncertain");
                 }
                 (state.fault, state.policy.last_lease().cloned(), now)

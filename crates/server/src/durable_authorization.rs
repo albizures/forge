@@ -5,9 +5,11 @@ mod effect_admission;
 pub mod effects;
 mod inspection_process;
 pub mod operator;
+pub mod quiesced_inspection;
 pub mod recovery_inspection;
 pub mod retirement;
 mod runtime_directory;
+pub mod waiting_recovery_inspection;
 use forge_app::{
     RegistrationError,
     authorization_lease::{

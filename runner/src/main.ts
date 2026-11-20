@@ -9,6 +9,7 @@ import { openNodeSqliteStorage } from '@earendil-works/pi-durable/storage/sqlite
 import { canonical, compatibility, Denied, exactKeys, requireCondition, validateRequest, type Launch } from './contract.ts';
 import { Authorization, guardProvider, type Owner } from './authorization.ts';
 import { ownerIdentity } from './owner.ts';
+import { inspectRecoveryCandidate } from './recovery.ts';
 import { databasePath, journal, observe, persistIntent, persistRoot, validateDirectory } from './storage.ts';
 
 process.umask(0o077);
@@ -18,6 +19,9 @@ let harness: Harness | undefined;
 let authorization: Authorization | undefined;
 let authorizedLaunch: Launch | undefined;
 let cancelled = false;
+let authorizationFenced = false;
+let recoveryPreparation: string | undefined;
+let recoveryDelivered = false;
 // Trusted supervisor cancellation: close admission and abort active guarded
 // execution. The independent host bounds shutdown and verifies descendants.
 process.on('SIGTERM', () => { cancelled = true; authorization?.close(); });
@@ -27,33 +31,85 @@ function watchdogBlocked(): boolean {
   catch (error) { return (error as NodeJS.ErrnoException).code !== 'ENOENT'; }
 }
 
+function currentOwner(): Owner {
+  const evidence = ownerIdentity(directory);
+  const owner: Owner = {
+    boot_id: evidence.owner.boot_id,
+    time_namespace: readlinkSync('/proc/self/ns/time'),
+    host_pid: evidence.owner.host_pid,
+    host_start: evidence.owner.host_start,
+    worker_pid: process.pid,
+    worker_start: evidence.worker_start,
+    lock_device: evidence.owner.lock_device,
+    lock_inode: evidence.owner.lock_inode,
+  };
+  requireCondition(readlinkSync(`/proc/${process.ppid}/ns/time`) === owner.time_namespace, 'assignment-lease-denied');
+  return owner;
+}
+
+// Preparation is not authority. The host first verifies original quiescence and
+// the new owner, then forwards a fresh expectation on this private channel. This
+// consumer independently checks original pending input/effects read-only. It does
+// not bootstrap, open Harness, resubmit input or resume any execution here.
+async function prepareRecovery(control: unknown): Promise<void> {
+  try {
+    exactKeys(control, ['host_prepare_recovery', 'candidate', 'grant']);
+    requireCondition(control.host_prepare_recovery === 1 && !cancelled && !authorizationFenced && !watchdogBlocked(), 'assignment-lease-denied');
+    if (recoveryPreparation !== undefined) {
+      requireCondition(!recoveryDelivered && canonical(control) === recoveryPreparation, 'assignment-lease-denied');
+      return;
+    }
+    requireCondition(!authorization, 'assignment-lease-denied');
+    exactKeys(control.candidate, ['launch', 'admission_id', 'attempt', 'execution_directory', 'last_lease']);
+    const { candidate, grant } = control;
+    requireCondition(candidate.execution_directory === worktree && grant?.lease?.generation === candidate.attempt?.generation, 'assignment-lease-denied');
+    requireCondition(canonical(candidate.launch) === canonical(grant.lease.launch) && canonical(candidate.last_lease?.launch) === canonical(candidate.launch), 'assignment-lease-denied');
+    requireCondition(Number.isSafeInteger(candidate.last_lease.sequence) && grant.lease.sequence === candidate.last_lease.sequence + 1 && candidate.last_lease.daemon_epoch !== grant.lease.daemon_epoch, 'assignment-lease-denied');
+    const identity = canonical(control);
+    await inspectRecoveryCandidate(directory, candidate.launch, candidate.admission_id);
+    requireCondition(!cancelled && !authorizationFenced && !watchdogBlocked(), 'assignment-lease-denied');
+    authorization = Authorization.forRecovery(candidate.launch, candidate.attempt.generation, currentOwner(), grant.lease.daemon_epoch, grant);
+    authorizedLaunch = structuredClone(candidate.launch);
+    recoveryPreparation = identity;
+    console.log(JSON.stringify({ event: 'recovery-prepared' }));
+  } catch {
+    authorizationFenced = true;
+    authorization?.close();
+    throw new Denied('assignment-lease-denied');
+  }
+}
+
+function acceptRecovery(control: unknown): void {
+  try {
+    exactKeys(control, ['host_recovery', 'grant']);
+    requireCondition(control.host_recovery === 1 && recoveryPreparation && authorization && !cancelled && !authorizationFenced && !watchdogBlocked(), 'assignment-lease-denied');
+    authorization.acceptRecovery(control.grant);
+    recoveryDelivered = true;
+    console.log(JSON.stringify({ event: 'authorized', sequence: control.grant.lease.sequence }));
+  } catch {
+    authorizationFenced = true;
+    authorization?.close();
+    throw new Denied('assignment-lease-denied');
+  }
+}
+
 // Only the directly spawned supervisor's protected input pipe delivers this
 // control. Never load a persisted grant, expose a tool or accept an agent RPC.
 function acceptAuthorization(control: unknown): void {
   try {
     exactKeys(control, ['host_control', 'lease']);
-    requireCondition(control.host_control === 1 && !cancelled && !watchdogBlocked(), 'assignment-lease-denied');
+    requireCondition(control.host_control === 1 && !cancelled && !authorizationFenced && !watchdogBlocked(), 'assignment-lease-denied');
     const lease = control.lease;
     requireCondition(lease && typeof lease === 'object', 'assignment-lease-denied');
     if (!authorization) {
-      const evidence = ownerIdentity(directory);
-      const owner: Owner = {
-        boot_id: evidence.owner.boot_id,
-        time_namespace: readlinkSync('/proc/self/ns/time'),
-        host_pid: evidence.owner.host_pid,
-        host_start: evidence.owner.host_start,
-        worker_pid: process.pid,
-        worker_start: evidence.worker_start,
-        lock_device: evidence.owner.lock_device,
-        lock_inode: evidence.owner.lock_inode,
-      };
-      requireCondition(readlinkSync(`/proc/${process.ppid}/ns/time`) === owner.time_namespace, 'assignment-lease-denied');
+      const owner = currentOwner();
       authorization = new Authorization(lease.launch, lease.generation, owner, lease.daemon_epoch);
       authorizedLaunch = structuredClone(lease.launch);
     }
     authorization.accept(lease);
     console.log(JSON.stringify({ event: 'authorized', sequence: lease.sequence }));
   } catch {
+    authorizationFenced = true;
     authorization?.close();
     throw new Denied('assignment-lease-denied');
   }
@@ -101,6 +157,14 @@ try {
     }
     try {
       const request: unknown = JSON.parse(line);
+      if (request && typeof request === 'object' && 'host_prepare_recovery' in request) {
+        await prepareRecovery(request);
+        continue;
+      }
+      if (request && typeof request === 'object' && 'host_recovery' in request) {
+        acceptRecovery(request);
+        continue;
+      }
       if (request && typeof request === 'object' && 'host_control' in request) {
         acceptAuthorization(request);
         continue;

@@ -162,6 +162,18 @@ pub trait Repository: Send + Sync {
         launch: &Launch,
     ) -> Result<Candidate, RegistrationError>;
 
+    /// Read the current candidate through exactly one active matching reservation.
+    /// Unlike claim replay, this revalidates live authority and the full candidate
+    /// commitment. A retired/cancelled claim or historical grant is not permission.
+    /// This read neither consumes the reservation nor verifies external safety.
+    /// # Errors
+    /// Rejects absent/foreign/retired claims, stale commitments and live blockers.
+    fn claimed_recovery_candidate(
+        &self,
+        workspace: &str,
+        claim: &Claim,
+    ) -> Result<Candidate, RegistrationError>;
+
     /// Reserve the original binding after atomically revalidating the candidate.
     /// The retained resource fences ordinary grants and competing claims. An
     /// exact authorized retry returns its original result even after revocation;

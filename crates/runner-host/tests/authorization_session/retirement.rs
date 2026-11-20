@@ -387,8 +387,11 @@ fn intent_commit_failure_prevents_host_cancellation_and_keeps_revocation() {
     let (controller, _cleanup) = handoff(&mut f);
     let c = rusqlite::Connection::open(&f.database).unwrap();
     c.execute_batch("CREATE TRIGGER fail_retirement_intent BEFORE INSERT ON durable_assignment_retirements BEGIN SELECT RAISE(ABORT, 'injected'); END;").unwrap();
+    // Keep the original registry/private pipe alive through these assertions.
+    // Dropping the only controller with the temporary app can deliver EOF and
+    // independently trigger legitimate worker-exit/watchdog uncertainty.
     assert!(
-        app(&f, controller)
+        app(&f, controller.clone())
             .retire_agent_assignment("assignment")
             .is_err()
     );
