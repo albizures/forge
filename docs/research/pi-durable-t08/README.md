@@ -104,10 +104,10 @@ additional process/effect evidence.
 
 ## Remaining T08 work / handoff
 
-1. Wire the implemented trusted observation/retention boundary into the future
-   production supervisor/recovery controller. Controlled Rust-to-Node composition
-   now delivers actual observations, including lost admission replies and daemon
-   restart, but is not production scheduling or delivery.
+1. Wire the trusted observation/retention service into the future production
+   supervisor/recovery controller. The bounded server-to-runner adapter described
+   below now delivers actual observations, including lost admission replies and
+   daemon restart, but is not production scheduling or recovery authorization.
 2. Define/implement a bounded operator CLI/RPC inspection/resolution operation:
    scope authorization before replay; exact retries return original audit;
    conflicting reuse rejects; verified ownership/absence and current binding
@@ -249,3 +249,112 @@ worktree repair was added. T18 independent review remains required.
 
 Summary: no introduced coding-standard violations found; remaining implementation
 gaps are explicitly retained, not waived by the passing local gates.
+
+## Bounded server observation increment
+
+`crates/server/src/durable_authorization/effects.rs::inspect_and_retain` now
+composes actual committed runtime inspection with transactional Forge retention.
+The two real publication-like fault scenarios use this service rather than
+submitting fixture-returned identities directly to the store. It is a callable
+trusted daemon adapter, **not yet an automatically scheduled production recovery
+controller or an operator resolution command**. T08 remains incomplete and T09
+remains blocked.
+
+- Scope and the complete retained Launch are checked before process spawning.
+  Storage comes from the existing protected canonical Workspace/store mapping;
+  no RPC-selected path, current profile source, model credential, capability or
+  worktree access is needed for this historical inspection.
+- Explicit trusted absolute Node/inspector paths replace PATH discovery. The
+  inspector checks the retained component hash, runtime schema and complete
+  journal identity. The process has a cleared environment, protected identities
+  on stdin, a 16 KiB request cap, a 20 MiB response cap and a 30-second deadline.
+  Failed/timed-out/oversized inspectors receive a kill/reap attempt bounded by
+  one additional second; an unverified exit stays unknown (including kernel I/O
+  stalls). Stderr and arbitrary parser/storage errors are not forwarded. This is
+  only direct read-only child cleanup, not Assignment retirement or proof about
+  surviving external work.
+- `runner/src/inspect-effects.ts` is a separate read-only entrypoint. Missing
+  runtime storage and interrupted initialization fail closed, not a successful
+  empty scan. It uses the pinned physical read-only adapter, never a Harness.
+  Only protocol version, exact Launch and bounded effect identities are returned.
+- Response validation denies foreign bindings, unknown fields/protocol versions,
+  unbounded batches and invalid identities. Retention then rechecks scope and
+  binding transactionally. It remains monotonic: no response, failure or empty
+  scan clears a resource/hold, rewrites an Outcome or authorizes execution.
+- Read-only scans can race an active writer; they are not an exclusive recovery
+  snapshot. Recovery must still obtain verified host ownership and inspect again
+  before any writable opening/model/tool admission. No scheduler is enabled here.
+
+Compatibility: additive internal protocol-1 observation entrypoint; no public
+CLI/RPC fields, dependency versions or storage schemas changed. Tokio's existing
+`process` feature is enabled to bound/reap the inspector without blocking an async
+executor; no new dependency is added. Shared Launch validation is extracted
+without changing admission rules. Storage ownership checks are shared between
+historical inspection and new-launch validation; historical inspection does not
+require the original worktree to exist. The component hash includes the new
+entrypoint. Old hashes are never rewritten: retained runtimes still require
+matching components; this increment does not supply T15 packaging/selection.
+
+### Verification
+
+From the repository root, all final gates passed:
+
+```sh
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+(cd runner && npm run check && npm test)
+git diff --check
+```
+
+Results: **659 Rust harness tests passed, 0 failed, 1 pre-existing opt-in probe
+ignored; all 6 custom-harness supervised scenarios passed; runner typecheck and
+51 Node tests passed**. The two fault scenarios retain actual inspected effects
+through the service, repeat observation after daemon abort/restart and verify
+unchanged runtime DB bytes, retained Assignment state/capacity and actual CLI/RPC
+inspection. Mutation count remains one; tracked, staged and untracked bytes stay
+unchanged. Tests also reject wrong scope/binding before a missing executable,
+and preserve the prior blocker when the inspector executable is unavailable.
+
+New adapter tests cover malformed/extra fields, all Launch identity mismatches,
+version/batch/identity bounds, deadline expiry, excessive output and redacted
+nonzero exits. A separate Node wire test covers absent storage, interrupted
+initialization, mismatched hash/journal, oversized/malformed requests, exact
+repeated committed inspection, argument-canary redaction and unrepaired corrupt
+storage. Shell scripts used only as broken-inspector fixtures use builtins and
+spawn no descendants. These tests are not real-provider or packaged release
+verification. The historical supervisor timeout did not recur; no general flake
+resolution is claimed.
+
+During implementation, typechecking caught a narrowed-key indexing error and
+Rust compilation/lint caught test error-field access and let-else style; all were
+corrected before the final gates. The first composed run correctly rejected a
+group-writable test `.forge` ancestor inherited from host umask 0002. The fixture
+now creates its owner-only `.forge` boundary before worktree setup; production
+path validation was not weakened. An initial name-filtered Rust command selected
+zero tests; the entire five-case integration target and full workspace were then
+run successfully.
+
+### Task-local reviews
+
+Implementation review against T08: “Translate runtime interruption into
+Forge-visible uncertainty before recovery can schedule more model/tools” now has
+a bounded reusable server observation/retention adapter, but production recovery
+controller integration remains absent. “Establish a bounded, explicit operator
+inspection/resolution path” remains partial: no audited resolution command or
+resolution scope/conflict/unsafe-ownership acceptance tests exist. Successful
+inspection is not execution authority. No unrelated scope expansion found.
+
+Summary: T08 incomplete; audited operator resolution and production recovery
+composition remain the blocking gaps; T09 must not advance.
+
+Standards self-review: no introduced violations found. Policy/transactional
+retention remain in app/store; server owns process adaptation and canonical
+mapping. External calls finish before the store's atomic scope/binding recheck.
+Failures retain uncertainty/capacity, stderr is discarded and wire payloads
+exclude tool arguments/results. Tests isolate roots/processes and the final
+workspace suite ran in default parallel mode. This is a task-local self-review,
+not the independent T18 review.
+
+Summary: no introduced coding-standard violations found; remaining T08 work and
+unrun release gates are not waived.

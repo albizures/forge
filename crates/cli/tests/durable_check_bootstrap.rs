@@ -179,7 +179,7 @@ async fn returned_tool_without_committed_receipt_retains_forge_blocker_across_da
 }
 
 async fn interrupted_effect_process(
-    root: &Path,
+    runtime: &Path,
     launch: &Launch,
     checkout: &Path,
     key: &Path,
@@ -192,11 +192,6 @@ async fn interrupted_effect_process(
     std::fs::write(checkout.join("untracked.txt"), "untracked bytes\n").unwrap();
     let status = git(checkout, &["status", "--porcelain=v1"]);
     let index = git(checkout, &["show", ":tracked.txt"]);
-    let runtime = root.join("interrupted-runtime");
-    std::fs::DirBuilder::new()
-        .mode(0o700)
-        .create(&runtime)
-        .unwrap();
     let input = json!({ "directory": runtime, "worktree": checkout, "key": key, "launch": launch, "beforeResultCommit": before_commit });
     let output = tokio::task::spawn_blocking(move || {
         let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -293,6 +288,12 @@ async fn inspect_interrupted_effect(endpoint: &str, assignment: &str) {
 async fn check_execution(mode: &str) {
     let fixture = Fixture::new();
     let root = &fixture.0;
+    // The trusted runtime mapping rejects group-writable ancestors regardless
+    // of the test host's umask; establish the owned boundary before Git setup.
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(root.join(".forge"))
+        .unwrap();
     let repository = root.join("repository");
     std::fs::create_dir(&repository).unwrap();
     git(&repository, &["init", "-q"]);
@@ -520,8 +521,12 @@ async fn check_execution(mode: &str) {
     stale["bound"]["checkAttempt"]["evidence"]["commit"] = "f".repeat(40).into();
     bootstrap(stale).await;
     if mode.starts_with("effect-") {
+        let authority = forge_server::durable_authorization::DaemonAuthority::new().unwrap();
+        let runtime_directory = authority
+            .prepare_directory(&store, "test", &launch)
+            .unwrap();
         let effects = interrupted_effect_process(
-            root,
+            &runtime_directory,
             &launch,
             &checkout.path,
             &model_key,
@@ -530,10 +535,53 @@ async fn check_execution(mode: &str) {
         .await;
         // The lost runtime admission reply deliberately remains Unknown. Runtime
         // observations must still be retained, never interpreted as safe absence.
-        store
-            .retain_interrupted_effects("test", &launch, &effects)
+        let inspector = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../runner/src/inspect-effects.ts")
+            .canonicalize()
+            .unwrap();
+        let inspect = forge_server::durable_authorization::effects::inspect_and_retain;
+        let database_before = std::fs::read(runtime_directory.join("runtime.sqlite")).unwrap();
+        // Scope/binding rejection must precede spawning even an invalid binary.
+        assert!(
+            inspect(
+                &store,
+                "foreign",
+                &launch,
+                Path::new("/missing-node"),
+                &inspector
+            )
+            .await
+            .is_err()
+        );
+        let mut foreign_launch = launch.clone();
+        foreign_launch.incarnation_id = "foreign-incarnation".into();
+        assert!(
+            inspect(
+                &store,
+                "test",
+                &foreign_launch,
+                Path::new("/missing-node"),
+                &inspector
+            )
+            .await
+            .is_err()
+        );
+        inspect(&store, "test", &launch, &node(), &inspector)
+            .await
             .unwrap();
         let before = store.agent_assignment_info(assignment_id).unwrap();
+        assert_eq!(
+            std::fs::read(runtime_directory.join("runtime.sqlite")).unwrap(),
+            database_before
+        );
+        assert_eq!(
+            before
+                .resources
+                .iter()
+                .filter(|resource| resource.resource_kind == "interrupted-effect")
+                .count(),
+            effects.len()
+        );
         assert!(before.capacity_reserved());
         assert!(
             before
@@ -552,9 +600,20 @@ async fn check_execution(mode: &str) {
         daemon.abort();
         let _ = daemon.await;
         let reopened = SqliteProjectRepository::open(&db).unwrap();
-        reopened
-            .retain_interrupted_effects("test", &launch, &effects)
+        inspect(&reopened, "test", &launch, &node(), &inspector)
+            .await
             .unwrap();
+        assert!(
+            inspect(
+                &reopened,
+                "test",
+                &launch,
+                Path::new("/missing-node"),
+                &inspector
+            )
+            .await
+            .is_err()
+        );
         assert!(
             reopened
                 .retain_interrupted_effects("foreign", &launch, &effects)

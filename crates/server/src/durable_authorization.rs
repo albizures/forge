@@ -1,6 +1,7 @@
 //! Trusted durable grant delivery/renewal service. No operator RPC, Assignment
 //! capability or production launch path exposes this service yet.
 //! One `DaemonAuthority` belongs to one daemon lifetime, never retained on disk.
+pub mod effects;
 mod runtime_directory;
 use forge_app::{
     RegistrationError,

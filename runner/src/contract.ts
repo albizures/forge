@@ -10,7 +10,7 @@ export function requireCondition(condition: unknown, code: string): asserts cond
 }
 export function componentHash(): string {
   const hash = createHash('sha256');
-  for (const path of ['package-lock.json', 'prepare-reader.mjs', 'src/contract.ts', 'src/storage.ts', 'src/main.ts', 'src/authorization.ts', 'src/profiles.ts', 'src/bootstrap.ts', 'src/check-runtime.ts', 'src/interrupted-effects.ts', 'src/owner.ts']) {
+  for (const path of ['package-lock.json', 'prepare-reader.mjs', 'src/contract.ts', 'src/storage.ts', 'src/main.ts', 'src/authorization.ts', 'src/profiles.ts', 'src/bootstrap.ts', 'src/check-runtime.ts', 'src/interrupted-effects.ts', 'src/inspect-effects.ts', 'src/owner.ts']) {
     hash.update(path).update(readFileSync(new URL('../' + path, import.meta.url)));
   }
   return hash.digest('hex');
@@ -26,6 +26,14 @@ export function canonical(value: unknown): string {
   if (value !== null && typeof value === 'object') return '{' + Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => JSON.stringify(k) + ':' + canonical(v)).join(',') + '}';
   return JSON.stringify(value);
 }
+export function validateLaunch(launch: unknown): asserts launch is Launch {
+  exactKeys(launch, launchKeys);
+  for (const key of launchKeys) {
+    if (key !== 'profile_revision' && key !== 'runtime_schema') requireCondition(typeof launch[key] === 'string' && launch[key].trim(), 'durable-identity-invalid');
+  }
+  requireCondition(Number.isInteger(launch.profile_revision) && launch.profile_revision > 0 && launch.profile_revision <= 4294967295, 'durable-identity-invalid');
+  requireCondition(launch.runtime_schema === 2 && launch.component_hash === componentHash(), 'runner-schema-incompatible');
+}
 export function validateRequest(request: unknown): asserts request is Record<string, any> {
   exactKeys(request, ['compatibility', 'assignment_id', 'runtime_id', 'operation_id', 'operation']);
   exactKeys(request.compatibility, ['protocol', 'runtime_schema', 'component_hash']);
@@ -37,14 +45,9 @@ export function validateRequest(request: unknown): asserts request is Record<str
   requireCondition(operation && typeof operation === 'object', 'runner-request-invalid');
   if (operation.kind === 'admit') {
     exactKeys(operation, ['kind', 'launch']);
-    exactKeys(operation.launch, launchKeys);
+    validateLaunch(operation.launch);
     const launch = operation.launch;
-    for (const key of launchKeys) {
-      if (key !== 'profile_revision' && key !== 'runtime_schema') requireCondition(typeof launch[key] === 'string' && launch[key].trim(), 'durable-identity-invalid');
-    }
-    requireCondition(Number.isInteger(launch.profile_revision) && launch.profile_revision > 0 && launch.profile_revision <= 4294967295, 'durable-identity-invalid');
-    requireCondition(launch.runtime_schema === 2 && launch.component_hash === componentHash(), 'runner-schema-incompatible');
-    for (const key of ['assignment_id', 'runtime_id', 'operation_id']) requireCondition(request[key] === launch[key], 'runner-identity-conflict');
+    for (const key of ['assignment_id', 'runtime_id', 'operation_id'] as const) requireCondition(request[key] === launch[key], 'runner-identity-conflict');
   } else if (operation.kind === 'observe') {
     exactKeys(operation, ['kind', 'admission_operation_id']);
     requireCondition(typeof operation.admission_operation_id === 'string' && operation.admission_operation_id.trim(), 'runner-identity-conflict');

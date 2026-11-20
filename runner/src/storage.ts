@@ -17,15 +17,18 @@ export function protectedPath(path: string, directory = false): void {
   requireCondition((directory ? stat.isDirectory() : stat.isFile()) && stat.uid === process.getuid!() && (stat.mode & 0o777) === (directory ? 0o700 : 0o600) && (directory || stat.nlink === 1), 'runner-storage-ownership-invalid');
   requireCondition(realpathSync(path) === path, 'runner-storage-path-invalid');
 }
-export function validateDirectory(directory: string, worktree: string): void {
+export function validateStorageDirectory(directory: string): void {
   requireCondition(process.platform === 'linux' && process.version === 'v24.18.0', 'runner-host-incompatible');
   protectedPath(directory, true);
-  requireCondition(isAbsolute(worktree) && realpathSync(worktree) === worktree, 'runner-worktree-invalid');
-  const nested = (a: string, b: string) => { const rel = relative(a, b); return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel)); };
-  requireCondition(!nested(worktree, directory) && !nested(directory, worktree), 'runner-storage-in-worktree');
   for (const name of ['runtime.sqlite', 'runtime.sqlite-wal', 'runtime.sqlite-shm']) {
     if (exists(join(directory, name))) protectedPath(join(directory, name));
   }
+}
+export function validateDirectory(directory: string, worktree: string): void {
+  validateStorageDirectory(directory);
+  requireCondition(isAbsolute(worktree) && realpathSync(worktree) === worktree, 'runner-worktree-invalid');
+  const nested = (a: string, b: string) => { const rel = relative(a, b); return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel)); };
+  requireCondition(!nested(worktree, directory) && !nested(directory, worktree), 'runner-storage-in-worktree');
 }
 export function journal(directory: string): { launch: Launch; root: number | null } | undefined {
   const path = databasePath(directory);
