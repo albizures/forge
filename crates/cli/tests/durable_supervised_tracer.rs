@@ -297,6 +297,16 @@ async fn scenario(mode: &str) {
         mode: mode.into(),
         provisions: Arc::new(AtomicUsize::new(0)),
         reports: Arc::new(Mutex::new(vec![])),
+        retirement: Arc::new(
+            forge_server::durable_authorization::retirement::Controller::default()
+                .with_inspection(
+                    forge_server::durable_authorization::operator::InspectionComponents {
+                        node: node.clone(),
+                        inspector: runner.join("src/inspect-effects.ts"),
+                    },
+                )
+                .unwrap(),
+        ),
     };
     // Embed the actual server with the explicitly injected controlled adapter.
     // Only this test drives scheduling: a second default Herdr reconciler must
@@ -328,7 +338,7 @@ async fn scenario(mode: &str) {
             .unwrap();
     assert!(!existing);
     assert_eq!(adapter.provisions.load(Ordering::SeqCst), 1);
-    let report = adapter.reports.lock().unwrap().pop().unwrap();
+    let mut report = adapter.reports.lock().unwrap().pop().unwrap();
     assert_eq!(report.launch.assignment_id, assignment.id);
     assert_eq!(assignment.profile.revision, profile.revision);
     let attempt = store
@@ -354,7 +364,7 @@ async fn scenario(mode: &str) {
     let info = store.agent_assignment_info(&assignment.id).unwrap();
     assert!(info.capacity_reserved());
     assert_eq!(store.list_agent_assignments(record).unwrap().len(), 1);
-    if mode == "accepted" {
+    if matches!(mode, "accepted" | "retired") {
         assert_eq!(report.answer, Some(AnswerObservation::OutcomeAccepted));
         assert_eq!(
             store.show_record(record).unwrap().status,
@@ -436,7 +446,7 @@ async fn scenario(mode: &str) {
             );
         }
     }
-    if matches!(mode, "accepted" | "rejected") {
+    if matches!(mode, "accepted" | "rejected" | "retired") {
         assert_eq!(
             fs::read_to_string(report.directory.join("controlled-effects")).unwrap(),
             "effect\n"
@@ -454,28 +464,144 @@ async fn scenario(mode: &str) {
             .is_empty()
     );
     assert_eq!(adapter.provisions.load(Ordering::SeqCst), 1);
-    // Explicit fixture closure is not retirement proof. Reopening retains all
-    // resources/capacity/diagnostics and never rewrites the accepted admission.
-    if assignment.closed_at_millis.is_none() {
-        store
-            .close_agent_assignment(
+    if mode == "retired" {
+        // Actual CLI/RPC -> application revocation -> registered original host.
+        // Historical cleanup must survive missing source/authentication files.
+        fs::remove_file(&model_key).unwrap();
+        fs::remove_file(root.join(".agents/profiles/worker.md")).unwrap();
+        let claim = store.worktree_claim(record).unwrap().unwrap();
+        let head = git(&git_program, &claim.path, &["rev-parse", "HEAD"]);
+        let status = git(
+            &git_program,
+            &claim.path,
+            &["--no-optional-locks", "status", "--porcelain=v2"],
+        );
+        let checks = store.list_record_checks(record).unwrap();
+        let retire = |success: bool| {
+            let output = Command::new(&adapter.cli)
+                .env_clear()
+                .args([
+                    "dispatcher",
+                    "assignment-retire",
+                    &assignment.id,
+                    "--json",
+                    "--server-url",
+                    &format!("{}/rpc", adapter.endpoint),
+                ])
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.success(),
+                success,
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(!String::from_utf8_lossy(&output.stdout).contains(&capability));
+            if !success {
+                assert!(
+                    String::from_utf8_lossy(&output.stderr)
+                        .contains("assignment-retirement-unreconciled")
+                );
+            }
+        };
+        // The pre-launch provision-intent remains a separate unknown-resource
+        // confirmation, even after the owned process receipt is committed.
+        retire(false);
+        let pending = store.agent_assignment_info(&assignment.id).unwrap();
+        assert!(pending.assignment.closed_at_millis.is_some());
+        assert!(pending.capacity_reserved());
+        assert!(
+            pending
+                .resources
+                .iter()
+                .any(|r| r.resource_kind == "provision-intent" && r.retired_at_millis.is_none())
+        );
+        assert!(adapter.app().dispatch_record(replacement).is_err());
+        assert!(
+            store
+                .list_agent_assignments(replacement)
+                .unwrap()
+                .is_empty()
+        );
+        let resolve = Command::new(&adapter.cli)
+            .env_clear()
+            .args([
+                "dispatcher",
+                "assignment-resolve-unknown",
                 &assignment.id,
-                forge_app::AgentAssignmentClosureReason::Retired,
-            )
+                "--confirm-old-agent-cannot-act",
+                "--confirm-unknown-resources-safe",
+                "--json",
+                "--server-url",
+                &format!("{}/rpc", adapter.endpoint),
+            ])
+            .output()
             .unwrap();
+        assert!(
+            resolve.status.success(),
+            "{}",
+            String::from_utf8_lossy(&resolve.stderr)
+        );
+        assert!(
+            store
+                .agent_assignment_info(&assignment.id)
+                .unwrap()
+                .capacity_reserved()
+        );
+        retire(true);
+        let retired = store.agent_assignment_info(&assignment.id).unwrap();
+        assert!(retired.assignment.closed_at_millis.is_some());
+        assert!(!retired.capacity_reserved());
+        assert!(retired.dispatch_hold.is_some());
+        retire(true);
+        assert_eq!(
+            store.agent_assignment_info(&assignment.id).unwrap(),
+            retired
+        );
+        assert_eq!(store.list_record_checks(record).unwrap(), checks);
+        assert_eq!(git(&git_program, &claim.path, &["rev-parse", "HEAD"]), head);
+        assert_eq!(
+            git(
+                &git_program,
+                &claim.path,
+                &["--no-optional-locks", "status", "--porcelain=v2"]
+            ),
+            status
+        );
+        assert_eq!(
+            store.runtime("test", &assignment.id).unwrap().unwrap(),
+            runtime
+        );
+        assert_eq!(
+            store.assignment_check_attempt(&assignment.id).unwrap(),
+            Some(attempt)
+        );
+        assert_eq!(adapter.provisions.load(Ordering::SeqCst), 1);
+        report.finish_retired(&capability);
+    } else {
+        // Explicit fixture closure is not retirement proof. Reopening retains all
+        // resources/capacity/diagnostics and never rewrites the accepted admission.
+        if assignment.closed_at_millis.is_none() {
+            store
+                .close_agent_assignment(
+                    &assignment.id,
+                    forge_app::AgentAssignmentClosureReason::Retired,
+                )
+                .unwrap();
+        }
+        let reopened = SqliteProjectRepository::open(&database).unwrap();
+        let retained = reopened.agent_assignment_info(&assignment.id).unwrap();
+        assert!(retained.capacity_reserved());
+        assert_eq!(retained.resources, info.resources);
+        assert_eq!(
+            reopened.runtime("test", &assignment.id).unwrap().unwrap(),
+            runtime
+        );
+        assert_eq!(
+            reopened.assignment_check_attempt(&assignment.id).unwrap(),
+            Some(attempt)
+        );
     }
-    let reopened = SqliteProjectRepository::open(&database).unwrap();
-    let retained = reopened.agent_assignment_info(&assignment.id).unwrap();
-    assert!(retained.capacity_reserved());
-    assert_eq!(retained.resources, info.resources);
-    assert_eq!(
-        reopened.runtime("test", &assignment.id).unwrap().unwrap(),
-        runtime
-    );
-    assert_eq!(
-        reopened.assignment_check_attempt(&assignment.id).unwrap(),
-        Some(attempt)
-    );
     if let Some((_, proxy)) = proxy {
         proxy.abort();
         let _ = proxy.await;
@@ -499,7 +625,7 @@ fn main() {
             std::process::exit(1);
         }
     } else if args.iter().any(|arg| arg == "--list") {
-        println!("T07 supervised tracer (six parallel controlled scenarios)");
+        println!("T07/T09 supervised tracer (seven parallel controlled scenarios)");
     } else {
         // Parallel isolated scenarios are intentional, not a serial-test waiver.
         tokio::runtime::Builder::new_multi_thread()
@@ -510,6 +636,7 @@ fn main() {
             .block_on(async {
                 let modes = [
                     "accepted",
+                    "retired",
                     "missing",
                     "rejected",
                     "bootstrap-denied",
@@ -528,6 +655,6 @@ fn main() {
                     "supervised tracer scenarios failed: {failures:?}"
                 );
             });
-        println!("T07 supervised tracer: 6 scenarios passed");
+        println!("T07/T09 supervised tracer: 7 scenarios passed");
     }
 }

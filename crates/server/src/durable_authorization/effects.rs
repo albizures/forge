@@ -147,6 +147,41 @@ pub async fn resolve_exclusive(
     Ok(receipt)
 }
 
+/// Synchronous operator-adapter bridge. Keep the host inspection lock held while
+/// a dedicated executor reads committed effects and retains them in Forge; never
+/// nest `block_on` in the HTTP executor or open writable runtime storage.
+pub(super) fn inspect_retirement(
+    repository: &SqliteProjectRepository,
+    workspace: &str,
+    launch: &Launch,
+    components: &super::operator::InspectionComponents,
+    directory: &Path,
+    ownership: &ExclusiveInspection,
+) -> Result<(), RegistrationError> {
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|_| denied())?;
+                runtime
+                    .block_on(inspect_mapped(
+                        repository,
+                        workspace,
+                        launch,
+                        &components.node,
+                        &components.inspector,
+                        directory,
+                        Some(ownership),
+                    ))
+                    .map(|_| ())
+            })
+            .join()
+            .map_err(|_| denied())?
+    })
+}
+
 async fn inspect_mapped(
     repository: &SqliteProjectRepository,
     workspace: &str,

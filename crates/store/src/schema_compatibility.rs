@@ -15,7 +15,8 @@ use rusqlite::Connection;
 // Revision 19 revalidates clean salvage identity and binds extended index flags.
 // Revision 20 reserves durable runtime identities and admission results atomically.
 // Revision 21 retains append-only bounded Assignment authorization grants.
-const SCHEMA_REVISION: i64 = 21;
+// Revision 22 journals identity-bound revoked execution retirement receipts.
+const SCHEMA_REVISION: i64 = 22;
 const APPLICATION_ID: i64 = 0x464f_5247; // FORG
 
 pub(super) fn validate(connection: &Connection) -> Result<(), RegistrationError> {

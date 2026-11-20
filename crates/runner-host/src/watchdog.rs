@@ -16,14 +16,20 @@ pub struct State {
     policy: LeaseWatchdog,
     fault: Option<&'static str>,
     retained_blocker: bool,
+    retirement: Option<forge_app::durable_execution::retirement::Operation>,
+    retirement_denied: bool,
+    owner: Owner,
 }
 
 impl State {
     pub fn new(owner: Owner, retained_blocker: bool) -> Self {
         Self {
-            policy: LeaseWatchdog::new(owner),
+            policy: LeaseWatchdog::new(owner.clone()),
             fault: None,
             retained_blocker,
+            retirement: None,
+            retirement_denied: false,
+            owner,
         }
     }
 
@@ -53,6 +59,41 @@ pub fn forward_input(mut input: ChildStdin, state: &Mutex<State>) {
                 return Err(io::Error::other("invalid bounded host input"));
             }
             let value = serde_json::from_slice::<serde_json::Value>(&line).ok();
+            if value
+                .as_ref()
+                .is_some_and(|v| v.get("host_retire").is_some())
+            {
+                let control: forge_rpc::durable_execution::SupervisorRetirement =
+                    serde_json::from_slice(&line)
+                        .map_err(|_| io::Error::other("invalid retirement control"))?;
+                let mut state = state
+                    .lock()
+                    .map_err(|_| io::Error::other("watchdog state unavailable"))?;
+                if control.host_retire
+                    != forge_rpc::durable_execution::SUPERVISOR_RETIREMENT_VERSION
+                    || state
+                        .retirement
+                        .as_ref()
+                        .is_some_and(|op| *op != control.operation)
+                {
+                    state.fence("runner-retirement-conflict");
+                    return Err(io::Error::other("invalid retirement control"));
+                }
+                let valid = control.operation.validate().is_ok()
+                    && control.operation.owner == state.owner
+                    && state
+                        .policy
+                        .last_lease()
+                        .is_none_or(|lease| lease.launch == control.operation.launch);
+                state.retirement_denied |= !valid;
+                state.policy.fence();
+                state.retirement = Some(control.operation);
+                drop(state);
+                // The watchdog verifies ownership and persists host intent
+                // before signalling TERM, whose runner handler aborts authority.
+                // No cancellation is forwarded on descriptive evidence alone.
+                continue;
+            }
             if value
                 .as_ref()
                 .is_some_and(|v| v.get("host_control").is_some())
@@ -145,7 +186,7 @@ fn retain(
     }
 }
 
-pub fn supervise(mut worker: Supervised<'_>, directory: &Path, state: &Mutex<State>) -> ! {
+pub fn supervise(mut worker: Supervised<'_>, directory: &Path, state: &Mutex<State>) {
     let owner = worker.owner().clone();
     let identity = worker.directory_identity();
     let record = |code: &str, lease: Option<&Lease>, marker: bool| {
@@ -154,7 +195,32 @@ pub fn supervise(mut worker: Supervised<'_>, directory: &Path, state: &Mutex<Sta
     let mut alarm: Option<(Instant, Option<u64>)> = None;
     let mut kill_attempted = false;
     let mut exited = false;
+    let mut retirement_attempted = false;
     loop {
+        let retirement = state.lock().ok().and_then(|state| {
+            state
+                .retirement
+                .clone()
+                .map(|op| (op, !state.retirement_denied))
+        });
+        if !retirement_attempted && let Some((operation, valid)) = retirement {
+            retirement_attempted = true;
+            if valid && crate::retirement::retire(&mut worker, directory, &operation).is_ok() {
+                eprintln!("runner-retirement-verified");
+                return;
+            }
+            record("retirement-unverified", None, true);
+            eprintln!("runner-retirement-unverified; ownership retained");
+            // An incomplete retirement is terminal for this supervisor. No new
+            // grant or blind signal retry may turn uncertainty into permission.
+            exited = true;
+        }
+        if retirement_attempted {
+            // No fallback watchdog signals after a failed identity-bound
+            // retirement, including intent/receipt storage or ownership failure.
+            std::thread::sleep(Duration::from_millis(50));
+            continue;
+        }
         let observation = if exited { Ok(()) } else { worker.verify() };
         let (fault, lease, now) = match state.lock() {
             Ok(mut state) => {

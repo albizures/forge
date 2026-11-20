@@ -60,6 +60,7 @@ impl Fixture {
             r#"import sys, os, json, fcntl
 assert sys.stdin.readline() == '{"host_ready":true}\n'
 print('ready', flush=True)
+hold_after_eof = False
 for line in sys.stdin:
     command = line.strip()
     if command == 'exit':
@@ -69,7 +70,13 @@ for line in sys.stdin:
         fcntl.flock(fd, fcntl.LOCK_UN)
     elif command == 'close-lock':
         os.close(fd)
+    elif command == 'hold-after-eof':
+        hold_after_eof = True
     print('ack', flush=True)
+if hold_after_eof:
+    import time
+    while True:
+        time.sleep(3600)
 "#,
         )
         .unwrap();
@@ -150,6 +157,65 @@ impl Drop for Fixture {
         let _ = self.child.wait();
         fs::remove_dir_all(&self.root).unwrap();
     }
+}
+
+/// A transient identity failure must not turn into permission to escalate after
+/// descriptive evidence is restored. This tests the actual host watchdog and
+/// real worker; it is not the operator retirement/revocation integration.
+#[test]
+fn failed_signal_ownership_stays_fenced_after_evidence_restoration() {
+    let mut f = Fixture::new();
+    f.command("hold-after-eof");
+    let original = fs::read(f.directory.join("owner.json")).unwrap();
+    let runtime = f.directory.join("runtime-preserved");
+    let work = f.root.join("worktree/untracked-preserved");
+    fs::write(&runtime, b"runtime bytes").unwrap();
+    fs::write(&work, b"worktree bytes").unwrap();
+    let mut changed = f.evidence.clone();
+    changed["worker_start"] = "mismatched-start".into();
+    f.save_evidence(&changed);
+    // Malformed trusted control fences admission and initiates cancellation.
+    // The worker never receives this control or any execution permission.
+    writeln!(f.input, "{{\"host_control\":0}}").unwrap();
+    let term = f.directory.join(format!(
+        "watchdog-{}-{}-term-unverified.json",
+        f.evidence["owner"]["host_pid"].as_u64().unwrap(),
+        f.evidence["owner"]["host_start"].as_str().unwrap()
+    ));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    // Synchronize on the persisted failed TERM attempt, not a guessed delay.
+    while !term.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "missing TERM diagnostic"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    fs::write(f.directory.join("owner.json"), &original).unwrap();
+    loop {
+        let line = f.errors.recv_timeout(Duration::from_secs(10)).unwrap();
+        if line.contains("runner-watchdog-kill-") {
+            assert!(line.contains("kill-unverified"), "{line}");
+            break;
+        }
+    }
+    let marker: Value =
+        serde_json::from_slice(&fs::read(f.directory.join("watchdog.json")).unwrap()).unwrap();
+    assert_eq!(marker["cleanup"], "unverified");
+    assert!(ExclusiveInspection::acquire(&f.directory).is_err());
+    let pid = f.evidence["worker_pid"].as_u64().unwrap();
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    let fields: Vec<_> = stat
+        .rsplit_once(')')
+        .unwrap()
+        .1
+        .split_whitespace()
+        .collect();
+    assert_eq!(fields[19], f.evidence["worker_start"].as_str().unwrap());
+    assert!(!matches!(fields[0], "Z" | "X" | "x"));
+    assert_eq!(fs::read(runtime).unwrap(), b"runtime bytes");
+    assert_eq!(fs::read(work).unwrap(), b"worktree bytes");
+    assert_eq!(fs::read(f.directory.join("owner.json")).unwrap(), original);
 }
 
 #[test]

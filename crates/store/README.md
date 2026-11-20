@@ -9,7 +9,7 @@ by migrations—not just the initial `CREATE TABLE` statements.
 - [`src/lib.rs`](src/lib.rs): `SqliteProjectRepository::from_connection`,
   `migrate_*` functions, profile seeds, and repository operations.
 - [`src/workspaces.rs`](src/workspaces.rs): Workspace ownership and Project identity.
-- [`src/upgrade.rs`](src/upgrade.rs): explicit offline schema 7 → 8 → 9 → 10 → 11 → 12 → 13 → 14 → 15 → 16 → 17 → 18 → 19 → 20 → 21 conversion,
+- [`src/upgrade.rs`](src/upgrade.rs): explicit offline schema 7 → 8 → 9 → 10 → 11 → 12 → 13 → 14 → 15 → 16 → 17 → 18 → 19 → 20 → 21 → 22 conversion,
   frozen contract validation, consistent snapshots, and preservation inventories.
   See [Revision State upgrades](../../docs/state-upgrades.md) for orchestration.
 - [`src/record_workspaces.rs`](src/record_workspaces.rs): Record ownership,
@@ -25,7 +25,8 @@ by migrations—not just the initial `CREATE TABLE` statements.
   configuration, provider generations, and Assignment binding.
 - [`src/durable_execution.rs`](src/durable_execution.rs): durable runtime identity,
   admission intent/results and conservative capacity reservation (schema 20),
-  and append-only authorization grant history (schema 21).
+  append-only authorization grant history (schema 21), and identity-bound
+  revoked retirement reconciliation (`src/durable_execution/retirement.rs`, schema 22).
 
 Keep this reference in sync when those schema definitions change. Domain behavior
 is documented separately in [Records](../../docs/records.md),
@@ -46,10 +47,40 @@ is documented separately in [Records](../../docs/records.md),
   numbered separately per Workspace.
 - Foreign keys use SQLite's default delete behavior unless stated otherwise.
   Most references do **not** cascade.
-- Ordinary repository opening accepts only the current marked schema revision **21**.
+- Ordinary repository opening accepts only the current marked schema revision **22**.
   Triggers and repository validation also enforce invariants. Explicit managed
-  copy-and-upgrade targets revision 21 from revisions 7 through 21; unsupported
+  copy-and-upgrade targets revision 22 from revisions 7 through 22; unsupported
   stores are rejected without automatic conversion or reset.
+
+## Durable retirement reconciliation (revision 22)
+
+`durable_assignment_retirements` stores one immutable `operation_json` per
+`assignment_id` (PK/FK to the retained durable runtime) and nullable
+`reconciled_at_millis`. The operation binds the original Launch, retirement ID,
+host/worker starts, boot/time namespace and kernel lock identity. Identity/delete
+triggers retain intent; a non-null result timestamp is immutable. No credential,
+command, transcript or prompt is stored here.
+
+The trusted retirement port requires owning scope, exact retained binding,
+revocation and a known admission result before accepting intent or replay. New
+intent must match original ownership in the retained authorization grant; a fresh
+lookalike cannot replace the original executor. After external cleanup, the caller
+holds exclusive host inspection while reading the protected exact receipt,
+retaining committed interrupted effects with the matched read-only inspector,
+and committing reconciliation. An immediate transaction
+records the timestamp and retires only application-approved bound runtime and
+known execution-liveness diagnostics; any failed write rolls back both. A runtime
+resource trigger requires a matching accepted retirement result and revoked
+Assignment before releasing its marker. External effects, unknown provisioning,
+unrecognized diagnostics and the operator Dispatch Hold are preserved. Generic
+retirement finalization still requires all other resources reconciled.
+
+Ordinary opening rejects revision 21 before initialization writes. Explicit
+offline 21 → 22 adds an empty retirement journal and replaces the runtime resource
+retirement guard; it fabricates no historical ownership or cleanup proof and does
+not permit upgrading through unresolved execution blockers. Runtime schema and
+runner wire v1 are unchanged; the separate private retirement control is version 1.
+See [Assignment recovery](../../docs/assignment-recovery.md#durable-supervised-retirement-controlled-implementation).
 
 ## Assignment authorization grant history (revision 21)
 

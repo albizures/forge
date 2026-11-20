@@ -24,6 +24,8 @@ pub struct Supervised<'a> {
     device: u64,
     inode: u64,
     owner: Owner,
+    record: crate::Record,
+    fenced: bool,
 }
 
 impl<'a> Supervised<'a> {
@@ -38,6 +40,8 @@ impl<'a> Supervised<'a> {
             device: meta.dev(),
             inode: meta.ino(),
             owner,
+            record: record(path)?,
+            fenced: false,
         })
     }
 
@@ -53,12 +57,38 @@ impl<'a> Supervised<'a> {
     }
 
     /// # Errors
-    /// Unreadable/changed evidence is uncertainty, not permission to signal.
+    /// Unreadable/changed evidence terminally fences this handle. Restoring a
+    /// descriptive file cannot authorize a later escalation or retirement retry.
     pub fn verify(&mut self) -> io::Result<()> {
+        if self.fenced {
+            return Err(invalid());
+        }
+        // Set before fallible I/O: every failed observation retains uncertainty,
+        // including errors reading the directory, process identity or flock.
+        self.fenced = true;
         let meta = directory(&self.path)?;
         if meta.dev() != self.device
             || meta.ino() != self.inode
+            || record(&self.path)? != self.record
             || verify(self.child, &self.path)? != self.owner
+        {
+            return Err(invalid());
+        }
+        self.fenced = false;
+        Ok(())
+    }
+
+    /// Protected storage must still match after all children are gone; this does
+    /// not verify live execution or clear a previously observed identity fault.
+    pub(crate) fn verify_storage(&self) -> io::Result<()> {
+        let meta = directory(&self.path)?;
+        let lock = protected_file(&self.path.join("owner.lock"))?.metadata()?;
+        if self.fenced
+            || meta.dev() != self.device
+            || meta.ino() != self.inode
+            || record(&self.path)? != self.record
+            || lock.dev().to_string() != self.owner.lock_device
+            || lock.ino().to_string() != self.owner.lock_inode
         {
             return Err(invalid());
         }

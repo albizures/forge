@@ -141,6 +141,34 @@ edit runtime SQLite or clear an ordinary Dispatch Hold to bypass this fence.
 Production durable dispatch and automatic recovery remain disabled. See the
 [T08 evidence and remaining work](../docs/research/pi-durable-t08/README.md).
 
+## T09 controlled retirement boundary
+
+The original-backend operator retirement adapter journals the revoked operation
+and original owner before private control delivery. The dedicated Linux host now
+acts as a subreaper, fences new grants, verifies live ownership and persists host
+intent before group TERM. `main.ts` closes authorization and aborts guarded runtime
+work on TERM; after five seconds the independent host can attempt KILL only with
+still-verified group ownership. A protected synced receipt requires kernel ECHILD
+for the host's entire child set, not just leader exit or successful signals.
+
+Escaped/surviving children, identity drift, unavailable ownership and failed proof
+writes retain the flock and capacity. Failed verification permanently fences the
+signal handle; restoring `owner.json` cannot authorize escalation. Restarted hosts
+deny grants when retirement intent exists. No host process is adopted from a PID.
+Exact receipt reconciliation uses original lock identity and exclusive inspection
+through a fresh matched committed-effect scan and Forge's result commit. Missing
+inspection retains the pending operation; original grant ownership must match,
+not a freshly spawned lookalike. Other effects/unknown resources and holds remain.
+Runtime/worktree history is preserved, not repaired or deleted. The descendant
+proof is not universal same-user containment or proof of external/remote effects.
+
+The seven-scenario supervised Check tracer includes actual CLI/RPC retirement of
+the original live host, missing source/authentication files, explicit unknown
+provisioning confirmation and idempotent retirement retries. Separate real-process
+and storage fault tests cover interrupted cleanup; see [T09 evidence](../docs/research/pi-durable-t09/README.md).
+Production durable dispatch, writable recovery and matched installation remain
+later Tasks. This is not a release or real-provider readiness claim.
+
 ## Reproduce
 
 Supported/tested host: Linux x64, local filesystem with `flock`, Node **24.18.0**,

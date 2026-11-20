@@ -5,7 +5,7 @@ use super::*;
 use forge_server::durable_authorization::operator::InspectionComponents;
 use std::io::Write;
 
-fn components() -> InspectionComponents {
+pub(super) fn components() -> InspectionComponents {
     let output = Command::new("node")
         .args(["--print", "process.execPath"])
         .output()
@@ -20,7 +20,7 @@ fn components() -> InspectionComponents {
     }
 }
 
-fn component_hash(components: &InspectionComponents) -> String {
+pub(super) fn component_hash(components: &InspectionComponents) -> String {
     let contract = components.inspector.with_file_name("contract.ts");
     let output = Command::new(&components.node)
         .env_clear()
@@ -35,7 +35,7 @@ fn component_hash(components: &InspectionComponents) -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 
-fn seed(f: &Fixture, components: &InspectionComponents, mode: &str) {
+pub(super) fn seed(f: &Fixture, components: &InspectionComponents, mode: &str) {
     let script = components
         .inspector
         .parent()

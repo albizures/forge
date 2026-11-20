@@ -4,6 +4,7 @@
 mod effect_admission;
 pub mod effects;
 pub mod operator;
+pub mod retirement;
 mod runtime_directory;
 use forge_app::{
     RegistrationError,
@@ -206,6 +207,13 @@ pub struct Authorization<'a> {
 }
 
 impl Authorization<'_> {
+    /// Retain the same private control channel when handing the directly spawned
+    /// supervisor to the retirement controller. This grants no execution authority.
+    #[must_use]
+    pub fn retirement_control(&self) -> ControlPipe {
+        self.pipe.clone()
+    }
+
     /// Commit current Forge authority before bounded pipe delivery, or wait until
     /// the app-owned renewal deadline. A write is not worker acknowledgement.
     /// # Errors

@@ -79,7 +79,7 @@ Neither policy is safe writable recovery, supervised retirement or production
 scheduling. Investigate the actual external outcome and make old execution/external
 children safe first. If retiring, use `assignment-retire` to revoke before cleanup
 and inspect persisted closure: an incomplete cleanup error is not proof of absence.
-Durable supervised retirement remains later work; retain all other blockers.
+Controlled durable supervised retirement is described below; retain all other blockers.
 Never directly close an Assignment in SQLite to satisfy this command.
 
 For new resolutions, the daemon requires [explicit matched inspection components](development.md#run-a-manual-daemon),
@@ -172,6 +172,58 @@ provider cleanup succeeded. The marker, capacity reservation and Dispatch Hold
 remain. Generic provider resource cleanup cannot retire this marker. Exact
 finalization retries preserve its original retirement timestamp.
 
+### Durable supervised retirement (controlled implementation)
+
+The same `assignment-retire` command routes an existing durable Assignment through
+its retained backend, without profile-source preflight, model credentials or Herdr.
+Production durable dispatch remains disabled. A directly spawned supervisor must
+have been retained by the trusted controller; a missing live controller cannot
+adopt a PID or infer that its work stopped.
+
+After durable closure/revocation, Forge journals the original retirement operation,
+Launch and captured owner coordinates before control delivery. The owner must
+match the original retained authorization grant; a freshly spawned lookalike
+cannot replace the old execution's cleanup proof. The host fences
+new grants, verifies ownership and persists host intent before sending group TERM;
+the runner's TERM handler closes admission and aborts guarded runtime execution.
+After five seconds it attempts group KILL only while the original leader identity
+is still verified. The dedicated Linux subreaper reaps its descendants and writes
+an owner-only, synced receipt only when the kernel reports no remaining children.
+TERM/KILL admission, an abort acknowledgement and leader exit alone are not receipts.
+A surviving child, including one that escaped the process group, keeps cleanup
+uncertain and the host flock retained; Forge does not chase numeric orphan IDs.
+
+Forge reads the exact original receipt under exclusive host inspection, checks the
+original lock identity, and uses the explicitly configured matched read-only effect
+inspector to retain any unsettled committed intent before releasing execution
+resources. Missing/incompatible inspection components or runtime evidence retain
+the pending operation, even with a valid process receipt. It then transactionally
+records reconciliation and retires
+only the bound runtime and known execution-liveness diagnostics. The operator
+retirement marker finalizes only when every other resource is reconciled. Existing
+unknown provisioning resources still require the separate confirmations below;
+interrupted effects still require their specialized resolution. Neither missing
+Outcomes nor process cleanup synthesizes a passing Assessment. The Dispatch Hold
+requires separate review/resume; worktree, index, runtime history and audit are not
+cleaned, reset or deleted.
+
+On dropped delivery, unavailable ownership, identity drift or failed host proof,
+inspect and preserve capacity; a repeat cannot adopt lookalikes or blindly replay
+a partial pipe write. After a lost result/Forge commit failure, repeating the same
+command can reconcile a valid retained receipt after daemon/controller restart
+without starting an execution runner or requiring original model credentials;
+new reconciliation still requires matched read-only effect inspection. Missing,
+corrupt, unsafe or wrong-lock receipts remain blockers. Accepted retries preserve
+the original operation and reconciliation timestamp, even if components later
+become unavailable. Restarted hosts deny grants when retirement intent exists.
+
+The proof covers this dedicated host's descendant execution on supported Linux,
+not remote effects or work delegated to an unrelated daemon. This remains a
+trusted-local-host boundary, not hostile same-user containment. Never delete a
+lock/intent/receipt or edit SQLite to make cleanup appear verified. See
+[T09 evidence](research/pi-durable-t09/README.md); automatic recovery remains T10
+and production scheduling/packaging/release verification remain later Tasks.
+
 ## Resolve unknown resources only after external safety checks
 
 A crash may leave a provisioning-intent marker without the resource identity
@@ -200,8 +252,9 @@ separately resolved. The Dispatch Hold remains, too. Inspect again rather than
 assuming the command's success means recovery is complete. After resolving
 unknown provisioning resources, retry the same `assignment-retire` to reconcile
 and finalize its retained retirement marker. This does not clear the hold or
-waive any other blocker. Durable supervised cancellation/absence verification
-is still incomplete; this finalization gate does not supply process-death proof.
+waive any other blocker. The generic finalization gate itself supplies no
+process-death proof; durable cleanup additionally requires the exact protected
+supervisor receipt described below.
 
 ## Authorize retained Implementation work for salvage
 

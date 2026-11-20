@@ -9,11 +9,14 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 mod completion;
 mod effect_resolution;
 mod effects;
+mod retirement;
 
 pub(super) fn schema(c: &Connection) -> Result<(), RegistrationError> {
     c.execute_batch(include_str!("upgrade/durable_execution.sql"))
         .map_err(storage_error)?;
     c.execute_batch(include_str!("upgrade/authorization_leases.sql"))
+        .map_err(storage_error)?;
+    c.execute_batch(include_str!("upgrade/durable_retirement.sql"))
         .map_err(storage_error)
 }
 

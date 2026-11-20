@@ -132,6 +132,47 @@ test('shared Rust/TypeScript v1 fixture and strict compatibility checks', async 
   assert.throws(() => validateRequest(extra), { code: 'runner-request-invalid' });
 });
 
+test('identity-bound retirement cancels the actual runner, retains history and fences a fresh host', async t => {
+  const f = await fixture(t), p = start(t, f);
+  await owned(p);
+  const id = launch();
+  const lease = await authorize(p, id);
+  p.send(request(id));
+  assert.equal((await response(p)).admission.state, 'accepted');
+  await settled(p);
+  const before = await runInspect(f);
+  const operation = { operation_id: 'retire-a', launch: id, owner: lease.owner };
+  p.send({ host_retire: 1, operation });
+  assert.equal((await p.exited)[0], 0, p.stderr());
+  const receipt = JSON.parse(await readFile(join(f.directory, 'retirement-receipt.json'), 'utf8'));
+  assert.deepEqual(receipt, { version: 1, operation, children_absent: true });
+  assert.equal((await stat(join(f.directory, 'retirement-receipt.json'))).mode & 0o777, 0o600);
+  assert.deepEqual(await runInspect(f), before);
+  const restarted = start(t, f);
+  await owned(restarted);
+  restarted.send({ host_control: 1, lease: await authorizationGrant(restarted, id) });
+  await restarted.diagnostic(/runner-authorization-denied/);
+  assert.deepEqual(await runInspect(f), before);
+});
+
+test('retirement with mismatched owner or launch cannot cancel or signal a lookalike', async t => {
+  for (const mismatch of ['owner', 'launch']) {
+    const f = await fixture(t), p = start(t, f);
+    const evidence = (await owned(p)).identity;
+    const id = launch();
+    const lease = await authorize(p, id);
+    const operation = { operation_id: 'retire-a', launch: structuredClone(id), owner: structuredClone(lease.owner) };
+    if (mismatch === 'owner') operation.owner.worker_start = 'not-the-owned-worker';
+    else operation.launch.attempt_id = 'different-attempt';
+    p.send({ host_retire: 1, operation });
+    await p.diagnostic(/runner-retirement-unverified/);
+    const current = await readFile(`/proc/${evidence.worker_pid}/stat`, 'utf8');
+    assert.equal(current.slice(current.lastIndexOf(')') + 2).split(' ')[19], evidence.worker_start);
+    await assert.rejects(readFile(join(f.directory, 'retirement-intent.json')), { code: 'ENOENT' });
+    await assert.rejects(readFile(join(f.directory, 'retirement-receipt.json')), { code: 'ENOENT' });
+  }
+});
+
 test('new execution requires a matching lease before any writable store open', async t => {
   const f = await fixture(t), p = start(t, f);
   await owned(p);

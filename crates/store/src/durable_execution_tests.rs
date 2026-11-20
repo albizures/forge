@@ -7,6 +7,8 @@ mod effects_tests;
 mod retirement_application_tests;
 #[path = "durable_execution/retirement_tests.rs"]
 mod retirement_tests;
+#[path = "durable_execution/supervised_retirement_tests.rs"]
+mod supervised_retirement_tests;
 use forge_app::{
     AgentDispatchRepository, NewAgentAssignment, NewTypedRecord, Project, ProjectRepository,
     RecordRepository, RecordType, WorkspaceRepository,

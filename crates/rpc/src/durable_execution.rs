@@ -16,6 +16,16 @@ pub struct SupervisorControl {
     pub lease: forge_app::authorization_lease::Lease,
 }
 
+/// Additive, separately versioned retirement control on the same private pipe.
+/// Its original operation must already be durably recorded after revocation.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupervisorRetirement {
+    pub host_retire: u32,
+    pub operation: forge_app::durable_execution::retirement::Operation,
+}
+
+pub const SUPERVISOR_RETIREMENT_VERSION: u32 = 1;
 pub const SUPERVISOR_CONTROL_VERSION: u32 = 1;
 pub const RUNNER_PROTOCOL_VERSION: u32 = 1;
 pub const DURABLE_RUNTIME_SCHEMA: u32 = forge_app::durable_execution::RUNTIME_SCHEMA_VERSION;

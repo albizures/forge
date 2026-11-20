@@ -12,6 +12,8 @@ use forge_server::durable_authorization::DaemonAuthority;
 use forge_store::SqliteProjectRepository;
 #[path = "authorization_session/effect_admission.rs"]
 mod effect_admission;
+#[path = "authorization_session/retirement.rs"]
+mod retirement;
 use rusqlite::params;
 use serde_json::Value;
 use std::{

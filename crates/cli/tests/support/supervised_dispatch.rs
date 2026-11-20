@@ -43,6 +43,12 @@ pub struct Report {
     pub answer: Option<AnswerObservation>,
     pub events: Vec<Value>,
     pub capability_file: PathBuf,
+    process: Option<Process>,
+}
+impl Report {
+    pub fn finish_retired(&mut self, secret: &str) {
+        self.process.take().unwrap().finish_redacted(secret);
+    }
 }
 
 #[derive(Clone)]
@@ -61,6 +67,7 @@ pub struct SupervisedDispatch {
     pub mode: String,
     pub provisions: Arc<AtomicUsize>,
     pub reports: Arc<Mutex<Vec<Report>>>,
+    pub retirement: Arc<forge_server::durable_authorization::retirement::Controller>,
 }
 
 impl SupervisedDispatch {
@@ -318,6 +325,7 @@ impl SupervisedDispatch {
                 driver.join().unwrap().unwrap();
             });
         }
+        let retirement_pipe = service.retirement_control();
         drop(service);
         // Failure retention is explicit even when no runtime submission exists.
         if self.mode.starts_with("bootstrap-") {
@@ -326,7 +334,18 @@ impl SupervisedDispatch {
                 .unwrap();
         }
         let secret = fs::read_to_string(&delivery.secret_file).unwrap();
-        process.finish_redacted(&secret);
+        let retained_process = if self.mode == "retired" {
+            let mut placeholder = Command::new("/bin/true").spawn().unwrap();
+            placeholder.wait().unwrap();
+            let host = std::mem::replace(&mut process.child, placeholder);
+            self.retirement
+                .register(&store, "test", launch.clone(), host, retirement_pipe)
+                .unwrap();
+            Some(process)
+        } else {
+            process.finish_redacted(&secret);
+            None
+        };
         assert!(!serde_json::to_string(&events).unwrap().contains(&secret));
         self.reports.lock().unwrap().push(Report {
             launch,
@@ -334,6 +353,7 @@ impl SupervisedDispatch {
             answer,
             events,
             capability_file: delivery.secret_file.clone(),
+            process: retained_process,
         });
         // Test teardown kills only this directly spawned owner/group. It does not
         // retire Forge resources or claim safe descendant absence in product state.
@@ -378,7 +398,8 @@ impl AgentDispatchAdapterFactory for SupervisedDispatch {
         &self,
         profile: &AgentProfile,
     ) -> Result<Box<dyn AgentDispatchAdapter>, AgentAdapterError> {
-        self.validate_profile(profile)?;
+        assert_eq!(profile.provider, "pi-durable");
+        // Historical cleanup must not reload profile sources/authentication.
         Ok(Box::new(self.clone()))
     }
 }
@@ -415,10 +436,19 @@ impl AgentDispatchAdapter for SupervisedDispatch {
     }
     fn retire(
         &self,
-        _: &AgentDispatchContext,
+        context: &AgentDispatchContext,
         _: &dyn AgentDispatchRepository,
     ) -> Result<(), AgentAdapterError> {
-        panic!("T07 must not infer retirement")
+        assert!(context.assignment.closed_at_millis.is_some());
+        assert!(context.capability_delivery.is_none());
+        let store = SqliteProjectRepository::open(&self.database).unwrap();
+        let runtime = store
+            .runtime("test", &context.assignment.id)
+            .unwrap()
+            .unwrap();
+        self.retirement
+            .retire(&store, "test", &runtime.launch)
+            .map_err(|error| AgentAdapterError::Cleanup(error.code.into()))
     }
 }
 
@@ -441,16 +471,30 @@ fn receive(output: &Receiver<String>) -> Value {
 }
 struct Process {
     child: Child,
+    original_host: u32,
+    original_start: String,
     output: Receiver<String>,
     errors: Receiver<String>,
     directory: PathBuf,
 }
 impl Process {
     fn new(mut child: Child, directory: &Path) -> Self {
+        let original_host = child.id();
+        let stat = fs::read_to_string(format!("/proc/{original_host}/stat")).unwrap();
+        let original_start = stat
+            .rsplit_once(')')
+            .unwrap()
+            .1
+            .split_whitespace()
+            .nth(19)
+            .unwrap()
+            .into();
         let output = lines(child.stdout.take().unwrap());
         let errors = lines(child.stderr.take().unwrap());
         Self {
             child,
+            original_host,
+            original_start,
             output,
             errors,
             directory: directory.into(),
@@ -489,7 +533,7 @@ impl Process {
     fn terminate(&mut self) {
         if let Ok(bytes) = fs::read(self.directory.join("owner.json"))
             && let Ok(owner) = serde_json::from_slice::<Value>(&bytes)
-            && owner["owner"]["host_pid"] == self.child.id()
+            && owner["owner"]["host_pid"] == self.original_host
             && let Some(pid) = owner["worker_pid"]
                 .as_u64()
                 .and_then(|pid| u32::try_from(pid).ok())
@@ -502,6 +546,23 @@ impl Process {
                 && let Some(pid) = rustix::process::Pid::from_raw(pid.cast_signed())
             {
                 let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+            }
+        }
+        // Test-only teardown after transferring the actual Child to the real
+        // registry: verify this fixture's original spawn before forced cleanup.
+        if self.child.id() != self.original_host {
+            let stat = fs::read_to_string(format!("/proc/{}/stat", self.original_host))
+                .unwrap_or_default();
+            let fields: Vec<_> = stat
+                .rsplit_once(')')
+                .map(|(_, r)| r.split_whitespace().collect())
+                .unwrap_or_default();
+            if fields.get(19).copied() == Some(self.original_start.as_str())
+                && fields.get(1).and_then(|p| p.parse::<u32>().ok()) == Some(std::process::id())
+                && let Some(pid) = rustix::process::Pid::from_raw(self.original_host.cast_signed())
+            {
+                let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+                let _ = rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::empty());
             }
         }
         let _ = self.child.kill();

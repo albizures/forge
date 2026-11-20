@@ -1,7 +1,7 @@
 // Test-only composed daemon/store/host/consumer fixture. Not a runner profile,
 // production entrypoint, live provider or authority issuer.
 import { createInterface } from 'node:readline';
-import { readFileSync, readlinkSync } from 'node:fs';
+import { readFileSync, readlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
@@ -17,9 +17,21 @@ const mode = readFileSync(join(directory, 'controlled-mode'), 'utf8');
 const emit = value => console.log(JSON.stringify(value));
 const lines = createInterface({ input: process.stdin });
 let authorization, harness, child, started = false, requests = 0, tools = 0, cancellations = 0, childExit;
-process.on('SIGTERM', () => authorization?.close());
+process.on('SIGTERM', () => {
+  authorization?.close();
+  if (mode === 'retire-delayed') setTimeout(() => process.exit(0), 150);
+});
 
 async function execute() {
+  if (mode === 'retire-delayed' || mode === 'retire-escaped') {
+    child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+      env: {}, stdio: 'ignore', detached: mode === 'retire-escaped',
+    });
+    await once(child, 'spawn');
+    if (mode === 'retire-escaped') writeFileSync(join(directory, 'controlled-escaped.pid'), String(child.pid));
+    emit({ event: 'started', mode, child: child.pid });
+    return;
+  }
   const provider = fauxProvider();
   provider.setResponses([mode === 'model' ? (_input, options) => new Promise((_resolve, reject) => {
     requests++;

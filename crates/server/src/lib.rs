@@ -906,9 +906,18 @@ fn application_from_config_with_cli(
         Box::new(GitWorktreeAdapter),
         Box::new(dispatch),
         Box::new(ServerAgentDispatchAdapterFactory {
-            provider: Box::new(HerdrAdapterFactory::from_configuration_store(
-                config.store_path.clone(),
-            )),
+            provider: Box::new(durable_authorization::retirement::Factory {
+                database: config.store_path.clone(),
+                controller: Arc::new(match &config.durable_inspection {
+                    Some(components) => durable_authorization::retirement::Controller::default()
+                        .with_inspection(components.clone())
+                        .map_err(|error| error.code.to_owned())?,
+                    None => durable_authorization::retirement::Controller::default(),
+                }),
+                original: Box::new(HerdrAdapterFactory::from_configuration_store(
+                    config.store_path.clone(),
+                )),
+            }),
             daemon_url: format!("http://{}", config.bind_addr),
             capability_secret_root,
             cli_override,

@@ -17,6 +17,10 @@ const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
 let harness: Harness | undefined;
 let authorization: Authorization | undefined;
 let authorizedLaunch: Launch | undefined;
+let cancelled = false;
+// Trusted supervisor cancellation: close admission and abort active guarded
+// execution. The independent host bounds shutdown and verifies descendants.
+process.on('SIGTERM', () => { cancelled = true; authorization?.close(); });
 
 function watchdogBlocked(): boolean {
   try { lstatSync(join(directory, 'watchdog.json')); return true; }
@@ -28,7 +32,7 @@ function watchdogBlocked(): boolean {
 function acceptAuthorization(control: unknown): void {
   try {
     exactKeys(control, ['host_control', 'lease']);
-    requireCondition(control.host_control === 1 && !watchdogBlocked(), 'assignment-lease-denied');
+    requireCondition(control.host_control === 1 && !cancelled && !watchdogBlocked(), 'assignment-lease-denied');
     const lease = control.lease;
     requireCondition(lease && typeof lease === 'object', 'assignment-lease-denied');
     if (!authorization) {
