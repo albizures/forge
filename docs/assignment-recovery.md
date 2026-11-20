@@ -143,6 +143,23 @@ still require the ordinary transactional authority/freshness/hold/resource check
 This supplies the interrupted-effect recovery precondition, not the later writable
 same-attempt recovery feature. No scheduler or production durable rollout is enabled.
 
+## Durable recovery authorization foundation (not yet runnable)
+
+The internal controlled recovery port can reserve an original candidate and,
+following a trusted external-verification boundary, atomically commit a first
+fresh recovery lease, audit and claim retirement. Generic resource operations
+cannot forge or consume these records. A retained audit/lease is not permission
+to restart, and a cancelled claim cannot grant execution. Revocation, expiry,
+changed context/freshness and unrelated blockers reject grant delivery/replay.
+
+There is no concrete recovery host verifier, specialized consumer handshake,
+daemon reconciliation or authorized writable reopen yet. Existing consumers
+reject recovery's continued global sequence as an ordinary first grant. No CLI/RPC
+operation exposes recovery authorization, and production/automatic durable recovery
+remain disabled. Do not replay retained grant files, reset sequence/watchdogs,
+edit resource markers or repair the worktree to bypass this boundary. See
+[T10 authorization evidence](research/pi-durable-t10/recovery-authorization.md).
+
 ## Revoke and clean up known resources
 
 ```sh
@@ -199,7 +216,12 @@ inspector to retain any unsettled committed intent before releasing execution
 resources. Missing/incompatible inspection components or runtime evidence retain
 the pending operation, even with a valid process receipt. It then transactionally
 records reconciliation and retires
-only the bound runtime and known execution-liveness diagnostics. The operator
+only the bound runtime, known execution-liveness diagnostics and any validated
+recovery reservation for that exact Launch. Cancelling a recovery reservation
+preserves its original identity, timestamps and retry history; it cannot transfer
+a claim or authorize recovery. Malformed or mismatched reservations block and
+roll back reconciliation rather than being treated as generic unknown resources.
+No production path creates these internal controlled reservations yet. The operator
 retirement marker finalizes only when every other resource is reconciled. Existing
 unknown provisioning resources still require the separate confirmations below;
 interrupted effects still require their specialized resolution. Neither missing

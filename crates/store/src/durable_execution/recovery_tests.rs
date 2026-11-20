@@ -6,6 +6,9 @@ use forge_app::{
 };
 use std::fmt::Write as _;
 
+mod authorization_tests;
+mod cancellation_tests;
+
 fn prepared() -> Fixture {
     let f = prepared_without_grant();
     f.store.grant_lease("test", &lease(&f), 1_000).unwrap();
@@ -48,6 +51,10 @@ fn candidate_body(f: &Fixture) -> String {
 }
 
 fn snapshot(f: &Fixture) -> String {
+    snapshot_except(f, &[])
+}
+
+fn snapshot_except(f: &Fixture, excluded: &[&str]) -> String {
     // A logical snapshot includes every table: even a seemingly unrelated
     // counter/history/resource change would violate read-only preflight.
     let c = f.store.connection.lock().unwrap();
@@ -60,6 +67,9 @@ fn snapshot(f: &Fixture) -> String {
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     for name in names {
+        if excluded.contains(&name.as_str()) {
+            continue;
+        }
         out.push_str(&name);
         let mut stmt = c
             .prepare(&format!("SELECT * FROM \"{}\"", name.replace('"', "\"\"")))

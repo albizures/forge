@@ -1,8 +1,26 @@
-# T10 — Recovery candidate and reservation increments
+# T10 — Recovery inspection, reservation and authorization increments
 
 ## Status: partial; T10 remains pending
 
-The latest [transactional reservation increment](recovery-reservation.md) adds
+The latest [transactional recovery-grant increment](recovery-authorization.md)
+adds an application-owned external-verification boundary and atomic first recovery
+lease/audit/claim consumption, with ten new policy tests. Final repository gates
+pass: **735 Rust harness tests plus seven supervised scenarios**, one pre-existing
+opt-in test ignored; runner typecheck and **64 Node tests** pass. The first full
+workspace run failed an existing CLI inspection-lock reacquisition test; its target
+and a complete default-parallel rerun passed without a product fix. That transient
+failure is not claimed resolved. No concrete recovery host verifier, recovery
+consumer handshake, daemon composition or writable reopen is implemented.
+
+The preceding [revoked-claim cancellation increment](recovery-cancellation.md) lets
+verified original-owner retirement cancel matching reservations atomically while
+preserving claim history and unrelated blockers. Five new persistence tests pass.
+All four repository gates pass: **725 Rust harness tests plus seven supervised
+scenarios**, with one pre-existing opt-in test ignored; runner typecheck and
+**64 Node tests** pass. This is cancellation, not recovery authorization. Recovery
+leases, daemon composition and authorized writable reopen remain unimplemented.
+
+The preceding [transactional reservation increment](recovery-reservation.md) adds
 exclusive, content-bound recovery claims, immutable exact retry and ordinary-grant
 fencing, with six new store tests. All four repository gates pass: **720 Rust
 harness tests plus seven supervised scenarios**, with one pre-existing opt-in test
@@ -14,7 +32,7 @@ The original runtime-inspection increment is recorded below. The preceding
 [Forge-side candidate gate](forge-candidate-gate.md) added consistent read-only
 application/store binding inspection and nine persistence-policy tests (714 Rust
 harness tests on that snapshot). Historical results below describe those earlier
-increments; the latest increment and review are recorded at the end.
+increments; each later increment and its review are recorded in linked evidence.
 
 The original increment implements only committed runtime candidate inspection. It does
 **not** deliver authorized writable recovery, change lease issuance or enable
@@ -93,15 +111,16 @@ power-loss durability or hostile same-user containment is inferred.
 
 ## Remaining T10 acceptance work
 
-1. Complete application/store-owned recovery authorization and specialized claim
-   reconciliation/consumption. Transactional reservation now revalidates original
-   bindings, generations, candidate content and blockers, preserves identities and
-   serializes concurrent claims with exact retry. It is not authority: external
-   evidence/freshness and retained-work validation, process safety and fresh bounded
-   permission remain necessary. No timeout/restart may automatically discard or
-   transfer the retained fence.
-2. Compose canonical ownership and process safety with daemon reconciliation and
-   fresh commit-before-delivery recovery leases. A retained flock or descriptive
+1. Implement the concrete trusted recovery host verifier: persist/prove predecessor
+   process safety, inspect the original pending input and committed effects, verify
+   canonical ownership and apply external freshness/retained-work rules. The
+   application/store first-grant transition now consumes an exact claim and commits
+   a fresh bounded lease/audit transactionally, but only fake-host policy tests
+   exercise it. Historical evidence cannot reconstruct its opaque prepared authority.
+   Generalize beyond the current single retained recovery operation only through
+   explicit safe subsequent recovery, never timeout/restart takeover.
+2. Compose that verifier and transactional first grant with daemon reconciliation,
+   a specialized recovery consumer handshake and commit-before-delivery leases. A retained flock or descriptive
    PID is not descendant cleanup proof; do not adopt old grants or controllers.
 3. Implement an authorized writable reopen/resume path that cannot re-admit the
    original input, replay arbitrary effects or silently repair/adopt dirty work.

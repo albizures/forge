@@ -7,6 +7,8 @@ use super::Launch;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+pub mod authorization;
+
 /// A consistent read of the original binding. Retained grants are evidence only:
 /// neither this value nor an unexpired old lease permits a new process to run.
 /// External ownership/process cleanup, committed runtime/effect inspection and
@@ -83,14 +85,31 @@ impl Claim {
     }
 }
 
-/// Only the recovery protocol may create or consume its retained fence.
+/// Validate a reservation before verified, revoked retirement cancels it.
+/// This consumes only the execution fence, not its immutable history, and never
+/// permits a new owner to execute. The caller must independently verify the
+/// original owner's cleanup receipt and revocation in the same transaction.
 /// # Errors
-/// Rejects generic resource insertion/retirement of recovery reservations.
+/// Rejects malformed claims and claims for any other immutable runtime binding.
+pub fn validate_retirement(claim: &Claim, launch: &Launch) -> Result<(), RegistrationError> {
+    claim.validate()?;
+    if claim.launch != *launch {
+        return Err(RegistrationError::new(
+            "durable-recovery-claim-conflict",
+            "retirement cannot reconcile a different recovery binding",
+        ));
+    }
+    Ok(())
+}
+
+/// Recovery reservations and grant audits are owned by specialized operations.
+/// # Errors
+/// Rejects generic resource insertion/retirement of recovery reservations/audits.
 pub fn validate_resource_mutation(kind: &str) -> Result<(), RegistrationError> {
-    if kind == "recovery-claim" {
+    if matches!(kind, "recovery-claim" | "recovery-grant") {
         return Err(RegistrationError::new(
             "durable-recovery-specialized-operation-required",
-            "recovery reservations require specialized transactional reconciliation",
+            "recovery reservations and grant audits require specialized transactional operations",
         ));
     }
     Ok(())

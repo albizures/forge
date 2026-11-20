@@ -21,7 +21,7 @@ impl Repository for SqliteProjectRepository {
         // Every read uses the same snapshot, including across other connections.
         // No result is execution permission; eventual claims must revalidate it.
         let tx = c.transaction().map_err(storage_error)?;
-        let result = candidate(&tx, workspace, launch)?;
+        let result = candidate(&tx, workspace, launch, None)?;
         tx.commit().map_err(storage_error)?;
         Ok(result)
     }
@@ -62,7 +62,7 @@ impl Repository for SqliteProjectRepository {
         if !known.is_empty() {
             return Err(error("durable-storage-invalid"));
         }
-        let current = candidate(&tx, workspace, launch)?;
+        let current = candidate(&tx, workspace, launch, None)?;
         if Claim::for_candidate(
             &current,
             claim.operation_id.clone(),
@@ -73,7 +73,7 @@ impl Repository for SqliteProjectRepository {
         }
         // The existing opaque resource ledger retains identity, timestamp and
         // capacity atomically. Its presence also blocks ordinary lease renewal.
-        // This increment deliberately provides no release or execution API.
+        // Only specialized authorization or verified retirement can consume it.
         tx.execute(
             "INSERT INTO agent_assignment_resources(assignment_id, resource_kind, resource_id, created_at_millis) VALUES (?1, 'recovery-claim', ?2, ?3)",
             params![launch.assignment_id, serde_json::to_string(claim).map_err(|_| error("durable-storage-invalid"))?, now_millis()?],
@@ -83,10 +83,11 @@ impl Repository for SqliteProjectRepository {
     }
 }
 
-fn candidate(
+pub(super) fn candidate(
     c: &Connection,
     workspace: &str,
     launch: &Launch,
+    claim: Option<&Claim>,
 ) -> Result<Candidate, RegistrationError> {
     authorize(c, workspace, launch, false)?;
     launch.validate()?;
@@ -114,14 +115,20 @@ fn candidate(
     // Provisioning/Working/Idle alone do not establish continued authority.
     // Require the original open attempt, live reservation, no holds, no
     // competing owner/resources and no retirement/effect/authorization fence.
+    // Only the exact specialized recovery operation may look through its own
+    // fence. Every unrelated resource and claim remains an execution blocker.
+    let claim_json = claim
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|_| error("durable-storage-invalid"))?;
     let eligible: bool = c.query_row(
             "SELECT EXISTS(SELECT 1 FROM agent_assignments a JOIN record_attempts r ON r.id = ?2 WHERE a.id = ?1 AND a.closed_at_millis IS NULL AND a.state IN ('provisioning', 'working', 'idle') AND r.closed = 0
              AND NOT EXISTS(SELECT 1 FROM dispatch_holds h WHERE h.record_id = a.record_id)
              AND NOT EXISTS(SELECT 1 FROM durable_assignment_retirements d WHERE d.assignment_id = a.id)
              AND EXISTS(SELECT 1 FROM agent_assignment_resources x WHERE x.assignment_id = a.id AND x.resource_kind = 'durable-runtime' AND x.resource_id = ?3 AND x.retired_at_millis IS NULL)
-             AND NOT EXISTS(SELECT 1 FROM agent_assignment_resources x WHERE x.assignment_id = a.id AND x.retired_at_millis IS NULL AND x.resource_kind NOT IN ('durable-runtime', 'provision-intent'))
+             AND NOT EXISTS(SELECT 1 FROM agent_assignment_resources x WHERE x.assignment_id = a.id AND x.retired_at_millis IS NULL AND x.resource_kind NOT IN ('durable-runtime', 'provision-intent') AND NOT (x.resource_kind = 'recovery-claim' AND x.resource_id = COALESCE(?4, '')))
              AND NOT EXISTS(SELECT 1 FROM agent_assignments other WHERE other.record_id = a.record_id AND other.id != a.id AND (other.closed_at_millis IS NULL OR EXISTS(SELECT 1 FROM agent_assignment_resources x WHERE x.assignment_id = other.id AND x.retired_at_millis IS NULL))))",
-            params![launch.assignment_id, launch.attempt_id, launch.runtime_id], |r| r.get(0),
+            params![launch.assignment_id, launch.attempt_id, launch.runtime_id, claim_json], |r| r.get(0),
         ).map_err(storage_error)?;
     if !eligible {
         return Err(error("durable-recovery-blocked"));
@@ -133,13 +140,16 @@ fn candidate(
     let execution_directory = directory
         .filter(|s| !s.trim().is_empty())
         .ok_or_else(|| error("durable-recovery-worktree-unbound"))?;
-    let last: Option<String> = c.query_row(
-            "SELECT lease_json FROM assignment_authorization_leases WHERE assignment_id = ?1 ORDER BY sequence DESC LIMIT 1",
-            [&launch.assignment_id], |r| r.get(0),
+    let last: Option<(u32, String)> = c.query_row(
+            "SELECT sequence, lease_json FROM assignment_authorization_leases WHERE assignment_id = ?1 ORDER BY sequence DESC LIMIT 1",
+            [&launch.assignment_id], |r| Ok((r.get(0)?, r.get(1)?)),
         ).optional().map_err(storage_error)?;
+    let (sequence, json) = last.ok_or_else(|| error("durable-recovery-grant-missing"))?;
     let last_lease: Lease =
-        serde_json::from_str(&last.ok_or_else(|| error("durable-recovery-grant-missing"))?)
-            .map_err(|_| error("durable-storage-invalid"))?;
+        serde_json::from_str(&json).map_err(|_| error("durable-storage-invalid"))?;
+    if last_lease.sequence != sequence {
+        return Err(error("durable-storage-invalid"));
+    }
     if last_lease.launch != *launch || last_lease.generation != attempt.generation {
         return Err(error("durable-binding-stale"));
     }

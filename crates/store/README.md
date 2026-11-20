@@ -210,9 +210,33 @@ attempt, Outcome, evidence, admission or grant changes.
 This resource retains capacity and fences ordinary grants, including old-owner
 renewal. It is **not** a recovery lease, process cleanup proof or permission to open
 runtime storage. Generic resource insertion/retirement cannot create or consume
-it. No timeout, restart or retired history permits takeover. Specialized
-reconciliation/consumption is still unimplemented; no production daemon or public
-CLI/RPC path calls this port. Automatic recovery remains disabled. No DDL/schema
+it. No timeout, restart or retired history permits takeover. Verified revoked
+retirement may cancel a validated claim matching the exact Launch, atomically
+with its original-owner cleanup receipt and runtime reconciliation. Malformed or
+foreign claims fail closed and roll back the entire reconciliation. Claim identity,
+creation timestamp and original-result replay survive cancellation; effects,
+unknown resources and holds are not discharged. No production daemon or public
+CLI/RPC path creates a claim. Automatic recovery remains disabled.
+
+The internal `recovery::authorization::Repository::grant_recovery` transition
+accepts an opaque application-owned `Prepared` value constructed only after a
+trusted `RecoveryHost` verification boundary. That boundary must retain protected
+external safety evidence keyed by claim operation; a digest links the audit to
+that proof, not proof of death by itself. No concrete recovery verifier or delivery
+controller is implemented yet. The store revalidates the full claimed candidate
+and every live gate inside an immediate transaction. Only the exact recovery claim
+is exempted from resource blocking; holds, effects and unrelated resources remain.
+Acceptance commits the next Assignment-wide lease sequence, a retired
+`recovery-grant` audit (claim, new lease and evidence digest), and claim retirement
+together. Original attempts, admissions, bound context and other tables are unchanged.
+The new lease uses a freshly verified waiting owner and the claim's new daemon epoch;
+it is not renewal of the old owner's expired deadline. Exact live retries preserve
+the original deadline/audit; expiry, revocation, binding drift or later renewal
+reject delivery replay without rewriting history. Generic resource operations
+cannot create/retire either recovery resource kind. Existing ordinary consumers
+reject a first grant above sequence one; the specialized handshake remains missing.
+The current single-claim history also conservatively blocks subsequent recovery
+operations. See [T10 authorization evidence](../../docs/research/pi-durable-t10/recovery-authorization.md). No DDL/schema
 or public wire changes are required for this additive opaque resource kind; older
 grant/readiness checks already block unknown retained resources. See
 [T10 reservation evidence](../../docs/research/pi-durable-t10/recovery-reservation.md).

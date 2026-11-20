@@ -1,5 +1,10 @@
 # T10 — Transactional recovery reservation increment
 
+Historical reservation snapshot. The subsequent [cancellation increment](recovery-cancellation.md)
+adds verified revoked-retirement cancellation only; recovery-authorizing consumption
+remains unimplemented. Statements below about no release API describe this earlier
+snapshot, not the current cancellation path.
+
 ## Scope
 
 This increment adds an internal trusted-daemon `claim_recovery` persistence port.

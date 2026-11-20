@@ -5,6 +5,7 @@ use forge_app::{
     RegistrationError,
     durable_execution::{
         Launch,
+        recovery::{Claim, validate_retirement},
         retirement::{
             Operation, Receipt, Repository, Retirement, reconciles_resource, validate_begin,
             validate_owner, validate_receipt,
@@ -97,13 +98,20 @@ impl Repository for SqliteProjectRepository {
         if existing.reconciled_at_millis.is_none() {
             let now = now_millis()?;
             tx.execute("UPDATE durable_assignment_retirements SET reconciled_at_millis = ?2 WHERE assignment_id = ?1", params![receipt.operation.launch.assignment_id, now]).map_err(storage_error)?;
-            // Only execution-liveness diagnostics are discharged. External effects,
-            // unknown resources and all other identities remain blockers/history.
+            // Only execution-liveness diagnostics and matching recovery fences
+            // are discharged. Effects and unknown identities remain blockers.
+            // Claim history survives cancellation, so retries cannot transfer it.
             let resources = tx.prepare("SELECT resource_kind, resource_id FROM agent_assignment_resources WHERE assignment_id = ?1 AND retired_at_millis IS NULL").map_err(storage_error)?
                 .query_map([&receipt.operation.launch.assignment_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).map_err(storage_error)?
                 .collect::<Result<Vec<_>, _>>().map_err(storage_error)?;
             for (kind, id) in resources {
-                if reconciles_resource(&receipt.operation.launch, &kind, &id) {
+                let recovery_claim = kind == "recovery-claim";
+                if recovery_claim {
+                    let claim: Claim =
+                        serde_json::from_str(&id).map_err(|_| error("durable-storage-invalid"))?;
+                    validate_retirement(&claim, &receipt.operation.launch)?;
+                }
+                if recovery_claim || reconciles_resource(&receipt.operation.launch, &kind, &id) {
                     tx.execute("UPDATE agent_assignment_resources SET retired_at_millis = ?4 WHERE assignment_id = ?1 AND resource_kind = ?2 AND resource_id = ?3 AND retired_at_millis IS NULL", params![receipt.operation.launch.assignment_id, kind, id, now]).map_err(storage_error)?;
                 }
             }
