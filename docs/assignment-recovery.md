@@ -199,6 +199,15 @@ opens no writable Harness and resumes no model/tool. The controlled receiver tra
 uses an actual SQLite recovery commit but explicitly synthetic Git/protected-digest
 verification. See [waiting-owner/receiver evidence](research/pi-durable-t10/waiting-receiver.md).
 
+A separate read-only repository-progress verifier now checks the original claimed
+worktree/repository/branch and both Base Commit and attempt-input ancestry. It
+fingerprints retained bytes/index without adopting Implementation progress as a
+checkpoint; other Checks require exact clean bound input. Hidden index flags are
+not proof of clean review input. Fsmonitor execution is disabled for these reads;
+configured clean/process filters, submodules and unsafe filesystem observations
+block this component. It grants no authority and is not yet composed into the
+waiting-owner handoff. See [worktree verification evidence](research/pi-durable-t10/recovery-worktree.md).
+
 There is still no complete trusted recovery verifier/ownership handoff orchestration,
 daemon reconciliation or authorized writable reopen. Executables still reject a
 continued global sequence sent as an ordinary first grant. No CLI/RPC operation

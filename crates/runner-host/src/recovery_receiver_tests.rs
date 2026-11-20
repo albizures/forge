@@ -48,6 +48,113 @@ fn preparation() -> SupervisorRecoveryPreparation {
     }
 }
 
+// Rebind the entire expected envelope after changing history, so rejection
+// cannot be attributed merely to a stale candidate commitment.
+fn rebind(control: &mut SupervisorRecoveryPreparation) {
+    let epoch = control.grant.claim.daemon_epoch.clone();
+    control.grant.claim = Claim::for_candidate(
+        &control.candidate,
+        control.grant.claim.operation_id.clone(),
+        epoch,
+    )
+    .unwrap();
+    control.grant.lease.sequence = control.candidate.last_lease.sequence + 1;
+}
+
+#[test]
+fn receiver_malformed_predecessor_terminally_fences_even_with_matching_commitment() {
+    let changes: &[fn(&mut Lease)] = &[
+        |l| l.sequence = 0,
+        |l| l.daemon_epoch.clear(),
+        |l| l.owner.host_pid = 0,
+        |l| l.owner.worker_pid = 0,
+        |l| l.owner.boot_id.clear(),
+        |l| l.owner.time_namespace.clear(),
+        |l| l.owner.host_start.clear(),
+        |l| l.owner.worker_start.clear(),
+        |l| l.owner.lock_device.clear(),
+        |l| l.owner.lock_inode.clear(),
+        |l| l.expires_boottime_millis += 1,
+        |l| l.expires_boottime_millis = l.issued_boottime_millis,
+    ];
+    for change in changes {
+        let good = preparation();
+        let mut malformed = good.clone();
+        change(&mut malformed.candidate.last_lease);
+        rebind(&mut malformed);
+        let mut state = State::new(good.grant.lease.owner.clone(), true);
+        assert!(state.prepare_recovery(malformed, 1_000).is_err());
+        assert!(state.policy.last_lease().is_none());
+        assert!(state.prepare_recovery(good.clone(), 1_001).is_err());
+        assert!(state.policy.accept_recovery(&good.grant, 1_002).is_err());
+    }
+}
+
+#[test]
+fn recovery_transition_and_fresh_preparation_reject_the_same_malformed_history() {
+    use forge_app::{
+        RegistrationError,
+        durable_execution::recovery::authorization::{Prepared, RecoveryHost, Verification},
+    };
+    struct NoExternalVerification;
+    impl RecoveryHost for NoExternalVerification {
+        fn verify(&mut self, _: &Candidate, _: &Claim) -> Result<Verification, RegistrationError> {
+            panic!("malformed history must be rejected before external verification");
+        }
+    }
+    let changes: &[fn(&mut Lease)] = &[
+        |l| l.sequence = 0,
+        |l| l.daemon_epoch.clear(),
+        |l| l.owner.host_pid = 0,
+        |l| l.owner.worker_start.clear(),
+        |l| l.expires_boottime_millis += 1,
+    ];
+    for change in changes {
+        let mut control = preparation();
+        change(&mut control.candidate.last_lease);
+        rebind(&mut control);
+        assert!(
+            control
+                .grant
+                .validate_candidate(&control.candidate, 1_000)
+                .is_err()
+        );
+        assert!(
+            Prepared::verify(
+                control.candidate,
+                control.grant.claim,
+                &mut NoExternalVerification,
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn receiver_valid_expired_renewal_and_prior_boot_history_remain_recoverable() {
+    for prior_boot in [false, true] {
+        let mut control = preparation();
+        control.candidate.last_lease.sequence = 6;
+        if prior_boot {
+            control.candidate.last_lease.owner.boot_id = "previous-boot".into();
+            // Old and new boottime values have no ordering across a reboot.
+            control.candidate.last_lease.issued_boottime_millis = 90_000;
+            control.candidate.last_lease.expires_boottime_millis = 120_000;
+        }
+        control.grant.lease.issued_boottime_millis = 40_000;
+        control.grant.lease.expires_boottime_millis = 70_000;
+        rebind(&mut control);
+        let mut state = State::new(control.grant.lease.owner.clone(), true);
+        state.prepare_recovery(control.clone(), 40_000).unwrap();
+        assert!(state.policy.last_lease().is_none());
+        state
+            .policy
+            .accept_recovery(&control.grant, 40_001)
+            .unwrap();
+        assert_eq!(state.policy.last_lease(), Some(&control.grant.lease));
+    }
+}
+
 #[test]
 fn receiver_preparation_retries_remain_unarmed_and_cannot_reset_after_delivery() {
     let control = preparation();

@@ -14,6 +14,23 @@ fn denied() -> RegistrationError {
     )
 }
 
+// Historical shape is checked at its own issue time, never against the new
+// owner's clock. Expired grants and grants from an earlier boot remain evidence,
+// not renewable permission. Normalize only sequence: history may be a renewal,
+// but a zero sequence must not become a valid predecessor by normalization.
+fn validate_predecessor(candidate: &Candidate) -> Result<(), RegistrationError> {
+    let old = &candidate.last_lease;
+    if old.sequence == 0
+        || old.launch != candidate.launch
+        || old.generation != candidate.attempt.generation
+    {
+        return Err(denied());
+    }
+    let mut predecessor = old.clone();
+    predecessor.sequence = 1;
+    predecessor.validate(None, predecessor.issued_boottime_millis)
+}
+
 /// Trusted host boundary, not an agent/operator payload. Implementations must
 /// prove the predecessor's descendant execution safe, hold exclusive canonical
 /// ownership through commit/delivery, inspect the exact pending original runtime
@@ -79,11 +96,8 @@ impl Prepared {
         {
             return Err(denied());
         }
-        if candidate.last_lease.sequence == 0
-            || candidate.last_lease.launch != candidate.launch
-            || candidate.last_lease.generation != candidate.attempt.generation
-            || candidate.last_lease.daemon_epoch == claim.daemon_epoch
-        {
+        validate_predecessor(&candidate)?;
+        if candidate.last_lease.daemon_epoch == claim.daemon_epoch {
             return Err(denied());
         }
         let sequence = candidate
@@ -91,9 +105,6 @@ impl Prepared {
             .sequence
             .checked_add(1)
             .ok_or_else(denied)?;
-        let mut predecessor = candidate.last_lease.clone();
-        predecessor.sequence = 1;
-        predecessor.validate(None, predecessor.issued_boottime_millis)?;
         let verification = host.verify(&candidate, &claim)?;
         let observation = verification.observation;
         let now = observation.boottime_millis;
@@ -150,6 +161,7 @@ impl Grant {
         candidate: &Candidate,
         now: u64,
     ) -> Result<(), RegistrationError> {
+        validate_predecessor(candidate)?;
         let old = &candidate.last_lease;
         let lease = &self.lease;
         let claim = &self.claim;

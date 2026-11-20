@@ -7,6 +7,7 @@ mod inspection_process;
 pub mod operator;
 pub mod quiesced_inspection;
 pub mod recovery_inspection;
+pub mod recovery_worktree;
 pub mod retirement;
 mod runtime_directory;
 pub mod waiting_recovery_inspection;

@@ -2,7 +2,32 @@
 
 ## Status: partial; T10 remains pending
 
-The latest [waiting-owner inspection and executable receiver](waiting-receiver.md)
+The latest [read-only repository-progress verification](recovery-worktree.md)
+adds application-owned policy, a single-snapshot claimed store read and canonical
+Git/content/index observation with live post-I/O revalidation. Implementation
+progress stays distinct from accepted evidence; other Checks require exact clean
+input. Twelve new Rust tests include actual SQLite/Git composition, hidden-index
+flags, unsafe ancestry/placement, races and a pre-fix failing ambient-fsmonitor
+regression. Final gates pass: 809 Rust harness tests plus seven supervised
+scenarios, one opt-in ignored; runner typecheck and 76 Node tests pass. An existing
+Herdr copied-executable spawn hit `ExecutableFileBusy` in the first workspace run;
+its target and complete unchanged/default-parallel reruns passed, without claiming
+a diagnosed fix. This is not a complete verifier/protected handoff, daemon
+integration or writable resume. T10 remains pending; automatic recovery remains
+disabled.
+
+The preceding [predecessor-validation correction](predecessor-validation.md) unifies
+historical lease validation for fresh preparation and receiving-host transitions.
+Three new regressions reject malformed history with terminal fencing while
+preserving valid expired renewal/prior-boot history; the direct transition test
+failed without the correction and passed afterward. Final gates pass: 797 Rust
+harness tests plus seven supervised scenarios, one opt-in ignored; runner typecheck
+and 76 Node tests pass. A first verification command was interrupted by its tool
+budget; the complete default-parallel workspace rerun passed. No writable recovery,
+trusted proof/handoff orchestration or daemon integration is added. T10 remains
+pending; production and automatic recovery remain disabled.
+
+The preceding [waiting-owner inspection and executable receiver](waiting-receiver.md)
 adds fresh original-receipt/pending-input/effect inspection under a directly spawned
 new waiting owner, separate unarmed preparation and exact-envelope supervisor/Node
 reception. The controlled positive tracer uses the actual SQLite grant transaction

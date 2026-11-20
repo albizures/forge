@@ -18,6 +18,9 @@ fn unknown() -> RegistrationError {
 fn git_bytes(path: &Path, args: &[&str]) -> Result<Vec<u8>, RegistrationError> {
     let output = Command::new("git")
         .arg("--no-optional-locks")
+        // Even ls-files can invoke a configured fsmonitor program. Retained
+        // inspection fingerprints bytes/index only, never ambient executables.
+        .args(["-c", "core.fsmonitor=false"])
         .arg("-C")
         .arg(path)
         .args(args)
