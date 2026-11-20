@@ -171,6 +171,7 @@ async fn production_daemon_bootstraps_grilling_through_delivered_cli() {
         bind_addr: addr,
         store_path: db.clone(),
         durable_model_key_file: None,
+        durable_inspection: None,
         managed: None,
     }));
     for _ in 0..100 {

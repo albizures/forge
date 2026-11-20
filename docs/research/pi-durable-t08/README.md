@@ -4,8 +4,10 @@
 
 **T08 remains incomplete; T09 must not proceed.** This increment establishes the
 runtime read-only inspection/admission fence, Forge-visible transactional effect
-retention, and live-consumer failure fencing. It does not deliver the required
-audited operator resolution or production observation/recovery controller.
+retention, and live-consumer failure fencing. The latest increment adds the public
+operator resolution CLI/RPC and explicit matched inspection-component wiring for
+revoked Assignments. Live/same-Assignment resolution policy and production recovery
+integration remain undelivered; original runtime intent still blocks writable recovery.
 Production durable dispatch and automatic recovery remain disabled. No live Forge
 records, profiles, credentials or worktrees were changed.
 
@@ -449,3 +451,254 @@ default parallel mode. This is a task-local self-review, not independent T18.
 
 Summary: no introduced coding-standard violations found; missing T08 deliverables
 and unrun release checks remain explicitly blocking.
+
+## Audited resolution backend increment
+
+`crates/app/src/durable_execution/effect_resolution.rs` now defines a bounded,
+trusted-operator evidence assertion and original acceptance receipt. Supported
+external conclusions are `applied` and `not-applied`; there is no unknown-to-safe
+default. Both old-agent-cannot-act and external-work-safe confirmations, bounded
+attribution, evidence reference and explanation are mandatory. These are explicit
+operator assertions, not authenticated human identity, external verification or
+proof against escaped same-user processes. Evidence fields are ordinary operational
+output: do not copy credentials, prompts or tool arguments/results into them.
+
+`crates/store/src/durable_execution/effect_resolution.rs` authorizes Workspace and
+complete immutable Launch before replay. Its immediate transaction requires a
+closed/revoked Assignment for new acceptance, checks the exact retained effect,
+and atomically retires only that effect and retains the original audit/timestamp.
+Exact retries return the original receipt across restart. Reusing an operation
+with different evidence or targeting an already resolved effect with another
+operation rejects; concurrent conflicting conclusions accept only one. Accepted
+Outcomes, runtime receipts, worktree evidence, other resources and Dispatch Holds
+are untouched. Unknown external work cannot be resolved by this API.
+
+This is additive use of schema 21's opaque resource contract:
+`interrupted-effect-resolution` has canonical serialized assertion JSON as its ID
+and equal creation/retirement timestamps. The already-retired audit does not itself
+reserve capacity. At most 1,000 audits are accepted per runtime. Original effect
+identities remain retained with their resolution timestamp; later observations do
+not reactivate them or replace their audit. Generic insertion and retirement now
+reject both protected effect kinds, preventing bypass through those generic ports.
+No schema, dependency, public wire fields or runner component identity changed.
+
+`crates/server/src/durable_authorization/effects.rs::resolve_exclusive` validates
+assertions, maps canonical storage, acquires the existing shared ownership flock,
+performs fresh bounded committed inspection/retention, and retains/revalidates the
+same guard through the resolution commit. A competing owner, missing/unsafe lock,
+failed inspection or foreign binding rejects. A post-commit path error can leave an
+accepted audit; exact operation replay discovers it without overwriting evidence.
+The host lock fences supervisors, not arbitrary escaped external children; those
+must separately be made safe, as explicitly asserted. Nothing opens writable runtime
+storage, issues a grant, repairs a receipt, reruns a command or adopts dirty work.
+
+### Actual verification
+
+From the repository root, all final gates passed:
+
+```sh
+cargo test -p forge-store effect_resolution
+cargo test -p forge-cli --test durable_check_bootstrap
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+(cd runner && npm run check && npm test)
+git diff --check
+```
+
+Final full-suite results: **671 Rust harness tests passed, 0 failed, 1 pre-existing
+opt-in probe ignored; all 6 custom-harness supervised scenarios passed; runner
+typecheck and 51 Node tests passed**. The initial focused store run had six tests;
+two more were subsequently added and all eight pass in the full default-parallel
+suite. Eight store regressions cover atomic audit/resource rollback, exact restart
+replay, every Launch identity and wrong Workspace, live authority, both missing
+confirmations, invalid/unknown conclusions, conflicting operations, concurrent exact
+and conflicting claims, accepted-result preservation, other effects/holds/capacity,
+and generic-port forgery/retirement denial. Rollback/accepted-result cases are
+store fixtures, not additional authenticated Outcome paths.
+
+Both existing actual Bash/publication-like fault cases now compose the resolution
+service after daemon restart: one dies after external acceptance and one after tool
+return before completed-result commit. The controlled endpoint reports one mutation;
+the worker group is killed/reaped and the endpoint stopped by test teardown before
+resolution. These tests use an explicitly labelled protected ownership-lock fixture,
+**not product supervised retirement or universal process-death evidence**. They
+reject competing ownership, live authority, wrong scope/binding and unconfirmed
+resolution; accept and replay the exact assertion; reject a conflicting conclusion;
+and inspect the original audit through actual human/JSON CLI/RPC Assignment info.
+Runtime DB bytes, Git status, index, tracked and untracked bytes remain unchanged.
+A final actual committed inspector still reports the unsettled runtime intent:
+resolution deliberately manufactures no runtime result or replay authority. Original
+model and authorization fixtures remain fixtures, not real-provider evidence.
+
+During implementation, compilation caught SQLite signed/unsigned timestamp reads;
+the first focused test correctly rejected an accepted-result fixture missing its
+closed-attempt marker. Clippy caught two test idioms and an overlong composed-test
+helper; these were corrected before the successful full gates. No production path
+validation was relaxed. No clean-install, packaged-component, real-provider or
+release verification was run; no live Forge state changed.
+
+### Backend-increment remaining work and task-local reviews
+
+T08's “Establish a bounded, explicit operator inspection/resolution path” remains
+**partial**: the internal audited backend exists, but a public operator CLI/RPC with
+trusted matched-component wiring and command-level denial/retry tests is missing.
+The currently exposed CLI/RPC only reads the accepted audit via Assignment info.
+The initial backend deliberately requires revoked/closed authority; live/same-attempt
+resolution and the policy for consuming external audit alongside still-unsettled
+runtime intent are not implemented. Do not equate a retired Forge effect resource
+with safe writable runtime recovery. The existing runner fence still denies it.
+
+“Translate runtime interruption into Forge-visible uncertainty before recovery can
+schedule more model/tools” has inspection, transactional retention and failure fences,
+but still lacks production recovery-controller integration. That controller must
+compose current authorization, evidence/ownership and effect policy before writable
+opening; no existing gate is waived here. T09 remains blocked, and durable production
+dispatch/automatic recovery remain disabled. No unrelated scope expansion found.
+
+Implementation-review summary: T08 incomplete; public resolution controls and
+production recovery composition remain the blocking gaps.
+
+Standards review: no introduced violations found. App owns assertion types/policy,
+store owns atomic scope/replay/audit and resource changes, server owns canonical
+mapping and external read-only inspection under host ownership. External calls stay
+outside transactions; failures preserve unrelated safety state and no runtime or
+repository repair occurs. Tests isolate roots/processes and the complete workspace
+ran in default parallel mode. This task-local self-review does not replace T18.
+
+Standards-review summary: no introduced coding-standard violations found; missing
+T08 deliverables and unrun release gates remain explicit blockers.
+
+## Public operator resolution increment
+
+`forge dispatcher assignment-resolve-effect` and the additive
+`agentDispatch_assignmentResolveEffect` RPC now expose the conservative revoked-
+Assignment resolution boundary. Explicit Workspace/canonical client-cwd selection
+uses the existing Record selection contract; a bare Assignment ID does not select
+scope. The daemon derives the immutable Launch from the owning stored runtime,
+not an RPC-selected profile, component or filesystem path. Strict wire decoding
+rejects extra credential/path/Launch fields and unsupported conclusions. The
+Assignment capability API remains unchanged. Operator RPC is still trusted and
+unauthenticated; Workspace routing and rejecting credential-shaped fields do not
+authenticate a human or sandbox a same-user agent.
+
+New acceptance requires the same bounded assertion, both safety confirmations,
+closed authority, exact retained effect, fresh committed scan and existing protected
+exclusive host lock. The CLI exposes explicit effect identity, stable operation,
+conclusion, attribution and evidence flags. Missing confirmations reject locally
+before endpoint resolution and independently on the server. Errors keep stdout
+empty in JSON mode; accepted JSON is the typed original receipt. Human output
+explicitly disclaims replay/recovery. Evidence fields are ordinary operational
+output, not protected transcript storage. No agent secret is read or forwarded.
+
+`durable_authorization::operator::InspectionComponents` selects both absolute
+trusted Node and inspector paths or neither. Manual daemons read the explicit
+`FORGE_DURABLE_NODE` and `FORGE_DURABLE_EFFECT_INSPECTOR` host settings. Partial or
+relative selection rejects; there is no PATH/npm/current-checkout fallback. The
+inspector still verifies the retained component hash/schema/Launch. Managed
+launches do not inherit these settings; matched Revision packaging and selection
+remain T15 work. This configuration supplies no model key or Assignment authority
+and enables no dispatch/recovery. Missing components deny new acceptance with a
+fixed diagnostic. An extra scoped repository connection supplies operator
+inspection/resolution without altering the application's provider factory.
+
+A new scoped accepted-result read separates **discovering an original audit** from
+**accepting a new safety assertion**. Scope and the complete retained Launch are
+checked in a consistent read transaction before returning the receipt. Conflicting
+operation/effect reuse rejects. Exact accepted-result retries require neither host
+ownership nor runtime storage/components: they perform no inspection, retirement,
+authority renewal or safety acceptance. This fixes the earlier backend's overly
+strict dependency on current inspection availability for lost-reply replay. The
+mutation transaction independently repeats scope/replay checks before any new
+acceptance. No later runtime state can rewrite an accepted audit.
+
+Compatibility: new CLI command and operator RPC method, plus an internal optional
+DaemonConfig component field and explicit manual environment configuration. No
+existing arguments, response fields, management protocol, schema, dependencies,
+runner code/component hash or accepted resource representation changed. Existing
+DaemonConfig constructors/fixtures explicitly select no components; managed
+configuration remains independent of ambient settings. Help and operational/
+store documentation describe the command and controlled limits.
+
+### Public-boundary verification
+
+Both real Bash/publication-like fault cases now accept the resolution through the
+**actual CLI → HTTP daemon → canonical service → committed inspector → store**
+path, after daemon restart. Direct backend checks remain as separate boundary
+assertions. New public cases cover missing confirmations before an unreachable
+endpoint, independent server confirmation rejection, missing/wrong Workspace,
+closed-authority requirements, competing lock ownership, unknown conclusions,
+credential/path/Launch-shaped RPC extras, conflicting conclusion and exact retry
+in human/JSON modes. Ambient Assignment credential canaries are not consumed or
+returned. Both existing human/JSON Assignment-info reads retain the original audit.
+
+After acceptance, exact RPC/CLI retries run while another inspection guard owns the
+host lock. Then the daemon is stopped/restarted **without inspector configuration**
+and the runtime directory is temporarily renamed away from its canonical location.
+The original receipt/timestamp remains discoverable without creating storage,
+changing resources/holds or taking the host lock. A new operation still rejects as
+unconfigured. The original runtime directory is restored afterward: this tests
+unavailability, not transcript deletion or managed packaging. Original-reply replay
+is a lost-reply analogue, not an injected dropped HTTP response.
+
+Worktree/index/tracked/untracked and runtime DB bytes remain unchanged, and actual
+committed inspection still reports the unsettled intent. The endpoint's actual
+mutation count remains one before controlled endpoint teardown; resolution has no
+command/runtime write path. Closure uses the existing repository port as a **fixture**,
+not product supervised retirement or proof against escaped external children.
+The ownership lock is still a labelled fixture; real supervisor/worker fencing is
+separately covered by the pre-existing host tests. Model/lease fixtures remain
+fixtures; this is not real-provider verification.
+
+Five new standalone regressions cover strict RPC encoding, complete/absolute host
+selection, a scoped accepted-result read and CLI parser required identity/evidence/
+conclusion/credential/path contracts. The expanded composed cases run in the default
+parallel CLI target. Commands from repository root:
+
+```sh
+cargo test -p forge-cli --test durable_check_bootstrap
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+(cd runner && npm run check && npm test)
+git diff --check
+```
+
+Final corrected-snapshot results: **676 Rust harness tests passed, 0 failed,
+1 pre-existing opt-in probe ignored; all 6 custom-harness supervised scenarios
+passed; runner typecheck and 51 Node tests passed**. `git diff --check` passes.
+The server binary was also rebuilt with `cargo build -p forge-server --bin
+forge-server`, then its `--help` and the new CLI command's `--help` were inspected.
+The initial compile caught that CLI depends on RPC, not app; shared resolution types
+are now deliberately re-exported by RPC rather than adding a dependency. Clippy
+caught inline test-module placement; tests were moved to a capability-local file.
+No clean-install, packaged-component, real-provider or release gate was run. No
+live Forge records, profiles, credentials or worktrees were changed.
+
+### Current task-local review and blockers
+
+Implementation review: T08's “Establish a bounded, explicit operator inspection/
+resolution path preserving accepted results, ownership guards and audit” now has
+public commands and controlled CLI/RPC/process evidence for revoked Assignments.
+“On reopen, neither tool replay nor a fresh model request bypasses the blocker”
+remains fail-closed: public resolution leaves the runtime intent unsettled and the
+existing runner fence still rejects writable recovery. However, live/same-Assignment
+resolution policy and production controller consumption of effect audit alongside
+runtime uncertainty remain missing. The public command is not a waiver for those
+gates. No unrelated scope expansion found.
+
+Implementation-review summary: **T08 incomplete; live/same-Assignment effect policy
+and production recovery composition remain blocking. T09 must not proceed.**
+
+Standards review: no introduced violations found. App owns resolution alternatives
+and replay policy; store owns scope, consistent read and atomic mutation/audit;
+RPC owns strict operator contracts; server owns selection, canonical mapping and
+matched process adaptation; CLI owns flags/presentation. External inspection stays
+outside database transactions, with binding rechecked at commit and host ownership
+held for new acceptance. Exact replay reads admit nothing and preserve original
+evidence. Denied actions preserve safety state, tests isolate processes/roots and
+full workspace verification runs in default parallel mode. Independent T18 remains
+required.
+
+Standards-review summary: no introduced coding-standard violations found; remaining
+T08 deliverables and unrun release gates are not waived.

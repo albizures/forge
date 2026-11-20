@@ -6,6 +6,8 @@ mod assignment_findings;
 pub use assignment_findings::{AssignmentFindingAction, assignment_finding};
 mod assignment_checks;
 pub use assignment_checks::{AssignmentCheckAction, assignment_check};
+mod effect_resolution;
+pub use effect_resolution::request_resolve_interrupted_effect;
 mod record_selection;
 pub use record_selection::RecordEndpoint;
 use record_selection::record_client;

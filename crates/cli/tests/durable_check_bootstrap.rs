@@ -4,6 +4,8 @@
 //! grant remains a test-only fixture, NOT supervised execution. No Herdr binding.
 #[path = "support/durable_dispatch.rs"]
 mod durable_dispatch;
+#[path = "durable_check_bootstrap/effect_resolution.rs"]
+mod effect_resolution;
 use forge_app::{
     AgentDispatchRepository, Application, ManagedWorktreeRepository, NewTypedRecord, Project,
     ProjectRepository, RecordRepository, RecordType, WorkspaceDispatchRepository,
@@ -479,6 +481,7 @@ async fn check_execution(mode: &str) {
         bind_addr: addr,
         store_path: db.clone(),
         durable_model_key_file: None,
+        durable_inspection: None,
         managed: None,
     }));
     let endpoint = format!("http://{addr}");
@@ -685,6 +688,12 @@ async fn check_execution(mode: &str) {
             bind_addr: addr,
             store_path: db.clone(),
             durable_model_key_file: None,
+            durable_inspection: Some(
+                forge_server::durable_authorization::operator::InspectionComponents {
+                    node: node(),
+                    inspector: inspector.clone(),
+                },
+            ),
             managed: None,
         }));
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
@@ -702,8 +711,49 @@ async fn check_execution(mode: &str) {
             reopened.agent_assignment_info(assignment_id).unwrap(),
             before
         );
+        let receipt = effect_resolution::verify_resolution(
+            &reopened,
+            &launch,
+            &runtime_directory,
+            &checkout.path,
+            &inspector,
+            &endpoint,
+        )
+        .await;
         restarted.abort();
         let _ = restarted.await;
+        // Accepted-result reads survive daemon restart, unavailable components
+        // and absent canonical runtime storage; no new resolution is admitted.
+        let retained_path = runtime_directory.with_extension("retained-fixture");
+        std::fs::rename(&runtime_directory, &retained_path).unwrap();
+        let replay_daemon = tokio::spawn(serve(DaemonConfig {
+            bind_addr: addr,
+            store_path: db.clone(),
+            durable_model_key_file: None,
+            durable_inspection: None,
+            managed: None,
+        }));
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if tokio::net::TcpStream::connect(addr).await.is_ok() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let state_before_replay = reopened.agent_assignment_info(assignment_id).unwrap();
+        effect_resolution::verify_replay(&endpoint, assignment_id, &receipt).await;
+        effect_resolution::verify_unconfigured(&endpoint, assignment_id, &receipt).await;
+        assert_eq!(
+            reopened.agent_assignment_info(assignment_id).unwrap(),
+            state_before_replay
+        );
+        assert!(!runtime_directory.exists());
+        std::fs::rename(&retained_path, &runtime_directory).unwrap();
+        replay_daemon.abort();
+        let _ = replay_daemon.await;
         return;
     }
     // Implementation may deliver a new clean commit; retain input A on the

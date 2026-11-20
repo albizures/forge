@@ -75,7 +75,7 @@ fn parse_options() -> Result<ServerOptions, String> {
             }
             "--help" | "-h" => {
                 println!(
-                    "Usage: forge-server [--bind-addr IP:PORT] [--managed --store-path PATH --runtime-record-path PATH --lifecycle-control-endpoint PATH --lifecycle-credential VALUE --daemon-instance-id ID]\n\nFORGE_BIND_ADDR and FORGE_STORE_PATH supply manual-launch defaults. FORGE_DURABLE_OPENAI_KEY_FILE optionally selects an owner-only API-key file for durable profile preflight (not a key value or dispatch enablement). A managed launch must explicitly provide every managed input. Remote bindings are unauthenticated; use only a trusted private network."
+                    "Usage: forge-server [--bind-addr IP:PORT] [--managed --store-path PATH --runtime-record-path PATH --lifecycle-control-endpoint PATH --lifecycle-credential VALUE --daemon-instance-id ID]\n\nFORGE_BIND_ADDR and FORGE_STORE_PATH supply manual-launch defaults. FORGE_DURABLE_OPENAI_KEY_FILE optionally selects an owner-only API-key file for durable profile preflight (not a key value or dispatch enablement). FORGE_DURABLE_NODE and FORGE_DURABLE_EFFECT_INSPECTOR optionally select both absolute trusted matched inspection components for operator effect resolution, never dispatch/recovery enablement. Partial configuration rejects. Managed launches inherit none of these durable environment settings and must explicitly provide every managed input. Remote bindings are unauthenticated; use only a trusted private network."
                 );
                 std::process::exit(0);
             }

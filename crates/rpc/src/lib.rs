@@ -3,6 +3,8 @@
 mod agent_profiles;
 mod assignment;
 pub mod durable_execution;
+pub mod effect_resolution;
+pub use effect_resolution::ResolveInterruptedEffectRequest;
 mod task_inspection;
 pub use agent_profiles::*;
 pub use assignment::*;
@@ -181,6 +183,13 @@ pub trait AgentDispatchApi {
     ) -> RpcResult<AgentAssignmentInfoResponse>;
     #[method(name = "assignmentRetire")]
     async fn assignment_retire(&self, request: RetireAgentAssignmentRequest) -> RpcResult<()>;
+    /// Evidence-based resolution after revocation and exclusive committed inspection.
+    /// Workspace selection is routing, not operator authentication.
+    #[method(name = "assignmentResolveEffect")]
+    async fn assignment_resolve_effect(
+        &self,
+        request: SelectedRecordRequest<ResolveInterruptedEffectRequest>,
+    ) -> RpcResult<forge_app::durable_execution::effect_resolution::ResolutionReceipt>;
     #[method(name = "assignmentResolveUnknown")]
     async fn assignment_resolve_unknown(
         &self,

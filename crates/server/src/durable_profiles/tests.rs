@@ -233,6 +233,7 @@ async fn operator_preview_and_registration_require_explicit_auth_before_persisti
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         store_path: database,
         durable_model_key_file: None,
+        durable_inspection: None,
         managed: None,
     };
     let daemon = crate::Daemon::new(crate::application_from_config(&config).unwrap())

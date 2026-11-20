@@ -96,6 +96,17 @@ for permissions, supported inputs and fail-closed behavior. This setting neither
 enables durable dispatch nor supplies a Forge Assignment capability. Managed
 launches do not inherit it; matched managed packaging is later release work.
 
+For controlled interrupted-effect resolution, a manual daemon may set both
+`FORGE_DURABLE_NODE` and `FORGE_DURABLE_EFFECT_INSPECTOR` to explicit absolute
+trusted executable/entrypoint paths. Partial or relative selection rejects;
+there is no PATH/npm/current-checkout discovery. The retained runtime's component
+hash must match the inspector, which uses committed read-only storage. The paths
+are host configuration, never RPC input. Managed launches do not inherit these
+settings; matched Revision packaging/selection remains later work. Missing
+components block new resolutions, but exact accepted-result audit reads still work.
+This configuration supplies no model key/capability and enables no durable dispatch
+or automatic recovery. See [effect investigation](assignment-recovery.md#interrupted-durable-effects-controlled-implementation).
+
 ## Browser and RPC
 
 On the default manual listener, open <http://127.0.0.1:45003/>. Browser routes

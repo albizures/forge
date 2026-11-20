@@ -3,6 +3,7 @@ mod assignment_check_commands;
 mod assignment_finding_commands;
 mod check_templates;
 mod checks;
+mod effect_resolution_command;
 mod findings;
 mod help;
 mod project_selection;
@@ -413,6 +414,8 @@ enum AgentDispatchCommand {
     AssignmentRetire(AssignmentRetireArgs),
     /// Assert unknown resources are safe after retirement (risk of duplicate agents).
     AssignmentResolveUnknown(AssignmentResolveUnknownArgs),
+    /// Record one evidence-based interrupted-effect resolution after revocation; never replay or resume.
+    AssignmentResolveEffect(effect_resolution_command::ResolveEffectArgs),
 }
 #[derive(Args, Debug)]
 struct DispatcherConfigReadArgs {
@@ -1441,6 +1444,9 @@ async fn agent_dispatch(command: AgentDispatchCommand, workspace: Option<String>
         AgentDispatchCommand::Resume(args) => return dispatcher_resume(args).await,
         AgentDispatchCommand::AssignmentResolveUnknown(args) => {
             return dispatcher_resolve_unknown(args).await;
+        }
+        AgentDispatchCommand::AssignmentResolveEffect(args) => {
+            return effect_resolution_command::run(args, workspace).await;
         }
         AgentDispatchCommand::AssignmentRetire(args) => return dispatcher_retire(args).await,
     };

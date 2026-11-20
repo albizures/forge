@@ -3031,6 +3031,7 @@ impl AgentDispatchRepository for SqliteProjectRepository {
         &self,
         resource: &NewAgentAssignmentResource,
     ) -> Result<AgentAssignmentResource, RegistrationError> {
+        forge_app::durable_execution::effects::validate_resource_creation(&resource.resource_kind)?;
         if resource.resource_kind.trim().is_empty() || resource.resource_id.trim().is_empty() {
             return Err(RegistrationError::new(
                 "invalid-assignment-resource",

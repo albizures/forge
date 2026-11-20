@@ -5,6 +5,7 @@ use forge_app::{
     RegistrationError,
     durable_execution::{
         Launch,
+        effect_resolution::{Repository as ResolutionRepository, Resolution, ResolutionReceipt},
         effects::{InterruptedEffect, Repository},
     },
 };
@@ -83,6 +84,39 @@ pub async fn inspect_exclusive_and_retain(
     .await?;
     ownership.verify().map_err(|_| denied())?;
     Ok(ownership)
+}
+
+/// Resolve one externally investigated effect under the existing exclusive host
+/// lock, after a fresh committed scan. Trusted operator input only, never an
+/// Assignment capability operation. The store atomically requires revocation,
+/// validates the retained effect and records the original evidence-based audit.
+/// Exact accepted-result retries are scope-authorized read-only audit lookups;
+/// they do not require current host ownership, runtime storage or components.
+/// No runtime receipt is repaired and no recovery or command replay is authorized.
+/// External children must separately be made safe, as explicitly asserted in the
+/// request: the host lock alone cannot prove universal process absence.
+/// # Errors
+/// Rejects unconfirmed evidence, unsafe ownership, unavailable inspection, wrong
+/// scope/binding, live authority and conflicting/missing effects. Errors do not
+/// clear holds or other blockers. A post-commit path error may leave an accepted
+/// audit; retry the exact operation rather than inventing a new resolution.
+pub async fn resolve_exclusive(
+    repository: &SqliteProjectRepository,
+    workspace: &str,
+    launch: &Launch,
+    node: &Path,
+    inspector: &Path,
+    resolution: &Resolution,
+) -> Result<ResolutionReceipt, RegistrationError> {
+    if let Some(receipt) = repository.accepted_effect_resolution(workspace, launch, resolution)? {
+        return Ok(receipt);
+    }
+    let ownership =
+        inspect_exclusive_and_retain(repository, workspace, launch, node, inspector).await?;
+    ownership.verify().map_err(|_| denied())?;
+    let receipt = repository.resolve_interrupted_effect(workspace, launch, resolution)?;
+    ownership.verify().map_err(|_| denied())?;
+    Ok(receipt)
 }
 
 async fn inspect_mapped(

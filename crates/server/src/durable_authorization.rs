@@ -2,6 +2,7 @@
 //! capability or production launch path exposes this service yet.
 //! One `DaemonAuthority` belongs to one daemon lifetime, never retained on disk.
 pub mod effects;
+pub mod operator;
 mod runtime_directory;
 use forge_app::{
     RegistrationError,

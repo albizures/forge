@@ -1,4 +1,6 @@
 use super::*;
+#[path = "durable_execution/effect_resolution_tests.rs"]
+mod effect_resolution_tests;
 #[path = "durable_execution/effects_tests.rs"]
 mod effects_tests;
 use forge_app::{

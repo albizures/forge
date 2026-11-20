@@ -70,7 +70,55 @@ These resources reserve capacity and block new authorization grants even for a
 closed Assignment. Provider resource retirement cannot waive them, and accepted
 Outcomes are not overwritten by their arrival.
 
-There is currently **no audited operator resolution command** for these effects.
+A controlled operator CLI/RPC now records evidence-based resolutions for
+**revoked/closed** Assignments under exclusive host inspection. It is not safe
+live/same-Assignment recovery, supervised retirement or production scheduling.
+Investigate the actual external outcome and make old execution/external children
+safe first. Use `assignment-retire` to revoke before cleanup, then inspect persisted
+closure: an incomplete cleanup error is not proof of absence. Durable supervised
+retirement is still undelivered; retain all its other blockers. Never directly
+close an Assignment in SQLite to satisfy this command.
+
+For new resolutions, the daemon requires [explicit matched inspection components](development.md#run-a-manual-daemon),
+existing protected host-lock evidence, a fresh
+committed runtime scan and both safety assertions. A missing lock, live owner,
+unavailable/incompatible inspector or unknown external outcome blocks acceptance.
+Take `execution-task`, `conversation` and `call` from the selected retained
+`interrupted-effect` resource, not from a different Assignment or Forge Task ID:
+
+```sh
+forge dispatcher assignment-resolve-effect <assignment-id> --workspace <owner> \
+  --operation-id <stable-resolution-id> \
+  --execution-task <runtime-task-id> --conversation <conversation-id> --call <call-id> \
+  --outcome applied --actor <operator> --evidence <external-receipt-reference> \
+  --message <investigation-summary> \
+  --confirm-old-agent-cannot-act --confirm-external-work-safe --json
+```
+
+Use `not-applied` only with evidence of that conclusion; unknown stays unresolved.
+Assertions are trusted operator authority, not authenticated human identity or
+universal process-death proof. The RPC is
+`agentDispatch_assignmentResolveEffect`, with
+`{selection: {workspace, cwd?}, record: {assignment_id, resolution}}`.
+Resolution contains the operation ID, exact `effect` identities, conclusion,
+actor/evidence/message and both confirmation booleans. It accepts no capability,
+secret, runtime path or selected executable. Workspace selection routes scope;
+it does not authenticate an operator on this trusted unauthenticated interface.
+
+Exact retries use the **same operation ID and all original evidence** and return
+the original timestamp/receipt, even after daemon restart or loss of runtime
+components/storage. This replay is only an authorized read of an already accepted
+audit; it performs no new inspection or safety acceptance. Different evidence or
+another operation targeting the same resolved effect rejects. On transport failure,
+inspect Assignment info and retry the exact resolution, never the tool command.
+
+The `interrupted-effect-resolution` audit remains visible through Assignment info.
+Only its targeted Forge effect is retired. Runtime intent remains unsettled;
+other resources, capacity blockers and holds remain. No command is rerun, runtime
+receipt repaired, dirty commit adopted or replay/recovery authorized. Audit evidence
+fields are ordinary output, not protected transcript storage: never include
+credentials, tool payloads or prompts in them.
+
 Do not use `assignment-resolve-unknown`, retained-work salvage, generic cleanup,
 runtime SQLite edits or `resume` as an interrupted-effect waiver. Preserve the
 runtime/worktree and externally investigate publication/push outcomes without

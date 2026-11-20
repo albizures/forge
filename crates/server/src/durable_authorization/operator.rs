@@ -1,0 +1,122 @@
+//! Operator adaptation only. Runtime/tool execution and recovery stay disabled.
+use super::effects::resolve_exclusive;
+use forge_app::{
+    RegistrationError,
+    durable_execution::{
+        Repository as _,
+        effect_resolution::{Repository as _, ResolutionReceipt},
+    },
+};
+use forge_rpc::ResolveInterruptedEffectRequest;
+use forge_store::SqliteProjectRepository;
+use std::path::{Path, PathBuf};
+
+/// Trusted daemon configuration, never RPC-selected paths or PATH discovery.
+/// The inspector independently verifies its component hash against the immutable
+/// retained runtime. Historical inspection needs no model key/profile source.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InspectionComponents {
+    pub node: PathBuf,
+    pub inspector: PathBuf,
+}
+
+impl InspectionComponents {
+    /// Select both explicitly configured components or neither; never fill a
+    /// partial selection from PATH or the current checkout.
+    /// # Errors
+    /// Rejects partial or relative configuration.
+    pub fn select(
+        node: Option<PathBuf>,
+        inspector: Option<PathBuf>,
+    ) -> Result<Option<Self>, RegistrationError> {
+        match (node, inspector) {
+            (None, None) => Ok(None),
+            (Some(node), Some(inspector)) => {
+                let components = Self { node, inspector };
+                components.validate()?;
+                Ok(Some(components))
+            }
+            _ => Err(RegistrationError::new(
+                "durable-effect-inspector-invalid",
+                "configure both FORGE_DURABLE_NODE and FORGE_DURABLE_EFFECT_INSPECTOR, or neither",
+            )),
+        }
+    }
+
+    /// # Errors
+    /// Rejects partial or relative selection. Missing/incompatible files fail
+    /// closed at request time, without resolving an effect or enabling recovery.
+    pub fn validate(&self) -> Result<(), RegistrationError> {
+        if !self.node.is_absolute() || !self.inspector.is_absolute() {
+            return Err(RegistrationError::new(
+                "durable-effect-inspector-invalid",
+                "select explicit absolute Node and matched effect-inspector paths on the daemon host",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[path = "operator_tests.rs"]
+mod tests;
+
+pub(crate) struct OperatorService {
+    repository: SqliteProjectRepository,
+    components: Option<InspectionComponents>,
+}
+
+impl OperatorService {
+    pub(crate) fn new(
+        store: &Path,
+        components: Option<InspectionComponents>,
+    ) -> Result<Self, RegistrationError> {
+        if let Some(components) = &components {
+            components.validate()?;
+        }
+        Ok(Self {
+            repository: SqliteProjectRepository::open(store)?,
+            components,
+        })
+    }
+
+    pub(crate) async fn resolve(
+        &self,
+        workspace: &str,
+        request: &ResolveInterruptedEffectRequest,
+    ) -> Result<ResolutionReceipt, RegistrationError> {
+        // Canonical immutable Launch comes from owning storage, never a caller's
+        // desired profile, path or component. Scope is authorized before reads/replay.
+        let runtime = self
+            .repository
+            .runtime(workspace, &request.assignment_id)?
+            .ok_or_else(|| {
+                RegistrationError::new(
+                    "durable-intent-missing",
+                    "Assignment has no retained durable runtime",
+                )
+            })?;
+        // Returning an accepted receipt is a read, not a new safety assertion.
+        // Lost-reply retries must survive absent runtime components/storage or a
+        // current lock owner. Fresh acceptance still requires exclusive inspection.
+        if let Some(receipt) = self.repository.accepted_effect_resolution(
+            workspace,
+            &runtime.launch,
+            &request.resolution,
+        )? {
+            return Ok(receipt);
+        }
+        let components = self.components.as_ref().ok_or_else(|| RegistrationError::new(
+            "durable-effect-inspector-unconfigured", "configure trusted matched effect inspection components on the daemon; preserve uncertainty and do not replay",
+        ))?;
+        resolve_exclusive(
+            &self.repository,
+            workspace,
+            &runtime.launch,
+            &components.node,
+            &components.inspector,
+            &request.resolution,
+        )
+        .await
+    }
+}

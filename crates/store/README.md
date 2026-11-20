@@ -107,9 +107,44 @@ resolve prior uncertainty. Delayed observations after closure/invalidation or a
 lost admission reply remain retainable. Accepted Outcomes are untouched. These
 resources reserve capacity and independently block lease issuance even after hold
 clearance. Generic resource retirement rejects this kind: provider cleanup cannot
-resolve an external outcome. There is not yet an audited operator resolution or
-production observation driver; see [T08 evidence](../../docs/research/pi-durable-t08/README.md).
-No schema or existing serialized contract changes are required.
+resolve an external outcome.
+
+The internal `effect_resolution::Repository` boundary accepts evidence-based
+trusted operator assertions only for revoked/closed Assignments. For new
+acceptance, the server's `resolve_exclusive` adapter obtains the existing host
+lock and performs fresh committed inspection, retaining the guard throughout the
+commit. Original accepted-result reads authorize Workspace/Launch in a consistent
+read transaction and admit nothing; they require no current host owner, runtime
+storage or matching inspector. Conflicting reuse still rejects.
+Both explicit safety confirmations are required in addition to revocation and
+host ownership; the lock is not proof that escaped external children stopped.
+Supported conclusions are `applied` or `not-applied`; unknown stays unresolved.
+An immediate transaction checks scope and the complete Launch before replay,
+returns the original receipt for an exact operation, and rejects conflicting
+operation/effect reuse. Acceptance retires **only** the selected retained effect
+and atomically inserts an already-retired `interrupted-effect-resolution` audit
+resource, whose canonical JSON ID retains attribution, evidence reference,
+explanation and confirmations. Its creation/retirement timestamps are identical
+and supply the original acceptance time. At most 1,000 audits exist per runtime.
+Generic resource insertion/retirement cannot forge or rewrite these audits.
+Re-observation preserves the retired effect and original audit. Holds, other
+resources, Outcomes and runtime receipts are untouched; audit resources do not
+reserve capacity themselves. Evidence fields are ordinary operational output:
+never place tool payloads, credentials or prompts there.
+
+The controlled public `assignment-resolve-effect` CLI and
+`agentDispatch_assignmentResolveEffect` RPC wrap this boundary. The server derives
+Launch and canonical storage from the selected Workspace/Assignment, never caller
+paths or a mutable current profile. New acceptance requires explicit trusted
+matched inspection components on the host; accepted-result reads remain available
+without them. These are operator operations, not Assignment capability actions.
+Runtime interruption remains visible in protected storage and still rejects
+writable recovery; no accepted runtime result is manufactured. Live/same-Assignment
+resolution and production recovery integration remain undelivered. See
+[T08 evidence](../../docs/research/pi-durable-t08/README.md).
+No schema, runner component or existing serialized field changes are required;
+these are additive opaque resource kinds, a new CLI/RPC operation and internal
+Rust service interfaces.
 
 The server's preparation/binding path derives protected storage at
 `<workspace-root>/.forge/assignment-runtimes/<sha256(store_id)>` from the exact

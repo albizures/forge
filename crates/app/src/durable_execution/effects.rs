@@ -30,11 +30,24 @@ impl InterruptedEffect {
     }
 }
 
+/// Specialized effect operations exclusively own their resource/audit writes.
+/// # Errors
+/// Rejects generic insertion of effect uncertainty or accepted resolution audits.
+pub fn validate_resource_creation(kind: &str) -> Result<(), RegistrationError> {
+    if matches!(kind, "interrupted-effect" | "interrupted-effect-resolution") {
+        return Err(RegistrationError::new(
+            "durable-effect-specialized-operation-required",
+            "effect resources and audits require their specialized transactional operations",
+        ));
+    }
+    Ok(())
+}
+
 /// External-effect uncertainty cannot be waived by provider resource cleanup.
 /// # Errors
 /// Interrupted effects require their own evidence-based audited resolution.
 pub fn validate_resource_retirement(kind: &str) -> Result<(), RegistrationError> {
-    if kind == "interrupted-effect" {
+    if matches!(kind, "interrupted-effect" | "interrupted-effect-resolution") {
         return Err(RegistrationError::new(
             "durable-effect-resolution-required",
             "interrupted effects require explicit audited resolution, not resource retirement",

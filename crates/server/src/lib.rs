@@ -128,6 +128,8 @@ pub struct DaemonConfig {
     pub store_path: PathBuf,
     /// Explicit host credential-file path for new durable profiles; never a key value.
     pub durable_model_key_file: Option<PathBuf>,
+    /// Explicit trusted components for operator interrupted-effect inspection/resolution.
+    pub durable_inspection: Option<durable_authorization::operator::InspectionComponents>,
     /// Present only when Forgeup explicitly owns this daemon launch.
     pub managed: Option<ManagedDaemonConfig>,
 }
@@ -141,6 +143,10 @@ impl std::fmt::Debug for DaemonConfig {
             .field(
                 "durable_model_auth_configured",
                 &self.durable_model_key_file.is_some(),
+            )
+            .field(
+                "durable_inspection_configured",
+                &self.durable_inspection.is_some(),
             )
             .finish()
     }
@@ -166,6 +172,11 @@ impl DaemonConfig {
             store_path: env::var_os("FORGE_STORE_PATH")
                 .map_or_else(|| PathBuf::from("forge.sqlite3"), PathBuf::from),
             durable_model_key_file: env::var_os("FORGE_DURABLE_OPENAI_KEY_FILE").map(PathBuf::from),
+            durable_inspection: durable_authorization::operator::InspectionComponents::select(
+                env::var_os("FORGE_DURABLE_NODE").map(PathBuf::from),
+                env::var_os("FORGE_DURABLE_EFFECT_INSPECTOR").map(PathBuf::from),
+            )
+            .map_err(|error| error.message)?,
             managed: None,
         })
     }
@@ -199,6 +210,7 @@ impl DaemonConfig {
             bind_addr,
             store_path: PathBuf::from(inputs.store_path),
             durable_model_key_file: None,
+            durable_inspection: None,
             managed: Some(ManagedDaemonConfig {
                 runtime_record_path: PathBuf::from(inputs.runtime_record_path),
                 lifecycle_control_endpoint: PathBuf::from(inputs.lifecycle_control_endpoint),
@@ -236,6 +248,7 @@ pub struct Daemon {
     capability_secret_root: Option<PathBuf>,
     profile_operator_root: Option<PathBuf>,
     durable_model_key_file: Option<PathBuf>,
+    durable_effect_resolution: Option<Arc<durable_authorization::operator::OperatorService>>,
 }
 
 impl Daemon {
@@ -255,6 +268,7 @@ impl Daemon {
             application: Arc::new(application),
             capability_secret_root: None,
             durable_model_key_file: None,
+            durable_effect_resolution: None,
             profile_operator_root: std::env::var_os("HOME").map(PathBuf::from),
             management: ManagementStatus::new(
                 RevisionIdentity::from(forge_build_info::current()),
@@ -1189,6 +1203,20 @@ impl AgentDispatchApiServer for Daemon {
         self.application
             .agent_assignment_info(&request.assignment_id)
             .map(Into::into)
+            .map_err(rpc_error)
+    }
+
+    async fn assignment_resolve_effect(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<forge_rpc::ResolveInterruptedEffectRequest>,
+    ) -> RpcResult<forge_app::durable_execution::effect_resolution::ResolutionReceipt> {
+        let workspace = self.record_workspace(&request.selection, &mut [])?;
+        let service = self.durable_effect_resolution.as_ref().ok_or_else(|| rpc_error(
+            RegistrationError::new("durable-effect-inspector-unconfigured", "configure trusted matched effect inspection components on the daemon; preserve uncertainty and do not replay"),
+        ))?;
+        service
+            .resolve(&workspace, &request.record)
+            .await
             .map_err(rpc_error)
     }
 
@@ -2237,6 +2265,13 @@ pub async fn serve(config: DaemonConfig) -> Result<(), std::io::Error> {
     daemon
         .durable_model_key_file
         .clone_from(&config.durable_model_key_file);
+    daemon.durable_effect_resolution = Some(Arc::new(
+        durable_authorization::operator::OperatorService::new(
+            &config.store_path,
+            config.durable_inspection.clone(),
+        )
+        .map_err(|error| std::io::Error::other(error.message))?,
+    ));
     let store_root = config.store_path.parent().unwrap_or_else(|| Path::new("."));
     daemon.capability_secret_root = Some(
         if store_root.is_absolute() {
@@ -2970,6 +3005,7 @@ mod tests {
             bind_addr: "127.0.0.1:0".parse().unwrap(),
             store_path: database,
             durable_model_key_file: None,
+            durable_inspection: None,
             managed: None,
         })
         .unwrap();
@@ -4444,6 +4480,7 @@ mod tests {
             bind_addr,
             store_path: store_path.clone(),
             durable_model_key_file: None,
+            durable_inspection: None,
             managed: None,
         })
         .await
