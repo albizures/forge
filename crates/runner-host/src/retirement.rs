@@ -13,7 +13,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-fn persist(directory: &Path, name: &str, value: &impl serde::Serialize) -> io::Result<()> {
+pub(crate) fn persist(
+    directory: &Path,
+    name: &str,
+    value: &impl serde::Serialize,
+) -> io::Result<()> {
     let bytes = serde_json::to_vec(value).map_err(|_| invalid())?;
     match protected_file(&directory.join(name)) {
         Ok(mut file) => {
@@ -72,8 +76,29 @@ pub(crate) fn retire(
     if &operation.owner != worker.owner() || operation.operation_id.trim().is_empty() {
         return Err(invalid());
     }
+    stop_owned(worker, path, "retirement-intent.json", operation)?;
+    persist(
+        path,
+        "retirement-receipt.json",
+        &Receipt {
+            version: 1,
+            operation: operation.clone(),
+            children_absent: true,
+        },
+    )
+}
+
+// Shared direct-child subreaper mechanism. Callers bind their distinct intent
+// and receipt policy; neither a signal nor leader exit produces a receipt.
+pub(crate) fn stop_owned(
+    worker: &mut Supervised<'_>,
+    path: &Path,
+    intent_name: &str,
+    intent: &impl serde::Serialize,
+) -> io::Result<()> {
+    worker.verify()?;
     let identity = worker.directory_identity();
-    persist(path, "retirement-intent.json", operation)?;
+    persist(path, intent_name, intent)?;
     worker.signal(rustix::process::Signal::TERM)?;
     let start = Instant::now();
     let mut escalated = false;
@@ -102,14 +127,5 @@ pub(crate) fn retire(
     if (meta.dev(), meta.ino()) != identity {
         return Err(invalid());
     }
-    worker.verify_storage()?;
-    persist(
-        path,
-        "retirement-receipt.json",
-        &Receipt {
-            version: 1,
-            operation: operation.clone(),
-            children_absent: true,
-        },
-    )
+    worker.verify_storage()
 }

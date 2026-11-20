@@ -4,6 +4,7 @@
 pub mod control;
 pub mod inspection;
 pub mod model_auth;
+pub mod quiescence;
 pub mod retirement;
 pub mod storage;
 pub mod supervision;

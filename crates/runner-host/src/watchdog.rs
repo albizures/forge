@@ -12,12 +12,38 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[derive(Clone, PartialEq)]
+enum Shutdown {
+    Retirement(Box<forge_app::durable_execution::retirement::Operation>),
+    Quiescence(Box<forge_app::durable_execution::recovery::quiescence::Operation>),
+}
+
+impl Shutdown {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Retirement(_) => "retirement",
+            Self::Quiescence(_) => "quiescence",
+        }
+    }
+
+    fn stop(&self, worker: &mut Supervised<'_>, directory: &Path) -> io::Result<()> {
+        match self {
+            Self::Retirement(operation) => crate::retirement::retire(worker, directory, operation),
+            Self::Quiescence(operation) => crate::quiescence::quiesce(worker, directory, operation),
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "quiescence_tests.rs"]
+mod quiescence_tests;
+
 pub struct State {
     policy: LeaseWatchdog,
     fault: Option<&'static str>,
     retained_blocker: bool,
-    retirement: Option<forge_app::durable_execution::retirement::Operation>,
-    retirement_denied: bool,
+    shutdown: Option<Shutdown>,
+    shutdown_denied: bool,
     owner: Owner,
 }
 
@@ -27,9 +53,38 @@ impl State {
             policy: LeaseWatchdog::new(owner.clone()),
             fault: None,
             retained_blocker,
-            retirement: None,
-            retirement_denied: false,
+            shutdown: None,
+            shutdown_denied: false,
             owner,
+        }
+    }
+
+    fn request_shutdown(&mut self, operation: Shutdown) -> io::Result<()> {
+        let valid = match &operation {
+            Shutdown::Retirement(op) => {
+                op.validate().is_ok()
+                    && op.owner == self.owner
+                    && self
+                        .policy
+                        .last_lease()
+                        .is_none_or(|lease| lease.launch == op.launch)
+            }
+            Shutdown::Quiescence(op) => {
+                op.validate().is_ok()
+                    && !self.retained_blocker
+                    && self.fault.is_none()
+                    && op.predecessor.owner == self.owner
+                    && self.policy.last_lease() == Some(&op.predecessor)
+            }
+        };
+        self.shutdown_denied |=
+            !valid || self.shutdown.as_ref().is_some_and(|old| *old != operation);
+        self.shutdown.get_or_insert(operation);
+        self.policy.fence();
+        if self.shutdown_denied {
+            Err(io::Error::other("shutdown denied"))
+        } else {
+            Ok(())
         }
     }
 
@@ -71,27 +126,36 @@ pub fn forward_input(mut input: ChildStdin, state: &Mutex<State>) {
                     .map_err(|_| io::Error::other("watchdog state unavailable"))?;
                 if control.host_retire
                     != forge_rpc::durable_execution::SUPERVISOR_RETIREMENT_VERSION
-                    || state
-                        .retirement
-                        .as_ref()
-                        .is_some_and(|op| *op != control.operation)
                 {
                     state.fence("runner-retirement-conflict");
                     return Err(io::Error::other("invalid retirement control"));
                 }
-                let valid = control.operation.validate().is_ok()
-                    && control.operation.owner == state.owner
-                    && state
-                        .policy
-                        .last_lease()
-                        .is_none_or(|lease| lease.launch == control.operation.launch);
-                state.retirement_denied |= !valid;
-                state.policy.fence();
-                state.retirement = Some(control.operation);
+                state.request_shutdown(Shutdown::Retirement(Box::new(control.operation)))?;
                 drop(state);
                 // The watchdog verifies ownership and persists host intent
                 // before signalling TERM, whose runner handler aborts authority.
                 // No cancellation is forwarded on descriptive evidence alone.
+                continue;
+            }
+            if value
+                .as_ref()
+                .is_some_and(|v| v.get("host_quiesce").is_some())
+            {
+                let control: forge_rpc::durable_execution::SupervisorQuiescence =
+                    serde_json::from_slice(&line)
+                        .map_err(|_| io::Error::other("invalid recovery shutdown control"))?;
+                let mut state = state
+                    .lock()
+                    .map_err(|_| io::Error::other("watchdog state unavailable"))?;
+                if control.host_quiesce
+                    != forge_rpc::durable_execution::SUPERVISOR_QUIESCENCE_VERSION
+                {
+                    state.fence("runner-quiescence-conflict");
+                    return Err(io::Error::other("invalid recovery shutdown control"));
+                }
+                state.request_shutdown(Shutdown::Quiescence(Box::new(control.operation)))?;
+                // Cancellation goes through the original subreaper only, never
+                // through a worker message or a retained PID supplied by a client.
                 continue;
             }
             if value
@@ -195,35 +259,42 @@ pub fn supervise(mut worker: Supervised<'_>, directory: &Path, state: &Mutex<Sta
     let mut alarm: Option<(Instant, Option<u64>)> = None;
     let mut kill_attempted = false;
     let mut exited = false;
-    let mut retirement_attempted = false;
+    let mut shutdown_attempted = false;
     loop {
-        let retirement = state.lock().ok().and_then(|state| {
+        let shutdown = state.lock().ok().and_then(|state| {
             state
-                .retirement
+                .shutdown
                 .clone()
-                .map(|op| (op, !state.retirement_denied))
+                .map(|op| (op, !state.shutdown_denied))
         });
-        if !retirement_attempted && let Some((operation, valid)) = retirement {
-            retirement_attempted = true;
-            if valid && crate::retirement::retire(&mut worker, directory, &operation).is_ok() {
-                eprintln!("runner-retirement-verified");
+        if !shutdown_attempted && let Some((operation, valid)) = shutdown {
+            shutdown_attempted = true;
+            let kind = operation.kind();
+            if valid && operation.stop(&mut worker, directory).is_ok() {
+                eprintln!("runner-{kind}-verified");
                 return;
             }
-            record("retirement-unverified", None, true);
-            eprintln!("runner-retirement-unverified; ownership retained");
-            // An incomplete retirement is terminal for this supervisor. No new
+            record(&format!("{kind}-unverified"), None, true);
+            eprintln!("runner-{kind}-unverified; ownership retained");
+            // Incomplete shutdown is terminal for this supervisor. No new
             // grant or blind signal retry may turn uncertainty into permission.
             exited = true;
         }
-        if retirement_attempted {
+        if shutdown_attempted {
             // No fallback watchdog signals after a failed identity-bound
-            // retirement, including intent/receipt storage or ownership failure.
+            // shutdown, including intent/receipt storage or ownership failure.
             std::thread::sleep(Duration::from_millis(50));
             continue;
         }
         let observation = if exited { Ok(()) } else { worker.verify() };
         let (fault, lease, now) = match state.lock() {
             Ok(mut state) => {
+                // Input may have requested shutdown after the loop's first
+                // snapshot. Do not mistake its deliberate policy fence for an
+                // expiry and issue watchdog signals ahead of protected intent.
+                if state.shutdown.is_some() {
+                    continue;
+                }
                 let now = boottime_millis().ok();
                 if let Some(now) = now {
                     if state.policy.check(now).is_err() {

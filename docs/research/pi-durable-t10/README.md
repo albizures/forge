@@ -2,7 +2,30 @@
 
 ## Status: partial; T10 remains pending
 
-The latest [recovery coordinator/watchdog increment](recovery-session.md) adds
+The latest [claim-bound predecessor quiescence](recovery-quiescence.md) adds an
+executable private stop control and protected original-subreaper cleanup receipt
+without revoking the Assignment, consuming its claim or releasing capacity. Nine
+new Rust tests include actual committed claims, normal/escaped children, conflicting
+host evidence and restart denial. Final repository gates pass on a default-parallel
+rerun (769 Rust harness tests plus seven supervised scenarios; one opt-in ignored),
+runner typecheck and 76 Node tests pass. The existing inspection-lock reacquisition
+test failed one full run; its target and a complete unchanged rerun passed, without
+a claimed fix. A concrete recovery host, protected ownership handoff, executable
+grant reception, daemon reconciliation and writable resume remain absent. T10 is
+pending; original-supervisor loss/prior host uncertainty remain blocked and
+production/automatic recovery remain disabled.
+
+The preceding [private recovery delivery transport](recovery-control.md) implements
+`ControlPipe`'s specialized recovery sender and a strict versioned whole-envelope
+wire record. All pipe clones/control kinds now share a terminal framing fence on
+uncertain writes. Eight new Rust tests include actual pipe-to-Node consumer
+composition with a fixed synthetic expectation/clock. All four repository gates
+pass (760 Rust harness tests plus seven supervised scenarios; one pre-existing
+opt-in ignored), runner typecheck and 76 Node tests pass. Executable recovery
+reception, host verification/handoff, daemon reconciliation and writable resume
+remain absent. T10 stays pending; production/automatic recovery remain disabled.
+
+The preceding [recovery coordinator/watchdog increment](recovery-session.md) adds
 application-owned commit-before-delivery from opaque fresh verification,
 post-commit owner/time checks, ordinary bounded renewal and a matching unarmed
 watchdog-policy handshake. Twelve new Rust tests exercise actual SQLite commits,
@@ -151,8 +174,9 @@ power-loss durability or hostile same-user containment is inferred.
 
 ## Remaining T10 acceptance work
 
-1. Implement the concrete trusted recovery host verifier: persist/prove predecessor
-   process safety, inspect the original pending input and committed effects, verify
+1. Implement the concrete trusted recovery host verifier: consume the exact
+   protected predecessor quiescence receipt (original-supervisor loss/prior host
+   faults still block), inspect the original pending input and committed effects, verify
    canonical ownership and apply external freshness/retained-work rules. The
    application/store first-grant transition now consumes an exact claim and commits
    a fresh bounded lease/audit transactionally, but only fake-host policy tests
@@ -161,8 +185,9 @@ power-loss durability or hostile same-user containment is inferred.
    explicit safe subsequent recovery, never timeout/restart takeover.
 2. Compose that verifier and transactional first grant with daemon reconciliation,
    the internal exact-grant recovery consumer/watchdog handshakes and application
-   commit-before-delivery coordinator, including executable host/private-transport
-   support for the new initial sequence. A retained flock or descriptive
+   commit-before-delivery coordinator. The private sender port now exists, but
+   executable host reception/watchdog and runner initialization for the new
+   initial sequence remain absent. A retained flock or descriptive
    PID is not descendant cleanup proof; do not adopt old grants or controllers.
 3. Implement an authorized writable reopen/resume path that cannot re-admit the
    original input, replay arbitrary effects or silently repair/adopt dirty work.

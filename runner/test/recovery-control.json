@@ -1,0 +1,54 @@
+{
+  "host_recovery": 1,
+  "grant": {
+    "claim": {
+      "operation_id": "recover-original",
+      "daemon_epoch": "recovery-epoch",
+      "launch": {
+        "assignment_id": "assignment",
+        "operation_id": "launch",
+        "attempt_id": "attempt",
+        "profile_revision": 1,
+        "runtime_id": "runtime",
+        "incarnation_id": "incarnation",
+        "conversation_id": "conversation",
+        "store_id": "store",
+        "forge_revision": "revision",
+        "component_hash": "hash",
+        "runtime_schema": 2
+      },
+      "candidate_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "lease": {
+      "launch": {
+        "assignment_id": "assignment",
+        "operation_id": "launch",
+        "attempt_id": "attempt",
+        "profile_revision": 1,
+        "runtime_id": "runtime",
+        "incarnation_id": "incarnation",
+        "conversation_id": "conversation",
+        "store_id": "store",
+        "forge_revision": "revision",
+        "component_hash": "hash",
+        "runtime_schema": 2
+      },
+      "generation": 1,
+      "owner": {
+        "boot_id": "boot",
+        "time_namespace": "time:[1]",
+        "host_pid": 101,
+        "host_start": "10",
+        "worker_pid": 102,
+        "worker_start": "11",
+        "lock_device": "1",
+        "lock_inode": "2"
+      },
+      "daemon_epoch": "recovery-epoch",
+      "sequence": 7,
+      "issued_boottime_millis": 1000,
+      "expires_boottime_millis": 31000
+    },
+    "evidence_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  }
+}

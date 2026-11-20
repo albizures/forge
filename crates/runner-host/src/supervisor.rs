@@ -154,7 +154,11 @@ pub fn run(
     // Existing diagnostics are never converted into permission or removed by a
     // restart. Read-only observation can still run without receiving any grant.
     let mut retained_blocker = false;
-    for marker in ["watchdog.json", "retirement-intent.json"] {
+    for marker in [
+        "watchdog.json",
+        "retirement-intent.json",
+        crate::quiescence::INTENT,
+    ] {
         match fs::symlink_metadata(directory.join(marker)) {
             Ok(_) => retained_blocker = true,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}

@@ -161,8 +161,21 @@ handshakes require the exact expected claim/lease/evidence envelope and cannot
 initialize through ordinary lease controls. These are trusted composition ports,
 not agent/operator operations or proof of process safety.
 
-There is still no concrete recovery host verifier, executable recovery
-control/handoff, daemon reconciliation or authorized writable reopen. Existing
+The private sender now supports the whole recovery envelope with a shared terminal
+pipe fence on uncertain writes. A separate claim-bound **predecessor quiescence**
+control can stop a still-verified original supervisor's worker without retiring
+or revoking the Assignment. It requires the host's exact last accepted grant,
+retains protected intent before signalling and writes an exact receipt only after
+the dedicated subreaper observes no remaining children. Escaped children,
+conflicting evidence, prior host uncertainty or unavailable proof leave ownership,
+claim and capacity retained, with no blind signal retry. This does not adopt a
+dead supervisor, resolve effects or prove universal same-user process absence.
+The intent remains a startup fence; the receipt does not authorize recovery or
+clear anything. No operator CLI/RPC or daemon reconciliation invokes this stop
+control yet. See [quiescence evidence](research/pi-durable-t10/recovery-quiescence.md).
+
+There is still no concrete recovery host verifier, executable recovery grant
+reception/ownership handoff, daemon reconciliation or authorized writable reopen. Existing
 executables reject recovery's continued global sequence as an ordinary first
 grant. No CLI/RPC operation exposes recovery authorization, and production/automatic
 durable recovery remain disabled. Do not replay retained grant files, reset

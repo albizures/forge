@@ -27,6 +27,27 @@ pub struct SupervisorRetirement {
     pub operation: forge_app::durable_execution::retirement::Operation,
 }
 
+/// Initial recovery delivery is the whole committed envelope, never an ordinary
+/// lease with a relaxed starting sequence. This private control does not prepare
+/// a consumer or authenticate retained evidence as fresh host verification.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupervisorRecovery {
+    pub host_recovery: u32,
+    pub grant: forge_app::durable_execution::recovery::authorization::Grant,
+}
+
+/// Stop an exactly owned predecessor for a persisted recovery reservation.
+/// Unlike retirement, this preserves live Assignment authority and all fences.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupervisorQuiescence {
+    pub host_quiesce: u32,
+    pub operation: forge_app::durable_execution::recovery::quiescence::Operation,
+}
+
+pub const SUPERVISOR_QUIESCENCE_VERSION: u32 = 1;
+pub const SUPERVISOR_RECOVERY_VERSION: u32 = 1;
 pub const SUPERVISOR_RETIREMENT_VERSION: u32 = 1;
 pub const SUPERVISOR_CONTROL_VERSION: u32 = 1;
 pub const RUNNER_PROTOCOL_VERSION: u32 = 1;
@@ -177,6 +198,40 @@ mod tests {
         let mut unknown = value;
         unknown["agent_input"] = true.into();
         assert!(serde_json::from_value::<SupervisorControl>(unknown).is_err());
+    }
+
+    #[test]
+    fn quiescence_control_is_strict_and_distinct_from_retirement_and_recovery() {
+        let control: SupervisorRecovery =
+            serde_json::from_str(include_str!("../../../runner/test/recovery-control.json"))
+                .unwrap();
+        let mut predecessor = control.grant.lease;
+        predecessor.daemon_epoch = "original-daemon".into();
+        let control = SupervisorQuiescence {
+            host_quiesce: SUPERVISOR_QUIESCENCE_VERSION,
+            operation: forge_app::durable_execution::recovery::quiescence::Operation {
+                claim: control.grant.claim,
+                predecessor,
+            },
+        };
+        control.operation.validate().unwrap();
+        let value = serde_json::to_value(&control).unwrap();
+        assert_eq!(
+            serde_json::from_value::<SupervisorQuiescence>(value.clone()).unwrap(),
+            control
+        );
+        assert!(serde_json::from_value::<SupervisorRetirement>(value.clone()).is_err());
+        assert!(serde_json::from_value::<SupervisorRecovery>(value.clone()).is_err());
+        for path in [
+            "",
+            "/operation",
+            "/operation/claim",
+            "/operation/predecessor",
+        ] {
+            let mut wrong = value.clone();
+            wrong.pointer_mut(path).unwrap()["unknown"] = true.into();
+            assert!(serde_json::from_value::<SupervisorQuiescence>(wrong).is_err());
+        }
     }
 
     #[test]

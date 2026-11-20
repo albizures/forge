@@ -22,7 +22,41 @@ fn uncertain() -> RegistrationError {
 /// and persist current authority before using the application delivery port.
 #[derive(Clone)]
 pub struct ControlPipe {
-    input: Arc<Mutex<ChildStdin>>,
+    input: Arc<Mutex<Pipe<ChildStdin>>>,
+}
+
+// A partial record corrupts framing for the whole channel, including clones and
+// other control kinds. No caller may append bytes after any uncertain send.
+struct Pipe<W> {
+    writer: W,
+    fenced: bool,
+}
+
+impl<W: Write> Pipe<W> {
+    fn send(
+        &mut self,
+        control: &impl serde::Serialize,
+        limit: usize,
+    ) -> Result<(), RegistrationError> {
+        if self.fenced {
+            return Err(uncertain());
+        }
+        self.fenced = true;
+        let mut bytes = serde_json::to_vec(control).map_err(|_| uncertain())?;
+        bytes.push(b'\n');
+        if bytes.len() > limit {
+            return Err(uncertain());
+        }
+        // Exactly one nonblocking write. Never retry EINTR, a partial record or
+        // a full pipe, and never flush a possibly buffered transport.
+        match self.writer.write(&bytes) {
+            Ok(count) if count == bytes.len() => {
+                self.fenced = false;
+                Ok(())
+            }
+            _ => Err(uncertain()),
+        }
+    }
 }
 
 impl ControlPipe {
@@ -35,8 +69,27 @@ impl ControlPipe {
         rustix::fs::fcntl_setfl(&input, flags | rustix::fs::OFlags::NONBLOCK)
             .map_err(|_| uncertain())?;
         Ok(Self {
-            input: Arc::new(Mutex::new(input)),
+            input: Arc::new(Mutex::new(Pipe {
+                writer: input,
+                fenced: false,
+            })),
         })
+    }
+
+    /// Stop an owned predecessor only after persisting the exact recovery claim.
+    /// Success is delivery, not descendant proof, revocation or resume authority.
+    /// # Errors
+    /// Uncertain delivery terminally fences every clone/control on this pipe.
+    pub fn quiesce(
+        &mut self,
+        operation: &forge_app::durable_execution::recovery::quiescence::Operation,
+    ) -> Result<(), RegistrationError> {
+        let control = forge_rpc::durable_execution::SupervisorQuiescence {
+            host_quiesce: forge_rpc::durable_execution::SUPERVISOR_QUIESCENCE_VERSION,
+            operation: operation.clone(),
+        };
+        let mut input = self.input.lock().map_err(|_| uncertain())?;
+        input.send(&control, 1_048_576)
     }
 
     /// Send only an already persisted, revoked retirement operation. Partial or
@@ -52,40 +105,36 @@ impl ControlPipe {
     }
 }
 
-fn write_retirement(
-    writer: &mut impl Write,
+fn write_retirement<W: Write>(
+    writer: &mut Pipe<W>,
     operation: &forge_app::durable_execution::retirement::Operation,
 ) -> Result<(), RegistrationError> {
     let control = forge_rpc::durable_execution::SupervisorRetirement {
         host_retire: forge_rpc::durable_execution::SUPERVISOR_RETIREMENT_VERSION,
         operation: operation.clone(),
     };
-    let mut bytes = serde_json::to_vec(&control).map_err(|_| uncertain())?;
-    bytes.push(b'\n');
-    if bytes.len() > 4096 {
-        return Err(uncertain());
-    }
-    match writer.write(&bytes) {
-        Ok(count) if count == bytes.len() => Ok(()),
-        _ => Err(uncertain()),
-    }
+    writer.send(&control, 4096)
 }
 
-fn write_control(writer: &mut impl Write, lease: &Lease) -> Result<(), RegistrationError> {
+fn write_control<W: Write>(writer: &mut Pipe<W>, lease: &Lease) -> Result<(), RegistrationError> {
     let control = SupervisorControl {
         host_control: SUPERVISOR_CONTROL_VERSION,
         lease: lease.clone(),
     };
-    let mut bytes = serde_json::to_vec(&control).map_err(|_| uncertain())?;
-    bytes.push(b'\n');
-    if bytes.len() > 1_048_576 {
-        return Err(uncertain());
-    }
-    // Exactly one nonblocking write. A partial write, EINTR or full pipe is
-    // terminal uncertainty, never a locally retried/concatenated JSON control.
-    match writer.write(&bytes) {
-        Ok(count) if count == bytes.len() => Ok(()),
-        _ => Err(uncertain()),
+    writer.send(&control, 1_048_576)
+}
+
+impl forge_app::durable_execution::recovery::session::Delivery for ControlPipe {
+    fn deliver_recovery(
+        &mut self,
+        grant: &forge_app::durable_execution::recovery::authorization::Grant,
+    ) -> Result<(), RegistrationError> {
+        let control = forge_rpc::durable_execution::SupervisorRecovery {
+            host_recovery: forge_rpc::durable_execution::SUPERVISOR_RECOVERY_VERSION,
+            grant: grant.clone(),
+        };
+        let mut input = self.input.lock().map_err(|_| uncertain())?;
+        input.send(&control, 1_048_576)
     }
 }
 
@@ -95,6 +144,10 @@ impl Delivery for ControlPipe {
         write_control(&mut *input, lease)
     }
 }
+
+#[cfg(test)]
+#[path = "control_tests.rs"]
+mod recovery_tests;
 
 #[cfg(test)]
 mod tests {
@@ -130,18 +183,25 @@ mod tests {
             owner: lease.owner,
         };
         for partial in [true, false] {
-            let mut writer = Writer { calls: 0, partial };
+            let mut writer = Pipe {
+                writer: Writer { calls: 0, partial },
+                fenced: false,
+            };
             assert_eq!(
                 write_retirement(&mut writer, &operation).unwrap_err().code,
                 "authorization-delivery-uncertain"
             );
-            assert_eq!(writer.calls, 1);
+            assert!(write_retirement(&mut writer, &operation).is_err());
+            assert_eq!(writer.writer.calls, 1);
         }
-        let mut bytes = Vec::new();
-        write_retirement(&mut bytes, &operation).unwrap();
-        assert_eq!(bytes.last(), Some(&b'\n'));
+        let mut pipe = Pipe {
+            writer: Vec::new(),
+            fenced: false,
+        };
+        write_retirement(&mut pipe, &operation).unwrap();
+        assert_eq!(pipe.writer.last(), Some(&b'\n'));
         let control: forge_rpc::durable_execution::SupervisorRetirement =
-            serde_json::from_slice(&bytes).unwrap();
+            serde_json::from_slice(&pipe.writer).unwrap();
         assert_eq!(control.operation, operation);
         let mut json = serde_json::to_value(control).unwrap();
         json["unrecognized"] = true.into();
@@ -158,16 +218,23 @@ mod tests {
         ))
         .unwrap();
         for partial in [true, false] {
-            let mut writer = Writer { calls: 0, partial };
+            let mut writer = Pipe {
+                writer: Writer { calls: 0, partial },
+                fenced: false,
+            };
             let error = write_control(&mut writer, &lease).unwrap_err();
             assert_eq!(error.code, "authorization-delivery-uncertain");
-            assert_eq!(writer.calls, 1);
+            assert!(write_control(&mut writer, &lease).is_err());
+            assert_eq!(writer.writer.calls, 1);
             assert!(!error.message.contains("epoch"));
         }
-        let mut bytes = Vec::new();
-        write_control(&mut bytes, &lease).unwrap();
-        assert_eq!(bytes.last(), Some(&b'\n'));
-        let control: SupervisorControl = serde_json::from_slice(&bytes).unwrap();
+        let mut pipe = Pipe {
+            writer: Vec::new(),
+            fenced: false,
+        };
+        write_control(&mut pipe, &lease).unwrap();
+        assert_eq!(pipe.writer.last(), Some(&b'\n'));
+        let control: SupervisorControl = serde_json::from_slice(&pipe.writer).unwrap();
         assert_eq!(control.lease, lease);
     }
 }
