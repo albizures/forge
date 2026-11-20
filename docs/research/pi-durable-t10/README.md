@@ -1,13 +1,20 @@
-# T10 — Recovery candidate inspection increments
+# T10 — Recovery candidate and reservation increments
 
 ## Status: partial; T10 remains pending
 
-The original runtime-inspection increment is recorded below. The subsequent
-[Forge-side candidate gate](forge-candidate-gate.md) adds consistent read-only
-application/store binding inspection and nine persistence-policy tests; all four
-repository gates, 714 Rust harness tests plus seven supervised scenarios, runner
-typecheck and 64 Node tests pass. Neither increment authorizes execution. Claims,
-recovery leases, daemon composition and writable reopen remain unimplemented.
+The latest [transactional reservation increment](recovery-reservation.md) adds
+exclusive, content-bound recovery claims, immutable exact retry and ordinary-grant
+fencing, with six new store tests. All four repository gates pass: **720 Rust
+harness tests plus seven supervised scenarios**, with one pre-existing opt-in test
+ignored; runner typecheck and **64 Node tests** pass. This is reservation only:
+claim reconciliation/consumption, recovery leases, daemon composition and writable
+reopen remain unimplemented. No execution is authorized.
+
+The original runtime-inspection increment is recorded below. The preceding
+[Forge-side candidate gate](forge-candidate-gate.md) added consistent read-only
+application/store binding inspection and nine persistence-policy tests (714 Rust
+harness tests on that snapshot). Historical results below describe those earlier
+increments; the latest increment and review are recorded at the end.
 
 The original increment implements only committed runtime candidate inspection. It does
 **not** deliver authorized writable recovery, change lease issuance or enable
@@ -86,11 +93,13 @@ power-loss durability or hostile same-user containment is inferred.
 
 ## Remaining T10 acceptance work
 
-1. Add application/store-owned recovery authorization and transactional claims:
-   current Assignment/attempt/profile/generation, evidence/freshness and
-   retained-work validation; revocation/expiry/effect/retirement/hold rejection;
-   concurrent claims, immutable history and lost-commit/reply behavior. Preserve
-   original admission, capacity and all attempt/evidence identities.
+1. Complete application/store-owned recovery authorization and specialized claim
+   reconciliation/consumption. Transactional reservation now revalidates original
+   bindings, generations, candidate content and blockers, preserves identities and
+   serializes concurrent claims with exact retry. It is not authority: external
+   evidence/freshness and retained-work validation, process safety and fresh bounded
+   permission remain necessary. No timeout/restart may automatically discard or
+   transfer the retained fence.
 2. Compose canonical ownership and process safety with daemon reconciliation and
    fresh commit-before-delivery recovery leases. A retained flock or descriptive
    PID is not descendant cleanup proof; do not adopt old grants or controllers.
@@ -137,3 +146,55 @@ synchronization. Existing user-owned planning changes were preserved.
 
 Summary: no introduced coding-standards violations found in this increment.
 This review does not certify T10 completion or replace T18.
+
+## Transactional reservation increment — verification and reviews
+
+See [implementation/compatibility details](recovery-reservation.md). Actual checks
+on the reservation snapshot:
+
+- `cargo fmt --check`: passed.
+- `cargo clippy --workspace --all-targets -- -D warnings`: passed.
+- `cargo test --workspace`: passed, default parallelism; 720 Rust harness tests,
+  seven custom-harness supervised scenarios and one pre-existing opt-in ignored.
+- Runner `npm run check` and `npm test`: passed; 64 Node tests.
+- `git diff --check`: passed.
+
+Six new SQLite policy tests cover cross-connection claim races/exact retries,
+reopen/revocation replay, stale candidate/renewal/context rejection, generic mutation
+and grant fencing, rollback/retry, diagnostic payload minimization and preservation
+of all other table contents. No new owned-process writable recovery, packaged or
+real-provider verification ran. Existing transient historical failures are not
+claimed fixed. No live configuration, Assignment or worktree was changed.
+
+### Implementation review (T10)
+
+- “Wire daemon reconciliation and runner reopen through authorization, exclusive
+  ownership, lease issuance and interrupted-effect gates”: **partial**. The new
+  reservation is exclusively transactional and ordinary grants are fenced; host
+  cleanup, recovery lease issuance, specialized fence consumption and writable
+  reopen are still missing. No scheduler consumes the new port.
+- “Safe restart resumes the same attempt/conversation with no duplicate admission”:
+  **not yet demonstrated**. Reservation preserves all original identities/history
+  and exact retry, but does not execute a recovery.
+- “Continuation and independent Review successors receive fresh conversations and
+  exact approved context”: the new durable demonstration remains missing, as do
+  full restart-order matrices and glossary/ADR completion.
+
+Summary: T10 remains incomplete; the main gap is authorized same-attempt writable
+recovery. No scope creep or incorrect execution-authority claim found in this
+increment. Do not advance T11 or enable automatic/production recovery.
+
+### Coding-standards review
+
+Reviewed the new app policy, store reservation/shared preflight, generic-resource
+guards, six tests and evidence/storage docs against `CODING_STANDARDS.md` and the
+surrounding grant/resource contracts. The app owns claim representation/validation;
+the store atomically revalidates and commits the exclusive fence with no external
+I/O. Scope precedes historical replay; exact retries preserve accepted identities
+and timestamps. Resource IDs retain only a digest of candidate context, not copied
+Task bodies/handoffs. Independent connections exercise concurrency; all required
+gates pass. The additive opaque resource kind uses existing conservative unknown
+resource handling and does not change DDL or public wire contracts.
+
+Summary: no introduced coding-standards violations found in this increment. This
+is not an independent T18 review or a claim of T10 completion.

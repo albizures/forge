@@ -4,19 +4,96 @@ use crate::{
 };
 
 use super::Launch;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// A consistent read of the original binding. Retained grants are evidence only:
 /// neither this value nor an unexpired old lease permits a new process to run.
 /// External ownership/process cleanup, committed runtime/effect inspection and
 /// worktree observations remain independent gates. Revalidate mutable facts in
 /// the eventual recovery-claim transaction before committing fresh authority.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Candidate {
     pub launch: Launch,
     pub admission_id: String,
     pub attempt: Attempt,
     pub execution_directory: String,
     pub last_lease: Lease,
+}
+
+/// An immutable reservation for a trusted daemon's recovery operation. This is
+/// a fence, not execution authority: host cleanup/ownership, runtime inspection,
+/// worktree validation and a separately committed fresh lease are still required.
+/// No timeout, daemon restart or missing reply transfers this reservation.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Claim {
+    pub operation_id: String,
+    pub daemon_epoch: String,
+    pub launch: Launch,
+    /// Commits the full candidate, including original attempt context, without
+    /// copying Task bodies/handoffs into ordinary resource diagnostics.
+    pub candidate_sha256: String,
+}
+
+impl Claim {
+    /// Construct a content-bound reservation. This still grants no authority.
+    /// # Errors
+    /// Rejects invalid operation identities or serialization failures.
+    pub fn for_candidate(
+        candidate: &Candidate,
+        operation_id: String,
+        daemon_epoch: String,
+    ) -> Result<Self, RegistrationError> {
+        let bytes = serde_json::to_vec(candidate).map_err(|_| {
+            RegistrationError::new(
+                "durable-recovery-claim-invalid",
+                "invalid candidate encoding",
+            )
+        })?;
+        let claim = Self {
+            operation_id,
+            daemon_epoch,
+            launch: candidate.launch.clone(),
+            candidate_sha256: format!("{:x}", Sha256::digest(bytes)),
+        };
+        claim.validate()?;
+        Ok(claim)
+    }
+    /// # Errors
+    /// Rejects empty/unbounded operation identities and malformed launch bindings.
+    pub fn validate(&self) -> Result<(), RegistrationError> {
+        self.launch.validate()?;
+        if self.candidate_sha256.len() != 64
+            || !self
+                .candidate_sha256
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            || [&self.operation_id, &self.daemon_epoch]
+                .iter()
+                .any(|s| s.trim().is_empty() || s.len() > 200 || s.chars().any(char::is_control))
+        {
+            return Err(RegistrationError::new(
+                "durable-recovery-claim-invalid",
+                "recovery requires bounded operation and daemon identities",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Only the recovery protocol may create or consume its retained fence.
+/// # Errors
+/// Rejects generic resource insertion/retirement of recovery reservations.
+pub fn validate_resource_mutation(kind: &str) -> Result<(), RegistrationError> {
+    if kind == "recovery-claim" {
+        return Err(RegistrationError::new(
+            "durable-recovery-specialized-operation-required",
+            "recovery reservations require specialized transactional reconciliation",
+        ));
+    }
+    Ok(())
 }
 
 /// Policy for the original attempt, not adoption of observed implementation
@@ -63,4 +140,12 @@ pub trait Repository: Send + Sync {
         workspace: &str,
         launch: &Launch,
     ) -> Result<Candidate, RegistrationError>;
+
+    /// Reserve the original binding after atomically revalidating the candidate.
+    /// The retained resource fences ordinary grants and competing claims. An
+    /// exact authorized retry returns its original result even after revocation;
+    /// this replay is historical evidence, never permission to execute.
+    /// # Errors
+    /// Rejects changed candidates, competing operations/epochs and foreign scope.
+    fn claim_recovery(&self, workspace: &str, claim: &Claim) -> Result<Claim, RegistrationError>;
 }

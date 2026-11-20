@@ -195,6 +195,28 @@ resolves persisted resources. See [T05 evidence](../../docs/research/pi-durable-
 for fake-clock and real SQLite/daemon-service/host/Node outage tests and remaining
 production/release gates.
 
+## Recovery reservations (controlled T10 increment)
+
+The internal `durable_execution::recovery::Repository::claim_recovery` port
+atomically revalidates a candidate and reserves one `recovery-claim` opaque
+Assignment resource. Its JSON identity retains the exact Launch, bounded operation
+and daemon identities, and SHA-256 of the complete typed candidate; Task bodies
+and handoffs are not copied into resource diagnostics. Scope/binding authorization
+precedes historical replay. Exact retries preserve the original identity and
+timestamp even after revocation; competing operations/epochs or changed candidates
+reject. The immediate transaction serializes independent claimants and commits no
+attempt, Outcome, evidence, admission or grant changes.
+
+This resource retains capacity and fences ordinary grants, including old-owner
+renewal. It is **not** a recovery lease, process cleanup proof or permission to open
+runtime storage. Generic resource insertion/retirement cannot create or consume
+it. No timeout, restart or retired history permits takeover. Specialized
+reconciliation/consumption is still unimplemented; no production daemon or public
+CLI/RPC path calls this port. Automatic recovery remains disabled. No DDL/schema
+or public wire changes are required for this additive opaque resource kind; older
+grant/readiness checks already block unknown retained resources. See
+[T10 reservation evidence](../../docs/research/pi-durable-t10/recovery-reservation.md).
+
 ## Durable runtime admission (revision 20)
 
 `durable_assignment_runtimes` has one row per Assignment (`assignment_id` PK/FK).

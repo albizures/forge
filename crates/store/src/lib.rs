@@ -3033,6 +3033,9 @@ impl AgentDispatchRepository for SqliteProjectRepository {
         resource: &NewAgentAssignmentResource,
     ) -> Result<AgentAssignmentResource, RegistrationError> {
         forge_app::durable_execution::effects::validate_resource_creation(&resource.resource_kind)?;
+        forge_app::durable_execution::recovery::validate_resource_mutation(
+            &resource.resource_kind,
+        )?;
         if resource.resource_kind.trim().is_empty() || resource.resource_id.trim().is_empty() {
             return Err(RegistrationError::new(
                 "invalid-assignment-resource",
@@ -3069,6 +3072,7 @@ impl AgentDispatchRepository for SqliteProjectRepository {
     ) -> Result<AgentAssignmentResource, RegistrationError> {
         forge_app::assignment_retirement::validate_resource_retirement(resource_kind)?;
         forge_app::durable_execution::effects::validate_resource_retirement(resource_kind)?;
+        forge_app::durable_execution::recovery::validate_resource_mutation(resource_kind)?;
         let connection = self
             .connection
             .lock()

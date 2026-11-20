@@ -2,7 +2,7 @@
 use super::*;
 use forge_app::{
     authorization_lease::Repository as _,
-    durable_execution::recovery::{Candidate, Repository as _},
+    durable_execution::recovery::{Candidate, Claim, Repository as _},
 };
 use std::fmt::Write as _;
 
@@ -26,8 +26,25 @@ fn prepared_without_grant() -> Fixture {
     f
 }
 
+fn claim(f: &Fixture) -> Claim {
+    Claim::for_candidate(
+        &candidate(f).unwrap(),
+        "recover-original".into(),
+        "restarted-daemon".into(),
+    )
+    .unwrap()
+}
+
 fn candidate(f: &Fixture) -> Result<Candidate, RegistrationError> {
     f.reopen().recovery_candidate("test", &f.launch)
+}
+
+fn candidate_body(f: &Fixture) -> String {
+    let c = f.store.connection.lock().unwrap();
+    crate::task_attempts::binding(&c, "assignment")
+        .unwrap()
+        .unwrap()
+        .body
 }
 
 fn snapshot(f: &Fixture) -> String {
@@ -242,4 +259,220 @@ fn concurrent_candidate_reads_are_not_claims_or_lease_history_forks() {
         assert_eq!(first.join().unwrap(), second.join().unwrap());
     });
     assert_eq!(snapshot(&f), before);
+}
+
+#[test]
+fn recovery_claim_replays_original_fence_after_restart_and_revocation() {
+    let f = prepared();
+    let request = claim(&f);
+    assert_eq!(f.store.claim_recovery("test", &request).unwrap(), request);
+    let accepted = snapshot(&f);
+    assert_eq!(
+        f.reopen().claim_recovery("test", &request).unwrap(),
+        request
+    );
+    assert_eq!(snapshot(&f), accepted);
+    f.store
+        .connection
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE agent_assignments SET closed_at_millis = 9, closure_reason = 'retired'",
+            [],
+        )
+        .unwrap();
+    let closed = snapshot(&f);
+    assert!(
+        f.reopen()
+            .agent_assignment_info("assignment")
+            .unwrap()
+            .capacity_reserved()
+    );
+    assert_eq!(
+        f.reopen().claim_recovery("test", &request).unwrap(),
+        request
+    );
+    assert_eq!(snapshot(&f), closed);
+    assert!(f.reopen().claim_recovery("foreign", &request).is_err());
+    let mut conflict = request.clone();
+    conflict.daemon_epoch.push_str("-another");
+    assert!(f.reopen().claim_recovery("test", &conflict).is_err());
+    assert_eq!(snapshot(&f), closed);
+}
+
+#[test]
+fn recovery_claim_is_not_a_lease_and_preserves_all_other_tables() {
+    let f = prepared();
+    let request = claim(&f);
+    let before = snapshot(&f);
+    f.store.claim_recovery("test", &request).unwrap();
+    let accepted = snapshot(&f);
+    assert!(candidate(&f).is_err());
+    let mut renewal = lease(&f);
+    renewal.sequence = 2;
+    renewal.issued_boottime_millis = 11_000;
+    renewal.expires_boottime_millis = 41_000;
+    assert!(f.reopen().grant_lease("test", &renewal, 11_000).is_err());
+    let id = serde_json::to_string(&request).unwrap();
+    assert!(!id.contains(&candidate_body(&f)));
+    assert!(!id.contains("/retained/worktree"));
+    assert!(
+        f.store
+            .retire_agent_assignment_resource("assignment", "recovery-claim", &id)
+            .is_err()
+    );
+    assert!(
+        f.store
+            .add_agent_assignment_resource(&forge_app::NewAgentAssignmentResource {
+                assignment_id: "assignment".into(),
+                resource_kind: "recovery-claim".into(),
+                resource_id: "forged".into(),
+            })
+            .is_err()
+    );
+    assert_eq!(snapshot(&f), accepted);
+    // Test-only deletion proves no attempt, counter, grant, hold, evidence or
+    // runtime admission changed. Production has no generic release operation.
+    f.store
+        .connection
+        .lock()
+        .unwrap()
+        .execute(
+            "DELETE FROM agent_assignment_resources WHERE resource_kind = 'recovery-claim'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(snapshot(&f), before);
+}
+
+#[test]
+fn recovery_claim_revalidates_candidate_and_mutable_gates_before_commit() {
+    for sql in [
+        "UPDATE agent_assignments SET closed_at_millis = 9, closure_reason = 'retired'",
+        "UPDATE record_attempts SET closed = 1",
+        "UPDATE records SET execution_mode = 'manual'",
+        "INSERT INTO dispatch_holds SELECT record_id, 'investigate' FROM agent_assignments",
+        "UPDATE worktree_claims SET state = 'cleanup-required'",
+        "UPDATE assignment_execution_bindings SET directory = '/changed'",
+        "UPDATE record_attempts SET attempt_json = json_set(attempt_json, '$.body', 'changed bound context')",
+        "INSERT INTO agent_assignment_resources VALUES ('assignment', 'interrupted-effect', 'unknown', 1, NULL)",
+    ] {
+        let f = prepared();
+        let request = claim(&f);
+        f.store.connection.lock().unwrap().execute(sql, []).unwrap();
+        let before = snapshot(&f);
+        assert!(
+            f.reopen().claim_recovery("test", &request).is_err(),
+            "{sql}"
+        );
+        assert_eq!(snapshot(&f), before);
+    }
+    let f = prepared();
+    let request = claim(&f);
+    let mut renewal = lease(&f);
+    renewal.sequence = 2;
+    renewal.issued_boottime_millis = 11_000;
+    renewal.expires_boottime_millis = 41_000;
+    f.store.grant_lease("test", &renewal, 11_000).unwrap();
+    let before = snapshot(&f);
+    assert!(f.reopen().claim_recovery("test", &request).is_err());
+    assert_eq!(snapshot(&f), before);
+}
+
+#[test]
+fn recovery_claim_rejects_changed_candidate_fields_and_invalid_identities() {
+    let f = prepared();
+    let original = claim(&f);
+    let before = snapshot(&f);
+    let mut changed = original.clone();
+    changed.candidate_sha256 = "0".repeat(64);
+    assert!(f.store.claim_recovery("test", &changed).is_err());
+    changed = original.clone();
+    changed.launch.operation_id.push_str("-foreign");
+    assert!(f.store.claim_recovery("test", &changed).is_err());
+    for value in [
+        String::new(),
+        " ".into(),
+        "bad\nidentity".into(),
+        "x".repeat(201),
+    ] {
+        changed = original.clone();
+        changed.operation_id.clone_from(&value);
+        assert!(f.store.claim_recovery("test", &changed).is_err());
+        changed = original.clone();
+        changed.daemon_epoch = value;
+        assert!(f.store.claim_recovery("test", &changed).is_err());
+    }
+    assert_eq!(snapshot(&f), before);
+    // Every original candidate field is content-bound, not just its Launch.
+    let baseline = candidate(&f).unwrap();
+    let mut altered = baseline.clone();
+    altered.attempt.body.push_str(" changed");
+    changed = Claim::for_candidate(
+        &altered,
+        original.operation_id.clone(),
+        original.daemon_epoch.clone(),
+    )
+    .unwrap();
+    assert!(f.store.claim_recovery("test", &changed).is_err());
+    altered = baseline;
+    altered.execution_directory.push_str("/other");
+    changed = Claim::for_candidate(&altered, original.operation_id, original.daemon_epoch).unwrap();
+    assert!(f.store.claim_recovery("test", &changed).is_err());
+    assert_eq!(snapshot(&f), before);
+}
+
+#[test]
+fn concurrent_recovery_claims_have_one_winner_without_implicit_takeover() {
+    for exact_retry in [false, true] {
+        let f = prepared();
+        let first = claim(&f);
+        let mut second = first.clone();
+        if !exact_retry {
+            second.operation_id.push_str("-other");
+            second.daemon_epoch.push_str("-other");
+        }
+        let a = f.reopen();
+        let b = f.reopen();
+        let barrier = Barrier::new(2);
+        std::thread::scope(|s| {
+            let one = s.spawn(|| {
+                barrier.wait();
+                a.claim_recovery("test", &first)
+            });
+            let two = s.spawn(|| {
+                barrier.wait();
+                b.claim_recovery("test", &second)
+            });
+            let results = [one.join().unwrap(), two.join().unwrap()];
+            assert_eq!(
+                results.iter().filter(|r| r.is_ok()).count(),
+                if exact_retry { 2 } else { 1 }
+            );
+        });
+        let c = f.store.connection.lock().unwrap();
+        assert_eq!(c.query_row("SELECT count(*) FROM agent_assignment_resources WHERE resource_kind = 'recovery-claim'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+    }
+}
+
+#[test]
+fn failed_recovery_claim_insert_rolls_back_and_retry_can_accept() {
+    let f = prepared();
+    let request = claim(&f);
+    f.store.connection.lock().unwrap().execute_batch(
+        "CREATE TRIGGER fail_claim BEFORE INSERT ON agent_assignment_resources WHEN NEW.resource_kind = 'recovery-claim' BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+    ).unwrap();
+    let before = snapshot(&f);
+    assert!(f.store.claim_recovery("test", &request).is_err());
+    assert_eq!(snapshot(&f), before);
+    f.store
+        .connection
+        .lock()
+        .unwrap()
+        .execute_batch("DROP TRIGGER fail_claim")
+        .unwrap();
+    assert_eq!(
+        f.reopen().claim_recovery("test", &request).unwrap(),
+        request
+    );
 }
