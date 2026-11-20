@@ -2,8 +2,9 @@
 // Run under exclusive host ownership BEFORE Harness.open: opening the Harness
 // can settle unsafe calls as interrupted and immediately schedule another model.
 import { BACKGROUND_CONTEXT as context } from '@earendil-works/chord/context';
-import type { Cursor } from '@earendil-works/pi-durable';
-import { canonical, requireCondition, type Launch } from './contract.ts';
+import type { Cursor, ToolRegistration } from '@earendil-works/pi-durable';
+import { Authorization, guardTool } from './authorization.ts';
+import { canonical, Denied, requireCondition, type Launch } from './contract.ts';
 import { journal, readStorage } from './storage.ts';
 
 export interface InterruptedEffect {
@@ -61,6 +62,30 @@ export async function inspectInterruptedEffects(directory: string, launch: Launc
     } while (cursor !== undefined);
     return effects;
   } finally { await storage.close(context); }
+}
+
+/** A failed/cancelled invocation cannot be fed back into the model as permission
+ * to immediately repeat an unknown effect. Close this process's authorization;
+ * later committed read-only inspection and Forge retention still own recovery.
+ * A returned tool result (including a known shell exit code) is not a thrown,
+ * interrupted invocation. Persistence failure remains the Harness's boundary.
+ */
+export function guardEffectTool(execute: ToolRegistration['execute'], authorization: Authorization): ToolRegistration['execute'] {
+  const guarded = guardTool(execute, authorization);
+  return (args, api, context) => {
+    // Keep the established synchronous admission-denial contract; a denied
+    // invocation has not started an effect and is not an interrupted effect.
+    authorization.admit();
+    return (async () => {
+      try {
+        return await guarded(args, api, context);
+      } catch {
+        authorization.close();
+        // No arbitrary upstream error, command, output or credentials escape here.
+        throw new Denied('runner-interrupted-effect');
+      }
+    })();
+  };
 }
 
 export async function requireNoInterruptedEffects(directory: string, launch: Launch): Promise<void> {

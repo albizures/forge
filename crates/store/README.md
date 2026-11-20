@@ -94,6 +94,23 @@ transaction rolls back both effects; the prior durable-runtime reservation still
 reserves capacity when persistence is unavailable. This additive use of existing
 resource/hold contracts does not change schema 21.
 
+Interrupted effects likewise use an additive resource kind, `interrupted-effect`.
+Its opaque `resource_id` is canonical serialized `InterruptedEffect` identity
+(`task_id`, `conversation_id`, `call_id`), not command text, arguments or output.
+The trusted `durable_execution::effects::Repository` boundary checks owning scope
+and exact retained Launch before retry, then atomically retains bounded identities
+and a Dispatch Hold without overwriting another hold. A task identity cannot be
+reused with conflicting call/conversation identities. At most 1,000 distinct
+identities are accepted per runtime; overflow rejects the whole transaction.
+Exact retries preserve original timestamps, and empty/later observations do not
+resolve prior uncertainty. Delayed observations after closure/invalidation or a
+lost admission reply remain retainable. Accepted Outcomes are untouched. These
+resources reserve capacity and independently block lease issuance even after hold
+clearance. Generic resource retirement rejects this kind: provider cleanup cannot
+resolve an external outcome. There is not yet an audited operator resolution or
+production observation driver; see [T08 evidence](../../docs/research/pi-durable-t08/README.md).
+No schema or existing serialized contract changes are required.
+
 The server's preparation/binding path derives protected storage at
 `<workspace-root>/.forge/assignment-runtimes/<sha256(store_id)>` from the exact
 retained runtime and immutable registered root, never an operator path. Missing

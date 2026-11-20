@@ -121,9 +121,21 @@ host ownership, as for writable opening. Failure closes that lease consumer; it
 does not revoke Forge authority or prove process/child absence. Inspection never
 repairs runtime state or changes Git/worktree contents.
 
-**This is not complete T08 or usable recovery.** Forge-visible interrupted-effect
-resource/audit persistence, operator resolution, and integration into a future
-recovery controller are not implemented. There is no resolution command, no
+Actual coding tools also use `guardEffectTool`: a thrown or cancelled invocation
+terminally closes that consumer before another model/tool request can repeat an
+unknown effect. Returned results, including known nonzero shell exits, remain
+receipts; a subsequent persistence failure is still the Harness boundary. Errors
+are redacted. Committed failed receipts block a later reopening too.
+
+The trusted Rust `durable_execution::effects::Repository` now retains these exact
+identities transactionally as `interrupted-effect` resources plus a hold. They
+remain visible through existing Assignment inspection and retain capacity across
+daemon restart. Clearing a hold or provider resource retirement cannot waive them.
+Controlled integration tests deliver actual read-only runtime observations to
+that boundary; this is not an automatic production observation driver.
+
+**This is not complete T08 or usable recovery.** Audited operator resolution and
+integration into a future recovery controller are not implemented. There is no resolution command, no
 permission to rerun an interrupted command, and no exactly-once guarantee. Do not
 edit runtime SQLite or clear an ordinary Dispatch Hold to bypass this fence.
 Production durable dispatch and automatic recovery remain disabled. See the

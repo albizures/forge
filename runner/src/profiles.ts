@@ -10,7 +10,8 @@ import { openaiProvider } from '@earendil-works/pi-ai/providers/openai';
 import { createRegistry, defineExtension, type AgentChange, type HarnessOptions, type ToolRegistration } from '@earendil-works/pi-durable';
 import { NodeExecutionEnv } from '@earendil-works/pi-durable/env/node';
 import { createBashTool, createEditTool, createReadTool, createWriteTool } from '@earendil-works/pi-durable/tools';
-import { Authorization, guardProvider, guardTool } from './authorization.ts';
+import { Authorization, guardProvider } from './authorization.ts';
+import { guardEffectTool } from './interrupted-effects.ts';
 import { Denied, exactKeys, requireCondition } from './contract.ts';
 
 const MAX_CONTEXT = 256 * 1024;
@@ -154,7 +155,7 @@ export function createProfileRuntime(input: unknown, credentialFile: string | un
   };
   const tools = config.tools.map(name => {
     const tool = factories[name]();
-    return { ...tool, replay: 'unsafe' as const, execute: guardTool(tool.execute, authorization) };
+    return { ...tool, replay: 'unsafe' as const, execute: guardEffectTool(tool.execute, authorization) };
   });
   const registry = createRegistry();
   const extension = defineExtension({ name: 'forge-coding', tools });

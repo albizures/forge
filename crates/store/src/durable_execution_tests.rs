@@ -1,4 +1,6 @@
 use super::*;
+#[path = "durable_execution/effects_tests.rs"]
+mod effects_tests;
 use forge_app::{
     AgentDispatchRepository, NewAgentAssignment, NewTypedRecord, Project, ProjectRepository,
     RecordRepository, RecordType, WorkspaceRepository,

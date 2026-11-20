@@ -3,12 +3,13 @@
 ## Status
 
 **T08 remains incomplete; T09 must not proceed.** This increment establishes the
-runtime read-only inspection/admission fence. It does not deliver the required
-Forge-visible interrupted-effect persistence or audited operator resolution.
+runtime read-only inspection/admission fence, Forge-visible transactional effect
+retention, and live-consumer failure fencing. It does not deliver the required
+audited operator resolution or production observation/recovery controller.
 Production durable dispatch and automatic recovery remain disabled. No live Forge
 records, profiles, credentials or worktrees were changed.
 
-## Implemented boundary
+## Initial implemented boundary
 
 `runner/src/interrupted-effects.ts` uses the pinned physical read-only adapter to
 inspect committed execution tasks before any writable Harness opening/recovery.
@@ -48,7 +49,7 @@ change. The internal TypeScript helper gains a required argument; all callers ar
 updated. The component hash includes the new source and changed runtime helper,
 so old component identities cannot silently reuse the changed implementation.
 
-## Verification
+## Initial-increment verification
 
 Commands from repository root:
 
@@ -103,11 +104,10 @@ additional process/effect evidence.
 
 ## Remaining T08 work / handoff
 
-1. Add an application-owned trusted interrupted-effect observation contract and
-   transactional Forge retention of exact runtime/effect identities, a visible
-   recovery blocker/hold and retained capacity. Deliver actual runtime observations
-   to that boundary, including daemon restart and lost transport/commit cases.
-   Preserve existing accepted Outcomes and unrelated resources/holds.
+1. Wire the implemented trusted observation/retention boundary into the future
+   production supervisor/recovery controller. Controlled Rust-to-Node composition
+   now delivers actual observations, including lost admission replies and daemon
+   restart, but is not production scheduling or delivery.
 2. Define/implement a bounded operator CLI/RPC inspection/resolution operation:
    scope authorization before replay; exact retries return original audit;
    conflicting reuse rejects; verified ownership/absence and current binding
@@ -115,20 +115,20 @@ additional process/effect evidence.
    remain unknown. Resolution records evidence, never reruns the command or
    authorizes dirty-commit adoption, and cannot clear unrelated holds.
 3. Compose the fence and retained Forge blocker with that resolution policy before
-   T10 same-Assignment recovery is possible. Prevent a fresh model/tool request
-   from bypassing any unresolved effect, including within a live runtime after
-   failed/cancelled effects, not just reopening through this helper.
-4. Extend synchronized tests to the post-tool-return/pre-result-commit boundary,
-   push/publication analogues and daemon restart. Verify denied wrong-scope,
-   conflicting and unsafe-ownership resolutions, preservation of accepted results,
-   audit and capacity, then renew all affected verification/reviews.
+   T10 same-Assignment recovery is possible. The live failed/cancelled invocation
+   fence is now implemented and tested, but does not supply recovery authority.
+4. Extend controlled publication-like effect tests to the eventual resolution
+   path and unsafe-ownership/wrong-scope/conflicting resolutions. Post-tool-return/
+   pre-result-commit death, daemon restart, observation scope/conflict denial,
+   accepted-result preservation and capacity retention now have regression tests.
+   Resolution audit/ownership still need implementation and verification.
 
 There is currently **no operator resolution path**. Do not manually mutate runtime
 SQLite or use existing unknown-provisioning resolution/retained-work salvage as an
 interrupted-effect waiver. This partial increment does not establish exactly-once
 execution, external reconciliation or universal process death.
 
-## Task-local reviews
+## Initial-increment task-local reviews
 
 Implementation review against T08: “Translate runtime interruption into
 Forge-visible uncertainty” and “Establish a bounded, explicit operator
@@ -145,5 +145,107 @@ Incompatible records and unknown external effects fail closed, no destructive
 worktree operations occur, and process tests isolate roots/listeners/credentials
 with explicit effect synchronization. T18 independent review remains required.
 
-Summary: runtime interruption inspection/fencing delivered; Forge-visible durable
-retention and operator resolution are the blocking missing T08 deliverables.
+Initial-increment summary: runtime interruption inspection/fencing delivered;
+Forge-visible retention and operator resolution were missing at that snapshot.
+
+## Forge-retention and live-fencing increment
+
+`crates/app/src/durable_execution/effects.rs` defines a trusted host observation
+port and bounded task/conversation/call identities. No commands, arguments, tool
+outputs or external-outcome assertions cross that port. The store implementation
+rechecks Workspace and the complete retained Launch before any replay, including
+observations arriving after closure/invalidation or with a lost admission reply.
+An immediate transaction atomically retains `interrupted-effect` resources and a
+Dispatch Hold. It preserves another hold and all accepted Outcome bytes. Exact
+retries preserve timestamps, conflicting task identity reuse rejects, and a batch
+or accumulated runtime limit over 1,000 rejects atomically. Empty/later scans never
+clear previous uncertainty. Existing resource capacity and lease gates retain the
+blocker even after explicit hold clearance. Application policy and the store reject
+generic resource retirement of this kind; cleanup cannot resolve external effects.
+
+This is additive use of schema 21's opaque resource representation, not new DDL,
+a schema conversion, a public mutation RPC or an agent-authorized operation.
+Existing CLI/RPC Assignment inspection exposes the resource and new explicit
+`interrupted-effect` blocker without changing response fields. No dependency or
+version change. Production durable launch/automatic recovery remain disabled.
+
+Actual coding tools now use `guardEffectTool`. A thrown/cancelled invocation closes
+that consumer before another provider or tool request; the fixed error excludes
+upstream details. Synchronous lease denial remains the existing contract. Returned
+results (including a known shell exit code) remain receipts; this wrapper does not
+claim to commit them. The pinned Harness owns result persistence; reopening still
+requires committed read-only inspection. Two real-Harness/fake-provider tests cover
+ordinary exception and cancellation-shaped exception, fresh input after failure,
+one model request/one attempted effect, retained failed receipts and redaction.
+These are local failure simulations, not universal child-exit evidence.
+
+### Composed process and daemon evidence
+
+Two new default-parallel Rust CLI integration cases use actual application
+Check dispatch/Managed Worktree, authenticated bootstrap, a real pinned Harness,
+actual configured Bash, independent loopback HTTP publication-like endpoint and
+read-only runtime inspector. Model and lease are fixtures; this is not the shared-
+flock supervisor or real-provider verification. Each endpoint receives one mutation:
+
+- Kill the worker group after the endpoint accepts the effect, withholding its reply.
+- Return the endpoint reply and pause the actual storage adapter immediately before
+  the completed tool receipt commits; kill the worker group at that explicit marker.
+  This is a controlled persistence-boundary proxy, not a physical SQLite/power fault.
+
+Both deliver the actual inspected identities to Forge while its admission result
+is still Unknown (lost-reply analogue). Retention is retried after daemon abort/
+restart and read through actual human/JSON CLI/RPC inspection. No second Harness
+opens, no replay is submitted, and each mutation count stays one. Tracked bytes,
+staged index bytes, untracked bytes and Git status remain unchanged; inspector DB
+bytes also remain unchanged. Separate process-group teardown is test isolation,
+not product retirement or proof against escaped same-user descendants.
+
+Eight store tests cover transactional hold/resource rollback, concurrent independent
+connections, exact retries, wrong scope/Launch, conflicting identities, invalid/
+unbounded inputs, cumulative limits, closure/restart, empty observations, accepted
+Outcome preservation, unrelated holds, generic-retirement denial, capacity and
+renewal rejection even after explicit hold clearance. Accepted-Outcome preservation
+is a store fixture, not an additional authenticated Outcome path.
+
+### Final verification for this increment
+
+From the repository root, all passed:
+
+```sh
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+(cd runner && npm run check && npm test)
+git diff --check
+```
+
+Final results: **657 Rust harness tests passed, 0 failed, 1 pre-existing opt-in
+probe ignored; all 6 custom-harness supervised scenarios passed; runner typecheck
+and 50 Node tests passed**. Two added fault-boundary CLI cases also passed
+individually before the full default-parallel run. The first Node run found a
+synchronous lease-denial regression in the new async wrapper; it was corrected
+and the complete suite rerun successfully. No clean-install, packaged-component,
+real-provider or release readiness gate was run. No live Forge state was changed.
+
+### Task-local reviews on the increment
+
+Implementation review (T08): “Translate runtime interruption into Forge-visible
+uncertainty” now has a transactional boundary and controlled actual-observation
+composition. “Establish a bounded, explicit operator inspection/resolution path”
+remains partial: inspection exists, but audited evidence-based resolution and its
+scope/conflict/unsafe-ownership rejection tests are absent. “On reopen, neither
+tool replay nor a fresh model request bypasses the blocker” has local reopening
+and live-failure fences; full production supervisor/recovery composition is not
+implemented. No unrelated scope expansion found.
+
+Summary: **T08 incomplete; operator resolution and production observation/recovery
+composition remain the worst gaps; T09 remains blocked.**
+
+Standards self-review: no introduced violations found. Domain/retirement policy is
+in app, transactional retention in store, and CLI integration exercises existing
+wire inspection; external process/filesystem calls remain outside transactions.
+No implicit outcome resolution, capacity release, secret-bearing payloads or
+worktree repair was added. T18 independent review remains required.
+
+Summary: no introduced coding-standard violations found; remaining implementation
+gaps are explicitly retained, not waived by the passing local gates.

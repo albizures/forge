@@ -24,7 +24,23 @@ model.setResponses([
   fauxAssistantMessage('Done is not a Forge Outcome.'),
 ]);
 persistIntent(input.directory, input.launch);
-const harness = await Harness.open(await openNodeSqliteStorage(databasePath(input.directory)), { ...runtime.options, models }, context);
+const storage = await openNodeSqliteStorage(databasePath(input.directory));
+// Controlled crash point after the real tool returns, but before its terminal
+// receipt reaches SQLite. This test proxy never invents an execution intent.
+const controlled = input.beforeResultCommit ? new Proxy(storage, {
+  get(target, key) {
+    if (key === 'commit') return async (batches, ...args) => {
+      if (batches.flat().some(operation => operation.type === 'task' && operation.value.kind === 'pi.tool' && ['terminal', 'completing'].includes(operation.value.state.status) && operation.value.state.outcome.status === 'completed')) {
+        console.log('before-result-commit');
+        await new Promise(() => {});
+      }
+      return target.commit(batches, ...args);
+    };
+    const value = Reflect.get(target, key, target);
+    return typeof value === 'function' ? value.bind(target) : value;
+  },
+}) : storage;
+const harness = await Harness.open(controlled, { ...runtime.options, models }, context);
 try {
   const root = await harness.root(context, { agent: { ...runtime.agent, model: { provider: 'faux', modelId: 'faux-1' } } });
   persistRoot(input.directory, root.id);

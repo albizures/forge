@@ -7,6 +7,7 @@ use forge_app::{
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 mod completion;
+mod effects;
 
 pub(super) fn schema(c: &Connection) -> Result<(), RegistrationError> {
     c.execute_batch(include_str!("upgrade/durable_execution.sql"))

@@ -3065,6 +3065,7 @@ impl AgentDispatchRepository for SqliteProjectRepository {
         resource_kind: &str,
         resource_id: &str,
     ) -> Result<AgentAssignmentResource, RegistrationError> {
+        forge_app::durable_execution::effects::validate_resource_retirement(resource_kind)?;
         let connection = self
             .connection
             .lock()

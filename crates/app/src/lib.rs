@@ -1332,6 +1332,11 @@ impl AgentAssignmentInfo {
         }) {
             blockers.push("missing-outcome".into());
         }
+        if self.resources.iter().any(|resource| {
+            resource.resource_kind == "interrupted-effect" && resource.retired_at_millis.is_none()
+        }) {
+            blockers.push("interrupted-effect".into());
+        }
         if self.assignment.closed_at_millis.is_none()
             && matches!(
                 self.assignment.state,

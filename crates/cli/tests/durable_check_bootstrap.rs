@@ -14,6 +14,7 @@ use forge_app::{
     durable_execution::{
         Admission, Launch, Repository as _,
         completion::{AnswerObservation, Repository as _},
+        effects::{InterruptedEffect, Repository as _},
     },
     outcomes::Evidence,
 };
@@ -165,6 +166,127 @@ async fn final_prose_without_outcome_retains_missing_outcome_from_actual_runtime
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn rejected_outcome_then_final_prose_remains_missing_outcome() {
     check_execution("rejected").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn interrupted_external_mutation_retains_forge_blocker_across_daemon_restart() {
+    check_execution("effect-before-return").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn returned_tool_without_committed_receipt_retains_forge_blocker_across_daemon_restart() {
+    check_execution("effect-before-commit").await;
+}
+
+async fn interrupted_effect_process(
+    root: &Path,
+    launch: &Launch,
+    checkout: &Path,
+    key: &Path,
+    before_commit: bool,
+) -> Vec<InterruptedEffect> {
+    // Dirty tracked/index/untracked state must survive death and inspection.
+    std::fs::write(checkout.join("tracked.txt"), "staged bytes\n").unwrap();
+    git(checkout, &["add", "tracked.txt"]);
+    std::fs::write(checkout.join("tracked.txt"), "unstaged bytes\n").unwrap();
+    std::fs::write(checkout.join("untracked.txt"), "untracked bytes\n").unwrap();
+    let status = git(checkout, &["status", "--porcelain=v1"]);
+    let index = git(checkout, &["show", ":tracked.txt"]);
+    let runtime = root.join("interrupted-runtime");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&runtime)
+        .unwrap();
+    let input = json!({ "directory": runtime, "worktree": checkout, "key": key, "launch": launch, "beforeResultCommit": before_commit });
+    let output = tokio::task::spawn_blocking(move || {
+        let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../runner/test/retained-effect-tracer.mjs");
+        let mut child = Command::new(node())
+            .env_clear()
+            .arg(script)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(&serde_json::to_vec(&input).unwrap())
+            .unwrap();
+        child.wait_with_output().unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["mutations"], 1);
+    assert_eq!(
+        report["boundary"],
+        if before_commit {
+            "before-result-commit"
+        } else {
+            "after-external-effect"
+        }
+    );
+    assert_eq!(git(checkout, &["status", "--porcelain=v1"]), status);
+    assert_eq!(git(checkout, &["show", ":tracked.txt"]), index);
+    assert_eq!(
+        std::fs::read(checkout.join("tracked.txt")).unwrap(),
+        b"unstaged bytes\n"
+    );
+    assert_eq!(
+        std::fs::read(checkout.join("untracked.txt")).unwrap(),
+        b"untracked bytes\n"
+    );
+    serde_json::from_value(report["effects"].clone()).unwrap()
+}
+
+async fn inspect_interrupted_effect(endpoint: &str, assignment: &str) {
+    for json_output in [false, true] {
+        let endpoint = format!("{endpoint}/rpc");
+        let assignment = assignment.to_owned();
+        let output = tokio::task::spawn_blocking(move || {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_forge"));
+            command.env_clear().args([
+                "dispatcher",
+                "assignment-info",
+                &assignment,
+                "--workspace",
+                "test",
+                "--server-url",
+                &endpoint,
+            ]);
+            if json_output {
+                command.arg("--json");
+            }
+            command.output().unwrap()
+        })
+        .await
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert!(text.contains("interrupted-effect"));
+        assert!(!text.contains("T07-CAPABILITY-CANARY"));
+        assert!(!text.contains("T07-MODEL-KEY-CANARY"));
+        if json_output {
+            let info: forge_rpc::AgentAssignmentInfoResponse = serde_json::from_str(&text).unwrap();
+            assert!(info.capacity_reserved);
+            assert!(
+                info.recovery_blockers
+                    .contains(&"interrupted-effect".into())
+            );
+        }
+    }
 }
 
 #[allow(clippy::too_many_lines)] // One isolated real daemon/CLI/bootstrap composition.
@@ -397,6 +519,83 @@ async fn check_execution(mode: &str) {
     stale["expected"] = "denied".into();
     stale["bound"]["checkAttempt"]["evidence"]["commit"] = "f".repeat(40).into();
     bootstrap(stale).await;
+    if mode.starts_with("effect-") {
+        let effects = interrupted_effect_process(
+            root,
+            &launch,
+            &checkout.path,
+            &model_key,
+            mode == "effect-before-commit",
+        )
+        .await;
+        // The lost runtime admission reply deliberately remains Unknown. Runtime
+        // observations must still be retained, never interpreted as safe absence.
+        store
+            .retain_interrupted_effects("test", &launch, &effects)
+            .unwrap();
+        let before = store.agent_assignment_info(assignment_id).unwrap();
+        assert!(before.capacity_reserved());
+        assert!(
+            before
+                .recovery_blockers()
+                .contains(&"interrupted-effect".into())
+        );
+        assert_eq!(
+            store.assignment_check_attempt(assignment_id).unwrap(),
+            Some(attempt.clone())
+        );
+        assert!(
+            store.list_record_checks(task.id).unwrap()[0]
+                .latest_assessment
+                .is_none()
+        );
+        daemon.abort();
+        let _ = daemon.await;
+        let reopened = SqliteProjectRepository::open(&db).unwrap();
+        reopened
+            .retain_interrupted_effects("test", &launch, &effects)
+            .unwrap();
+        assert!(
+            reopened
+                .retain_interrupted_effects("foreign", &launch, &effects)
+                .is_err()
+        );
+        let mut conflicting = effects.clone();
+        conflicting[0].call_id = "conflicting-call".into();
+        assert!(
+            reopened
+                .retain_interrupted_effects("test", &launch, &conflicting)
+                .is_err()
+        );
+        assert_eq!(
+            reopened.agent_assignment_info(assignment_id).unwrap(),
+            before
+        );
+        let restarted = tokio::spawn(serve(DaemonConfig {
+            bind_addr: addr,
+            store_path: db.clone(),
+            durable_model_key_file: None,
+            managed: None,
+        }));
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if tokio::net::TcpStream::connect(addr).await.is_ok() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        inspect_interrupted_effect(&endpoint, assignment_id).await;
+        assert_eq!(
+            reopened.agent_assignment_info(assignment_id).unwrap(),
+            before
+        );
+        restarted.abort();
+        let _ = restarted.await;
+        return;
+    }
     // Implementation may deliver a new clean commit; retain input A on the
     // attempt while the authenticated Assessment binds output B.
     std::fs::write(checkout.path.join("deliverable.txt"), "Implemented\n").unwrap();

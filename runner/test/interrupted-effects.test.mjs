@@ -7,14 +7,55 @@ import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { componentHash } from '../src/contract.ts';
-import { inspectInterruptedEffects, requireNoInterruptedEffects } from '../src/interrupted-effects.ts';
+import { guardEffectTool, inspectInterruptedEffects, requireNoInterruptedEffects } from '../src/interrupted-effects.ts';
 import { createCheckRuntime } from '../src/check-runtime.ts';
-import { Authorization } from '../src/authorization.ts';
+import { Authorization, guardProvider } from '../src/authorization.ts';
+import { Harness, createRegistry, defineExtension, defineTool } from '@earendil-works/pi-durable';
+import { createModels, fauxProvider, fauxAssistantMessage, fauxToolCall } from '@earendil-works/pi-ai';
 import { BACKGROUND_CONTEXT as context } from '@earendil-works/chord/context';
 import { openNodeSqliteStorage } from '@earendil-works/pi-durable/storage/sqlite/node';
 import { databasePath, persistIntent, persistRoot } from '../src/storage.ts';
 
 const fixtureGrant = JSON.parse(await readFile(new URL('./authorization-lease.json', import.meta.url), 'utf8'));
+
+for (const failure of ['throw', 'cancel']) test(`live ${failure} fences further model/tool requests`, { timeout: 15000 }, async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'forge-live-effect-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const launch = { ...fixtureGrant.launch, component_hash: componentHash() };
+  const authorization = new Authorization(launch, fixtureGrant.generation, fixtureGrant.owner, fixtureGrant.daemon_epoch, () => 1000);
+  t.after(() => authorization.close());
+  authorization.accept({ ...fixtureGrant, launch, sequence: 1, issued_boottime_millis: 1000, expires_boottime_millis: 31000 });
+  const model = fauxProvider();
+  model.setResponses([fauxAssistantMessage(fauxToolCall('effect', {}), { stopReason: 'toolUse' }), () => { throw Error('must not ask model to retry'); }]);
+  const models = createModels({ authContext: { env: async () => undefined, fileExists: async () => false } });
+  models.setProvider(guardProvider(model.provider, authorization));
+  let effects = 0;
+  const tool = defineTool({ name: 'effect', description: 'Controlled uncertain effect', parameters: { type: 'object', properties: {}, additionalProperties: false }, replay: 'unsafe', execute: guardEffectTool(async () => {
+    effects++;
+    if (failure === 'cancel') throw new DOMException('cancelled secret canary', 'AbortError');
+    throw Error('upstream secret canary');
+  }, authorization) });
+  const registry = createRegistry();
+  registry.install(defineExtension({ name: 'effect-fixture', tools: [tool] }));
+  persistIntent(directory, launch);
+  const harness = await Harness.open(await openNodeSqliteStorage(databasePath(directory)), { models, registry, settings: { retry: { enabled: false }, compaction: { enabled: false } }, env: () => undefined }, context);
+  try {
+    const root = await harness.root(context, { agent: { model: { provider: 'faux', modelId: 'faux-1' } } });
+    persistRoot(directory, root.id);
+    for (const requestId of ['first', 'fresh-input']) {
+      const submission = await root.submit({ type: 'input', requestId, content: 'Execute controlled effect.' }, context);
+      await submission.wait(context);
+    }
+    assert.equal(effects, 1);
+    assert.equal(model.state.callCount, 1);
+    assert.equal(authorization.signal.aborted, true);
+  } finally { await harness.close(context); }
+  // The pinned Harness records thrown tool exceptions as failed receipts. The
+  // same read-only reopen fence must retain them, not just an in-memory abort.
+  assert.equal((await inspectInterruptedEffects(directory, launch)).length, 1);
+  const bytes = await readFile(databasePath(directory));
+  assert.ok(!bytes.includes(Buffer.from('secret canary')));
+});
 
 for (const interrupted of [true, false]) test(`external mutation ${interrupted ? 'interrupted before result' : 'with committed result'}`, { timeout: 20000 }, async t => {
   const home = await mkdtemp(join(tmpdir(), 'forge-effect-'));

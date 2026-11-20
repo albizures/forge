@@ -59,6 +59,25 @@ hold. Late acknowledgement can still make the existing Assignment Working and
 allow its Task to start without clearing that hold. Do not retire an otherwise
 healthy agent just because its acknowledgement was late.
 
+## Interrupted durable effects (controlled implementation)
+
+An `interrupted-effect` recovery blocker identifies committed runtime tool intent
+without a known accepted result. Its retained resource ID contains only the
+execution-task, conversation and call identities; commands, arguments and results
+remain in protected runtime storage. Inspection is read-only. A process exit,
+expired lease, later empty scan or cleared Dispatch Hold does not resolve it.
+These resources reserve capacity and block new authorization grants even for a
+closed Assignment. Provider resource retirement cannot waive them, and accepted
+Outcomes are not overwritten by their arrival.
+
+There is currently **no audited operator resolution command** for these effects.
+Do not use `assignment-resolve-unknown`, retained-work salvage, generic cleanup,
+runtime SQLite edits or `resume` as an interrupted-effect waiver. Preserve the
+runtime/worktree and externally investigate publication/push outcomes without
+replaying the command. Production durable dispatch and automatic recovery remain
+disabled; current integration evidence is controlled, not a release-readiness
+claim. See [T08 evidence and remaining work](research/pi-durable-t08/README.md).
+
 ## Revoke and clean up known resources
 
 ```sh

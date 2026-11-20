@@ -3,6 +3,7 @@ use crate::RegistrationError;
 use serde::{Deserialize, Serialize};
 
 pub mod completion;
+pub mod effects;
 
 /// Immutable identities only: no capability, provider credential or prompt content.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
