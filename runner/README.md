@@ -192,7 +192,8 @@ Actual coding tools also use `guardEffectTool`: a thrown or cancelled invocation
 terminally closes that consumer before another model/tool request can repeat an
 unknown effect. Returned results, including known nonzero shell exits, remain
 receipts; a subsequent persistence failure is still the Harness boundary. Errors
-are redacted. Committed failed receipts block a later reopening too.
+of interrupted effects are redacted. Committed failed receipts block a later
+reopening too.
 
 **Effect-free failures (T19 real-provider finding).** The pinned tools report
 ordinary mistakes by throwing: `read` of a missing path or past end of file,
@@ -201,12 +202,16 @@ effects ended real Assignments on routine model slips. The coding tools now reac
 the filesystem and shell only through `meteredEnv`, which counts every started
 `ExecutionEnv` operation outside a fixed read-only list (fail-closed: writes,
 removal, directories, temp files, `exec`, watchers, cleanup and any future
-method). An invocation that throws before any counted operation started, with
-neither the lease nor the call aborted, returns an ordinary bounded error result
-(`Tool failed without any effect: …`). The Harness commits it as a completed call,
-so the model can correct itself and recovery is not blocked. Anything else,
-including a concurrently started operation, stays an interrupted effect.
-Tests: `test/effect-free-failures.test.mjs`.
+method). Content reads also count unless their target is a regular file or
+absent, because opening a FIFO or device can consume data. An invocation that
+throws before any counted operation started, with neither the lease nor the call
+aborted, returns an ordinary error result (`Tool failed without any effect: …`,
+carrying the tool's own message, at most 2000 characters). The Harness commits
+it as a completed call, so the model can correct itself and recovery is not
+blocked. Anything else, including a concurrently started operation or an error
+that cannot be rendered, stays an interrupted effect. Tests:
+`test/effect-free-failures.test.mjs` and the production-wiring case in
+`test/profiles.test.mjs`.
 
 The trusted Rust `durable_execution::effects::Repository` now retains these exact
 identities transactionally as `interrupted-effect` resources plus a hold. They

@@ -4,7 +4,8 @@
 // or a cancelled/lease-lost call, stays a fatal interrupted effect.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { execFileSync, spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { componentHash } from '../src/contract.ts';
@@ -12,9 +13,9 @@ import { EffectMeter, guardEffectTool, inspectInterruptedEffects, meteredEnv } f
 import { Authorization, guardProvider } from '../src/authorization.ts';
 import { Harness, createRegistry, defineExtension, defineTool } from '@earendil-works/pi-durable';
 import { NodeExecutionEnv } from '@earendil-works/pi-durable/env/node';
-import { createEditTool, createReadTool, createWriteTool } from '@earendil-works/pi-durable/tools';
+import { createBashTool, createEditTool, createReadTool, createWriteTool } from '@earendil-works/pi-durable/tools';
 import { createModels, fauxProvider, fauxAssistantMessage, fauxToolCall } from '@earendil-works/pi-ai';
-import { BACKGROUND_CONTEXT as context } from '@earendil-works/chord/context';
+import { BACKGROUND_CONTEXT as context, withAbortSignal } from '@earendil-works/chord/context';
 import { openNodeSqliteStorage } from '@earendil-works/pi-durable/storage/sqlite/node';
 import { databasePath, persistIntent, persistRoot } from '../src/storage.ts';
 
@@ -129,6 +130,60 @@ test('meteredEnv counts every non-read-only operation and keeps the real env bou
   assert.equal(meter.started, 3);
   // A method the read-only list does not name counts, even a hypothetical one.
   const fake = meteredEnv({ futureMutation() { return 1; }, readTextFile() { return 2; } }, meter);
-  fake.futureMutation(); fake.readTextFile();
+  fake.futureMutation();
   assert.equal(meter.started, 4);
+  // A content read whose target cannot be checked fails closed.
+  fake.readTextFile();
+  assert.equal(meter.started, 5);
+});
+
+test('call-level cancellation with a plain error stays fatal', { timeout: 20000 }, async t => {
+  const f = await fixture(t);
+  const controller = new AbortController();
+  const execute = guardEffectTool(async () => { controller.abort(); throw Error('Operation aborted'); }, f.authorization, f.meter);
+  await assert.rejects(execute({}, {}, withAbortSignal(controller.signal, context)), { code: 'runner-interrupted-effect' });
+  assert.equal(f.authorization.signal.aborted, true);
+});
+
+test('a concurrently started operation makes a failing read fatal', { timeout: 20000 }, async t => {
+  const f = await fixture(t);
+  const execute = guardEffectTool(async () => { f.meter.note(); throw Error('read failed'); }, f.authorization, f.meter);
+  await assert.rejects(execute({}, {}, context), { code: 'runner-interrupted-effect' });
+  assert.equal(f.authorization.signal.aborted, true);
+});
+
+test('bash: invalid input is effect-free; a started command that fails is fatal', { timeout: 20000 }, async t => {
+  const f = await fixture(t);
+  const bash = createBashTool();
+  const invalid = await guardEffectTool(bash.execute, f.authorization, f.meter)({ command: 'true', timeout: -1 }, { env: f.env, output() {}, diagnostic() {}, retainedOutput: () => ({ text: '', truncated: false }) }, context);
+  assert.equal(invalid.isError, true);
+  assert.equal(f.authorization.signal.aborted, false);
+  // A shell that cannot be spawned: `exec` started, so the failure is uncertain.
+  const broken = meteredEnv(new NodeExecutionEnv({ cwd: f.worktree, shellPath: join(f.worktree, 'no-shell'), shellEnv: {} }), f.meter);
+  await assert.rejects(guardEffectTool(bash.execute, f.authorization, f.meter)({ command: 'true' }, { env: broken, output() {}, diagnostic() {}, retainedOutput: () => ({ text: '', truncated: false }) }, context), { code: 'runner-interrupted-effect' });
+  assert.equal(f.authorization.signal.aborted, true);
+});
+
+test('a content read through a link to a FIFO counts as an effect', { timeout: 20000 }, async t => {
+  const f = await fixture(t);
+  const fifo = join(f.worktree, 'pipe'), link = join(f.worktree, 'link');
+  execFileSync('/usr/bin/mkfifo', [fifo]);
+  await symlink(fifo, link);
+  const writer = spawn('/bin/sh', ['-c', `printf secret-data > '${fifo}'`]);
+  const finished = new Promise(resolve => writer.on('exit', resolve));
+  const { calls } = await converse(f, [createEditTool()], [
+    { name: 'edit', args: { path: link, edits: [{ oldText: 'absent', newText: 'x' }] } },
+    { name: 'edit', args: { path: link, edits: [{ oldText: 'absent', newText: 'x' }] } },
+  ]);
+  assert.equal(await finished, 0, 'the read consumed the writer data');
+  assert.equal(calls, 1, 'no model retry after a consuming read');
+  assert.equal(f.authorization.signal.aborted, true);
+  // Unit: regular and missing targets stay uncounted, special files count.
+  const meter = new EffectMeter();
+  const probe = meteredEnv({ readTextFile() {} }, meter);
+  await writeFile(join(f.worktree, 'regular'), 'x');
+  probe.readTextFile(join(f.worktree, 'regular')); probe.readTextFile(join(f.worktree, 'missing'));
+  assert.equal(meter.started, 0);
+  probe.readTextFile(link); probe.readTextFile('/dev/null');
+  assert.equal(meter.started, 2);
 });
