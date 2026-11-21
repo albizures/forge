@@ -26,7 +26,10 @@ by migrations—not just the initial `CREATE TABLE` statements.
 - [`src/durable_execution.rs`](src/durable_execution.rs): durable runtime identity,
   admission intent/results and conservative capacity reservation (schema 20),
   append-only authorization grant history (schema 21), and identity-bound
-  revoked retirement reconciliation (`src/durable_execution/retirement.rs`, schema 22).
+  revoked retirement reconciliation (`src/durable_execution/retirement.rs`, schema 22),
+  plus follow-ups, runtime purge journal and sticky launch rollback (schema 23).
+  Runtime conversations live in separate per-Assignment stores, not this database; see
+  [Durable Task execution](../../docs/durable-execution.md).
 
 Keep this reference in sync when those schema definitions change. Domain behavior
 is documented separately in [Records](../../docs/records.md),
@@ -1337,6 +1340,16 @@ assigns a review verification owner. Manual outcomes retain a hold for any resid
 blocker. Holds use `INSERT OR IGNORE`, preserving prior safety diagnostics; resolution
 never implicitly clears them. The serialized accepted result remains unchanged on
 replay, even when the live Findings or freshness later change.
+
+### Operator follow-ups (schema revision 23)
+
+`durable_assignment_followups(assignment_id, operation_id, sequence, message, message_sha256,
+binding_json, recorded_at_millis)` records operator input once per Assignment and operation ID
+(unique per-Assignment `sequence`), bound to the original attempt in `binding_json`. Triggers
+reject UPDATE and DELETE. `durable_assignment_followup_deliveries(assignment_id, operation_id,
+state unknown|delivered, admission_id, updated_at_millis)` tracks delivery: `unknown` is written
+before a pipe write, `delivered` (with the runtime admission ID) only after the runner accepts it,
+and a delivered row is final. Rows are never deleted, including by runtime purge.
 
 ### Runtime purge journal (schema revision 23)
 

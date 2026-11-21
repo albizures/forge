@@ -2,7 +2,10 @@
 
 Use this ordered runbook to investigate uncertain launches, revoke Assignments,
 verify provider cleanup, and safely restore dispatch eligibility. For initial
-configuration and launch behavior, see [dispatch operations](dispatch.md).
+configuration and launch behavior, see [dispatch operations](dispatch.md). For the
+headless pi-durable backend's setup, release state, limits and command overview, start
+with [Durable Task execution](durable-execution.md); the durable sections below hold
+the detailed rules.
 
 ## Trust and upgrade boundary
 
@@ -140,8 +143,8 @@ unsettled intent all deny permission with retained capacity. The synchronous
 fresh-launch binding cannot open existing runtime storage or orphaned SQLite
 sidecars; accepted admission with missing storage also rejects. Subsequent grants
 still require the ordinary transactional authority/freshness/hold/resource checks.
-This supplies the interrupted-effect recovery precondition, not the later writable
-same-attempt recovery feature. No scheduler or production durable rollout is enabled.
+This supplies the interrupted-effect precondition for same-attempt recovery (next
+section); it is not itself recovery. Production durable launch remains withheld.
 
 ## Same-Assignment durable recovery (controlled; rollout disabled)
 
@@ -247,9 +250,11 @@ revocation**, under exclusive inspection and committed-effect checks. It does no
 write or repair a host retirement receipt, erase other blockers or infer absence
 from controller loss. Unrelated later host-fault markers still block that path.
 
-Default production composition still leaves recovery unconfigured and durable
-launch disabled. There is no operator CLI/RPC recovery-authorization operation;
-packaging, real-provider release verification and rollout remain later Tasks.
+Default production composition still leaves recovery unconfigured and new durable
+launches withheld by the [release gate](durable-execution.md#current-release-state).
+There is no operator CLI/RPC recovery-authorization operation. Matched packaging and
+the rollback control exist; real-provider release verification and enabling rollout
+remain release work.
 Do not replay retained grants, reset sequences/watchdogs, edit resource markers or
 repair the worktree to bypass these gates. See the
 [T10 completion evidence](research/pi-durable-t10/completion.md) for reproducible
@@ -367,8 +372,8 @@ The proof covers this dedicated host's descendant execution on supported Linux,
 not remote effects or work delegated to an unrelated daemon. This remains a
 trusted-local-host boundary, not hostile same-user containment. Never delete a
 lock/intent/receipt or edit SQLite to make cleanup appear verified. See
-[T09 evidence](research/pi-durable-t09/README.md); automatic recovery remains T10
-and production scheduling/packaging/release verification remain later Tasks.
+[T09 evidence](research/pi-durable-t09/README.md). Retirement does not depend on the
+launch gate: it works for live and closed durable Assignments after a rollback.
 
 ## Resolve unknown resources only after external safety checks
 
@@ -597,7 +602,7 @@ A follow-up is durable operator input recorded in Forge (schema revision 23, imm
 - **Rejections:** `followup-assignment-revoked` (closed), `durable-binding-stale` (attempt closed or generation invalidated), `followup-admission-unconfirmed`, and `followup-blocked-by-uncertainty` for retained interrupted-effect, authorization, recovery-claim, retirement or provisioning uncertainty. A message never resumes unsafe work.
 - **Missing Outcome:** allowed as explicit intervention. Recording does not create an Outcome, retire the diagnostic, release capacity or grant a lease.
 - **Visibility:** recorded follow-ups, with operation IDs, are listed by `assignment-status`.
-- **Not delivery:** a record is not proof the runtime received or acted on it. Delivering recorded input into the conversation, and listing it in the committed runtime transcript, needs a writable authorized runner and is not yet implemented.
+- **Delivery:** a record is not proof the runtime received or acted on it. When the original runner is resumed under live authority, the daemon's recovery driver sends undelivered follow-ups after the runner reports `resumed`, records `unknown` before each write and `delivered` only after the runner accepts it (runtime request ID `followup:<operation-id>`, deduplicated by content hash). The receipt's `delivery` field reports `recorded`, `unknown` or `delivered`; delivered input appears in the committed transcript. An Assignment that is never resumed keeps its follow-ups recorded but undelivered. Recovery is not configured in the default daemon composition.
 
 ## Migrate existing Check profiles to durable execution
 
@@ -613,7 +618,8 @@ Existing Checks keep their original pinned profile. Changing a Check Template, a
 - **Freshness:** pass `--expected-generation` from the Task's work state; a stale value fails with `stale-work-generation`. A Task with work or Assessments has its freshness invalidated exactly once, so earlier passes and attempts are stale; the receipt reports generation before and after. A pristine Task has no generation change.
 - **Retries:** reuse the operation ID after a dropped reply. The original receipt returns with `replayed: true`, never advancing freshness again, even after later changes. The same ID with different content fails with `check-profile-migration-conflict`.
 - **Next attempt:** the following dispatch uses the effective revision through the ordinary gates (capacity, Dispatch Hold, preflight); a stale old-pin selection is rejected as `check-selection-stale`.
-- **Scope and rollback:** this operation selects only durable-compatible revisions and never deletes history; a further migration may pick another durable revision. Rollout gating and rolling new execution back to Herdr are separate (later) rollout controls. Mixed profiles across a Task's Checks are supported.
+- **Release gate:** the target revision is preflighted through the durable launch gate, so while new durable launches are withheld or rolled back the migration refuses with `invalid-check-profile` and records nothing.
+- **Scope and rollback:** this operation selects only durable-compatible revisions and never deletes history; a further migration may pick another durable revision. Stopping new durable launches is the separate sticky [`durable-launch-disable`](durable-execution.md#rollout-and-rollback) control; it never rewrites pins. Mixed profiles across a Task's Checks are supported.
 
 ## Retained runtime history and explicit deletion
 

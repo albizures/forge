@@ -1,8 +1,12 @@
 # Dispatcher operations
 
 Forge's daemon owns dispatch state, provider resources, and reconciliation.
-The CLI neither opens dispatch storage nor contacts Herdr directly. Herdr is a
-provider adapter: provider state is never proof of Forge Task completion.
+The CLI neither opens dispatch storage nor contacts Herdr directly. Herdr and the
+headless pi-durable runner are provider adapters: provider or runtime state is never
+proof of Forge Task completion. Each Task Check selects its backend through its
+effective pinned profile revision. This guide describes the shared Check rules and
+the Herdr backend; the durable backend, its release gate and its operator controls are
+in [Durable Task execution](durable-execution.md).
 
 ## Verified Check-driven Task dispatch
 
@@ -359,6 +363,13 @@ operator-directed store replacement.
 
 ## Configure dispatch
 
+This section configures the **Herdr backend**, used by Grilling and by Task Checks
+pinned to `herdr/pi` revisions. A Task Check pinned to a `pi-durable` revision does
+not require the Herdr socket, binding, Workspace profile selections or Workspace-wide
+readiness: its pinned adapter's preflight and the durable release gate apply instead,
+with no Herdr fallback. `dispatcher status` reports this Herdr-oriented Workspace
+readiness only.
+
 The adapter requires Herdr Socket API protocol **22**, schema version **1**, and
 an operator-selected existing Herdr Workspace. Each **Forge Workspace** independently
 selects a Task profile revision, a Grilling profile revision, and an exclusive
@@ -502,6 +513,11 @@ replacement. Explicit dispatch is not a recovery override: follow the
 [recovery runbook](assignment-recovery.md) before retrying.
 
 ## Launch and acknowledgement
+
+This section describes Herdr launches. Durable launches use the same authenticated
+`forge assignment bootstrap` and protected capability file, but run headlessly under a
+supervised runner with bounded authorization leases; see
+[Durable Task execution](durable-execution.md#execution-model).
 
 Forge persists a one-shot launch intent and acknowledgement deadline before
 launching Pi. Pi starts without a positional prompt. Forge pins the returned

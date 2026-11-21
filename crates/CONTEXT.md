@@ -61,7 +61,7 @@ One launch of a Managed Daemon, identified by a Forgeup-generated random instanc
 _Avoid_: revision, daemon version
 
 **Forge Workspace**:
-A Forge-owned boundary with a fixed filesystem root that groups Projects and Records and owns their dispatch profile selections and Herdr Workspace binding.
+A Forge-owned boundary with a fixed filesystem root that groups Projects and Records and owns dispatch profile selections and applicable provider bindings. A provider's user-interface container is not the Forge Workspace's filesystem or execution identity.
 _Avoid_: Managed Worktree, Herdr Workspace, task workspace
 
 **Project**:
@@ -209,7 +209,7 @@ A human-in-the-loop decision Record type that is a leaf child of one Wayfinder. 
 _Avoid_: question, approval
 
 **Agent Assignment**:
-A Forge-owned, durable association between one Record and an externally managed Agent for one work attempt, binding an Agent Profile revision and execution identity. A Task Assignment advances exactly one Check and binds an immutable attempt identity, starting freshness generation and input evidence; its profile revision is the revision pinned by that Check. Its Agent authenticates, acknowledges and starts its assigned Task or Grilling before working; the Assignment remains as history after the Agent is removed or replaced.
+A Forge-owned, durable association between one Record and an externally managed Agent for one work attempt, binding an Agent Profile revision and execution identity. A Task Assignment advances exactly one Check and binds an immutable attempt identity, starting freshness generation and input evidence; its profile revision is that Check's effective revision when the attempt was reserved and never changes afterwards. Its Agent authenticates, acknowledges and starts its assigned Task or Grilling before working; the Assignment remains as history after the Agent is removed or replaced.
 _Avoid_: record agent metadata, agent link
 
 **Dispatcher**:
@@ -249,7 +249,7 @@ The filesystem folder in which an Agent works for an Agent Assignment. Task Assi
 _Avoid_: Herdr Workspace, agent project
 
 **Forge Dispatch Workspace**:
-An existing operator-selected Herdr Workspace bound exclusively to one Forge Workspace within a daemon/store. It contains dedicated Agent Assignment tabs but is neither a Forge-owned filesystem root nor a container Forge owns or deletes.
+An existing operator-selected Herdr Workspace bound exclusively to one Forge Workspace within a daemon/store for Herdr-backed dispatch. It contains dedicated Agent Assignment tabs but is neither a Forge-owned filesystem root, a container Forge owns or deletes, nor a prerequisite for other execution backends.
 _Avoid_: Forge Workspace, Project workspace, task workspace
 
 **Assignment Recovery Blocker**:

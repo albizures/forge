@@ -90,7 +90,10 @@ but cannot grant membership. Skill paths may identify SKILL.md or its directory.
 MCP paths identify catalog configuration files; a file containing multiple server
 entries is ambiguous and must be selected by unique server name instead.
 
-## Durable profiles and authentication (controlled pre-dispatch boundary)
+## Durable profiles and authentication
+
+Operational setup, the supported matrix and rollout state are in
+[Durable Task execution](durable-execution.md).
 
 Task profiles may explicitly use `runtime: pi-durable` with version 1,
 `model: openai/gpt-4.1`, `thinkingLevel: off`, and a unique subset of
@@ -116,16 +119,16 @@ have a canonical owner-owned 0700 parent directory. The file contains one
 printable ASCII token (1–4096 bytes) with an optional final LF. Missing, malformed,
 redirected, hardlinked or permissive sources fail with redacted diagnostics.
 The library configuration equivalent is `DaemonConfig::durable_model_key_file`
-or `Daemon::with_durable_model_key_file`. Managed process configuration does not
-inherit this environment setting; packaged managed configuration remains later
-installation work. Do not copy a Pi configuration directory or put a key in
+or `Daemon::with_durable_model_key_file`. A Forgeup-managed daemon does not
+inherit this environment setting and has no equivalent yet, so durable
+preview/registration there fails with `durable-model-auth-unavailable`. Do not copy a Pi configuration directory or put a key in
 profile YAML, command arguments, prompts or environment values.
 
 Durable operator preview and registration validate this local authentication
 configuration before accepting a new profile. Registration persists the exact
 policy that passed preflight rather than resolving the mutable source a second
 time. Local validation makes no provider request and does not certify account
-permissions; real-provider release verification remains T19. Herdr profiles do
+permissions; real-provider verification belongs to the release gate. Herdr profiles do
 not require the new credential setting. Historical profile reads and original
 backend inspection/retirement never invoke this new-launch source/auth check.
 
@@ -142,12 +145,13 @@ from provider events before Harness persistence. This is not a hostile-agent
 sandbox: same-user tools can access host files deliberately, and stored repository
 content remains sensitive.
 
-This is **not dispatch readiness**: production durable selection/launch remains
-unsupported. The Check-bound launch/bootstrap tracer is T07 and must invoke
-preflight before capability issuance, bind the actual worktree/configuration,
-and gate behavioral context behind successful authenticated bootstrap. The
-factory itself opens no store or scheduler and grants no authority. No live
-operator profiles need to be registered to test this component.
+This is **not dispatch readiness**. Check-bound launch invokes this preflight
+before capability issuance, binds the actual worktree/configuration and gates
+behavioral context behind successful authenticated bootstrap, but new durable
+launches are withheld by the release gate in production Revisions. Registering
+a durable revision also selects it as the Workspace Task profile; reselect a
+Herdr Task revision so Workspace readiness for Herdr Tasks and Grilling stays
+valid. The factory itself opens no store or scheduler and grants no authority.
 
 ## Operator preview, registration and selection
 

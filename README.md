@@ -109,6 +109,7 @@ uses installed CLI help; no Forge source checkout or online manual is required.
 | [Task stacks](docs/stacks.md) | Linear branch inheritance and verified non-draft PR publication |
 | [Managed worktrees](docs/worktrees.md) | Manual checkout creation, safety checks, and repair |
 | [Dispatcher](docs/dispatch.md) | Configuration, explicit Record dispatch, launch, and ownership boundaries |
+| [Durable Task execution](docs/durable-execution.md) | Headless pi-durable backend: release state, setup, supported matrix, migration, rollout/rollback and operator controls |
 | [Assignment recovery](docs/assignment-recovery.md) | Investigation, retirement, unknown resources, and holds |
 | [Forgeup operations](crates/docs/forgeup.md) | Revision registration, selection, daemon lifecycle, and recovery |
 | [Revision State upgrades](docs/state-upgrades.md) | Explicit database copy-and-upgrade, activation, rollback, and crash recovery |

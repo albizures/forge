@@ -1,20 +1,18 @@
-# Forge durable runner — T04–T06 controlled execution boundary
+# Forge durable runner
 
-This is a **synthetic-only development component**, not a production dispatch
-backend or installed Forge Revision. `src/main.ts` remains synthetic-only: it uses
-no Pi CLI, Herdr, credentials, ambient Pi configuration, tools, network provider,
-Assignment capability or accepted Outcome. The daemon does not launch it. T06's
-separate explicit profile factory configures the pinned OpenAI provider and
-coding tools; tests use synthetic credentials and intercepted provider requests,
-never a real account or live Assignment. T05's application policy,
-trusted Linux evidence adapter, consumer guards and independent host watchdog are
-present. The executable requires a grant before new execution. The daemon-side
-service now owns canonical storage binding, commit-before-delivery, nonblocking
-controls, renewal scheduling and durable failure retention; cross-layer tests
-exercise it with the actual supervisor and pinned runtime. Production dispatch
-still does not select or launch this backend. T06 provides tested explicit
-profile/authentication mapping, T07 actual Check-bound dispatch, and T15 matched installation. Do not use
-this harness to execute live Assignments.
+This TypeScript package is the Forge-owned runner for durable Task execution. It
+consumes a pinned pi-durable release (1.5.2) directly, not the Pi CLI, behind the
+versioned Forge runner protocol 1. The daemon spawns it per Assignment under a
+supervising `forge-runner-host`, in the Task's Managed Worktree, after authorization;
+Forge's Rust application keeps all scheduling, Check, evidence and Outcome
+authority. It is shipped with a Forge Revision as a matched bundle
+(`package-bundle.mjs`); never run it from `PATH`/npm or against live Assignments by
+hand. New durable launches are withheld by the release gate in production Revisions.
+Operator documentation is in [Durable Task execution](../docs/durable-execution.md).
+
+The sections below are the implementation history and evidence of each increment
+(T04–T15). Statements there such as "synthetic-only" or "remains a later Task"
+describe that increment, not the current build.
 
 ## T10 recovery evidence increment — not automatic recovery
 
@@ -67,7 +65,7 @@ profile and worktree identity, preflight before capability issuance, and gate
 behavioral context behind successful authenticated bootstrap.
 
 Supported configuration and the raw-file authentication/permission matrix are
-in [Agent Profile policy](../docs/agent-profile-policy.md#durable-profiles-and-authentication-controlled-pre-dispatch-boundary).
+in [Agent Profile policy](../docs/agent-profile-policy.md#durable-profiles-and-authentication).
 No OAuth, Pi credential discovery, extensions/MCP, custom nested tools,
 image/classifier/deferred APIs, automatic compaction or request retries are
 supported. The four coding tools are all explicitly unsafe for replay; cwd and

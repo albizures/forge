@@ -98,6 +98,19 @@ be stopped and agent/resource ownership resolved. Preparation upgrades the manag
 registry to schema 2 so older managers cannot bypass recovery and lineage guards;
 see the guide before using older clients or attempting rollback.
 
+## Matched durable runner
+
+A Revision may carry the matched durable-runner bundle (pinned Node, runner and locked
+dependencies). `forgeup register --runner-bundle DIR` attests and installs it with the
+Revision; `forgeup runner verify <selector>` re-attests the installed copy, and
+`forgeup runner resolve --component-hash <hash>` names the Revision that shipped an exact
+bundle tree. `forgeup daemon start` re-attests the bundle and passes its components to the
+managed daemon; a missing or modified component blocks startup. PATH and npm are never used.
+Removing a runner-bearing Revision while its state exists requires `--purge-state`.
+The managed daemon receives no model credential setting. See
+[matched runner packaging](../../docs/development.md#matched-runner-packaging) and
+[Durable Task execution](../../docs/durable-execution.md).
+
 ## State and removal
 
 Each canonical selector has isolated Revision State: a database, runtime

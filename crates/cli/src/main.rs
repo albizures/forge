@@ -2557,6 +2557,10 @@ mod tests {
                 "assignment-recovery.md",
                 include_str!("../../../docs/assignment-recovery.md"),
             ),
+            (
+                "durable-execution.md",
+                include_str!("../../../docs/durable-execution.md"),
+            ),
         ];
         for (name, document) in documents {
             let mut in_shell = false;
@@ -2601,6 +2605,34 @@ mod tests {
                 !in_shell && count > 0,
                 "{name}: missing/unfinished examples"
             );
+        }
+    }
+
+    #[test]
+    fn durable_guide_shows_every_durable_operator_command() {
+        let guide = include_str!("../../../docs/durable-execution.md");
+        for command in [
+            "forge dispatcher durable-launch-status",
+            "forge dispatcher durable-launch-disable",
+            "forge dispatcher assignment-status",
+            "forge dispatcher assignment-transcript",
+            "forge dispatcher assignment-followup",
+            "forge dispatcher assignment-resolve-effect",
+            "forge dispatcher assignment-retire",
+            "forge dispatcher assignment-purge-runtime",
+            "forge record check-profile-migrate",
+            "forge record check-profile-migrations",
+            "forge agent-profile register",
+        ] {
+            assert!(guide.contains(command), "durable guide lacks {command}");
+        }
+        for limit in [
+            "is **not** verified absence",
+            "No exactly-once effects",
+            "Trusted local host",
+            "withheld",
+        ] {
+            assert!(guide.contains(limit), "durable guide lacks {limit}");
         }
     }
 
