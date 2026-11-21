@@ -28,7 +28,8 @@ by migrations—not just the initial `CREATE TABLE` statements.
   append-only authorization grant history (schema 21), and identity-bound
   revoked retirement reconciliation (`src/durable_execution/retirement.rs`, schema 22),
   plus follow-ups, runtime purge journal and sticky launch rollback (schema 23), and
-  recorded purge removal outcomes (schema 24).
+  recorded purge removal outcomes (schema 24), and proven never-granted launch
+  reconciliations (`src/durable_execution/launch_failure.rs`, schema 25).
   Runtime conversations live in separate per-Assignment stores, not this database; see
   [Durable Task execution](../../docs/durable-execution.md).
 
@@ -1372,6 +1373,28 @@ Triggers allow an insert only for a `purged` journal row and reject UPDATE and D
 Revision 24 is a separate table so revision 23 journal rows upgrade byte-exact: a purge
 completed before 24 has no removal row and reads as unrecorded (`removal: null`), never
 as a fabricated deletion. The explicit offline upgrade from 23 adds the empty table.
+
+### Never-granted launch reconciliation (schema revision 25)
+
+`claim` inserts the one-shot `provision-intent` marker, the `durable_assignment_runtimes`
+row and the `durable-runtime` resource in one immediate transaction, after the
+Assignment execution gate. A refused precondition rolls all of them back; an existing
+claim or a closed Assignment returns `None` and writes nothing.
+
+`durable_launch_reconciliations(assignment_id PK -> durable_assignment_runtimes, proof
+never-launched|never-owned|ungranted-quiescence, reconciled_at_millis)` journals a launch
+reconciled without any grant. Rows are immutable and retained. `reconcile_ungranted_launch`
+checks, in one immediate transaction, that the Assignment is closed, the admission is
+`Pending`, no grant was ever committed, no host retirement was begun and (for
+`never-launched`) no launch intent was committed. It then inserts the row (an exact
+retry keeps the original) and retires only `durable-runtime`, `provision-intent`, launch
+failure and authorization diagnostics. The `durable_runtime_capacity_retained` trigger now
+allows `durable-runtime` retirement with either a reconciled host retirement or this row,
+for a closed Assignment. `record_launch_failure` retains one `durable-launch-failure`
+resource per failure point. `reconcile_unreserved_claim` discharges a pre-T26 claim that
+has no runtime, only after closure. Purge eligibility accepts a `Pending` admission once
+every resource is retired. The explicit offline upgrade from 24 adds the empty table and
+replaces the trigger.
 
 ### Durable launch rollback (schema revision 23)
 

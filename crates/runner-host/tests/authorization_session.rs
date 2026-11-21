@@ -81,7 +81,7 @@ fn diagnostic(receiver: &Receiver<String>, code: &str) {
     loop {
         let line = receiver
             .recv_timeout(Duration::from_secs(40))
-            .expect("supervisor diagnostic timed out");
+            .unwrap_or_else(|error| panic!("supervisor diagnostic {code} timed out: {error}"));
         if line.contains(code) {
             return;
         }
@@ -124,6 +124,27 @@ impl Fixture {
         store
             .create_agent_assignment(&NewAgentAssignment {
                 id: "assignment".into(),
+                record_id: task.id,
+                project_slug: "alpha".into(),
+                profile_revision: 2,
+            })
+            .unwrap();
+        (task.id, store.list_record_checks(task.id).unwrap()[0].id)
+    }
+
+    /// A second open Assignment (`legacy`) on a new Task, for T26 claim tests.
+    fn create_second_assignment(store: &SqliteProjectRepository) -> (u64, u64) {
+        let task = store
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Task,
+                body: "legacy claim".into(),
+                project_slugs: vec!["alpha".into()],
+                generated_by_ids: vec![],
+            })
+            .unwrap();
+        store
+            .create_agent_assignment(&NewAgentAssignment {
+                id: "legacy".into(),
                 record_id: task.id,
                 project_slug: "alpha".into(),
                 profile_revision: 2,
@@ -805,4 +826,67 @@ fn dedicated_driver_renews_committed_history_then_stops_without_releasing_capaci
         .unwrap(),
         2
     );
+}
+
+/// T26: a host whose private pipe closes before any grant (its launching
+/// daemon failed or died) fences, stops its worker, proves quiescence as the
+/// original subreaper and writes an exact ungranted receipt before exiting.
+#[test]
+fn lost_issuer_before_any_grant_proves_ungranted_quiescence_and_releases_ownership() {
+    use forge_runner_host::fence::{self, Diagnosis};
+    let mut f = Fixture::new("model");
+    drop(f.child.stdin.take());
+    diagnostic(&f.errors, "runner-watchdog-quiescence-verified");
+    assert!(f.child.wait().unwrap().success());
+    let worker = f.evidence["worker_pid"].as_u64().unwrap();
+    assert!(!Path::new(&format!("/proc/{worker}")).exists());
+    let guard = forge_runner_host::inspection::ExclusiveInspection::acquire(&f.directory).unwrap();
+    let receipt = fence::ungranted_receipt(&f.directory).unwrap();
+    assert_eq!(receipt.marker, "watchdog.json");
+    assert!(receipt.children_absent);
+    assert_eq!(
+        u64::from(receipt.owner.host_pid),
+        f.evidence["owner"]["host_pid"].as_u64().unwrap()
+    );
+    let marker: Value =
+        serde_json::from_slice(&fs::read(f.directory.join("watchdog.json")).unwrap()).unwrap();
+    assert_eq!(marker["code"], "runner-issuer-lost");
+    assert!(marker["last_lease"].is_null());
+    fence::settled(&f.directory).unwrap();
+    assert_eq!(Diagnosis::of(&f.directory), Diagnosis::Proven);
+    // Owned directories are never sealed as never owned.
+    assert!(forge_runner_host::seal::seal(&f.directory).is_err());
+    drop(guard);
+    // Tampered marker bytes or owner evidence are not proof.
+    let marker_path = f.directory.join("watchdog.json");
+    let bytes = fs::read(&marker_path).unwrap();
+    fs::write(&marker_path, [bytes.as_slice(), b" "].concat()).unwrap();
+    assert!(fence::ungranted_receipt(&f.directory).is_err());
+    assert!(fence::settled(&f.directory).is_err());
+    fs::write(&marker_path, &bytes).unwrap();
+    let owner_path = f.directory.join("owner.json");
+    let owner = fs::read(&owner_path).unwrap();
+    let mut changed: Value = serde_json::from_slice(&owner).unwrap();
+    changed["worker_start"] = "other".into();
+    fs::write(&owner_path, serde_json::to_vec(&changed).unwrap()).unwrap();
+    assert!(fence::ungranted_receipt(&f.directory).is_err());
+    fs::write(&owner_path, &owner).unwrap();
+    fence::ungranted_receipt(&f.directory).unwrap();
+}
+
+/// T26: a directory sealed as never owned is never owned afterwards.
+#[test]
+fn sealed_runtime_directory_refuses_every_later_host() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path().canonicalize().unwrap();
+    let directory = root.join("runtime");
+    fs::create_dir(&directory).unwrap();
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+    let worktree = root.join("worktree");
+    fs::create_dir(&worktree).unwrap();
+    drop(forge_runner_host::seal::seal(&directory).unwrap());
+    let (mut child, _output, _errors) = spawn(&directory, &worktree);
+    assert!(!child.wait().unwrap().success());
+    assert!(!directory.join("owner.json").exists());
+    assert!(forge_runner_host::seal::sealed(&directory).unwrap());
 }

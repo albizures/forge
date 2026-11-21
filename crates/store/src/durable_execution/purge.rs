@@ -71,7 +71,11 @@ fn eligible(c: &Connection, workspace: &str, launch: &Launch) -> Result<(), Regi
         return blocked("runtime-purge-uncertainty-retained");
     }
     match runtime.admission {
-        Admission::Rejected { .. } => Ok(()),
+        // Rejected never started a conversation. Pending was never sent (T26): no
+        // conversation exists, and every resource, including the `durable-runtime`
+        // identity, is retired above, which happens only with host retirement or
+        // never-granted launch proof.
+        Admission::Rejected { .. } | Admission::Pending => Ok(()),
         Admission::Accepted { .. } => {
             let reconciled: bool = c
                 .query_row(
@@ -86,7 +90,7 @@ fn eligible(c: &Connection, workspace: &str, launch: &Launch) -> Result<(), Regi
                 blocked("runtime-purge-retirement-unreconciled")
             }
         }
-        _ => blocked("runtime-purge-admission-unknown"),
+        Admission::Unknown => blocked("runtime-purge-admission-unknown"),
     }
 }
 

@@ -101,7 +101,15 @@ Mark a Task complete only after its acceptance checks and required verification 
   - **Gates:** all four repository gates pass (910 Rust tests plus 15 supervised scenarios; 1 pre-existing opt-in ignored), runner typecheck and 98 Node tests.
   - **Not claimed:** a separately started/Forgeup-managed restarted daemon; the commit-before-delivery renewal window (fail closed); pre-grant fences (T26); a real provider.
   - T26 may proceed. Production durable dispatch stays withheld.
-- [ ] [T26 — Retire failed durable launches](26-retire-failed-durable-launches.md) — corrects T18 second-pass B4.
+- [x] [T26 — Retire failed durable launches](26-retire-failed-durable-launches.md) — corrects T18 second-pass B4. [Implementation and evidence](../../docs/research/pi-durable-t26/README.md):
+  - **Atomic claim:** `Repository::claim` commits the launch claim, runtime row and capacity in one transaction; a refused precondition leaves nothing. A pre-T26 claim without a runtime is discharged after revocation.
+  - **Diagnostics:** each failure point (runtime input, launch intent, spawn, `owned`, bind, grant) retains a specific `durable-launch-*` code shown in CLI/RPC status.
+  - **No orphaned host:** the launcher never drops a live `Child`. Before any grant it closes the pipe and reaps the host; the host fences (`runner-issuer-lost`), proves quiescence as subreaper and writes `ungranted-receipt-<pid>-<start>.json`. A failed first grant hands the original Child and pipe to retirement.
+  - **Reconciliation (schema 25):** a never-granted, never-sent launch retires from `never-launched` (store plus seal), `never-owned` (sealed `launch-sealed.json`) or `ungranted-quiescence` proof, journaled immutably; the capacity trigger accepts it. Otherwise `durable-launch-ungranted-unproven` (or the T25 codes) keeps it visibly blocked.
+  - **Evidence:** 10 new production-composition tracer scenarios (six failure points in one daemon lifetime, four with the launching daemon SIGKILLed) run failure → status → retirement → exact retry → purge; real-host receipt, seal and retirement tests; store/policy/upgrade tests.
+  - **Gates:** all four repository gates pass (925 Rust tests plus 25 supervised scenarios; 1 pre-existing opt-in ignored), runner typecheck and 99 Node tests. One transient leased-expiry test failure under full load is recorded, not claimed fixed.
+  - **Not claimed:** real provider; Forgeup-managed daemon (M4); `Unknown` admissions.
+  - **Next:** the T18 third-pass re-review. Production durable dispatch stays withheld.
 - [ ] [T19 — Verify integration and recovery](19-verify-integration-and-recovery.md)
 - [ ] [T20 — Deliver release handoff](20-publish-release-handoff.md)
 

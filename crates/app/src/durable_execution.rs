@@ -8,6 +8,7 @@ pub mod effect_resolution;
 pub mod effects;
 pub mod followup;
 pub mod launch_control;
+pub mod launch_failure;
 pub mod purge;
 mod reconciliation;
 pub mod recovery;
@@ -126,6 +127,15 @@ pub trait Repository: Send + Sync {
     /// # Errors
     /// Rejects unauthorized scope, conflicting identity and storage failures.
     fn reserve(&self, workspace: &str, launch: &Launch) -> Result<Runtime, RegistrationError>;
+    /// The single launch claim and the admission intent in one transaction
+    /// (T26): either both the one-shot `provision-intent` marker and the
+    /// reserved runtime exist, or neither does. `Ok(None)` when the Assignment
+    /// was already claimed or is closed; nothing is written then.
+    /// # Errors
+    /// Rejects unauthorized scope, a stale binding, conflicting identity and
+    /// storage failures, leaving no claim behind.
+    fn claim(&self, workspace: &str, launch: &Launch)
+    -> Result<Option<Runtime>, RegistrationError>;
     /// Atomically marks intent unknown *before* a potentially effective external call.
     /// Returns true only to the single initial sender. Unknown calls require observation.
     /// # Errors

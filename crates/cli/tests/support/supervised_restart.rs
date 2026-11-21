@@ -81,9 +81,24 @@ pub fn daemon(config: &Path, record: u64) -> ! {
             launch
         },
     };
-    let (assignment, existing) = adapter.app().dispatch_record(record).unwrap();
-    assert!(!existing);
-    println!("{}", assignment.id);
+    // T26: a `launch-fault-restart-*` daemon fails or stalls at its point.
+    super::supervised_launch_fault::inject(&adapter);
+    let id = match adapter.app().dispatch_record(record) {
+        Ok((assignment, existing)) => {
+            assert!(!existing);
+            assignment.id
+        }
+        Err(_) if adapter.mode.starts_with("launch-fault-") => {
+            SqliteProjectRepository::open(&adapter.database)
+                .unwrap()
+                .list_agent_assignments(record)
+                .unwrap()[0]
+                .id
+                .clone()
+        }
+        Err(error) => panic!("{error:?}"),
+    };
+    println!("{id}");
     std::io::stdout().flush().unwrap();
     loop {
         std::thread::sleep(Duration::from_secs(3600));

@@ -12,6 +12,7 @@ pub mod purge;
 pub mod quiescence;
 pub mod recovery_proof;
 pub mod retirement;
+pub mod seal;
 pub mod storage;
 pub mod supervision;
 pub mod supervisor;

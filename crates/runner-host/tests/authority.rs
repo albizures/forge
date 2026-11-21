@@ -293,20 +293,22 @@ fn unlock_or_missing_worker_descriptor_cannot_be_replaced_by_lock_file_identity(
 }
 
 #[test]
-fn exited_worker_is_not_permission_even_while_supervisor_retains_lock() {
+fn exited_worker_is_not_permission_and_ownership_ends_only_with_ungranted_proof() {
     let mut f = Fixture::new();
     assert!(ExclusiveInspection::acquire(&f.directory).is_err());
     assert!(SpawnedOwner::capture(&mut f.child, &f.directory).is_ok());
+    let contender = fs::File::open(f.directory.join("owner.lock")).unwrap();
     f.command("exit");
     assert!(SpawnedOwner::capture(&mut f.child, &f.directory).is_err());
-    let contender = fs::File::open(f.directory.join("owner.lock")).unwrap();
-    assert!(contender.try_lock_exclusive().is_err());
-    assert!(ExclusiveInspection::acquire(&f.directory).is_err());
-    f.child.kill().unwrap();
-    f.child.wait().unwrap();
+    // T26: before any grant, the original subreaper fences, proves that its
+    // worker and every descendant are gone, records the exact ungranted receipt
+    // and only then exits, releasing ownership. Exit alone is never proof.
+    assert!(f.child.wait().unwrap().success());
     let evidence = fs::read(f.directory.join("owner.json")).unwrap();
     let guard = ExclusiveInspection::acquire(&f.directory).unwrap();
     guard.verify().unwrap();
+    forge_runner_host::fence::ungranted_receipt(&f.directory).unwrap();
+    forge_runner_host::fence::settled(&f.directory).unwrap();
     assert!(contender.try_lock_exclusive().is_err());
     assert_eq!(fs::read(f.directory.join("owner.json")).unwrap(), evidence);
     drop(guard);

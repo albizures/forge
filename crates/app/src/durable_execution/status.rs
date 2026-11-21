@@ -66,8 +66,9 @@ pub struct View {
     pub retirement_blockers: Vec<String>,
 }
 
-const UNCERTAIN_KINDS: [(&str, &str); 5] = [
+const UNCERTAIN_KINDS: [(&str, &str); 6] = [
     ("provision-intent", "uncertain-provisioning"),
+    ("durable-launch-failure", "launch-failed"),
     ("interrupted-effect", "interrupted-effect"),
     ("authorization-uncertain", "authorization-uncertain"),
     ("recovery-claim", "recovery-claim-unresolved"),

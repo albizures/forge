@@ -11,6 +11,8 @@
 mod supervised_chain;
 #[path = "support/supervised_dispatch.rs"]
 mod supervised_dispatch;
+#[path = "support/supervised_launch_fault.rs"]
+mod supervised_launch_fault;
 #[path = "support/supervised_packaged.rs"]
 mod supervised_packaged;
 #[path = "support/supervised_purge.rs"]
@@ -481,6 +483,22 @@ async fn scenario(mode: &str) {
         let _ = daemon.await;
         return;
     }
+    if mode.starts_with("launch-fault-") {
+        let faulted = adapter.clone();
+        let store = SqliteProjectRepository::open(&database).unwrap();
+        tokio::task::spawn_blocking(move || {
+            if faulted.mode.starts_with("launch-fault-restart-") {
+                supervised_launch_fault::run_restart(&faulted, &store, record);
+            } else {
+                supervised_launch_fault::run(&faulted, &store, record);
+            }
+        })
+        .await
+        .unwrap();
+        daemon.abort();
+        let _ = daemon.await;
+        return;
+    }
     let dispatch = adapter.clone();
     let (assignment, existing, mut report) = tokio::task::spawn_blocking(move || {
         // Provision only spawns the host; the daemon-owned driver runs on.
@@ -796,7 +814,9 @@ fn main() {
             args[2].to_str().unwrap().parse().unwrap(),
         );
     } else if args.iter().any(|arg| arg == "--list") {
-        println!("T07/T09/T10/T24/T25 supervised tracer (fifteen parallel controlled scenarios)");
+        println!(
+            "T07/T09/T10/T24/T25/T26 supervised tracer (twenty-five parallel controlled scenarios)"
+        );
     } else {
         // Parallel isolated scenarios are intentional, not a serial-test waiver.
         let count = tokio::runtime::Builder::new_multi_thread()
@@ -821,6 +841,16 @@ fn main() {
                     "daemon-restart-retire",
                     "daemon-restart-tool",
                     "daemon-restart-exit",
+                    "launch-fault-runtime-input",
+                    "launch-fault-launch-intent",
+                    "launch-fault-spawn",
+                    "launch-fault-owned",
+                    "launch-fault-bind",
+                    "launch-fault-grant",
+                    "launch-fault-restart-runtime-input",
+                    "launch-fault-restart-spawn",
+                    "launch-fault-restart-stall",
+                    "launch-fault-restart-grant",
                 ];
                 // Optional name filters (`cargo test ... -- daemon-restart`);
                 // with none, every scenario runs.
@@ -850,6 +880,6 @@ fn main() {
                 );
                 count
             });
-        println!("T07/T09/T10/T24/T25 supervised tracer: {count} scenarios passed");
+        println!("T07/T09/T10/T24/T25/T26 supervised tracer: {count} scenarios passed");
     }
 }

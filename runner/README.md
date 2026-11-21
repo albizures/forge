@@ -503,6 +503,16 @@ history. The runner's `unblocked` check accepts a marker only when a receipt
 binds its exact bytes. Forge, not the runner, decides recovery or retirement
 from that receipt.
 
+**Pre-grant issuer loss (T26).** Before any accepted grant, the private pipe is
+the only channel a grant could ever arrive on. When it closes (the launching
+daemon failed the launch or died), the host fences with `runner-issuer-lost` and
+a marker that names no lease, then stops its worker as above. After the same
+proof it writes `ungranted-receipt-<host pid>-<host start>.json`, bound to the
+exact marker bytes and the owner, and exits. A directory Forge sealed as never
+owned (`launch-sealed.json`) is refused before the host records ownership or
+starts a worker. The runner's defense-in-depth `unblocked` check accepts an
+ungranted receipt for a marker only when the marker records no last lease.
+
 A retained, unsettled marker (even malformed or a dangling symlink) blocks future grants;
 read-only observation/replay remains available. Marker persistence failure still
 initiates cancellation and retains the live lock; Forge's T03 durable reservations

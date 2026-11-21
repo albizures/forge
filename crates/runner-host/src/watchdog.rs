@@ -160,7 +160,16 @@ pub fn forward_input(mut input: ChildStdin, state: &Mutex<State>, directory: &Pa
                 .read_until(b'\n', &mut line)?;
             if count == 0 {
                 // Pipe loss cannot renew. Existing authority expires at its
-                // absolute deadline even if a model/tool ignores EOF.
+                // absolute deadline even if a model/tool ignores EOF. Before
+                // any accepted grant, the private pipe was the only channel a
+                // grant could ever arrive on: the issuer is gone, so fence now
+                // and let the original subreaper prove quiescence (T26).
+                if let Ok(mut state) = state.lock()
+                    && state.shutdown.is_none()
+                    && state.policy.last_lease().is_none()
+                {
+                    state.fence("runner-issuer-lost");
+                }
                 return Ok(());
             }
             if count > 1_048_576 || line.last() != Some(&b'\n') {
@@ -499,7 +508,7 @@ pub fn supervise(mut worker: Supervised<'_>, directory: &Path, state: &Mutex<Sta
             });
         }
         if let Some(fence) = &mut fence
-            && quiesce_after_fence(&mut worker, directory, fence, now, &record)
+            && quiesce_after_fence(&mut worker, directory, &owner, fence, now, &record)
         {
             return;
         }
@@ -516,6 +525,7 @@ pub fn supervise(mut worker: Supervised<'_>, directory: &Path, state: &Mutex<Sta
 fn quiesce_after_fence(
     worker: &mut Supervised<'_>,
     directory: &Path,
+    owner: &Owner,
     fence: &mut Fence,
     now: Option<u64>,
     record: &impl Fn(&str, Option<&Lease>, bool) -> Option<String>,
@@ -550,14 +560,19 @@ fn quiesce_after_fence(
         }
         return false;
     }
-    // Proof needs this episode's own marker and an accepted lease to bind.
-    let (Some(marker), Some(lease)) = (&fence.marker, &fence.lease) else {
+    // Proof needs this episode's own marker and the last accepted lease to bind.
+    // A fence before any accepted grant (no lease) binds the owner instead (T26).
+    let Some(marker) = &fence.marker else {
         fence.proof_failed = true;
         return false;
     };
     match worker.fenced_quiescence() {
         Ok(true) => {
-            if crate::fence::record(directory, marker, lease).is_ok() {
+            let recorded = match &fence.lease {
+                Some(lease) => crate::fence::record(directory, marker, lease),
+                None => crate::fence::record_ungranted(directory, marker, owner),
+            };
+            if recorded.is_ok() {
                 eprintln!("runner-watchdog-quiescence-verified");
                 return true;
             }
@@ -571,7 +586,7 @@ fn quiesce_after_fence(
                 fence.unproven_recorded = true;
                 // A surviving worker or escaped descendant: keep the hold.
                 // Proof may still follow if it exits; nothing is signalled.
-                record("quiescence-unproven", Some(lease), false);
+                record("quiescence-unproven", fence.lease.as_ref(), false);
                 eprintln!("runner-watchdog-quiescence-unproven; ownership retained");
             }
             return false;

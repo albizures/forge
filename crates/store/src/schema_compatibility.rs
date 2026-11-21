@@ -18,7 +18,8 @@ use rusqlite::Connection;
 // Revision 22 journals identity-bound revoked execution retirement receipts.
 // Revision 23 retains immutable, idempotent operator follow-up records.
 // Revision 24 distinguishes a removed runtime from an already-absent one in purge history.
-const SCHEMA_REVISION: i64 = 24;
+// Revision 25 journals proven never-granted durable launch reconciliations.
+const SCHEMA_REVISION: i64 = 25;
 const APPLICATION_ID: i64 = 0x464f_5247; // FORG
 
 pub(super) fn validate(connection: &Connection) -> Result<(), RegistrationError> {

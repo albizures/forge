@@ -19,7 +19,9 @@ use forge_app::{
     assignment::BoundIdentity,
     authorization_lease::session::Failure,
     durable_execution::{
-        self, Admission, Launch, Repository as _, Transport, completion::AnswerObservation,
+        self, Admission, Launch, Repository as _, Transport,
+        completion::AnswerObservation,
+        launch_failure::{self, Repository as _},
     },
 };
 use forge_rpc::durable_execution::{
@@ -56,6 +58,43 @@ fn uncertain() -> RegistrationError {
 
 fn invalid(message: &str) -> RegistrationError {
     RegistrationError::new("durable-launch-invalid", message.to_owned())
+}
+
+/// A launch failure point that tests can force (T26). Injection only ever
+/// makes a launch fail at that point; it cannot enable or advance a launch.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum Fault {
+    /// Writing the runner's protected input fails.
+    RuntimeInput,
+    /// The launch intent is refused.
+    LaunchIntent,
+    /// Spawning the matched host fails (before any process exists).
+    Spawn,
+    /// The host's `owned` evidence is treated as invalid.
+    Owned,
+    /// Binding the spawned host fails.
+    Bind,
+    /// The first grant fails.
+    Grant,
+    /// The driver stops making progress after `owned`, before binding: a hung
+    /// daemon, so a test can kill it while the host waits for its first grant.
+    Stall,
+}
+
+/// Forced failure points; empty in every production composition.
+#[derive(Clone, Default)]
+struct Faults(Arc<Mutex<HashSet<Fault>>>);
+
+impl Faults {
+    fn inject(&self, fault: Fault) -> Result<(), RegistrationError> {
+        if self.0.lock().map_or(true, |faults| faults.contains(&fault)) {
+            return Err(RegistrationError::new(
+                "durable-launch-fault",
+                format!("durable launch failed at {fault:?}"),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// The Forge Revision recorded on every new Launch: this build's commit, marked
@@ -377,9 +416,19 @@ pub struct Launcher {
     authority: Arc<DaemonAuthority>,
     retirement: Arc<retirement::Controller>,
     slots: Mutex<HashMap<String, Slot>>,
+    faults: Faults,
 }
 
 impl Launcher {
+    /// Test seam (T26): make every later launch fail at `fault`. It can only
+    /// cause a failure, never enable, skip or advance anything.
+    #[doc(hidden)]
+    pub fn inject_fault(&self, fault: Fault) {
+        if let Ok(mut faults) = self.faults.0.lock() {
+            faults.insert(fault);
+        }
+    }
+
     /// # Errors
     /// Rejects missing matched components, an invalid component hash or an
     /// unavailable fresh daemon identity.
@@ -404,6 +453,7 @@ impl Launcher {
             authority,
             retirement,
             slots: Mutex::new(HashMap::new()),
+            faults: Faults::default(),
         })
     }
 
@@ -536,14 +586,6 @@ impl Launcher {
         let attempt = repository
             .assignment_check_attempt(&id)?
             .ok_or_else(|| invalid("durable launch requires a Check-bound attempt"))?;
-        // Atomic single-launch claim: an earlier attempt (this or a previous daemon
-        // lifetime, or a closed Assignment) is never respawned.
-        if !repository.begin_agent_provision(&id)? {
-            return Err(RegistrationError::new(
-                "durable-launch-claimed",
-                "durable launch was already claimed or the Assignment is closed; observe, recover or retire it",
-            ));
-        }
         let launch = Launch {
             assignment_id: id.clone(),
             operation_id: Self::mint("admit")?,
@@ -558,15 +600,39 @@ impl Launcher {
             runtime_schema: DURABLE_RUNTIME_SCHEMA,
         };
         launch.validate()?;
-        // Admission intent precedes every external effect.
-        let reserved = repository.reserve(&workspace, &launch)?;
+        // One transaction: the single-launch claim and the admission intent
+        // (T26). An earlier attempt (this or a previous daemon lifetime, or a
+        // closed Assignment) is never respawned, and a refused precondition
+        // leaves no claim behind.
+        let Some(reserved) = repository.claim(&workspace, &launch)? else {
+            return Err(RegistrationError::new(
+                "durable-launch-claimed",
+                "durable launch was already claimed or the Assignment is closed; observe, recover or retire it",
+            ));
+        };
         if reserved.launch != launch || reserved.admission != Admission::Pending {
             return Err(uncertain());
         }
-        let directory = runtime_directory::mapped(&repository, &workspace, &launch, true)?;
+        // From here every failure keeps its specific diagnostic (T26).
+        let failed = |failure: launch_failure::Failure, error: RegistrationError| {
+            if repository
+                .record_launch_failure(&workspace, &launch, failure)
+                .is_err()
+            {
+                tracing::warn!(
+                    assignment_id = %launch.assignment_id,
+                    code = failure.code(),
+                    "durable launch failure could not be retained"
+                );
+            }
+            error
+        };
+        let directory = runtime_directory::mapped(&repository, &workspace, &launch, true)
+            .map_err(|error| failed(launch_failure::Failure::RuntimeInput, error))?;
         if directory.starts_with(&cwd) || cwd.starts_with(&directory) {
-            return Err(invalid(
-                "runtime storage must be separate from the Managed Worktree",
+            return Err(failed(
+                launch_failure::Failure::RuntimeInput,
+                invalid("runtime storage must be separate from the Managed Worktree"),
             ));
         }
         let bound = BoundIdentity {
@@ -582,40 +648,55 @@ impl Launcher {
             execution_directory: cwd.clone(),
             provider_workspace: None,
         };
-        forge_runner_host::check_runtime::write(
-            &directory,
-            &CheckRuntimeInput {
-                version: CHECK_RUNTIME_VERSION,
-                launch: launch.clone(),
-                generation: attempt.generation,
-                bound,
-                configuration: prepared.configuration,
-                credential_file: prepared.credential_file,
-                capability: CheckCapability {
-                    assignment_id: id.clone(),
-                    daemon_url: delivery.endpoint.clone(),
-                    secret_file: delivery.secret_file.clone(),
-                    forge_cli: delivery.cli_path.clone(),
-                },
-            },
-        )?;
-        if !repository.begin_agent_launch(&id, now_millis()?)? {
-            return Err(uncertain());
+        self.faults
+            .inject(Fault::RuntimeInput)
+            .and_then(|()| {
+                forge_runner_host::check_runtime::write(
+                    &directory,
+                    &CheckRuntimeInput {
+                        version: CHECK_RUNTIME_VERSION,
+                        launch: launch.clone(),
+                        generation: attempt.generation,
+                        bound,
+                        configuration: prepared.configuration,
+                        credential_file: prepared.credential_file,
+                        capability: CheckCapability {
+                            assignment_id: id.clone(),
+                            daemon_url: delivery.endpoint.clone(),
+                            secret_file: delivery.secret_file.clone(),
+                            forge_cli: delivery.cli_path.clone(),
+                        },
+                    },
+                )
+            })
+            .map_err(|error| failed(launch_failure::Failure::RuntimeInput, error))?;
+        if self.faults.inject(Fault::LaunchIntent).is_err()
+            || !repository
+                .begin_agent_launch(&id, now_millis()?)
+                .map_err(|error| failed(launch_failure::Failure::LaunchIntent, error))?
+        {
+            return Err(failed(launch_failure::Failure::LaunchIntent, uncertain()));
         }
         let c = &self.settings.components;
-        let child = Command::new(&c.host)
-            .args(&c.host_arguments)
-            .args([&directory, &cwd, &c.node, &c.runner])
-            .env_clear()
-            .current_dir(&directory)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|_| uncertain())?;
+        let spawned = self.faults.inject(Fault::Spawn).and_then(|()| {
+            Command::new(&c.host)
+                .args(&c.host_arguments)
+                .args([&directory, &cwd, &c.node, &c.runner])
+                .env_clear()
+                .current_dir(&directory)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|_| uncertain())
+        });
+        // A failed spawn leaves no process: `Command::spawn` reports exec
+        // failure only after the forked child is gone.
+        let child = spawned.map_err(|error| failed(launch_failure::Failure::Spawn, error))?;
         let state = Arc::new(Mutex::new(DriverState::Live(AgentObservation::Working)));
         let (stop, stops) = mpsc::channel();
         let driver = Driver {
+            faults: self.faults.clone(),
             settings: self.settings.clone(),
             authority: self.authority.clone(),
             retirement: self.retirement.clone(),
@@ -712,6 +793,7 @@ fn outputs(source: impl Read + Send + 'static) -> Receiver<Result<RunnerOutput, 
 }
 
 struct Driver {
+    faults: Faults,
     settings: Settings,
     authority: Arc<DaemonAuthority>,
     retirement: Arc<retirement::Controller>,
@@ -749,18 +831,49 @@ impl Driver {
         }
     }
 
+    /// Retain the specific failure point (T26) beside the generic fence.
+    fn failed(&self, repository: &SqliteProjectRepository, failure: launch_failure::Failure) {
+        if repository
+            .record_launch_failure(&self.workspace, &self.launch, failure)
+            .is_err()
+        {
+            tracing::warn!(
+                assignment_id = %self.launch.assignment_id,
+                code = failure.code(),
+                "durable launch failure could not be retained"
+            );
+        }
+    }
+
+    /// A launch that failed before any grant reached its host (T26). Close the
+    /// private pipe: the host fences on the lost issuer, stops its worker and,
+    /// as subreaper, writes its exact ungranted receipt before exiting. A
+    /// granted host instead reaches lease expiry and its T25 receipt. Either
+    /// way the original Child is reaped here, never dropped live, and nothing
+    /// is signalled or adopted. Retirement then needs that host's own proof.
+    fn abandon(self, mut child: Child) {
+        self.set(DriverState::Ended);
+        drop(child.stdin.take());
+        // Dropping the driver closes its stop channel, so retirement never
+        // waits on this thread.
+        drop(self);
+        let _ = child.wait();
+    }
+
+    #[allow(clippy::too_many_lines)] // One ordered sequence; every failure point reaps the host.
     fn run(self, mut child: Child) {
         let Ok(repository) = SqliteProjectRepository::open(&self.settings.database) else {
-            self.set(DriverState::Ended);
             tracing::warn!(
                 code = "durable-launch-store-unavailable",
                 "durable launch fenced"
             );
+            self.abandon(child);
             return;
         };
         let Some(stdout) = child.stdout.take() else {
             self.retain(&repository, Failure::AuthorityUnavailable);
-            self.set(DriverState::Ended);
+            self.failed(&repository, launch_failure::Failure::Owned);
+            self.abandon(child);
             return;
         };
         let output = outputs(stdout);
@@ -769,19 +882,27 @@ impl Driver {
             output.recv_timeout(OWNED_TIMEOUT),
             Ok(Ok(RunnerOutput::Event(RunnerEvent::Owned { ref compatibility, .. })))
                 if compatibility.validate(&self.launch.component_hash).is_ok()
-        );
+        ) && self.faults.inject(Fault::Owned).is_ok();
         if !owned {
             self.retain(&repository, Failure::AuthorityUnavailable);
-            self.set(DriverState::Ended);
+            self.failed(&repository, launch_failure::Failure::Owned);
+            self.abandon(child);
             return;
         }
-        let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+        while self.faults.inject(Fault::Stall).is_err() {
+            std::thread::sleep(POLL);
+        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
-            .build()
-        else {
-            self.retain(&repository, Failure::AuthorityUnavailable);
-            self.set(DriverState::Ended);
-            return;
+            .build();
+        let runtime = match runtime {
+            Ok(runtime) if self.faults.inject(Fault::Bind).is_ok() => runtime,
+            _ => {
+                self.retain(&repository, Failure::AuthorityUnavailable);
+                self.failed(&repository, launch_failure::Failure::Bind);
+                self.abandon(child);
+                return;
+            }
         };
         let bound = runtime.block_on(self.authority.bind_inspected(
             &repository,
@@ -791,9 +912,12 @@ impl Driver {
             &mut child,
         ));
         let (exit, pipe) = match bound {
-            // `bind_inspected` already retained its failure and fenced the session.
+            // `bind_inspected` already retained its failure, fenced the session
+            // and closed the private pipe with its dropped Authorization.
             Err(_) => {
-                self.set(DriverState::Ended);
+                self.failed(&repository, launch_failure::Failure::Bind);
+                drop(runtime);
+                self.abandon(child);
                 return;
             }
             Ok(authorization) => {
@@ -846,23 +970,16 @@ impl Driver {
                 // Issuer loss is not a stop: never fabricate a stop/hold here. Reap
                 // the host after it records its crash receipt; recovery requires
                 // that exact proof, never this observation.
-                reap(&mut child);
                 self.set(DriverState::Crashed);
+                drop(self);
+                let _ = child.wait();
             }
             Exit::Ended => {
-                reap(&mut child);
+                // Never drop a live host: wait however long its own proof takes.
                 self.set(DriverState::Ended);
+                drop(self);
+                let _ = child.wait();
             }
-        }
-    }
-}
-
-fn reap(child: &mut Child) {
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while Instant::now() < deadline {
-        match child.try_wait() {
-            Ok(Some(_)) | Err(_) => return,
-            Ok(None) => std::thread::sleep(POLL),
         }
     }
 }
@@ -983,7 +1100,13 @@ impl Live<'_, '_> {
 
     fn supervise(&mut self) -> Exit {
         // The first grant must reach the host before any admission request.
-        if self.renew_if_due().is_err() {
+        let granted =
+            self.driver.faults.inject(Fault::Grant).is_ok() && self.renew_if_due().is_ok();
+        if !granted {
+            self.driver
+                .retain(self.repository, Failure::AuthorityUnavailable);
+            self.driver
+                .failed(self.repository, launch_failure::Failure::Grant);
             return self.wait_fenced();
         }
         let repository = self.repository;

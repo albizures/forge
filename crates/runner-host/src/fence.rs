@@ -20,6 +20,7 @@ use std::{
 /// The first fence marker of a runtime directory.
 pub(crate) const MARKER: &str = "watchdog.json";
 const RECEIPT_PREFIX: &str = "watchdog-receipt-";
+const UNGRANTED_PREFIX: &str = "ungranted-receipt-";
 const MAX_BYTES: u64 = 65_536;
 
 /// The per-episode marker used when an earlier episode's `watchdog.json` exists.
@@ -58,6 +59,29 @@ pub fn is_marker(name: &str) -> bool {
             })
 }
 
+fn ungranted_name(owner: &Owner) -> String {
+    format!(
+        "{UNGRANTED_PREFIX}{}-{}.json",
+        owner.host_pid, owner.host_start
+    )
+}
+
+/// `ungranted-receipt-<host pid>-<host start>.json`: proof from a host whose
+/// fence came before any accepted grant (T26).
+#[must_use]
+pub fn is_ungranted_receipt(name: &str) -> bool {
+    name.strip_prefix(UNGRANTED_PREFIX)
+        .and_then(|rest| rest.strip_suffix(".json"))
+        .and_then(|rest| rest.split_once('-'))
+        .is_some_and(|(pid, start)| {
+            canonical(pid)
+                && pid != "0"
+                && pid.parse::<u32>().is_ok()
+                && canonical(start)
+                && start.parse::<u64>().is_ok()
+        })
+}
+
 /// `watchdog-receipt-<lease sequence>.json`.
 #[must_use]
 pub fn is_receipt(name: &str) -> bool {
@@ -76,6 +100,19 @@ pub struct Receipt {
     pub marker: String,
     pub marker_contents: String,
     pub lease: Lease,
+    pub children_absent: bool,
+}
+
+/// Protected post-fence proof from a host that never accepted any grant: the
+/// fence marker names this owner and no last lease. It proves only that this
+/// host's worker and every descendant are gone; it never authorizes anything.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UngrantedReceipt {
+    pub version: u32,
+    pub marker: String,
+    pub marker_contents: String,
+    pub owner: Owner,
     pub children_absent: bool,
 }
 
@@ -110,6 +147,73 @@ fn bound(directory: &Path, receipt: &Receipt) -> io::Result<()> {
         return Err(invalid());
     }
     Ok(())
+}
+
+/// The ungranted marker must name exactly this owner and no lease, unchanged.
+fn bound_ungranted(directory: &Path, receipt: &UngrantedReceipt) -> io::Result<()> {
+    if receipt.version != 1 || !receipt.children_absent || !is_marker(&receipt.marker) {
+        return Err(invalid());
+    }
+    let bytes = read(&directory.join(&receipt.marker))?;
+    if bytes != receipt.marker_contents.as_bytes() {
+        return Err(invalid());
+    }
+    let marker: Marker = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+    if marker.owner != receipt.owner || marker.last_lease.is_some() {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+/// Written only by the original supervisor whose policy never accepted a grant,
+/// after `Supervised::fenced_quiescence`.
+pub(crate) fn record_ungranted(directory: &Path, marker: &str, owner: &Owner) -> io::Result<()> {
+    let contents = String::from_utf8(read(&directory.join(marker))?).map_err(|_| invalid())?;
+    let receipt = UngrantedReceipt {
+        version: 1,
+        marker: marker.into(),
+        marker_contents: contents,
+        owner: owner.clone(),
+        children_absent: true,
+    };
+    bound_ungranted(directory, &receipt)?;
+    crate::retirement::persist(directory, &ungranted_name(owner), &receipt)
+}
+
+/// Read the exact ungranted receipt of the host recorded in protected
+/// `owner.json`, under separately held exclusive inspection. The receipt owner
+/// must be that recorded host and worker, and the lock identity the owner's.
+/// Proves only this host's quiescence before any grant; it authorizes nothing.
+/// # Errors
+/// Missing, partial, foreign-owner or tampered evidence, or a changed marker.
+pub fn ungranted_receipt(directory: &Path) -> io::Result<UngrantedReceipt> {
+    crate::directory(directory)?;
+    let recorded = crate::record(directory)?;
+    let host = &recorded.owner;
+    let lock = protected_file(&directory.join("owner.lock"))?.metadata()?;
+    if lock.dev().to_string() != host.lock_device || lock.ino().to_string() != host.lock_inode {
+        return Err(invalid());
+    }
+    let name = format!(
+        "{UNGRANTED_PREFIX}{}-{}.json",
+        host.host_pid, host.host_start
+    );
+    let receipt: UngrantedReceipt =
+        serde_json::from_slice(&read(&directory.join(&name))?).map_err(|_| invalid())?;
+    let owner = &receipt.owner;
+    if owner.host_pid != host.host_pid
+        || owner.host_start != host.host_start
+        || owner.boot_id != host.boot_id
+        || owner.lock_device != host.lock_device
+        || owner.lock_inode != host.lock_inode
+        || owner.worker_pid != recorded.worker_pid
+        || owner.worker_start != recorded.worker_start
+        || name != ungranted_name(owner)
+    {
+        return Err(invalid());
+    }
+    bound_ungranted(directory, &receipt)?;
+    Ok(receipt)
 }
 
 /// Written only by the original supervisor, after `Supervised::fenced_quiescence`.
@@ -182,6 +286,15 @@ pub fn settled(directory: &Path) -> io::Result<()> {
             return Err(invalid());
         }
         bound(directory, &receipt)?;
+        receipts.push(receipt.marker);
+    }
+    for name in names.iter().filter(|name| is_ungranted_receipt(name)) {
+        let receipt: UngrantedReceipt =
+            serde_json::from_slice(&read(&directory.join(name))?).map_err(|_| invalid())?;
+        if *name != ungranted_name(&receipt.owner) {
+            return Err(invalid());
+        }
+        bound_ungranted(directory, &receipt)?;
         receipts.push(receipt.marker);
     }
     for marker in names.iter().filter(|name| is_marker(name)) {

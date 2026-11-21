@@ -1366,6 +1366,14 @@ impl AgentAssignmentInfo {
         }) {
             blockers.push("interrupted-effect".into());
         }
+        // The specific failure point of a failed durable launch (T26).
+        for resource in &self.resources {
+            if resource.resource_kind == "durable-launch-failure"
+                && resource.retired_at_millis.is_none()
+            {
+                blockers.push(resource.resource_id.clone());
+            }
+        }
         if self.assignment.closed_at_millis.is_none()
             && matches!(
                 self.assignment.state,

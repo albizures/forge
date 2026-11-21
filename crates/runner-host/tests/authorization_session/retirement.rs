@@ -612,3 +612,95 @@ fn lease_expiry_without_restart_reconciles_retirement_through_fence_receipt() {
         retirement
     );
 }
+
+/// T26: a launch that never received a grant retires only with its original
+/// host's ungranted receipt. A killed host, or one whose worker still holds the
+/// lock, keeps capacity with a specific code; nothing is adopted or signalled.
+#[test]
+fn never_granted_launch_retires_only_with_the_hosts_ungranted_receipt() {
+    use forge_app::AgentDispatchRepository as _;
+    let refused = |f: &Fixture, code: &str| {
+        let error = app(f, Arc::new(Controller::default()))
+            .retire_agent_assignment("assignment")
+            .unwrap_err();
+        assert!(error.message.contains(code), "{code}: {error:?}");
+        assert!(
+            open(&f.database)
+                .agent_assignment_info("assignment")
+                .unwrap()
+                .capacity_reserved()
+        );
+    };
+    // The host is killed before any grant, so it never proves quiescence.
+    // (While its worker still holds the lock, the code is the T25
+    // `durable-runtime-owner-active`.) Once the worker is gone too, nobody
+    // proved it: still refused, with the specific T26 code.
+    let mut f = Fixture::new("model");
+    assert!(
+        open(&f.database)
+            .begin_agent_launch("assignment", 1)
+            .unwrap()
+    );
+    f.child.kill().unwrap();
+    f.child.wait().unwrap();
+    let worker = i32::try_from(f.evidence["worker_pid"].as_u64().unwrap()).unwrap();
+    let group = rustix::process::Pid::from_raw(worker).unwrap();
+    // The orphaned worker may already have exited on its own closed input.
+    let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+    while Path::new(&format!("/proc/{worker}")).exists() {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    refused(&f, "durable-launch-ungranted-unproven");
+
+    // The original host loses its pipe and proves its own quiescence.
+    let mut f = Fixture::new("model");
+    assert!(
+        open(&f.database)
+            .begin_agent_launch("assignment", 1)
+            .unwrap()
+    );
+    drop(f.child.stdin.take());
+    diagnostic(&f.errors, "runner-watchdog-quiescence-verified");
+    assert!(f.child.wait().unwrap().success());
+    app(&f, Arc::new(Controller::default()))
+        .retire_agent_assignment("assignment")
+        .unwrap();
+    let retired = open(&f.database)
+        .agent_assignment_info("assignment")
+        .unwrap();
+    assert!(!retired.capacity_reserved(), "{retired:?}");
+    app(&f, Arc::new(Controller::default()))
+        .retire_agent_assignment("assignment")
+        .unwrap();
+    assert_eq!(
+        open(&f.database)
+            .agent_assignment_info("assignment")
+            .unwrap(),
+        retired
+    );
+}
+
+/// T26: a pre-T26 launch claim without a reserved runtime is discharged once
+/// revoked, through the ordinary operator retirement.
+#[test]
+fn unreserved_launch_claim_is_retired_through_the_adapter() {
+    use forge_app::AgentDispatchRepository as _;
+    let f = Fixture::new("model");
+    // A second Assignment with only the legacy claim.
+    let store = open(&f.database);
+    store
+        .close_agent_assignment(
+            "assignment",
+            forge_app::AgentAssignmentClosureReason::Retired,
+        )
+        .unwrap();
+    let (record, _) = Fixture::create_second_assignment(&store);
+    assert!(store.begin_agent_provision("legacy").unwrap());
+    app(&f, Arc::new(Controller::default()))
+        .retire_agent_assignment("legacy")
+        .unwrap();
+    let info = open(&f.database).agent_assignment_info("legacy").unwrap();
+    assert!(!info.capacity_reserved(), "{info:?}");
+    assert!(info.resources.iter().all(|r| r.retired_at_millis.is_some()));
+    assert!(open(&f.database).dispatch_hold(record).unwrap().is_some());
+}

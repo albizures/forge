@@ -31,10 +31,11 @@ export function workerOwner(directory: string): Owner {
 }
 const FENCE_MARKER = /^watchdog(?:-[1-9][0-9]*-(?:0|[1-9][0-9]*)-fence)?\.json$/;
 const FENCE_RECEIPT = /^watchdog-receipt-[1-9][0-9]*\.json$/;
+const UNGRANTED_RECEIPT = /^ungranted-receipt-[1-9][0-9]*-(?:0|[1-9][0-9]*)\.json$/;
 
 /** Defense in depth beside the host's authoritative check: every watchdog fence
  * marker must be settled by its original host's post-fence quiescence receipt
- * (exact marker bytes). A settled marker is history; it grants nothing. */
+ * (exact marker bytes), or, for a fence before any grant, its ungranted receipt. A settled marker is history; it grants nothing. */
 export function unblocked(directory: string): void {
   try {
     const names = readdirSync(directory);
@@ -47,6 +48,16 @@ export function unblocked(directory: string): void {
         && FENCE_MARKER.test(receipt.marker) && name === `watchdog-receipt-${receipt.lease?.sequence}.json`
         && lstatSync(join(directory, receipt.marker)).isFile()
         && readFileSync(join(directory, receipt.marker), 'utf8') === receipt.marker_contents) settled.add(receipt.marker);
+    }
+    // T26: a host fenced before any grant proves its quiescence bound to its
+    // owner; its marker must record no last lease.
+    for (const name of names.filter(name => UNGRANTED_RECEIPT.test(name))) {
+      const receipt = JSON.parse(readFileSync(join(directory, name), 'utf8'));
+      if (receipt?.version === 1 && receipt.children_absent === true && typeof receipt.marker === 'string'
+        && FENCE_MARKER.test(receipt.marker) && name === `ungranted-receipt-${receipt.owner?.host_pid}-${receipt.owner?.host_start}.json`
+        && lstatSync(join(directory, receipt.marker)).isFile()
+        && readFileSync(join(directory, receipt.marker), 'utf8') === receipt.marker_contents
+        && JSON.parse(receipt.marker_contents)?.last_lease === null) settled.add(receipt.marker);
     }
     if (markers.every(marker => settled.has(marker))) return;
   } catch { /* unreadable evidence is a fence */ }

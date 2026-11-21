@@ -41,3 +41,23 @@ test('fence markers block unless each is settled by its own exact receipt', asyn
   await writeFile(join(directory, 'watchdog-receipt-5.json'), 'not json');
   denied();
 });
+
+test('an ungranted fence is settled only by its owner-bound receipt with no last lease', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'forge-fence-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const denied = () => assert.throws(() => unblocked(directory), { code: 'assignment-lease-denied' });
+  const ungranted = JSON.stringify({ version: 1, code: 'runner-issuer-lost', owner: { host_pid: 7, host_start: '99' }, last_lease: null, cleanup: 'unverified' }) + '\n';
+  const proof = (contents, owner = { host_pid: 7, host_start: '99' }) => JSON.stringify({
+    version: 1, marker: 'watchdog.json', marker_contents: contents, owner, children_absent: true,
+  });
+  await writeFile(join(directory, 'watchdog.json'), ungranted);
+  denied();
+  await writeFile(join(directory, 'ungranted-receipt-7-99.json'), proof(ungranted));
+  unblocked(directory);
+  // A misnamed receipt, or one bound to a marker that names a lease, is not proof.
+  await writeFile(join(directory, 'ungranted-receipt-7-99.json'), proof(ungranted, { host_pid: 8, host_start: '99' }));
+  denied();
+  await writeFile(join(directory, 'watchdog.json'), marker);
+  await writeFile(join(directory, 'ungranted-receipt-7-99.json'), proof(marker));
+  denied();
+});

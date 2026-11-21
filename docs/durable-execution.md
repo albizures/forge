@@ -356,6 +356,47 @@ host, and retirement reports a specific code:
   processes by PID alone unless you have identified them. When the descendant ends, the host
   writes its receipt; then repeat the same command.
 
+### Failed launches
+
+A durable launch that fails after its claim never strands the Assignment (T26). The launch
+claim (`provision-intent`) and the reserved runtime identity commit in one transaction:
+either both exist or neither does, so a refused precondition (a stale binding, a closed
+Assignment) leaves nothing behind. A claimed Assignment is never respawned
+(`durable-launch-claimed`). Each later failure keeps a specific diagnostic, shown in
+`assignment-status` under `retirement_blockers` (and as `launch-failed` under uncertainty):
+
+| Code | Failure point |
+| --- | --- |
+| `durable-launch-runtime-input-failed` | Protected runtime storage or `check-runtime.json` was not written. |
+| `durable-launch-intent-refused` | The launch intent was refused (the Assignment closed or moved on). |
+| `durable-launch-spawn-failed` | The matched host could not be spawned. |
+| `durable-launch-owned-invalid` | The host sent no valid `owned` evidence for the matched components. |
+| `durable-launch-bind-failed` | The spawned host could not be bound through the interrupted-effect gate. |
+| `durable-launch-grant-failed` | The first grant could not be committed or delivered. |
+
+The daemon never drops a live host. After a failure before any grant, it closes the host's
+private pipe and reaps it. The host treats the closed pipe as a lost issuer: it fences
+(`watchdog.json` with code `runner-issuer-lost` and no last lease), stops its runner, proves
+as subreaper that no descendant remains, writes `ungranted-receipt-<pid>-<start>.json` and
+exits. The same happens when the launching daemon dies before the first grant.
+
+`assignment-retire` then reconciles with the strongest available proof and releases capacity:
+
+- **No launch intent was committed:** Forge's own records prove that no host was ever spawned.
+  Any prepared storage must also seal (`launch-sealed.json`) so no host can own it later; a
+  host that holds it anyway blocks this proof.
+- **The launch intent was committed but no host ever owned the directory** (for example, a
+  failed spawn): the directory is sealed under its exclusive lock, with no owner evidence.
+- **A host owned it but never received a grant:** its exact ungranted receipt.
+- **A grant was committed, or the host is still held by this daemon:** the ordinary paths above
+  (host retirement receipt, crash proof or fence receipt).
+
+Exact retries return the original result. Until proof exists, retirement reports
+`durable-runtime-owner-active`, `durable-runtime-fence-unproven` or
+`durable-launch-ungranted-unproven` (a host owned the directory before any grant but did not
+prove quiescence, for example because it was killed). As above, investigate rather than delete
+evidence. A reconciled failed launch can then be purged with `assignment-purge-runtime`.
+
 Plan for an Assignment to need recovery or retirement after any daemon outage longer than a
 grant. Under the trusted-local-host boundary, both are available once the original host has
 proven quiescence.

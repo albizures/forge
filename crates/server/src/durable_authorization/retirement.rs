@@ -43,6 +43,26 @@ fn unproven(directory: &std::path::Path) -> RegistrationError {
     }
 }
 
+/// Reap a directly spawned host on a dedicated thread, however long it takes to
+/// prove its own quiescence and exit. Never signals it and never drops it live.
+pub(super) fn reap_detached(mut child: Child) {
+    drop(child.stdin.take());
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+}
+
+/// A never-granted launch whose host left ownership evidence without proof.
+fn ungranted_unproven(directory: &std::path::Path) -> RegistrationError {
+    match unproven(directory) {
+        error if error.code == "durable-retirement-unverified" => RegistrationError::new(
+            "durable-launch-ungranted-unproven",
+            "the failed launch's host never received a grant but has not proven that its worker and descendants are gone; capacity stays reserved. Investigate the runtime directory's watchdog diagnostics",
+        ),
+        error => error,
+    }
+}
+
 struct Owned {
     child: Child,
     pipe: ControlPipe,
@@ -93,6 +113,8 @@ impl Controller {
     /// driver. The pipe is the original channel, retained from Authorization.
     /// # Errors
     /// Rejects unsafe ownership, duplicate registration or foreign runtime mapping.
+    /// A rejected handoff never drops a live host: the private pipe closes (the
+    /// host fences and proves quiescence itself) and the Child is reaped (T26).
     pub fn register(
         &self,
         repository: &SqliteProjectRepository,
@@ -101,10 +123,25 @@ impl Controller {
         mut child: Child,
         pipe: ControlPipe,
     ) -> Result<(), RegistrationError> {
-        let path = runtime_directory::mapped(repository, workspace, &launch, false)?;
-        let owner = SpawnedOwner::capture(&mut child, &path)?.observe()?.owner;
-        let mut owners = self.owners.lock().map_err(|_| uncertain())?;
+        let owner = runtime_directory::mapped(repository, workspace, &launch, false)
+            .and_then(|path| Ok(SpawnedOwner::capture(&mut child, &path)?.observe()?.owner));
+        let owner = match owner {
+            Ok(owner) => owner,
+            Err(error) => {
+                drop(pipe);
+                reap_detached(child);
+                return Err(error);
+            }
+        };
+        let Ok(mut owners) = self.owners.lock() else {
+            drop(pipe);
+            reap_detached(child);
+            return Err(uncertain());
+        };
         if owners.contains_key(&launch.assignment_id) {
+            drop(owners);
+            drop(pipe);
+            reap_detached(child);
             return Err(uncertain());
         }
         owners.insert(
@@ -148,7 +185,7 @@ impl Controller {
             return Ok(false);
         }
         let components = self.inspection(&operation.launch)?;
-        super::effects::inspect_retirement(
+        inspect_effects(
             repository,
             workspace,
             &operation.launch,
@@ -170,6 +207,177 @@ impl Controller {
         Ok(true)
     }
 
+    /// A host that never accepted any grant, under the operation recorded for
+    /// it: its exact ungranted receipt, bound to the same owner, every fence
+    /// settled and no host retirement in flight.
+    /// Host-written proof for the recorded operation without a live handoff:
+    /// crash or fence proof for the exact last lease or, for an unowned host
+    /// that never accepted a grant, its exact ungranted receipt (T26) — such a
+    /// host whose retirement request was lost with its daemon fenced on the
+    /// closed pipe instead.
+    fn reconcile_recorded(
+        &self,
+        repository: &SqliteProjectRepository,
+        workspace: &str,
+        directory: &std::path::Path,
+        operation: &Operation,
+        last: Option<&forge_app::authorization_lease::Lease>,
+        unowned: bool,
+    ) -> Result<bool, RegistrationError> {
+        match last {
+            Some(last) => self.reconcile_proof(repository, workspace, directory, operation, last),
+            None if unowned => {
+                reconcile_ungranted_owner(repository, workspace, directory, operation)
+            }
+            None => Ok(false),
+        }
+    }
+}
+
+fn reconcile_ungranted_owner(
+    repository: &SqliteProjectRepository,
+    workspace: &str,
+    directory: &std::path::Path,
+    operation: &Operation,
+) -> Result<bool, RegistrationError> {
+    let Ok(guard) = ExclusiveInspection::acquire(directory) else {
+        return Ok(false);
+    };
+    match std::fs::symlink_metadata(directory.join("retirement-intent.json")) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        _ => return Ok(false),
+    }
+    let Ok(receipt) = forge_runner_host::fence::ungranted_receipt(directory) else {
+        return Ok(false);
+    };
+    if receipt.owner != operation.owner || forge_runner_host::fence::settled(directory).is_err() {
+        return Ok(false);
+    }
+    guard.verify().map_err(|_| uncertain())?;
+    repository.reconcile_retirement(
+        workspace,
+        &Receipt {
+            version: 1,
+            operation: operation.clone(),
+            children_absent: true,
+        },
+    )?;
+    Ok(true)
+}
+
+/// T26: retire a launch that never received a grant and that no live host
+/// of this daemon still holds. Proof, strongest first:
+/// - no launch intent was committed, so nothing was ever spawned;
+/// - the original host's exact ungranted quiescence receipt;
+/// - a sealed directory that no host ever owned (and never can).
+///
+/// Otherwise a specific code keeps the Assignment visibly blocked.
+fn reconcile_ungranted(
+    repository: &SqliteProjectRepository,
+    workspace: &str,
+    launch: &Launch,
+) -> Result<(), RegistrationError> {
+    use forge_app::{
+        AgentDispatchRepository as _,
+        durable_execution::launch_failure::{Proof, Repository as _},
+    };
+    if repository
+        .agent_launch_intent(&launch.assignment_id)?
+        .is_none()
+    {
+        // The store proves no production launch spawned a host. Defense in
+        // depth: any prepared storage must also seal as never owned, so a host
+        // that exists anyway (any path outside the launch intent) blocks this.
+        let sealed = match runtime_directory::mapped(repository, workspace, launch, false) {
+            Ok(directory) => Some(
+                forge_runner_host::seal::seal(&directory)
+                    .map_err(|_| ungranted_unproven(&directory))?,
+            ),
+            Err(_) => None,
+        };
+        repository.reconcile_ungranted_launch(workspace, launch, Proof::NeverLaunched)?;
+        drop(sealed);
+        return Ok(());
+    }
+    let directory = runtime_directory::mapped(repository, workspace, launch, false)?;
+    if let Ok(guard) = ExclusiveInspection::acquire(&directory)
+        && std::fs::symlink_metadata(directory.join("owner.json")).is_ok()
+    {
+        let proven = forge_runner_host::fence::ungranted_receipt(&directory).is_ok()
+            && forge_runner_host::fence::settled(&directory).is_ok();
+        if !proven {
+            // Release the inspection lock first: the diagnosis probes it.
+            drop(guard);
+            return Err(ungranted_unproven(&directory));
+        }
+        guard.verify().map_err(|_| uncertain())?;
+        return repository.reconcile_ungranted_launch(
+            workspace,
+            launch,
+            Proof::UngrantedQuiescence,
+        );
+    }
+    match forge_runner_host::seal::seal(&directory) {
+        Ok(guard) => {
+            repository.reconcile_ungranted_launch(workspace, launch, Proof::NeverOwned)?;
+            drop(guard);
+            Ok(())
+        }
+        Err(_) => Err(ungranted_unproven(&directory)),
+    }
+}
+
+/// Committed interrupted-effect inspection before reconciliation. A launch
+/// whose admission was never sent and that has no runtime store has nothing to
+/// inspect: the same fresh-storage check gates its first grant (T26).
+fn inspect_effects(
+    repository: &SqliteProjectRepository,
+    workspace: &str,
+    launch: &Launch,
+    components: &super::operator::InspectionComponents,
+    directory: &std::path::Path,
+    guard: &ExclusiveInspection,
+) -> Result<(), RegistrationError> {
+    if !super::effect_admission::has_database(directory)?
+        && repository
+            .runtime(workspace, &launch.assignment_id)?
+            .is_some_and(|runtime| {
+                runtime.admission == forge_app::durable_execution::Admission::Pending
+            })
+    {
+        return super::effect_admission::require_fresh(repository, workspace, launch, directory);
+    }
+    super::effects::inspect_retirement(repository, workspace, launch, components, directory, guard)
+}
+
+/// Journal a new retirement operation for the directly spawned host this
+/// daemon holds, or else for the owner of the last committed grant.
+fn begin(
+    repository: &SqliteProjectRepository,
+    workspace: &str,
+    launch: &Launch,
+    owned: Option<&Arc<Mutex<Owned>>>,
+    last: Option<&forge_app::authorization_lease::Lease>,
+) -> Result<Operation, RegistrationError> {
+    let identity = if let Some(owned) = owned {
+        let owned = owned.lock().map_err(|_| uncertain())?;
+        if owned.fenced || owned.launch != *launch {
+            return Err(uncertain());
+        }
+        owned.owner.clone()
+    } else {
+        last.ok_or_else(uncertain)?.owner.clone()
+    };
+    let operation = Operation {
+        operation_id: format!("{}-retire", launch.operation_id),
+        launch: launch.clone(),
+        owner: identity,
+    };
+    repository.begin_retirement(workspace, &operation)?;
+    Ok(operation)
+}
+
+impl Controller {
     /// Called only after application's durable revocation. Retained receipt
     /// reconciliation after restart performs no process adoption or signalling.
     /// # Errors
@@ -188,7 +396,6 @@ impl Controller {
         {
             return Ok(());
         }
-        let directory = runtime_directory::mapped(repository, workspace, launch, false)?;
         let owned = self
             .owners
             .lock()
@@ -196,29 +403,24 @@ impl Controller {
             .get(&launch.assignment_id)
             .cloned();
         let last = repository.revoked_lease(workspace, launch)?;
-        let operation = if let Some(existing) = existing {
-            existing.operation
-        } else {
-            let identity = if let Some(owned) = &owned {
-                let owned = owned.lock().map_err(|_| uncertain())?;
-                if owned.fenced || owned.launch != *launch {
-                    return Err(uncertain());
-                }
-                owned.owner.clone()
-            } else {
-                last.as_ref().ok_or_else(uncertain)?.owner.clone()
-            };
-            let operation = Operation {
-                operation_id: format!("{}-retire", launch.operation_id),
-                launch: launch.clone(),
-                owner: identity,
-            };
-            repository.begin_retirement(workspace, &operation)?;
-            operation
+        // T26: a launch that never received a grant and that no live host of
+        // this daemon still holds has narrower proof than host retirement.
+        if existing.is_none() && owned.is_none() && last.is_none() {
+            return reconcile_ungranted(repository, workspace, launch);
+        }
+        let directory = runtime_directory::mapped(repository, workspace, launch, false)?;
+        let operation = match existing {
+            Some(existing) => existing.operation,
+            None => begin(repository, workspace, launch, owned.as_ref(), last.as_ref())?,
         };
-        if let Some(last) = last
-            && self.reconcile_proof(repository, workspace, &directory, &operation, &last)?
-        {
+        if self.reconcile_recorded(
+            repository,
+            workspace,
+            &directory,
+            &operation,
+            last.as_ref(),
+            owned.is_none(),
+        )? {
             return Ok(());
         }
         if let Some(owned) = &owned {
@@ -272,7 +474,7 @@ impl Controller {
             })?;
         guard.verify().map_err(|_| uncertain())?;
         let components = self.inspection(launch)?;
-        super::effects::inspect_retirement(
+        inspect_effects(
             repository,
             workspace,
             launch,
@@ -443,7 +645,16 @@ impl AgentDispatchAdapter for Adapter {
         _: &dyn AgentDispatchRepository,
     ) -> Result<(), AgentAdapterError> {
         let run = || {
-            let (repository, workspace, launch) = self.runtime(context)?;
+            let repository = SqliteProjectRepository::open(&self.database)?;
+            let workspace = repository.record_workspace(context.assignment.record_id)?;
+            let Some(runtime) = repository.runtime(&workspace, &context.assignment.id)? else {
+                // A launch claim without a reserved runtime (written before
+                // T26 made claim and reservation one transaction): once closed
+                // it can never reserve or spawn, so the claim is discharged.
+                use forge_app::durable_execution::launch_failure::Repository as _;
+                return repository.reconcile_unreserved_claim(&workspace, &context.assignment.id);
+            };
+            let launch = runtime.launch;
             if let Some(launcher) = &self.launcher {
                 launcher.stop_for_retirement(&workspace, &launch)?;
             }

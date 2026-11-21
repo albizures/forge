@@ -11,7 +11,7 @@ use std::{
 /// Exact names runner-host and the pinned runner write in a runtime directory, in
 /// removal order: data first, then evidence, and the ownership lock last so a retry
 /// still holds the lock proof. Bounded patterns slot in at their [`Rank`].
-const EXACT: [(&str, Rank); 12] = [
+const EXACT: [(&str, Rank); 13] = [
     ("runtime.sqlite-wal", Rank::Data),
     ("runtime.sqlite-shm", Rank::Data),
     ("runtime.sqlite-journal", Rank::Data),
@@ -21,6 +21,7 @@ const EXACT: [(&str, Rank); 12] = [
     ("recovery-quiescence-receipt.json", Rank::Recovery),
     ("watchdog.json", Rank::Marker),
     ("retirement-intent.json", Rank::Marker),
+    ("launch-sealed.json", Rank::Marker),
     ("retirement-receipt.json", Rank::Receipt),
     ("owner.json", Rank::Owner),
     ("owner.lock", Rank::Lock),
@@ -96,7 +97,7 @@ fn classify(name: &str) -> Option<Rank> {
     if crate::fence::is_marker(name) {
         return Some(Rank::Marker);
     }
-    if crate::fence::is_receipt(name) {
+    if crate::fence::is_receipt(name) || crate::fence::is_ungranted_receipt(name) {
         return Some(Rank::Receipt);
     }
     // `watchdog-<host pid>-<host start ticks>-<term|kill>-<sent|unverified>.json`,
@@ -276,6 +277,8 @@ mod tests {
             "watchdog-17-123456-fence.json".into(),
             "watchdog-receipt-1.json".into(),
             "watchdog-receipt-4294967295.json".into(),
+            "ungranted-receipt-17-123456.json".into(),
+            "launch-sealed.json".into(),
         ]
     }
 
@@ -304,6 +307,8 @@ mod tests {
             Some(Rank::Diagnostic)
         );
         assert_eq!(classify("retirement-intent.json"), Some(Rank::Marker));
+        assert_eq!(classify("launch-sealed.json"), Some(Rank::Marker));
+        assert_eq!(classify("ungranted-receipt-1-2.json"), Some(Rank::Receipt));
         assert_eq!(classify("retirement-receipt.json"), Some(Rank::Receipt));
         assert_eq!(classify("owner.1.pending"), Some(Rank::Owner));
         assert_eq!(classify("owner.json"), Some(Rank::Owner));
@@ -365,6 +370,12 @@ mod tests {
             "watchdog-receipt-01.json",
             "watchdog-receipt-4294967296.json",
             "watchdog-receipt-.json",
+            "ungranted-receipt-0-2.json",
+            "ungranted-receipt-01-2.json",
+            "ungranted-receipt-1-02.json",
+            "ungranted-receipt-1.json",
+            "ungranted-receipt-1-2.json.tmp",
+            "launch-sealed.json.tmp",
             "watchdog-1-2-term-sent.json.tmp",
             "watchdog-x-2-term-sent.json",
             "controlled-mode",

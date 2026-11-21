@@ -107,6 +107,11 @@ pub fn run(
     }
     lock.try_lock_exclusive()
         .map_err(|_| io::Error::other("runner-owner-busy"))?;
+    // A directory sealed as never owned (a failed launch reconciled by Forge)
+    // is never owned afterwards: refuse before recording ownership or spawning.
+    if crate::seal::sealed(directory)? {
+        return Err("runner-runtime-sealed".into());
+    }
     // Never unlink a stale lock. Stale descriptive evidence cannot authorize
     // adoption, termination or writable recovery. The worker checks its journal.
     // Share this *same* flock open description with the worker. If the host
