@@ -17,8 +17,9 @@
 //! The key file is passed to Forge by path only. This harness never reads it.
 use forge_app::{
     AgentAdapterError, AgentDispatchAdapter, AgentDispatchAdapterFactory, AgentDispatchRepository,
-    AgentObservation, AgentProfile, Application, NewTypedRecord, Project, ProjectRepository,
-    RecordRepository, RecordType, WorkspaceDispatchRepository, WorkspaceRepository,
+    AgentObservation, AgentProfile, Application, ManagedWorktreeRepository, NewTypedRecord,
+    Project, ProjectRepository, RecordRepository, RecordType, WorkspaceDispatchRepository,
+    WorkspaceRepository,
     agent_profiles::ResourceCatalog,
     check_templates::{CheckCriterion, TemplateReplacement},
     checks::Verdict,
@@ -50,17 +51,21 @@ use std::{
 
 const TASK: &str = "Add a file named `hello.txt` at the repository root containing exactly one line: `Hello from Forge` (followed by a newline). Commit it. Change nothing else.";
 
-const BEHAVIOR: &str = r#"You are an unattended Forge Task worker. No human will answer questions. Do the work with your tools, then submit exactly one Outcome.
+const OUTCOME: &str = r#"Your trusted Assignment context (JSON, below) contains `bound.checkAttempt` with `id`, `generation` and `evidence`, plus the Task `record` body. Work only in the current directory (a Git worktree of the bound repository). No human will answer questions.
 
-Your trusted Assignment context (JSON, below) contains `bound.checkAttempt` with `id`, `generation`, `check_id` and `evidence`, plus the Task `record` body.
+When done, write the Outcome as JSON to a new file outside the worktree, created with `mktemp`. Its shape is exactly:
+{"attempt_id": "<bound.checkAttempt.id>", "generation": <bound.checkAttempt.generation as a number>, "evidence": <EVIDENCE>, "verdict": "pass" or "fail", "actor": "worker", "message": "<one sentence>", "disposition": "complete", "findings": [], "verifications": []}
+Then run `forge assignment outcome --file <that file> --json`. If it reports an error, read it, correct the file and retry. When it succeeds, reply with one short sentence and stop."#;
 
-1. Run `forge assignment check list --json` and find the Check whose id equals `bound.checkAttempt.check_id`. Its name is either `Implementation` or `Review`.
-2. Work only in the current directory (a Git worktree of the bound repository).
-   - Implementation: make exactly the change the Task body asks for, `git add` it and `git commit -m "<summary>"`. Your evidence commit is the new `git rev-parse HEAD`. Verdict `pass` once the change is committed.
-   - Review: you are an independent reviewer. Do NOT modify, add or commit anything. Inspect the commit in `bound.checkAttempt.evidence.commit` (for example `git show --stat <commit>`, `git show <commit>:hello.txt`, `git log`) and judge it strictly against the Task body. Verdict `pass` only if it fully meets the Task and changes nothing else, otherwise `fail`. Your evidence must be exactly `bound.checkAttempt.evidence`, unchanged.
-3. Write the Outcome as JSON to a new file outside the worktree, created with `mktemp`. Its shape is exactly:
-   {"attempt_id": "<bound.checkAttempt.id>", "generation": <bound.checkAttempt.generation as a number>, "evidence": <bound.checkAttempt.evidence with only "commit" replaced by the full 40-hex evidence commit>, "verdict": "pass" or "fail", "actor": "worker", "message": "<one sentence>", "disposition": "complete", "findings": [], "verifications": []}
-4. Run `forge assignment outcome --file <that file> --json`. If it reports an error, read it, correct the file and retry. When it succeeds, reply with one short sentence and stop."#;
+/// Implementation behavior (pinned only to the Implementation Check).
+const IMPLEMENTER: &str = r#"You are an unattended Forge implementation worker. Make exactly the change the Task body asks for, `git add` it and `git commit -m "<summary>"`. Your evidence commit is the new `git rev-parse HEAD`. Verdict `pass` once the change is committed."#;
+
+/// Review behavior (pinned only to the Review Check; no write/edit tools).
+const REVIEWER: &str = r"You are an unattended, independent Forge REVIEWER. You did not write this change. Never create, modify, stage or commit any file in the worktree. Inspect the commit in `bound.checkAttempt.evidence.commit` read-only (for example `git show --stat <commit>`, `git show <commit>:<path>`, `git diff <parent> <commit>`) and judge it strictly against the Task body. Verdict `pass` only if it fully meets the Task and changes nothing else, otherwise `fail` with the reason in the message.";
+
+fn profile_body(role: &str, evidence: &str) -> String {
+    format!("{role}\n\n{}", OUTCOME.replace("<EVIDENCE>", evidence))
+}
 
 /// Original-backend stand-in: any non-durable or fallback call fails the run.
 struct NoHerdr;
@@ -178,25 +183,35 @@ impl Gate {
         assert!(ok, "retirement failed: {stderr}");
     }
 
-    fn transcript(&self, assignment: &str, name: &str) {
+    /// One complete page (<= 100 entries) of the committed transcript, saved as
+    /// evidence; panics if history is unavailable or longer than one page.
+    fn transcript(&self, assignment: &str, name: &str) -> String {
         let (ok, stdout, stderr) = self.cli(&[
             "dispatcher",
             "assignment-transcript",
             assignment,
             "--workspace",
             "test",
+            "--limit",
+            "100",
         ]);
         let path = self.root.join(format!("evidence-{name}-transcript.txt"));
         fs::write(
             &path,
             if ok {
-                stdout
+                stdout.clone()
             } else {
                 format!("transcript unavailable: {stderr}")
             },
         )
         .unwrap();
         log(&format!("{name} transcript saved to {}", path.display()));
+        assert!(ok, "transcript unavailable: {stderr}");
+        assert!(
+            stdout.contains("More committed entries: none"),
+            "transcript longer than one page"
+        );
+        stdout
     }
 
     fn git(&self, cwd: &Path, args: &[&str]) -> String {
@@ -353,18 +368,34 @@ async fn run(key_file: PathBuf) {
         })
         .unwrap();
     fs::create_dir_all(root.join(".agents/profiles")).unwrap();
-    fs::write(
-        root.join(".agents/profiles/worker.md"),
-        format!("---\nversion: 1\nruntime: pi-durable\nmodel: openai/gpt-4.1\nthinkingLevel: off\ntools: [read, write, edit, bash]\n---\n{BEHAVIOR}"),
-    )
-    .unwrap();
-    let policy = ResourceCatalog::discover(&root.join("operator"), &root)
-        .unwrap()
-        .resolve(&root, ".agents/profiles/worker.md")
+    let register = |name: &str, tools: &str, body: String| {
+        let file = format!(".agents/profiles/{name}.md");
+        fs::write(
+            root.join(&file),
+            format!("---\nversion: 1\nruntime: pi-durable\nmodel: openai/gpt-4.1\nthinkingLevel: off\ntools: [{tools}]\n---\n{body}"),
+        )
         .unwrap();
-    let profile = store
-        .register_agent_profile("test", RecordType::Task, &policy)
-        .unwrap();
+        let policy = ResourceCatalog::discover(&root.join("operator"), &root)
+            .unwrap()
+            .resolve(&root, &file)
+            .unwrap();
+        store
+            .register_agent_profile("test", RecordType::Task, &policy)
+            .unwrap()
+    };
+    let implementer_profile = register(
+        "implementer",
+        "read, write, edit, bash",
+        profile_body(
+            IMPLEMENTER,
+            "bound.checkAttempt.evidence with only \"commit\" replaced by the full 40-hex new HEAD",
+        ),
+    );
+    let reviewer_profile = register(
+        "reviewer",
+        "read, bash",
+        profile_body(REVIEWER, "exactly bound.checkAttempt.evidence, unchanged"),
+    );
     store
         .select_workspace_profile("test", RecordType::Task, None)
         .unwrap();
@@ -379,12 +410,12 @@ async fn run(key_file: PathBuf) {
                     CheckCriterion {
                         name: "Implementation".into(),
                         description: "Implement the Task and commit the result".into(),
-                        profile_revision: Some(profile.revision),
+                        profile_revision: Some(implementer_profile.revision),
                     },
                     CheckCriterion {
                         name: "Review".into(),
                         description: "Independently review the exact Implementation output".into(),
-                        profile_revision: Some(profile.revision),
+                        profile_revision: Some(reviewer_profile.revision),
                     },
                 ],
             },
@@ -461,6 +492,8 @@ async fn run(key_file: PathBuf) {
         .id;
     store.set_task_base_commit(record, &base).unwrap();
     let expected_hash = component_hash(&node, &sources);
+    let (implementer_revision, reviewer_revision) =
+        (implementer_profile.revision, reviewer_profile.revision);
 
     let journey = gate.clone();
     let summary = tokio::task::spawn_blocking(move || {
@@ -477,6 +510,7 @@ async fn run(key_file: PathBuf) {
         // ---- Implementation ----
         let (implementation, existing) = gate.app().dispatch_record(record).unwrap();
         assert!(!existing);
+        assert_eq!(implementation.profile.revision, implementer_revision);
         log(&format!(
             "Implementation Assignment {} dispatched",
             implementation.id
@@ -570,7 +604,24 @@ async fn run(key_file: PathBuf) {
             "Review must bind the exact output commit"
         );
         let review_state = gate.settle(&review.id);
-        gate.transcript(&review.id, "review");
+        let review_transcript = gate.transcript(&review.id, "review");
+        // Independence: the Review ran its own pinned read-only profile and never
+        // tried to write, stage or commit (write/edit tools are not even offered).
+        assert_eq!(review.profile.revision, reviewer_revision);
+        for forbidden in [
+            "git commit",
+            "git add",
+            "\"name\":\"write\"",
+            "\"name\":\"edit\"",
+        ] {
+            assert!(
+                !review_transcript.contains(forbidden),
+                "Review transcript contains {forbidden}"
+            );
+        }
+        let worktree = store.worktree_claim(record).unwrap().unwrap().path;
+        assert_eq!(gate.git(&worktree, &["rev-parse", "HEAD"]), output);
+        assert_eq!(gate.git(&worktree, &["status", "--porcelain"]), "");
         let review_answer = store.observe_answer("test", &review_launch).unwrap();
         log(&format!(
             "Review settled: {review_state:?}, answer {review_answer:?}"
