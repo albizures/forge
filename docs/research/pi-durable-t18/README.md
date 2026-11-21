@@ -1,5 +1,301 @@
 # T18 — Independent implementation and coding-standards review
 
+This report has two passes. The **second pass** (below) is current. The
+[first pass](#first-pass--2026-11-20-snapshot-1fc65a5) is kept unchanged as history.
+
+## Second pass — 2026-11-21, snapshot `646abd9`
+
+- **Date:** 2026-11-21
+- **Reviewed snapshot:** `646abd98143e4f5351f71eb9a4745f0729a91956` (T24 head)
+- **Reviewed diff:**
+  - `git diff 1fc65a5..646abd9`: the corrective Tasks T21 `b70fcc9`, T22 `f39417b`, T23 `5f44eda` and T24 `646abd9`, plus the plan commit `f60b880`. 89 files, +8 068 / −1 503.
+  - Every first-pass finding was re-located and rechecked in the full T02–T24 range `4870692..646abd9` (355 files, +56 583 / −189).
+- **Inputs:**
+  - the parent Spec;
+  - Task bodies T18 and T21–T24;
+  - `CODING_STANDARDS.md`;
+  - the evidence in `docs/research/pi-durable-t21..t24/`, treated as claims to check, not as proof.
+- **Method:** `review-implementation` and `review-coding-standards`.
+  - Three read-only reviewers, each starting from fresh context, covered one area each:
+    - the production launch path, protocol and packaging (B1, M3, M4, M5);
+    - purge and follow-ups (B2, M6, minors 7 and 13);
+    - reconciliation, documentation and the remaining minors (M1, M2, minors 1–17).
+  - Each new BLOCKER and MAJOR was then rechecked by hand at the file:line references below.
+  - No code, configuration, profile, dispatch or rollout state was changed.
+
+### Verdict (second pass)
+
+**Not ready for release verification. T19 must not start.**
+
+- **Resolved:** the two first-pass blockers. B1 is resolved structurally: a production launch path now exists, behind the default-withheld gate. B2 is fully resolved. M5 is resolved, M3 mostly, and minors 7, 9 and 13 are resolved.
+- **New blockers:** making launch real turned two earlier liveness gaps into reachable contract failures:
+  - **B3:** any daemon restart permanently strands live durable Assignments. This is M1, escalated.
+  - **B4:** a launch that fails after its claim can never be retired.
+
+  Both fail closed: no unsafe execution, release or replay was found. But they leave production-launched Assignments with neither a recovery path nor a retirement path. That breaks AC7, AC11 and AC17, and the Spec's Implementation Decision to *"keep runtime storage and ownership recoverable across daemon/runner restart and compatible Revision operations"*. T19's required "daemon/runner restart ordering" and "incomplete retirement" scenarios cannot pass.
+
+### Gates run on `646abd9` (this review)
+
+`PATH` had a real Node 24.18.0 first.
+
+| Gate | Result |
+| --- | --- |
+| `cargo fmt --check` | pass |
+| `cargo clippy --workspace --all-targets -- -D warnings` | pass |
+| `cargo test --workspace --no-fail-fast` | pass: 908 passed, 0 failed, 1 ignored (pre-existing opt-in probe) |
+| `durable_supervised_tracer` (rerun separately) | pass: all 11 scenarios, including `T24 packaged Revision dispatch and switch` |
+| `git diff --check 1fc65a5..646abd9` | pass |
+| `runner`: `npm run check` / `npm test` | pass / 97 of 97 |
+
+These are local deterministic gates, not release evidence.
+
+### Coverage classes (second pass)
+
+The classes are the same as in the first pass:
+- **(a)** mock or fake;
+- **(b)** real process, faux model;
+- **(c)** real provider.
+
+**There is still no class (c) test.**
+
+What changed since the first pass:
+- The tracer now runs the production composition (`launch::compose`). The only test-only parts are:
+  - the gate setting (`enable_controlled`, called only from `durable_supervised_tracer.rs`);
+  - a faux-provider entry;
+  - two bootstrap fault injections.
+- The non-packaged scenarios run the test binary as `--supervisor`. Only the `packaged` scenario runs the real `forge-runner-host`.
+- `runner/package-bundle.mjs` itself is run by no test. `supervised_packaged.rs:125-175` rebuilds the bundle layout and manifest independently.
+- `check-entry.test.mjs` stops every case before any model request, so the shipped entry's real-provider path has never run.
+
+### First-pass findings: status at `646abd9`
+
+| Finding | Status | Evidence |
+| --- | --- | --- |
+| **B1** no production path | **Resolved structurally; not yet reachable** | See the B1 notes below. |
+| **B2** purge after real retirement | **Resolved** | See the B2 notes below. |
+| **M1** no reconciliation after lease expiry / daemon loss | **Open → escalated to B3** | See B3. |
+| **M2** docs over-claim | **Partial** | Main guide updated; see M2′ below. |
+| **M3** AC19 component preflight / hash mapping | **Mostly resolved** | See the M3 notes below. |
+| **M4** managed daemon has no model credential | **Open, acknowledged** | `crates/server/src/lib.rs:273` (`durable_model_key_file: None`); T24 README. |
+| **M5** wire drift | **Resolved** | See the M5 notes below. |
+| **M6** purge/follow-up contract tests | **Purge resolved; follow-up open** | See the M6 notes below. |
+| Minor 1 revoked runner window | Open | `launch.rs:887-900` `fence`/stop sends no revocation to the host. The last grant (≤ 30 s) stays usable. |
+| Minor 2 AC12 dispatch after restart untested | Open | `store/src/durable_execution/retirement_tests.rs` unchanged. |
+| Minor 3 unknown admission never re-sent | Partial | Unknown follow-ups are re-sent across sessions (`recovery.rs:513-543`). An unknown launch admission fences and is not retried (`launch.rs:1018`). |
+| Minor 4 `let _ = mark_followup` | Open, now also on the launch path | `recovery.rs:555`; reached from the launch driver too. |
+| Minor 5 `kill()?` before `wait()`; `owner.json` overwrite | Open | `runner-host/src/supervisor.rs:65,141-150` |
+| Minor 6 dev/ino as strings | Open | `runner-host/src/supervision.rs:132-133,182` |
+| Minor 7 schema 23 reuse | Resolved going forward | Revision 24 is new (`schema_compatibility.rs:20-21`, `upgrade.rs:58-60`); 23→24 upgrade tests at `upgrade_tests.rs:415-438`. |
+| Minor 8 `profile_revision` meaning | Open | No compatibility note (`docs/records.md:731`). |
+| Minor 9 management protocol doc | **Resolved** | `crates/docs/management-protocol.md:93-95` |
+| Minor 10 key-file env var inherited | Open | `server/src/lib.rs:196`. The host spawn uses `env_clear` (`launch.rs:609`), but hooks, `git` and `gh` still inherit it. |
+| Minor 11 env-var key path untested | Open | No test sets `FORGE_DURABLE_OPENAI_KEY_FILE`. |
+| Minor 12 "delivery not proven" / non-snapshot status | Open, worse | `Receipt.delivery` now exists (`followup.rs:81`), but `cli/src/assignment_inspection.rs:204` ignores it. There are still four reads (`server/src/lib.rs:1313-1324`). |
+| Minor 13 `AlreadyAbsent` journaled as purged | Resolved | Append-only `durable_runtime_purge_removals` (schema 24). |
+| Minor 14 rollout test name | Open | `rollout_tests.rs:257-298` |
+| Minor 15 misplaced RPC comment | Open | `rpc/src/lib.rs:202-206` |
+| Minor 16 durable registration selects Task profile | Open (documented) | `agent-profile-policy.md:151-153` |
+| Minor 17 npm from PATH; `-shm` before lock | Open | `package-bundle.mjs:48`; `runner/src/storage.ts:37` |
+| ADR-0012 temporal status | Open, now wrong | ADR-0012 line 5 says recovery is disabled; see M2′. |
+
+**B1 notes.**
+- **Composition:** `application_from_config` (`server/src/lib.rs:986-1002`) wraps `launch::compose` (`launch.rs:1270`) in `ReleaseGate`. Managed daemons get components from `--durable-runner-bundle`.
+- **Provision is non-blocking** (`launch.rs:509-640`). The order is:
+  1. preflight;
+  2. the atomic `begin_agent_provision` claim;
+  3. `reserve`;
+  4. the protected runtime directory and `check-runtime.json`;
+  5. `begin_agent_launch`;
+  6. the `env_clear` host spawn;
+  7. the driver thread.
+- **Driver:** waits for typed `owned` evidence, then `bind_inspected` and the grant, then admission over the production `PipeTransport`. Settled answers are inspected, and a stop hands the original Child and pipe to retirement.
+- **Packaging:** `forge-runner-host` is packaged (`package-bundle.mjs:41`) and verified by Forgeup (`forgeup/src/runner.rs:230`).
+- **Not yet reachable:**
+  - `LaunchControl::default()` withholds launches (`lib.rs:988`), by design until T20.
+  - No shipped command can grant `Controlled`.
+  - M4 makes `durable_profiles::prepare` fail on a managed daemon.
+
+  T19 must therefore declare the composition its real-provider run uses (see "Notes for T19/T20").
+
+**B2 notes.**
+- `purge.rs:14-116` recognizes every artifact written into a runtime directory, using exact names plus four bounded parsers: no sign, no leading zeros, range-checked sequence numbers, a fixed 64-hex form, and no glob. The writers are the host supervisor, watchdog, retirement, crash, proof, quiescence and `check-runtime.json`, plus the runner's `runtime.sqlite` with its `-wal`/`-shm`/`-journal` files.
+- Links, directories, `nlink≠1` and a foreign uid are refused before the first unlink (`purge.rs:131-147`).
+- The lock is unlinked last, after a final `verify` (`purge.rs:175-187`).
+- Composed real retire → purge and crash → reconcile → retire → purge tests (`authorization_session/purge_runtime.rs:261-310`, class b) and a CLI → daemon → host journey (`cli/tests/support/supervised_purge.rs`, class b) exist.
+
+**M3 notes.**
+- Launch preflight checks components (`launch.rs:418-452`).
+- The manifest records `runner_component_sha256`.
+- `ComponentCatalog` serves a retained Launch only its original components.
+- Revision-switch retirement and recovery are tested (`packaged`, class b).
+
+**M5 notes.**
+- `RunnerEvent` and `RunnerOutput` are strict enums with `deny_unknown_fields` (`rpc/src/durable_execution.rs:193-243`), parsed typed in `recovery.rs:569-583`.
+- The dead v1 request variants are removed.
+
+**M6 notes.**
+- Purge now has a CLI → daemon → host test.
+- There is still no daemon-level test of a follow-up marked `unknown` and re-sent in a later session ending with exactly one admission. `recovery.rs:513-545` commits `Unknown`, then sends, and relies on runner deduplication. That deduplication is tested only by `runner/test/resume-runtime.test.mjs:101-128` (class a, faux provider). T21 defers this explicitly (`docs/research/pi-durable-t21/README.md:140`).
+
+### New findings (second pass)
+
+#### B3 — BLOCKER: any daemon restart permanently strands live durable Assignments (M1 escalated)
+
+AC7, AC8, AC11, AC12, AC17 and AC22; Spec Implementation Decisions. Responsible deliverables: T09, T10 and T23. Rules: SAFE-2 (retained uncertainty must stay reconcilable) and TEST-2.
+
+The first pass rated M1 MAJOR because no production launch existed. T23 makes it reachable. Verified by hand:
+- **The registry does not survive a restart.** The `Launcher` registry holds only children the current daemon spawned. A restarted daemon starts empty and never adopts (`launch.rs:370-373`).
+- **The old host fences itself and never exits.** It loses its stdin, so renewal stops (`runner-host/src/watchdog.rs:163-165`). At lease expiry the watchdog:
+  - writes `watchdog.json`;
+  - sends TERM, then KILL;
+  - then *"Retain ownership indefinitely"* (`watchdog.rs:447-484`).
+
+  The host process holds the flock forever.
+- **Automatic recovery refuses.** `reconcile_crash` returns `false` if the exclusive lock cannot be taken, or if `watchdog.json` or `retirement-intent.json` exists (`server/src/durable_authorization/retirement.rs:117-126`). Recovery quiescence rejects the same markers (`runner-host/src/quiescence.rs:54-61`).
+- **Explicit retirement fails.** `Controller::retire` (`retirement.rs:158-252`) has no `Owned` entry after a restart, so it sends no retirement. It then requires `ExclusiveInspection::acquire` and an exact retirement receipt (`:237-239`). The orphaned host holds the lock and was never sent a retirement, so this returns `uncertain` on every retry.
+- `resolve_unknown_agent_resources` retires only `provision-intent` (`store/src/lib.rs:3142`).
+
+**Consequence:**
+- Every daemon restart while a durable Assignment is live leaves an orphaned host holding the flock. That includes a crash, a host reboot of the daemon only, and every Forgeup Revision switch or upgrade.
+- The Assignment's capacity is reserved permanently.
+- Neither recovery, retirement, purge nor any audited operator command can resolve it.
+- `docs/durable-execution.md:318-325` tells operators to *"plan for … recovery or retirement after any daemon outage"*. Neither is possible.
+
+The `packaged` scenario's "switch" only works because the runner crashed (host exited with a crash receipt) *before* the new composition. A real daemon-process restart with a live runner is not exercised (T23 README, "Not claimed").
+
+**Required remediation:**
+1. Add a watchdog-fenced reconciliation path. For example:
+   - after the fence, the original host, which is the subreaper, proves descendant absence;
+   - it writes a protected exact receipt and releases or permits inspection of the lock;
+   - Forge accepts that receipt under exclusive inspection.
+
+   Alternatively, add an explicit, audited operator retirement for unowned durable runtimes that verifies process absence by retained identity. Either way, capacity is released only on proof.
+2. Add a real daemon-process restart test with a live runner: restart → expiry → reconcile → retire or recover.
+3. Correct `docs/durable-execution.md:318-325`.
+
+#### B4 — BLOCKER: a launch that fails after its claim can never be retired
+
+AC11, AC12, AC13 ("explicit authorized intervention remains possible") and AC17. Responsible deliverable: T23. Rules: TX-1, SAFE-2, RUST-3 and TEST-2. Verified by hand.
+
+There are two separate gaps.
+
+**1. The claim and the reservation are separate transactions.**
+- `begin_agent_provision` commits the `provision-intent` claim (`store/src/lib.rs:3029`). `reserve` (`launch.rs:562`) re-authorizes in a *new* transaction that requires `state='provisioning'` and the current generation (`store/src/durable_execution.rs:69,84`).
+- A close, a generation bump or a daemon restart between them leaves a permanent claim with no runtime row.
+- From then on:
+  - `provision` returns `durable-launch-claimed`;
+  - `observe` and `recover` return Transient;
+  - `Adapter::retire` fails at `self.runtime()?` (`retirement.rs:313-323,413`), which requires the runtime row.
+
+**2. Failures after reservation strand the Assignment and orphan the host.** This covers:
+- a failed `check_runtime::write`;
+- `begin_agent_launch` returning `false` (`launch.rs:602`);
+- a spawn failure (`:606-615`);
+- a host that never sends valid `owned` evidence (`:768-777`);
+- a failed `bind_inspected` (`:793-797`).
+
+In each case the driver retains a failure and returns. In the last two, the `Child` is dropped without being killed, reaped or registered with retirement, so the host process is orphaned and stays a zombie. Later, `Controller::retire` finds neither an `Owned` entry nor a revoked lease (`retirement.rs:189-190`) and returns `uncertain` forever.
+
+**Consequence:** a transient fault during launch makes the Assignment permanently unretirable and its `durable-runtime` capacity permanently reserved. There is no operator path. `launch_tests.rs` has no test for write, spawn, `owned` or bind failure.
+
+**Required remediation:**
+- Make the claim and the reservation one atomic precondition (TX-1), or reconcile a claim with no runtime through `resolve_unknown_agent_resources`.
+- On every post-spawn failure, register the original Child and pipe with retirement, or kill and reap it under the subreaper with a retained receipt.
+- Give a reserved-but-unspawned runtime a retirement path that proves it was never spawned.
+- Add fault tests for each listed failure.
+
+#### M2′ — MAJOR: documentation now contradicts the composed recovery path
+
+AC23. Responsible deliverables: T17 and T23. Rule: VERIFY-2.
+
+T23 composes `recovery` together with the launcher (`launch.rs:1311-1323`), and app reconciliation calls `recover` automatically (`app/src/lib.rs:1858,1907`). Any daemon with schema 2 bundles or `FORGE_DURABLE_RUNNER_HOST`/`ENTRY` therefore has automatic recovery configured. These documents still say otherwise:
+
+| Location | Problem |
+| --- | --- |
+| `docs/assignment-recovery.md:133-134, 149, 254, 325, 605` | Says recovery is unconfigured, disabled, or "remains disabled". |
+| `crates/store/README.md:152, 257-258, 323` | Says no production daemon creates a claim. `claim_recovery` runs at `recovery.rs:162`. |
+| ADR-0012 line 5 | Says recovery is disabled. |
+| `docs/assignment-recovery.md:286` | Lists only env vars for transcripts, though managed daemons use `--durable-runner-bundle`. |
+| `server/src/main.rs:101` | Calls `FORGE_DURABLE_OPENAI_KEY_FILE` "preflight" only. It is also the launch credential (`launch.rs:532`). |
+| `runner/README.md:46, 84, 208, 400, 460` | Still says launch is "refused until T23" or "remains disabled". |
+| `runner/README.md:169, 216, 446` | Still references `main.ts`. |
+| `docs/development.md:100-110` | Omits `FORGE_DURABLE_RUNNER_HOST`/`ENTRY`. |
+| "Production durable dispatch remains disabled" (in several docs) | Conflicts with the gate's own states, `Withheld` (default) and `Disabled` (rollback). |
+| `docs/durable-execution.md:118-119` | Key-exposure claim still unqualified (first-pass M2). |
+
+**Remediation:** correct each location, and use the gate's terms.
+
+#### MINOR (second pass)
+
+1. **Stop timeout and retirement.**
+   - `STOP_TIMEOUT` (10 s) is shorter than `OWNED_TIMEOUT` (30 s) and `ADMISSION_TIMEOUT` (120 s) (`launch.rs:44-46`). Stops are polled only in `run_loop`, so retirement during bootstrap or admission times out and needs retries.
+   - `stop_for_retirement` holds the `slots` mutex for the whole wait (`launch.rs:651-663`), which blocks `state()` and `provision` for every Assignment.
+2. **RUST-3: renewal error discarded.** In `let _ = self.renew_if_due()` (`launch.rs:934`), a `boottime_millis` error (`:909`) stops renewal silently, with no fence and no diagnostic.
+3. **SAFE-2 classification: oversize output looks like a crash.** A stdout line over 64 KiB ends the reader without an `Err` (`launch.rs:698-703`). A live host is then classified `Crashed` and dropped after `reap` (`:860`). The flock keeps this safe, but liveness is lost.
+4. **RUST-1: stringly-typed classification.** `adapter_error` classifies by matching code strings (`launch.rs:1154-1165`), and `profile_record_type: "task".into()` is a bare string (`:572`).
+5. **AC19: attestation gaps.**
+   - The Launch component hash is computed by the `contract.ts` being attested and excludes `node_modules` (`runner/src/contract.ts:11`).
+   - Between daemon start and launch, only stat fingerprints of the host and Node catch tampering.
+   - Recovery under retained components (`recovery.rs:140`) does not preflight the retained host.
+6. **Purge edge cases.**
+   - Removal is path-based, not `unlinkat` on a directory fd. A same-user rename between `verify` and unlink is outside the stated threat model.
+   - A file created mid-purge makes `remove_dir` fail after the lock is removed. Every later retry then refuses (`purge.rs:167-190`). This is fail-closed, but needs manual repair and is untested.
+   - Recognized files are not checked for 0600 mode (`purge.rs:140`).
+7. **Purge reporting.**
+   - A crash between directory removal and `finish_purge` makes the retry journal `already-absent`, which contradicts "nothing was removed" (`app/src/durable_execution/purge.rs:82-83`). This understates, so it is conservative.
+   - On an exact-retry replay, the human output still says "this operation removed".
+8. **Test caveats.**
+   - `supervised_recovery.rs:69-74` polls `recovery.recover()` directly after one `reconcile_agent_dispatch`. That poll can perform the recovery itself, so the reconciliation scan alone is not shown to recover.
+   - Provision runs the three preflight subprocesses twice, through `validate_provision` and `provision`.
+
+### Standards confirmed (second pass)
+
+- The single-launch claim is atomic (`INSERT OR IGNORE` in an IMMEDIATE transaction).
+- `durable_execution::admit` uses short separate transactions and holds none across the pipe (TX-4).
+- `begin_send` marks the request Unknown before sending, then observes; there is no blind replay (SAFE-2).
+- `check-runtime.json` holds paths only, no secret bytes, and is written `O_EXCL` into a freshly minted directory. It is input, not the writable store (SEC-1, AC6).
+- The host is spawned with `env_clear` and explicit arguments (SEC-3).
+- The only new production `expect` (`launch.rs:498`) guards a locally evident invariant (RUST-2).
+- Purge patterns are bounded and canonical (SAFE-4).
+
+### Acceptance-criteria trace: changes since the first pass
+
+Rows not listed keep their first-pass assessment, except that the general **B1** caveat ("no production path") is replaced by "production path exists; withheld; no class (c)".
+
+| AC | Change at `646abd9` |
+| --- | --- |
+| AC1 | Production adapter composed (b, tracer uses `launch::compose`). Withheld by default. M4 blocks managed daemons. |
+| AC3 | Shipped `check-entry.ts` composes bootstrap, profile and model key before intent or store (b, 7 real-host refusal tests). Real-provider path never run (c missing). |
+| AC4 | Production launch mints fresh runtime, conversation and store identities per Assignment (b). |
+| AC5 | Production `PipeTransport` plus typed events (M5 resolved). Unknown launch admission is fenced, not retried (minor 3). |
+| AC7 | Recovery composed in production. **B3**: unavailable after a daemon restart with a live runner. |
+| AC8 | **B3**: expiry after daemon loss has no reconciliation. |
+| AC11 / AC12 | **B3**, **B4**: capacity is retained (safe), but retirement cannot complete. |
+| AC13 | **B4**: "explicit authorized intervention remains possible" fails for stranded launches. |
+| AC15 | M6 follow-up part still open. |
+| AC16 | **B2 resolved** (b). |
+| AC17 | **B3**/**B4**: reconciliation and retirement can be impossible regardless of source availability. |
+| AC19 | Component preflight, host packaging and the Launch-hash catalog are in place (b, `packaged`). `package-bundle.mjs` is unexercised by tests. Minor 5. |
+| AC21 | Gate and rollback cover the production composition (b, `rollback` scenario). |
+| AC22 | **Unrun:** real provider, daemon-process restart with a live runner, any managed-daemon launch. Blocked by B3, B4 and M4. |
+| AC23 | **M2′**. |
+
+### Notes for T19/T20 (not findings)
+
+- No shipped command grants `Controlled` launch eligibility. This is deliberate: `docs/durable-execution.md:15-20` says new launches stay withheld in every production Revision. T19's real-provider run therefore has to use a test composition that calls `enable_controlled`. It must state that, and must not present a packaged-daemon run that never happened.
+- M4 means only a manual daemon can supply a model credential. T20 must either resolve this or limit the handoff to manual daemons.
+
+### Required next steps (second pass)
+
+1. **Operator decision:** assign B3 and B4, plus M2′ and M6, to a responsible deliverable. Closest owners: T23 for B4; T09/T10 with T23 for B3. The plan forbids silently adding Tasks.
+2. After the corrections, re-review the corrected snapshot and record it here as a third pass. T19 consumes only that snapshot.
+
+**T18 status:** the second-pass review deliverable is complete and records two blockers. T18 stays unchecked.
+
+---
+
+## First pass — 2026-11-20, snapshot `1fc65a5`
+
 - **Date:** 2026-11-20
 - **Reviewed snapshot:** `1fc65a57667093ceefdc737e8278ecb6634c58b2` (T17 head)
 - **Reviewed diff:** `git diff 4870692..1fc65a5` (T02 `f1fb797` through T17; 334 files, +50 017 / −188). `4870692` is the last pre-T02 commit. T01 research is included only as cited context.

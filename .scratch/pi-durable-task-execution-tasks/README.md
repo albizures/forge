@@ -49,6 +49,18 @@ Mark a Task complete only after its acceptance checks and required verification 
   - **Gates on `1fc65a5`:** all pass (881 Rust tests passed, 1 opt-in ignored, 10 supervised scenarios; runner typecheck; 90 Node tests).
   - **No real-provider coverage exists.**
   - **Next:** the operator added corrective Tasks T21–T24 for B1 and B2; all four are complete. T18 re-reviews the corrected snapshot. T19 must not start before that re-review.
+  - **Second pass: delivered and blocking (2026-11-21, snapshot `646abd9`, diff `1fc65a5..646abd9`).** [Second-pass report](../../docs/research/pi-durable-t18/README.md#second-pass--2026-11-21-snapshot-646abd9).
+    - **Resolved:**
+      - B1 structurally: the production launch is composed behind the default-withheld gate.
+      - B2.
+      - M5; M3 mostly; minors 7, 9 and 13.
+    - **New blockers:**
+      - B3 (M1 escalated): any daemon restart with a live runner leaves an orphaned host that holds its lock forever behind `watchdog.json`. Recovery, retirement and purge all refuse, so capacity is held permanently.
+      - B4: a launch that fails after its claim cannot be retired. The claim and the reservation are separate transactions, and a host that fails `owned` or bind is dropped without being registered.
+    - **Still open:** M2′ (docs contradict the now-composed recovery), M4 (managed-daemon credential) and M6 (daemon-level unknown follow-up resend test), plus minors.
+    - **Gates on `646abd9`:** all pass (908 Rust tests passed, 1 opt-in ignored, 11 supervised scenarios; runner typecheck; 97 Node tests).
+    - **No real-provider coverage exists.**
+    - **Next:** the operator assigns B3/B4. T19 must not start.
 - [x] [T21 — Purge retired lifecycle artifacts](21-purge-retired-lifecycle-artifacts.md) — corrects T18 B2 (plus the purge part of M6). [Implementation and evidence](../../docs/research/pi-durable-t21/README.md): host purge recognizes exactly the lifecycle artifacts runner-host writes (exact names plus bounded canonical patterns; unknown, near-miss, linked, directory and foreign entries still refuse before removal; lock last). Schema revision 24 journals `removed` vs `already-absent`. Composed real retire → purge and crash → reconcile → retire → purge tests fail on the old code with `runtime-purge-storage-unsafe` and pass now. A CLI → daemon → host purge journey covers scope denial, ineligibility, conflicting and exact retries. All four repository gates pass (890 Rust tests plus 10 supervised scenarios; 1 pre-existing opt-in probe ignored), runner typecheck and 90 Node tests. Eligibility rules are unchanged. T22 may proceed. Production durable dispatch and automatic recovery remain disabled.
 - [x] [T22 — Ship production Check runner entry](22-ship-production-check-runner.md) — corrects T18 B1, runner part, and M5. [Implementation and evidence](../../docs/research/pi-durable-t22/README.md):
   - **Entry:** the packaged entry is `runner/src/check-entry.ts` → `check-runner.ts::runCheckRunner`. One process handles first admission, observation, same-attempt recovery and follow-ups. Effect inspection, bootstrap, profile, model key and guarded tools all come before intent or store.
