@@ -120,18 +120,15 @@ Mark a Task complete only after its acceptance checks and required verification 
   - **Gates:** all four repository gates pass (925 Rust tests plus 25 supervised scenarios; 1 pre-existing opt-in ignored), runner typecheck and 99 Node tests. One transient leased-expiry test failure under full load is recorded, not claimed fixed.
   - **Not claimed:** real provider; Forgeup-managed daemon (M4); `Unknown` admissions.
   - **Next:** the T18 third-pass re-review. Production durable dispatch stays withheld.
-- [ ] [T19 — Verify integration and recovery](19-verify-integration-and-recovery.md) — **Incomplete: the real-provider gate awaits operator authorization and an isolated credential.** Deterministic part delivered: [verification report](../../docs/research/pi-durable-t19/README.md):
-  - **Snapshot:** reviewed snapshot `2097267`; verified tree `6cd2e44`, which differs only in documentation.
-  - **Identities:** runner component `8991977e…`, protocol 1, runtime schema 2, store schema 25, pi-durable 1.5.2, Node 24.18.0.
-  - **Gates, all pass:** fmt and clippy; 931 Rust tests, twice in a row; 25 real-process tracer scenarios; 99 Node tests; packaging, with the bundle manifest hash matching the source attestation.
-  - **Required deterministic fault classes:** each is mapped to passing scenarios.
-  - **Real-provider Implementation → Review gate:** **UNRUN**. No operator-authorized, isolated credential or environment was available. The steps to run it are documented.
-  - **Managed-daemon launch:** impossible (M4).
-  - **Result:** default-rollout approval is **withheld**.
-- [ ] [T20 — Deliver release handoff](20-publish-release-handoff.md) — **Provisional: it rests on T19, which is incomplete.** [Current withheld-readiness handoff](../../docs/research/pi-durable-t20/README.md):
-  - **Readiness: WITHHELD.** The remaining reason is the unrun real-provider gate (AC22).
-  - **M4 resolved afterwards** (`206f999` plus its fix): `forgeup daemon start --durable-openai-key-file`. It was re-reviewed and the gates were renewed (932 Rust tests, 25 scenarios).
-  - **Contents:** the passing component identities and compatibility matrix; the prerequisites for granting readiness; the conditions that revoke readiness or require renewed verification; an operator adoption checklist (not to be performed while withheld); the rollback procedure (old Herdr and durable Assignments keep their backends, Grilling stays on Herdr); and retained storage and transcript limits.
+- [x] [T19 — Verify integration and recovery](19-verify-integration-and-recovery.md) — **Complete on Forge Revision `6a2196a`.** [Verification report](../../docs/research/pi-durable-t19/README.md):
+  - **Identities:** runner component `5d32b086…`, protocol 1, runtime schema 2, store schema 25, pi-durable 1.5.2, Node 24.18.0.
+  - **Deterministic gates, all pass:** fmt and clippy; 932 Rust tests; 25 real-process tracer scenarios; 109 Node tests; packaging, with the bundle manifest hash matching the source attestation.
+  - **Real-provider Implementation → independent Review gate (AC22): pass.** Operator-authorized; real `openai/gpt-4.1`, shipped runner entry, real host, scratch Workspace; only launch eligibility is test-controlled (`crates/cli/tests/durable_real_provider.rs`, opt-in). 2 of 3 runs passed on `6a2196a`; the third failed on a connection timeout before any model output and was handled safely.
+  - **Defect found and fixed:** routine tool errors (missing path, `edit` text not found) were treated as interrupted effects and ended Assignments. Fixed in `9a7bb77` + `e968686`, independently reviewed twice (no blocker or major; [addendum](../../docs/research/pi-durable-t18/README.md#effect-free-failure-addendum--2026-11-21-9a7bb77-and-e968686)).
+  - **Not claimed:** a real `forgeup daemon start` with a real provider; publication with a durable pin.
+- [ ] [T20 — Deliver release handoff](20-publish-release-handoff.md) — **Handoff updated; readiness awaits one operator decision.** [Readiness handoff](../../docs/research/pi-durable-t20/README.md):
+  - **Readiness: WITHHELD pending operator decision.** All release gates pass on `6a2196a`, including AC22. The remaining prerequisite is the operator fixing or explicitly accepting the open non-blocking review items (third-pass list and the effect-free fix addendum).
+  - **Contents:** the passing component identities and compatibility matrix; the prerequisites for granting readiness; the conditions that revoke readiness or require renewed verification; an operator adoption checklist (not to be performed while withheld); the rollback procedure; retained storage and transcript limits; new limitations (no provider retry; Outcome submission depends on the profile).
   - **Nothing was changed:** no rollout, registration, selection, migration, dispatch or configuration change was performed.
 
 ## Ordered Tasks and explicit dependency edges

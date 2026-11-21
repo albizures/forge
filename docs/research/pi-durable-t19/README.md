@@ -1,129 +1,167 @@
 # T19 — Verify packaged integration, recovery and a real-provider Check cycle
 
-**Result: deterministic verification passes. The real-provider release gate is UNRUN, so
-default-rollout approval is WITHHELD.**
+**Result: verification passes on Forge Revision `6a2196a`.** The deterministic gates pass, and the
+real-provider Implementation → independent Review gate (Spec AC22) passed in 2 of 3 runs. The
+third run failed on a network timeout before the model answered, which is explained below and was
+handled safely. The gate also found a real defect, which was fixed and independently reviewed
+before the final runs.
 
 These are local verification checks, not release approval (Task T19, "Verification and
-evidence").
+evidence"). The readiness decision is [T20](../pi-durable-t20/README.md).
 
 ## Snapshot and identities
 
 | Item | Value |
 | --- | --- |
-| Reviewed implementation snapshot | `2097267` ([T18 third pass](../pi-durable-t18/README.md#third-pass--2026-11-21-final-snapshot-2097267)) |
-| Verified tree | `6cd2e44`. It differs from `2097267` only in two documentation files (the T18 report and the task checklist): `git diff --stat 2097267 6cd2e44`. |
-| Forge Revision reported by the built host | `6cd2e44f801f6fe5d84330569d5ab74810ba4172` (clean) |
-| Runner protocol / durable runtime schema | 1 / 2 (`forge-runner-host --compatibility`) |
+| Verified Revision | `6a2196a2de17ebfc77eeac43d8124f12c0ea2155` (clean; reported by the built `forge-runner-host --compatibility`) |
+| Implementation changes since the T18 third pass | M4 (`7f95ba3`, reviewed in the [M4 addendum](../pi-durable-t18/README.md#m4-addendum--2026-11-21-snapshot-206f999-plus-the-follow-up-fix)); the effect-free tool-failure fix `9a7bb77` + `e968686` ([review](../pi-durable-t18/README.md#effect-free-failure-addendum--2026-11-21-9a7bb77-and-e968686)); test-only commits `bacf2ef`, `02e5950`, `9ac67f6`, `6a2196a` |
+| Runner protocol / durable runtime schema | 1 / 2 |
 | Forge store schema revision | 25 |
-| Runner component hash (`contract.ts::componentHash`, and the bundle manifest) | `8991977e0e4cb7c4468875f5cbec11ac69403477e14d5378c92a7346a4af28a0` |
+| Runner component hash (`contract.ts::componentHash`, and the bundle manifest) | `5d32b0862d3082f5712d49fb36a55ddc9871d880ea7ba780c065efc1d9b1f70c` |
 | Pinned dependencies | `@earendil-works/pi-durable` 1.5.2, `@earendil-works/pi-ai` 1.5.2, Node 24.18.0 |
-| `runner/package-lock.json` sha256 | `69dfc7381ba7c4e6903970afdb42714e048c6abc851748f136c021a305b3bdf1` |
-| Bundle tree sha256 (from `package-bundle.mjs`) | `89f09c62e5df092f47a36539c8d27694d708a62de4b82ea3337d96c6a1541760` |
-| Toolchain | rustc/cargo 1.98.0. Node 24.18.0 was first on `PATH`: a real binary, because the Volta shim breaks `durable_check_bootstrap`. |
-| Host | Linux 7.0.0-43-generic, x86_64. Single trusted local user. Bundled SQLite (rusqlite 0.38, `bundled`). |
+| `runner/package-lock.json` sha256 | `69dfc7381ba7c4e6903970afdb42714e048c6abc851748f136c021a305b3bdf1` (unchanged) |
+| Bundle tree sha256 (from `package-bundle.mjs`) | `9cad5c0fae170b860a24a8fa21dcc57c85f37e110f30c098c7d974216d3ed803` |
+| Toolchain | rustc/cargo 1.98.0; real Node 24.18.0 first on `PATH` (the Volta shim breaks `durable_check_bootstrap`) |
+| Host | Linux 7.0.0-43-generic, x86_64. Single trusted local user. Bundled SQLite. |
 
-## Gates
-
-All gates were run from the Forge root.
+## Deterministic gates (on `6a2196a`)
 
 | Gate | Command | Result |
 | --- | --- | --- |
 | Format | `cargo fmt --check` | pass |
 | Lints | `cargo clippy --workspace --all-targets -- -D warnings` | pass |
-| Tests (normal parallel mode) | `cargo test --workspace --no-fail-fast` | pass, twice in a row: **931 passed, 0 failed, 1 ignored** (the pre-existing opt-in Herdr Pi probe). Summary: [workspace-test-summary.txt](workspace-test-summary.txt). |
-| Supervised tracer (inside the run above) | custom harness `durable_supervised_tracer` | pass: **25 scenarios** |
+| Tests | `cargo test --workspace --no-fail-fast` | pass: **932 passed, 0 failed, 1 ignored** (the pre-existing opt-in Herdr Pi probe). The new `durable_real_provider` test is a no-op here (opt-in). |
+| Supervised tracer | `durable_supervised_tracer` (inside the run above) | pass: **25 scenarios** |
 | Whitespace | `git diff --check` | pass |
-| Runner typecheck / tests | `cd runner && npm run check && npm test` | pass / **99 of 99** |
-| Packaging | `node runner/package-bundle.mjs --out <scratch> --forge-commit <HEAD> --runner-host target/debug/forge-runner-host` | pass. The schema 2 manifest records the same component hash as the source attestation. The host refuses a mismatched commit or protocol. Not registered with Forgeup (no operator state changed). Registration and verification with Forgeup are covered by the `packaged` scenario. |
-| Shipped skills | — | not affected by T21–T26 or the corrections |
+| Runner typecheck / tests | `cd runner && npm run check && npm test` | pass / **109 of 109** |
+| Packaging | `node runner/package-bundle.mjs --out <scratch> --forge-commit 6a2196a… --runner-host target/debug/forge-runner-host` | pass. The schema 2 manifest records component hash `5d32b086…`, equal to the source attestation. Not registered with Forgeup. |
 
-**Earlier intermittent failure.** During T26/T18 work, one full run failed
-`committed_model_authority_expires_during_renewal_outage…`, a real 30-second leased-expiry
-test. Its suite passed in isolation three times, and both final full runs passed. It is
-**not claimed fixed**. See the [T26 evidence](../pi-durable-t26/README.md#gates).
+**Earlier intermittent failure.** `committed_model_authority_expires_during_renewal_outage…` failed
+once during T26/T18 work under full load. It passed in every run since, including this one. It is
+**not claimed fixed** ([T26 evidence](../pi-durable-t26/README.md#gates)).
 
 ## Deterministic cross-process fault scenarios
 
-The scenarios run real processes: the real `forge-runner-host`, the Node runner, SQLite and
-Git, with a faux model provider. "Tracer" means
-`crates/cli/tests/durable_supervised_tracer.rs`, which runs the production composition
-(`launch::compose`). Its test-only parts are listed in
-[T18](../pi-durable-t18/README.md#coverage-classes-second-pass).
+Unchanged from the previous T19 pass and re-run green above. Real processes, faux model provider.
 
 | Required scenario | Evidence (all pass) |
 | --- | --- |
-| Duplicate admission | Tracer duplicate and fresh-composition provision (never respawns a claim); `launch-fault-*` re-dispatch; store `claim_and_reservation_commit_together_or_not_at_all`; runner `process.test.mjs` idempotent admission |
-| Competing writer | `runner-host/tests/authority.rs` (flock, lookalike/unrelated child, exited supervisor); `sealed_runtime_directory_refuses_every_later_host` |
-| Daemon/runner restart ordering | Tracer `daemon-restart`, `-retire`, `-tool`, `-exit` (a separate daemon process SIGKILLed); `launch-fault-restart-{runtime-input,spawn,stall,grant}`; `recovered`; `committed_but_undelivered_{renewal,first_grant}` (pipe loss) |
-| Lease expiry | `committed_*_authority_*_outage…` (real 30 s); `lease_expiry_without_restart_…`; tracer daemon-restart (fence → receipt) |
-| Stale/revoked recovery | `recovery_controller_refuses_missing_foreign_and_revoked_proof_before_spawning_or_claiming`; tracer `revoked`; `predecessor_tests` negative cases |
-| Interrupted external effect | Tracer `daemon-restart-tool` (effect blocks recovery, then resolution, then retirement); T08 real Bash/publication fault tests |
-| Missing Outcome | Tracer `missing` and `rejected`; `recovery_reconciliation` missing-outcome intervention |
-| Source loss | T09 retirement with lost profile/auth sources (retirement suite) |
-| Incomplete retirement | `refused_cancellation_…`, `escaped_descendant_…`, `never_granted_…` (`durable-launch-ungranted-unproven`), tracer `daemon-restart-retire` (tampered receipt → `durable-runtime-fence-unproven`) |
-| Profile migration retries | `check_profile_migration` store and CLI tests (9 migration tests in the run) |
-| Deletion safety | Purge suites (19 purge tests), including CLI → daemon → host, failed-launch purge and refusal of unknown or near-miss files |
-| Packaging mismatch | Tracer `packaged`: a Revision switch without the original bundle gives explicit refusals, and with it the original host/Node recovers. Launch preflight gives `durable-components-incompatible`. The packaging run above. |
-| Rollback | Tracer `rollback`: sticky disable; status and retirement of live and closed-uncertain work still work |
-| Herdr / Grilling retained behavior | 42 Herdr/Grilling tests in the run, plus release-gate tests (no fallback, Grilling on Herdr) |
-| Operator CLI/RPC controls | Tracer journeys drive `assignment-status`, `assignment-transcript`, `assignment-followup`, `assignment-retire`, `assignment-purge-runtime`, `resume`, `durable-launch-status`/`-disable` through the real CLI → daemon |
+| Duplicate admission | Tracer duplicate and fresh-composition provision; `launch-fault-*` re-dispatch; store `claim_and_reservation_commit_together_or_not_at_all`; runner `process.test.mjs` |
+| Competing writer | `runner-host/tests/authority.rs`; `sealed_runtime_directory_refuses_every_later_host` |
+| Daemon/runner restart ordering | Tracer `daemon-restart`, `-retire`, `-tool`, `-exit`; `launch-fault-restart-*`; `recovered`; `committed_but_undelivered_{renewal,first_grant}` |
+| Lease expiry | `committed_*_authority_*_outage…` (real 30 s); `lease_expiry_without_restart_…`; tracer daemon-restart |
+| Stale/revoked recovery | `recovery_controller_refuses_missing_foreign_and_revoked_proof…`; tracer `revoked`; `predecessor_tests` |
+| Interrupted external effect | Tracer `daemon-restart-tool`; T08 real Bash/publication fault tests; **new:** `runner/test/effect-free-failures.test.mjs` (effect-free vs uncertain tool failures) |
+| Missing Outcome | Tracer `missing` and `rejected`; `recovery_reconciliation`; **and real-provider runs below** |
+| Source loss | T09 retirement with lost profile/auth sources |
+| Incomplete retirement | `refused_cancellation_…`, `escaped_descendant_…`, `never_granted_…`, tracer `daemon-restart-retire` |
+| Profile migration retries | `check_profile_migration` store and CLI tests |
+| Deletion safety | Purge suites, including CLI → daemon → host |
+| Packaging mismatch | Tracer `packaged`; launch preflight `durable-components-incompatible`; packaging run above |
+| Rollback | Tracer `rollback` |
+| Herdr / Grilling retained behavior | Herdr/Grilling tests and release-gate tests |
+| Operator CLI/RPC controls | Tracer journeys through the real CLI → daemon |
 
-**Observed safety properties.** No scenario showed any of the following:
-- duplicated external effect;
-- execution under a revoked or undelivered lease;
-- capacity released without host or store proof;
-- inferred completion.
+## Real-provider gate (Spec AC22)
 
-These are assertions in the tests above, not inspection by eye.
+**Authorization.** The operator authorized one isolated real-provider cycle on 2026-11-21, using an
+owner-only key file passed by path (never read or printed by the agent), billed `openai/gpt-4.1`
+calls, and scratch Workspaces under `/tmp`. Retries and reruns of the same gate were covered by
+that authorization. The final runs were executed in a second operator session at the operator's
+direction.
 
-## Acceptance-criteria mapping
+**Harness.** `crates/cli/tests/durable_real_provider.rs` (opt-in: it runs only when
+`FORGE_REAL_PROVIDER_KEY_FILE` is set and is otherwise a no-op). It composes:
 
-The per-criterion trace, with implementation locations, test classes and gaps, is the
-[T18 third-pass AC table](../pi-durable-t18/README.md#acceptance-criteria-trace-at-2097267).
-This run confirms that every listed class (a) and (b) test passes on the verified tree.
+- the production durable composition (`launch::compose`) behind the production release gate;
+- the real `forge-runner-host` binary built from the same Revision, refused if stale;
+- the **shipped runner entry** `runner/src/check-entry.ts` with the real OpenAI provider (no faux
+  model);
+- the real Forge CLI and daemon RPC, including transcript reading through matched inspectors;
+- a scratch Workspace, store and Git repository; separately pinned Implementation and Review
+  profiles (the reviewer gets only `read` and `bash`).
 
-**AC22, the release verification gate, is NOT met:**
+The **only test-only substitution** is launch eligibility, `LaunchControl::enable_controlled`:
+every shipped Revision withholds new durable launches. No Herdr fallback exists (any call panics).
+
+**Asserted per run:** matched Revision and component hash on the Launch; authenticated bootstrap
+(context read); an accepted Implementation Outcome with a changed output commit that adds exactly
+`hello.txt`; no Review before the Implementation is retired; retirement releases capacity from
+proof; a fresh Review Assignment (new runtime and conversation) bound to exactly the output
+commit, on its own pinned profile; an accepted Review Outcome with the same evidence; the Review
+transcript contains no `git add`, `git commit`, `write` or `edit` call; the worktree HEAD is still
+the output commit and clean; no API-key-shaped token in runtime storage or the repository.
+
+### Run history
+
+| Revision | Result | What it showed |
+| --- | --- | --- |
+| `bacf2ef` | fail | OpenAI refused the first call: the account had no credits. Forge recorded Missing Outcome, kept capacity, started no Review. |
+| `02e5950` | pass (weak) | Full cycle in 36 s, but the single shared profile let the reviewer act as an implementer (it rewrote `hello.txt` with identical content and its commit failed with "nothing to commit"). Forge's own check would have refused a changed Review commit (Outcome evidence is re-observed and must equal the bound commit, on a clean worktree). The harness was strengthened: separate profiles and independence assertions. |
+| `9ac67f6` | **fail: defect found** | After committing, the model read `.git/HEAD` (a file-not-directory in a worktree). The tool threw, `guardEffectTool` treated every throw as an interrupted effect and closed authority, and the Assignment ended Missing Outcome. Upstream tools throw for routine mistakes (missing path, `edit` text not found), so real models would hit this constantly. **Fixed** in `9a7bb77` + `e968686`: see below. |
+| `9a7bb77` ×3 | Implementation pass ×2; Review fail ×2; 1 void | Both Implementations passed. Both reviewers reviewed correctly but did not submit: one answered in prose, the other (with no `write` tool) never created the Outcome file and falsely claimed success. Forge recorded Missing Outcome both times. Profile prompt issue in the harness, fixed in `6a2196a` (one exact heredoc submit command). The third run was void: the tree was dirty mid-run and the harness refused it. |
+| **`6a2196a` ×3** | **pass, fail (network), pass** | See below. |
+
+### Final runs on `6a2196a`
+
+Run by the second operator session on a clean tree, with the host rebuilt and reporting
+`6a2196a2de17ebfc77eeac43d8124f12c0ea2155`. Evidence was re-checked from the saved
+`evidence-summary.json` files.
+
+| Run | Result | Elapsed | Output commit (Implementation) | Review bound commit | Verdicts |
+| --- | --- | --- | --- | --- | --- |
+| 1 | **PASSED** | 25 s | `b415d4e` | `b415d4e` | Pass / Pass |
+| 2 | failed | — | — | — | — |
+| 3 | **PASSED** | 27 s | `2747e17` | `2747e17` | Pass / Pass |
+
+**Run 2.** The first OpenAI request failed at connection level after 0.5 s:
+`Connection error.: AggregateError (ETIMEDOUT)`. No tokens, no tool call. The runner disables
+provider retries by design (`maxRetries: 0`), so the Implementation went Blocked with Missing
+Outcome, capacity stayed reserved and no Review was dispatched. That is the specified safe
+behavior. It is an infrastructure failure, not a model or Forge failure, and it is recorded as a
+known limitation (no automatic retry of a transient provider error).
+
+No API-key-shaped string appears in any saved transcript.
+
+### The defect the gate found, and its fix
+
+`runner/src/interrupted-effects.ts::guardEffectTool` now receives an `EffectMeter`. The coding tools
+reach the filesystem and shell only through `meteredEnv` (the pinned pi-durable tools import no
+`fs` or `child_process`), which counts every started `ExecutionEnv` operation except a fixed
+read-only list, and counts content reads unless the target is a regular file or absent. A tool
+that throws before any counted operation started, with neither lease nor call aborted, returns an
+ordinary `isError` result. The Harness commits it as a completed call, so the model can recover and
+recovery is not blocked. Everything else stays a fatal interrupted effect. Tests:
+`runner/test/effect-free-failures.test.mjs` and the production-wiring case in
+`runner/test/profiles.test.mjs` (mutation-checked).
+
+## AC22 status
 
 | AC22 element | Status |
 | --- | --- |
-| Deterministic duplicate admission, daemon and runner crashes, lease expiry, interrupted effects, revoked recovery, missing Outcomes, incompatible components, incomplete retirement | **Run, pass** (above) |
-| Real-provider Implementation → independent Review cycle: authenticated bootstrap/Outcomes, changed output commit, exact Review binding, retirement before successor | **UNRUN**: no operator-authorized, isolated real-provider credential and environment was provided. Per the Task, live work and credentials must never be used without authorization. Only the faux-provider `continuation-chain` scenario covers this shape (class b). |
-| Managed (Forgeup) daemon launch | **Configuration verified, launch unrun.** M4 was resolved after this report (`--durable-openai-key-file`). The `packaged` scenario composes from Forgeup's managed arguments, including the key, in-process. No real `forgeup daemon start` launch with a real provider has been run. |
-| Review handback/Continuation and publication/unchanged rules | Covered by the retained integration gates in class (b) (`continuation-chain`, rollout tests). Publication with a durable pin was not re-exercised (T16 note). |
+| Deterministic duplicate admission, crashes, lease expiry, interrupted effects, revoked recovery, missing Outcomes, incompatible components, incomplete retirement | **Run, pass** |
+| Real-provider Implementation → independent Review cycle: authenticated bootstrap/Outcomes, changed output commit, exact Review binding, retirement before successor | **Run, pass** (2 of 3 on `6a2196a`; the failure is an explained network timeout handled safely) |
+| Managed (Forgeup) daemon launch | Configuration verified in-process (`packaged` scenario composes Forgeup's managed arguments including the key). A real `forgeup daemon start` with a real provider was not run. |
+| Review handback/Continuation and publication/unchanged rules | Class (b) only (`continuation-chain`, rollout tests). |
 
-## How to run the missing real-provider gate
+## Remaining limitations and open items
 
-Run this only with operator authorization, and never against ordinary live work.
-
-1. **Environment.** Use a dedicated Workspace and store, a scratch Git repository, and a
-   manual daemon. A managed daemon with `--durable-openai-key-file` also works now that
-   M4 is resolved. For a manual daemon, configure:
-   - `FORGE_DURABLE_RUNNER_HOST` and `FORGE_DURABLE_RUNNER_ENTRY`, pointing at a bundle
-     built from the verified Revision;
-   - `FORGE_DURABLE_NODE` and `FORGE_DURABLE_EFFECT_INSPECTOR`;
-   - `FORGE_DURABLE_OPENAI_KEY_FILE`, pointing at an isolated `0600` key file.
-2. **Launch eligibility.** Every shipped Revision withholds new launches, and no command
-   enables them. The run must therefore use a test composition that calls
-   `LaunchControl::enable_controlled`, and must say so.
-3. **Cycle.** Register a durable Task profile, pin Implementation and Review, then
-   dispatch. Verify:
-   - authenticated bootstrap;
-   - an accepted Implementation Outcome with a changed commit;
-   - safe retirement;
-   - a fresh Review Assignment bound to that exact commit;
-   - an accepted Review Outcome;
-   - no next Check before acceptance and retirement.
-4. **Evidence.** Record commands, expected and observed results, and identities.
-   Redact every credential.
-
-Any implementation change after `2097267` invalidates these results and needs renewed
-review and verification.
-
-## Remaining limitations
-
-- No class (c) evidence exists. M4 limits supported operation to manual daemons.
-- The test gaps and open minors listed in the
-  [T18 third pass](../pi-durable-t18/README.md#still-open-non-blocking) still apply.
+- **Open minors from the independent review of the fix** (none blocking; details in the
+  [addendum](../pi-durable-t18/README.md#effect-free-failure-addendum--2026-11-21-9a7bb77-and-e968686)):
+  a stat-then-open race that a background process the agent started earlier could exploit to
+  consume FIFO data on an `edit`; the stat check assumes absolute paths (all pinned tools pass
+  them); a synchronous `statSync` can stall the runner on a hung network filesystem; the
+  "concurrent" test is not concurrent; two nits.
+- **No provider retry.** A transient provider/network error leaves the Assignment Missing Outcome
+  until an operator follow-up or retirement.
+- **Outcome submission relies on the profile's behavior text.** The real runs show gpt-4.1 can end
+  with prose or claim a submission it did not make; Forge never infers completion, but an
+  operator-written profile must give an exact submission command.
+- The earlier T18 open minors and test gaps still apply
+  ([list](../pi-durable-t18/README.md#still-open-non-blocking)).
 - Process-crash tests do not establish durability against physical power loss.
-- The trusted-local-host boundary applies. Same-user tools can read anything the user
-  can, including the model key file.
+- The trusted-local-host boundary applies. Same-user tools can read anything the user can,
+  including the model key file.
+
+Any implementation change after `6a2196a` invalidates these results and needs renewed review and
+verification, including the real-provider gate.

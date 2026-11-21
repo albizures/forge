@@ -2,18 +2,21 @@
 
 ## Readiness decision
 
-**WITHHELD.** Do not enable default durable Task dispatch from any Forge Revision built
-from this source.
+**WITHHELD, pending one operator decision.** Every release gate has now passed on Forge Revision
+`6a2196a`. The only remaining prerequisite is step 3 below: the operator must fix or explicitly
+accept the open non-blocking review items. Until then, do not enable default durable Task
+dispatch from any Revision built from this source.
 
 | Basis | Evidence |
 | --- | --- |
-| Reviewed snapshot | `2097267`: T18 third pass, no open blocker ([report](../pi-durable-t18/README.md#third-pass--2026-11-21-final-snapshot-2097267)) |
-| Verified tree | `6cd2e44` (`2097267` plus two documentation files), Forge Revision `6cd2e44f801f6fe5d84330569d5ab74810ba4172` ([T19](../pi-durable-t19/README.md)) |
-| Deterministic gates | **Pass:** fmt, clippy, 931 Rust tests twice in a row, 25 real-process tracer scenarios, 99 Node tests, packaging |
-| Release gate (Spec AC22) | **UNRUN:** no real-provider Implementation → Review cycle |
-| M4 (managed-daemon credential) | **Resolved** after T19: `forgeup daemon start --durable-openai-key-file` ([addendum](../pi-durable-t18/README.md#m4-addendum--2026-11-21-snapshot-206f999-plus-the-follow-up-fix)). Changes after the verified tree need T19's gates renewed: they were re-run and pass (932 Rust tests, 25 scenarios). |
+| Review | T18 third pass on `2097267` (no blocker), plus two addenda for every later implementation change: [M4](../pi-durable-t18/README.md#m4-addendum--2026-11-21-snapshot-206f999-plus-the-follow-up-fix) and the [effect-free tool-failure fix](../pi-durable-t18/README.md#effect-free-failure-addendum--2026-11-21-9a7bb77-and-e968686). No open blocker or major. |
+| Verified Revision | `6a2196a2de17ebfc77eeac43d8124f12c0ea2155` ([T19](../pi-durable-t19/README.md)) |
+| Deterministic gates | **Pass:** fmt, clippy, 932 Rust tests, 25 real-process tracer scenarios, 109 Node tests, packaging |
+| Release gate (Spec AC22) | **Pass:** real `openai/gpt-4.1` Implementation → independent Review cycle passed in 2 of 3 runs on `6a2196a`; the third failed on a connection timeout before the model answered and was handled safely (Missing Outcome, capacity kept, no Review). Earlier runs found and drove the fix of a real defect. |
+| M4 (managed-daemon credential) | **Resolved:** `forgeup daemon start --durable-openai-key-file`. |
 
-A failed or unrun release gate is a withheld result. It is not a conditional success.
+A failed or unrun release gate is a withheld result. It is not a conditional success. The gates
+have passed; the withholding is now only the pending explicit operator decision.
 
 The source behaves accordingly:
 - `forge dispatcher durable-launch-status` reports `withheld` and
@@ -25,12 +28,13 @@ no dispatch and no configuration change.
 
 ## What passed, and with which components
 
-These identities are from the T19 run:
+These identities are from the T19 run on `6a2196a`:
 
 | Component | Identity |
 | --- | --- |
 | Runner bundle | schema 2; runner protocol 1; durable runtime schema 2 |
-| Runner component hash (carried by every Launch) | `8991977e0e4cb7c4468875f5cbec11ac69403477e14d5378c92a7346a4af28a0` |
+| Runner component hash (carried by every Launch) | `5d32b0862d3082f5712d49fb36a55ddc9871d880ea7ba780c065efc1d9b1f70c` |
+| Bundle tree sha256 | `9cad5c0fae170b860a24a8fa21dcc57c85f37e110f30c098c7d974216d3ed803` |
 | Dependencies | `@earendil-works/pi-durable` 1.5.2, `@earendil-works/pi-ai` 1.5.2; lock sha256 `69dfc738…b3bdf1` |
 | Node | 24.18.0, bundled |
 | Forge store | schema revision 25. Upgrade from 7–24 is explicit and offline: [state upgrades](../../state-upgrades.md) |
@@ -54,13 +58,16 @@ Everything else is rejected, fail-closed:
 
 ## What must happen before readiness can be granted
 
-1. **M4 is closed.** Managed daemons take `--durable-openai-key-file`. (This step is done.)
-2. **Run the real-provider gate.** Follow the steps in
-   [T19, "How to run the missing real-provider gate"](../pi-durable-t19/README.md#how-to-run-the-missing-real-provider-gate),
-   on the exact Revision to be released, in an operator-authorized, isolated environment,
-   and retain a redacted report.
-3. **Decide the open T18 minors and test gaps.** Fix them or accept them explicitly
-   ([list](../pi-durable-t18/README.md#still-open-non-blocking)).
+1. **M4 is closed.** Managed daemons take `--durable-openai-key-file`. **Done.**
+2. **Run the real-provider gate** on the exact Revision to be released. **Done** on `6a2196a`
+   ([T19](../pi-durable-t19/README.md#real-provider-gate-spec-ac22)). To repeat it on another
+   Revision: `FORGE_REAL_PROVIDER_KEY_FILE=<owner-only key file> cargo test -p forge-cli --test durable_real_provider`
+   on a clean tree with the host rebuilt, under operator authorization (billed calls).
+3. **Decide the open review items.** Fix them or accept them explicitly: the
+   [third-pass list](../pi-durable-t18/README.md#still-open-non-blocking) and the
+   [effect-free fix addendum list](../pi-durable-t18/README.md#still-open-after-the-addendum-non-blocking).
+   **Pending: operator decision.** Any fix changes the implementation and requires renewed
+   review and verification, including the real-provider gate.
 4. **Implement eligibility.** Only after steps 1–3 pass on that Revision can launch
    eligibility be implemented and reviewed as its own change. Today no shipped command
    grants it, and it must not be added as a side effect of this handoff.
@@ -74,7 +81,8 @@ Everything else is rejected, fail-closed:
 - **A different platform, model or authentication mechanism** from the supported matrix.
 - **Any failing or intermittent** release-gate scenario that has not been explained.
   `committed_model_authority_expires_during_renewal_outage…` failed once under full load
-  and is recorded but not claimed fixed.
+  and is recorded but not claimed fixed. The one failed real-provider run on `6a2196a` is
+  explained (connection `ETIMEDOUT` before any model output).
 - **An operator rollback** (`durable-launch-disable`). It is sticky and immutable for the
   store.
 
@@ -162,3 +170,9 @@ Every command below exists and is documented in the
   visibly blocked by design.
 - **Power loss.** Process-crash tests do not establish durability against physical power
   loss.
+- **No provider retry.** Retries are disabled by design. A transient provider or network error
+  leaves the Assignment with Missing Outcome; recover with an operator follow-up or retirement.
+- **Outcome submission depends on the profile.** Real runs showed `gpt-4.1` ending with prose,
+  or claiming a submission it never made, when the profile was vague. Forge never infers
+  completion. Profiles must give an exact submission command (see the harness profiles in
+  `crates/cli/tests/durable_real_provider.rs`) and reviewers should get only `read` and `bash`.

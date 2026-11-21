@@ -1,8 +1,54 @@
 # T18 — Independent implementation and coding-standards review
 
-This report has three passes. The **third pass** (below) is current. The
+This report has three passes and two addenda. The **third pass** (below) is the current
+whole-snapshot review; the addenda review the two implementation changes made after it. The
 [second pass](#second-pass--2026-11-21-snapshot-646abd9) and the
 [first pass](#first-pass--2026-11-20-snapshot-1fc65a5) are kept unchanged as history.
+
+## Effect-free failure addendum — 2026-11-21, `9a7bb77` and `e968686`
+
+**Why.** The T19 real-provider gate found a defect: the pinned pi-durable tools throw for routine
+mistakes (a `read` of a missing path, `edit` text not found), and `guardEffectTool` treated every
+throw as an interrupted effect, closing authority and ending the Assignment with Missing Outcome.
+The fix ([T19](../pi-durable-t19/README.md#the-defect-the-gate-found-and-its-fix)) meters every
+possibly-effectful `ExecutionEnv` operation and returns an ordinary error result for an
+invocation that threw before any such operation started. It changes the runner component hash
+(now `5d32b086…`).
+
+**Review.** An independent reviewer (a separate agent given only the code, no conclusions) reviewed
+`9a7bb77`, the author fixed the findings in `e968686`, and the reviewer re-reviewed `e968686`.
+Neither pass found a BLOCKER or MAJOR.
+
+Verified sound by the reviewer, with file references into the pinned dist: the tools reach fs
+and processes only through `api.env`, which is the proxied env (`harness/tool.js:388` →
+`options.env`); every write path goes through a counted method (`write`/`edit` → `writeFile`,
+`bash` → `exec`); allow-listed methods' internal calls stay allow-listed; returned readers expose
+no mutation; snapshot timing is synchronous after `admit()`; a parallel call can only make
+classification more conservative; a returned `isError` result is committed `completed`, so
+`inspectInterruptedEffects` correctly skips it; no new secret exposure (messages carry path,
+errno and indexes, never file content or `exec` output).
+
+Fixed in `e968686` from the first pass: an `edit` through a symlink to a FIFO consumed data yet was
+classified effect-free (content reads of non-regular targets now count); a non-string or throwing
+error message escaped the fail-closed path; surrogate pairs could be split; README "Errors are
+redacted" was stale; the production wiring, call-level abort, `bash` and FIFO cases were untested
+(now tested; the wiring test is mutation-checked).
+
+### Still open after the addendum (non-blocking)
+
+- **MINOR: stat-then-open race.** `statSync` runs before the async open, so another process can
+  swap a link to a FIFO in between (the reviewer reproduced 4 consuming reads in 12 under a
+  deliberate swap loop). Exploiting it needs a background process the agent itself started with
+  an earlier `bash` call, which can act at any time anyway. A full fix needs an
+  `O_NONBLOCK` open plus `fstat` on the env side.
+- **MINOR (latent): path resolution.** `statSync` resolves relative, `~` and `file://` paths
+  differently from the env. Not reachable: every pinned tool passes `absolutePath` output.
+- **MINOR: availability.** A synchronous `statSync` on a hung network filesystem stalls the whole
+  runner; safety holds (the lease fences when the loop resumes).
+- **MINOR: test.** The "concurrently started operation" test bumps the meter inside the same call,
+  so it is not truly concurrent.
+- **NITs:** evaluating `error.name` is outside the fail-closed try; `[...reason]` copies the whole
+  message before truncating; no tests for a non-rendering error or non-absolute paths.
 
 ## M4 addendum — 2026-11-21, snapshot `206f999` plus the follow-up fix
 
