@@ -422,7 +422,9 @@ proven quiescence.
 
 Shell and file tools are not replay-safe. If a tool call's intent was committed without a
 known result, Forge retains an `interrupted-effect` blocker that reserves capacity and blocks
-grants. Arbitrary commands are never replayed. Investigate the real external outcome (push,
+grants. A tool call that failed before it started any filesystem write or command (for
+example a `read` of a missing file, or an `edit` whose text was not found) had no effect: the
+agent sees an ordinary error result and continues, and no blocker is created. Arbitrary commands are never replayed. Investigate the real external outcome (push,
 publication, file changes) and record it with evidence:
 
 ```sh

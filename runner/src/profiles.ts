@@ -11,7 +11,7 @@ import { createRegistry, defineExtension, type AgentChange, type HarnessOptions,
 import { NodeExecutionEnv } from '@earendil-works/pi-durable/env/node';
 import { createBashTool, createEditTool, createReadTool, createWriteTool } from '@earendil-works/pi-durable/tools';
 import { Authorization, guardProvider } from './authorization.ts';
-import { guardEffectTool } from './interrupted-effects.ts';
+import { EffectMeter, guardEffectTool, meteredEnv } from './interrupted-effects.ts';
 import { Denied, exactKeys, requireCondition } from './contract.ts';
 
 const MAX_CONTEXT = 256 * 1024;
@@ -148,14 +148,16 @@ export function createProfileRuntime(input: unknown, credentialFile: string | un
   const cli = capabilityEnv.FORGE_ASSIGNMENT_FORGE_CLI;
   requireCondition(cli === undefined || isAbsolute(cli), 'durable-capability-env-invalid');
   const environment = { PATH: cli ? `${dirname(cli)}:/usr/bin:/bin` : '/usr/bin:/bin', LANG: 'C.UTF-8', ...capabilityEnv };
-  const env = new NodeExecutionEnv({ cwd: config.cwd, shellPath: '/bin/sh', shellEnv: environment });
+  // Every tool effect goes through this metered env (see guardEffectTool).
+  const meter = new EffectMeter();
+  const env = meteredEnv(new NodeExecutionEnv({ cwd: config.cwd, shellPath: '/bin/sh', shellEnv: environment }), meter);
   const factories: Record<string, () => ToolRegistration> = {
     read: createReadTool, write: createWriteTool, edit: createEditTool,
     bash: () => createBashTool({ prepare: execution => { execution.cwd = config.cwd; execution.env = { ...environment }; execution.inheritEnv = false; } }),
   };
   const tools = config.tools.map(name => {
     const tool = factories[name]();
-    return { ...tool, replay: 'unsafe' as const, execute: guardEffectTool(tool.execute, authorization) };
+    return { ...tool, replay: 'unsafe' as const, execute: guardEffectTool(tool.execute, authorization, meter) };
   });
   const registry = createRegistry();
   const extension = defineExtension({ name: 'forge-coding', tools });
