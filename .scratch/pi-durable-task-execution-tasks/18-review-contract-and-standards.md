@@ -23,4 +23,4 @@ Deliver a dated, revision-identified review report with findings, severity, requ
 
 ## Dependency
 
-Depends on T17. Non-code review Task; ordinary dependency only, not a new code Stack member. All downstream work consumes the reviewed final implementation snapshot.
+Depends on T24. The first review pass (2026-11-20, snapshot `1fc65a5`) reviewed T17 and found blockers. The corrective Tasks T21–T24 were inserted after T17 to fix them, so this Task now re-reviews the corrected snapshot after T24. Non-code review Task; ordinary dependency only, not a new code Stack member. All downstream work consumes the reviewed final implementation snapshot.

@@ -12,8 +12,11 @@ All Tasks form **one ordinary linear dependency chain**. There is no parallel fr
 
 ```text
 T01 → T02 → T03 → T04 → T05 → T06 → T07 → T08 → T09 → T10
-    → T11 → T12 → T13 → T14 → T15 → T16 → T17 → T18 → T19 → T20
+    → T11 → T12 → T13 → T14 → T15 → T16 → T17
+    → T21 → T22 → T23 → T24 → T18 → T19 → T20
 ```
+
+T21–T24 are corrective Tasks for the blockers in the first T18 review. The operator authorized them on 2026-11-20. They are numbered after T20 so that existing links stay valid, but they run between T17 and T18.
 
 Arrows mean execution order: the Task on the right depends on the Task on the left. Explicit per-Task edges appear below and in each Task body; these are filesystem declarations, not claimed Forge relationships.
 
@@ -45,7 +48,11 @@ Mark a Task complete only after its acceptance checks and required verification 
   - **Majors:** no reconciliation path after a watchdog fence or daemon loss, documentation over-claims, AC19 preflight and Revision-switch mapping, Forgeup model credentials, runner wire drift, and missing purge and follow-up contract/fault tests.
   - **Gates on `1fc65a5`:** all pass (881 Rust tests passed, 1 opt-in ignored, 10 supervised scenarios; runner typecheck; 90 Node tests).
   - **No real-provider coverage exists.**
-  - **Next:** B1 needs an operator decision on which deliverable owns it (no silent Task additions). The corrected snapshot must be reviewed again before T18 completes. T19 must not start.
+  - **Next:** the operator added corrective Tasks T21–T24 for B1 and B2. T18 now depends on T24 and re-reviews the corrected snapshot. T19 must not start.
+- [ ] [T21 — Purge retired lifecycle artifacts](21-purge-retired-lifecycle-artifacts.md) — corrects T18 B2 (plus the purge part of M6). Runs after T17.
+- [ ] [T22 — Ship production Check runner entry](22-ship-production-check-runner.md) — corrects T18 B1, runner part, and M5.
+- [ ] [T23 — Compose production durable adapter](23-compose-production-durable-adapter.md) — corrects T18 B1, server part.
+- [ ] [T24 — Package runner host and preflight components](24-package-runner-host-and-preflight.md) — corrects T18 B1, packaging part, and the launch-relevant part of M3. Followed by the T18 re-review.
 - [ ] [T19 — Verify integration and recovery](19-verify-integration-and-recovery.md)
 - [ ] [T20 — Deliver release handoff](20-publish-release-handoff.md)
 
@@ -70,7 +77,11 @@ Mark a Task complete only after its acceptance checks and required verification 
 | T15 | [Package and attest a matched runner with Forge Revisions](15-package-matched-runner.md) | T14 | T14 |
 | T16 | [Gate complete scheduling, mixed backends and rollback](16-gate-mixed-backend-rollout.md) | T15 | T15 |
 | T17 | [Complete domain records and verifiable operator documentation](17-document-domain-and-operations.md) | T16 | T16 |
-| T18 | [Review implementation and coding standards independently](18-review-contract-and-standards.md) | T17 | Not a Stack member |
+| T21 | [Purge runtimes after real retirement/crash reconciliation](21-purge-retired-lifecycle-artifacts.md) | T17 | T17 |
+| T22 | [Ship a production Check runner entry and real recovery entry](22-ship-production-check-runner.md) | T21 | T21 |
+| T23 | [Compose the production durable dispatch/recovery adapter](23-compose-production-durable-adapter.md) | T22 | T22 |
+| T24 | [Package the runner host and preflight matched components](24-package-runner-host-and-preflight.md) | T23 | T23 |
+| T18 | [Review implementation and coding standards independently](18-review-contract-and-standards.md) | T24 (first pass reviewed T17) | Not a Stack member |
 | T19 | [Verify packaged integration, fault recovery and real-provider handoff](19-verify-integration-and-recovery.md) | T18 | Not a Stack member |
 | T20 | [Deliver revision-specific readiness and rollout/rollback handoff](20-publish-release-handoff.md) | T19 | Not a Stack member |
 
@@ -91,7 +102,7 @@ Review or verification findings block advancement. Corrections must meet the res
 
 ## Planned code Stack and later publication prerequisites
 
-Code/documentation Stack declaration: **T02 → T03 → … → T17**. Each member Builds-On the immediately preceding code member. T02 is the proposed root. Ordinary predecessor dependencies still apply to every Task, including T01 and T18–T20.
+Code/documentation Stack declaration: **T02 → T03 → … → T17 → T21 → T22 → T23 → T24**. Each member Builds-On the immediately preceding code member. T02 is the proposed root. Ordinary predecessor dependencies still apply to every Task, including T01 and T18–T20.
 
 Read-only repository inspection found Git remote `origin` at `git@github.com:albizures/forge` and the checkout on `main`. These are observations, **not an operator-selected publication destination or starting branch**. No Stack root destination has been invented.
 
