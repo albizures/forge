@@ -13,10 +13,10 @@ All Tasks form **one ordinary linear dependency chain**. There is no parallel fr
 ```text
 T01 → T02 → T03 → T04 → T05 → T06 → T07 → T08 → T09 → T10
     → T11 → T12 → T13 → T14 → T15 → T16 → T17
-    → T21 → T22 → T23 → T24 → T18 → T19 → T20
+    → T21 → T22 → T23 → T24 → T25 → T26 → T18 → T19 → T20
 ```
 
-T21–T24 are corrective Tasks for the blockers in the first T18 review. The operator authorized them on 2026-11-20. They are numbered after T20 so that existing links stay valid, but they run between T17 and T18.
+T21–T24 are corrective Tasks for the blockers in the first T18 review. The operator authorized them on 2026-11-20. T25–T26 are corrective Tasks for the blockers in the second T18 review (B3, B4). The operator authorized them on 2026-11-21. All are numbered after T20 so that existing links stay valid, but they run between T17 and T18.
 
 Arrows mean execution order: the Task on the right depends on the Task on the left. Explicit per-Task edges appear below and in each Task body; these are filesystem declarations, not claimed Forge relationships.
 
@@ -60,7 +60,7 @@ Mark a Task complete only after its acceptance checks and required verification 
     - **Still open:** M2′ (docs contradict the now-composed recovery), M4 (managed-daemon credential) and M6 (daemon-level unknown follow-up resend test), plus minors.
     - **Gates on `646abd9`:** all pass (908 Rust tests passed, 1 opt-in ignored, 11 supervised scenarios; runner typecheck; 97 Node tests).
     - **No real-provider coverage exists.**
-    - **Next:** the operator assigns B3/B4. T19 must not start.
+    - **Next:** the operator added corrective Tasks T25 (B3) and T26 (B4). T18 re-reviews after T26 (third pass). T19 must not start before then.
 - [x] [T21 — Purge retired lifecycle artifacts](21-purge-retired-lifecycle-artifacts.md) — corrects T18 B2 (plus the purge part of M6). [Implementation and evidence](../../docs/research/pi-durable-t21/README.md): host purge recognizes exactly the lifecycle artifacts runner-host writes (exact names plus bounded canonical patterns; unknown, near-miss, linked, directory and foreign entries still refuse before removal; lock last). Schema revision 24 journals `removed` vs `already-absent`. Composed real retire → purge and crash → reconcile → retire → purge tests fail on the old code with `runtime-purge-storage-unsafe` and pass now. A CLI → daemon → host purge journey covers scope denial, ineligibility, conflicting and exact retries. All four repository gates pass (890 Rust tests plus 10 supervised scenarios; 1 pre-existing opt-in probe ignored), runner typecheck and 90 Node tests. Eligibility rules are unchanged. T22 may proceed. Production durable dispatch and automatic recovery remain disabled.
 - [x] [T22 — Ship production Check runner entry](22-ship-production-check-runner.md) — corrects T18 B1, runner part, and M5. [Implementation and evidence](../../docs/research/pi-durable-t22/README.md):
   - **Entry:** the packaged entry is `runner/src/check-entry.ts` → `check-runner.ts::runCheckRunner`. One process handles first admission, observation, same-attempt recovery and follow-ups. Effect inspection, bootstrap, profile, model key and guarded tools all come before intent or store.
@@ -87,6 +87,8 @@ Mark a Task complete only after its acceptance checks and required verification 
   - **Gates:** all four repository gates pass (908 Rust tests plus 11 supervised scenarios; 1 pre-existing opt-in ignored), runner typecheck and 97 Node tests.
   - **Not claimed:** no real provider; no managed-daemon dispatch (M4 remains).
   - **Next:** the T18 re-review of the corrected snapshot. Production durable dispatch stays withheld.
+- [ ] [T25 — Reconcile after daemon loss](25-reconcile-after-daemon-loss.md) — corrects T18 second-pass B3 (escalated M1).
+- [ ] [T26 — Retire failed durable launches](26-retire-failed-durable-launches.md) — corrects T18 second-pass B4.
 - [ ] [T19 — Verify integration and recovery](19-verify-integration-and-recovery.md)
 - [ ] [T20 — Deliver release handoff](20-publish-release-handoff.md)
 
@@ -115,7 +117,9 @@ Mark a Task complete only after its acceptance checks and required verification 
 | T22 | [Ship a production Check runner entry and real recovery entry](22-ship-production-check-runner.md) | T21 | T21 |
 | T23 | [Compose the production durable dispatch/recovery adapter](23-compose-production-durable-adapter.md) | T22 | T22 |
 | T24 | [Package the runner host and preflight matched components](24-package-runner-host-and-preflight.md) | T23 | T23 |
-| T18 | [Review implementation and coding standards independently](18-review-contract-and-standards.md) | T24 (first pass reviewed T17) | Not a Stack member |
+| T25 | [Reconcile Assignments after daemon loss or lease expiry](25-reconcile-after-daemon-loss.md) | T24 | T24 |
+| T26 | [Make failed durable launches reconcilable and retirable](26-retire-failed-durable-launches.md) | T25 | T25 |
+| T18 | [Review implementation and coding standards independently](18-review-contract-and-standards.md) | T26 (first pass reviewed T17, second pass T24) | Not a Stack member |
 | T19 | [Verify packaged integration, fault recovery and real-provider handoff](19-verify-integration-and-recovery.md) | T18 | Not a Stack member |
 | T20 | [Deliver revision-specific readiness and rollout/rollback handoff](20-publish-release-handoff.md) | T19 | Not a Stack member |
 
@@ -136,7 +140,7 @@ Review or verification findings block advancement. Corrections must meet the res
 
 ## Planned code Stack and later publication prerequisites
 
-Code/documentation Stack declaration: **T02 → T03 → … → T17 → T21 → T22 → T23 → T24**. Each member Builds-On the immediately preceding code member. T02 is the proposed root. Ordinary predecessor dependencies still apply to every Task, including T01 and T18–T20.
+Code/documentation Stack declaration: **T02 → T03 → … → T17 → T21 → T22 → T23 → T24 → T25 → T26**. Each member Builds-On the immediately preceding code member. T02 is the proposed root. Ordinary predecessor dependencies still apply to every Task, including T01 and T18–T20.
 
 Read-only repository inspection found Git remote `origin` at `git@github.com:albizures/forge` and the checkout on `main`. These are observations, **not an operator-selected publication destination or starting branch**. No Stack root destination has been invented.
 
