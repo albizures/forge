@@ -704,3 +704,90 @@ fn unreserved_launch_claim_is_retired_through_the_adapter() {
     assert!(info.resources.iter().all(|r| r.retired_at_millis.is_some()));
     assert!(open(&f.database).dispatch_hold(record).unwrap().is_some());
 }
+
+/// T18 F1: Forge commits a renewal before delivering it. When that delivery
+/// never happens, the host expires on the earlier lease it accepted, fences and
+/// proves quiescence for that lease. Retirement accepts the same owner's proof
+/// for the earlier lease of the same Launch instead of stranding the Assignment.
+#[test]
+fn committed_but_undelivered_renewal_retires_from_the_earlier_lease_fence() {
+    use forge_app::authorization_lease::{Repository as _, session::Tick};
+    let mut f = Fixture::new("model");
+    let authority = DaemonAuthority::new().unwrap();
+    let mut service = authority
+        .bind(&f.store, "test".into(), f.launch.clone(), 1, &mut f.child)
+        .unwrap();
+    let Tick::Delivered { lease, .. } = service.tick(&f.store).unwrap() else {
+        panic!("initial grant was not delivered")
+    };
+    event(&f.output, "authorized");
+    // Commit the next lease in Forge only: the delivery is lost.
+    let mut undelivered = forge_app::authorization_lease::Lease::clone(&lease);
+    undelivered.sequence += 1;
+    undelivered.issued_boottime_millis += 10_000;
+    undelivered.expires_boottime_millis += 10_000;
+    open(&f.database)
+        .grant_lease("test", &undelivered, undelivered.issued_boottime_millis)
+        .unwrap();
+    // Losing the pipe ends the worker: the host proves the crash for the lease
+    // it accepted (or, if the worker hangs, fences on that lease at expiry).
+    drop(service);
+    assert!(f.child.wait().unwrap().success());
+    let earlier = forge_runner_host::crash::receipt(&f.directory, &lease).is_ok()
+        || forge_runner_host::fence::receipt(&f.directory, &lease).is_ok();
+    let later = forge_runner_host::crash::receipt(&f.directory, &undelivered).is_ok()
+        || forge_runner_host::fence::receipt(&f.directory, &undelivered).is_ok();
+    assert!(earlier && !later, "proof names the earlier lease only");
+    app(&f, Arc::new(Controller::default()))
+        .retire_agent_assignment("assignment")
+        .unwrap();
+    let retired = open(&f.database)
+        .agent_assignment_info("assignment")
+        .unwrap();
+    assert!(!retired.capacity_reserved(), "{retired:?}");
+}
+
+/// T18 F1: a first grant committed in Forge but never delivered. The host
+/// loses its pipe before accepting any grant and writes its ungranted receipt;
+/// retirement accepts it for the committed lease's owner.
+#[test]
+fn committed_but_undelivered_first_grant_retires_from_the_ungranted_receipt() {
+    use forge_app::authorization_lease::{AuthorityHost as _, Lease, Repository as _};
+    let mut f = Fixture::new("model");
+    let owner = forge_runner_host::SpawnedOwner::capture(&mut f.child, &f.directory)
+        .unwrap()
+        .observe()
+        .unwrap()
+        .owner;
+    let now = forge_runner_host::supervision::boottime_millis().unwrap();
+    let lease = Lease {
+        launch: f.launch.clone(),
+        generation: 1,
+        owner,
+        daemon_epoch: "lost-daemon".into(),
+        sequence: 1,
+        issued_boottime_millis: now,
+        expires_boottime_millis: now + 30_000,
+    };
+    open(&f.database).grant_lease("test", &lease, now).unwrap();
+    drop(f.child.stdin.take());
+    diagnostic(&f.errors, "runner-watchdog-quiescence-verified");
+    assert!(f.child.wait().unwrap().success());
+    app(&f, Arc::new(Controller::default()))
+        .retire_agent_assignment("assignment")
+        .unwrap();
+    let retired = open(&f.database)
+        .agent_assignment_info("assignment")
+        .unwrap();
+    assert!(!retired.capacity_reserved(), "{retired:?}");
+    // Exact retry.
+    app(&f, Arc::new(Controller::default()))
+        .retire_agent_assignment("assignment")
+        .unwrap();
+    assert_eq!(
+        open(&f.database)
+            .agent_assignment_info("assignment")
+            .unwrap(),
+        retired
+    );
+}

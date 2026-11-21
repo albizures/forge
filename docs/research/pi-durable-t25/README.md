@@ -245,3 +245,7 @@ These are local deterministic gates, not release evidence.
 - Escaped-child absence beyond this host's subreaper, remote effects and hostile
   same-user processes remain outside the boundary, as before.
 - Production durable dispatch stays withheld; no rollout claim.
+
+## Errata (T18 third pass)
+
+Some statements above were corrected after review; see [third-pass corrections](../pi-durable-t18/third-pass-corrections.md#errata-to-earlier-evidence).

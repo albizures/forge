@@ -88,8 +88,8 @@ advisory sidecar lock and rejects a second owner before binding the listener.
 This prevents competing daemon ownership, not deliberate direct SQLite access.
 Managed daemons instead use Forgeup's isolated per-Revision state.
 
-For controlled durable-profile preview/registration only, a manual daemon may
-set `FORGE_DURABLE_OPENAI_KEY_FILE` to an explicit protected key-file **path**.
+For durable-profile preview/registration and, when launch is composed, as the
+launched runner's model credential, a manual daemon may set `FORGE_DURABLE_OPENAI_KEY_FILE` to an explicit protected key-file **path**.
 Never put the key value in the environment. See the
 [profile/authentication contract](agent-profile-policy.md#durable-profiles-and-authentication)
 for permissions, supported inputs and fail-closed behavior. This setting neither

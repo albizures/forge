@@ -224,7 +224,9 @@ impl SupervisedDispatch {
             let state = self.wait_state(id, |s| s != DriverState::Live(AgentObservation::Working));
             assert!(matches!(
                 state,
-                DriverState::Live(AgentObservation::Blocked) | DriverState::Ended
+                DriverState::Live(AgentObservation::Blocked)
+                    | DriverState::Ended
+                    | DriverState::Reaped
             ));
             return Report {
                 launch,

@@ -252,6 +252,28 @@ pub fn receipt(directory: &Path, lease: &Lease) -> io::Result<Receipt> {
     Ok(receipt)
 }
 
+/// Post-fence proof by the same host for an earlier (or this) lease of the same
+/// Launch. The fence marker records the last lease the host accepted, under
+/// the same lock that sets the fault, and a fenced host accepts no further
+/// lease: any later lease Forge committed was never accepted (T18 F1).
+/// # Errors
+/// No such receipt, or any unsafe or tampered evidence.
+pub fn receipt_for_owner(directory: &Path, last: &Lease) -> io::Result<Receipt> {
+    crate::directory(directory)?;
+    for name in names(directory)?.into_iter().filter(|n| is_receipt(n)) {
+        let Ok(receipt) = serde_json::from_slice::<Receipt>(&read(&directory.join(&name))?) else {
+            continue;
+        };
+        if receipt.lease.owner == last.owner
+            && receipt.lease.launch == last.launch
+            && receipt.lease.sequence <= last.sequence
+        {
+            return self::receipt(directory, &receipt.lease);
+        }
+    }
+    Err(invalid())
+}
+
 fn names(directory: &Path) -> io::Result<Vec<String>> {
     let mut names = Vec::new();
     for entry in fs::read_dir(directory)? {

@@ -240,6 +240,12 @@ enum Exit {
     Crashed(Box<Claim>),
 }
 
+/// How supervision of a spawned recovery host ended, with what it still owns.
+enum Spawned {
+    Retire(Sender<()>, ControlPipe),
+    Crashed(Box<Claim>),
+}
+
 impl Worker {
     fn set(&self, observation: AgentObservation) {
         if let Ok(mut value) = self.observation.lock() {
@@ -287,6 +293,62 @@ impl Worker {
         }
     }
 
+    /// Everything after the host spawn, borrowing the original Child.
+    async fn supervise_spawned(
+        &mut self,
+        repository: &SqliteProjectRepository,
+        child: &mut std::process::Child,
+    ) -> Result<Spawned, RegistrationError> {
+        let c = self.components.clone();
+        let output = events(child.stdout.take().ok_or_else(denied)?);
+        let owned = output
+            .recv_timeout(Duration::from_secs(30))
+            .map_err(|_| denied())?;
+        let Ok(RunnerEvent::Owned { compatibility, .. }) = owned else {
+            return Err(denied());
+        };
+        compatibility
+            .validate(&self.claim.launch.component_hash)
+            .map_err(|_| denied())?;
+        let mut pipe = ControlPipe::take(child)?;
+        let handoff = waiting_recovery_inspection::inspect(
+            repository,
+            &self.workspace,
+            &self.claim,
+            child,
+            &c.node,
+            &c.inspector,
+        )
+        .await?
+        .inspect_progress(repository, &self.workspace, &c.node, &c.inspector)
+        .await?
+        .prepare(repository)
+        .await?;
+        let admission = handoff.prepared().candidate().admission_id.clone();
+        let next = handoff.prepared().grant().lease.issued_boottime_millis
+            + forge_app::authorization_lease::RENEW_AFTER_MILLIS;
+        let mut active = handoff.start(repository, &mut pipe).await?;
+        self.set(AgentObservation::Working);
+        if let Some(started) = self.started.take() {
+            started.send(Ok(())).map_err(|_| denied())?;
+        }
+        let exit = self
+            .run_active(
+                repository,
+                &mut active,
+                &mut pipe,
+                &output,
+                &admission,
+                next,
+            )
+            .await?;
+        drop(active);
+        Ok(match exit {
+            Exit::Retire(done) => Spawned::Retire(done, pipe),
+            Exit::Crashed(next) => Spawned::Crashed(next),
+        })
+    }
+
     async fn drive(
         &mut self,
         repository: &SqliteProjectRepository,
@@ -315,51 +377,12 @@ impl Worker {
             .stderr(Stdio::null())
             .spawn()
             .map_err(|_| denied())?;
-        let output = events(child.stdout.take().ok_or_else(denied)?);
-        let owned = output
-            .recv_timeout(Duration::from_secs(30))
-            .map_err(|_| denied())?;
-        let Ok(RunnerEvent::Owned { compatibility, .. }) = owned else {
-            return Err(denied());
-        };
-        compatibility
-            .validate(&self.claim.launch.component_hash)
-            .map_err(|_| denied())?;
-        let mut pipe = ControlPipe::take(&mut child)?;
-        let handoff = waiting_recovery_inspection::inspect(
-            repository,
-            &self.workspace,
-            &self.claim,
-            &mut child,
-            &c.node,
-            &c.inspector,
-        )
-        .await?
-        .inspect_progress(repository, &self.workspace, &c.node, &c.inspector)
-        .await?
-        .prepare(repository)
-        .await?;
-        let admission = handoff.prepared().candidate().admission_id.clone();
-        let next = handoff.prepared().grant().lease.issued_boottime_millis
-            + forge_app::authorization_lease::RENEW_AFTER_MILLIS;
-        let mut active = handoff.start(repository, &mut pipe).await?;
-        self.set(AgentObservation::Working);
-        if let Some(started) = self.started.take() {
-            started.send(Ok(())).map_err(|_| denied())?;
-        }
-        let exit = self
-            .run_active(
-                repository,
-                &mut active,
-                &mut pipe,
-                &output,
-                &admission,
-                next,
-            )
-            .await?;
-        drop(active);
-        match exit {
-            Exit::Retire(done) => {
+        // T18 F2: every exit after the spawn keeps the original Child. A
+        // failure closes the private pipe (the host fences and proves itself)
+        // and reaps it; nothing here drops a live host.
+        match Box::pin(self.supervise_spawned(repository, &mut child)).await {
+            Ok(Spawned::Retire(done, pipe)) => {
+                // `register` itself reaps the host if the handoff is rejected.
                 self.retirement.register(
                     repository,
                     &self.workspace,
@@ -370,11 +393,18 @@ impl Worker {
                 done.send(()).map_err(|_| denied())?;
                 Ok(None)
             }
-            Exit::Crashed(next) => {
-                if child.try_wait().map_err(|_| denied())?.is_none() {
-                    return Err(denied());
-                }
+            Ok(Spawned::Crashed(next)) => {
+                // The host records crash proof, then exits; the next episode
+                // requires that proof, never this observation.
+                self.set(AgentObservation::Unknown);
+                drop(child.stdin.take());
+                child.wait().map_err(|_| denied())?;
                 Ok(Some(*next))
+            }
+            Err(error) => {
+                drop(child.stdin.take());
+                let _ = child.wait();
+                Err(error)
             }
         }
     }
@@ -518,7 +548,15 @@ pub(super) fn send_followups(
     sent: &mut std::collections::HashSet<String>,
 ) {
     use forge_app::durable_execution::followup::{Delivery, Repository as _};
+    let warn = |code: &'static str| {
+        tracing::warn!(
+            assignment_id = %assignment,
+            code,
+            "follow-up delivery deferred; the record stays undelivered and is retried"
+        );
+    };
     let Ok(pending) = repository.undelivered_followups(workspace, assignment) else {
+        warn("durable-followup-store-unavailable");
         return;
     };
     for request in pending {
@@ -534,10 +572,12 @@ pub(super) fn send_followups(
             )
             .is_err()
         {
+            warn("durable-followup-intent-unrecorded");
             return;
         }
         sent.insert(request.operation_id.clone());
         if pipe.deliver_followup(&request).is_err() {
+            warn("durable-followup-delivery-uncertain");
             return;
         }
     }
@@ -552,14 +592,25 @@ pub(super) fn record_followup_event(
     admission: &str,
 ) {
     use forge_app::durable_execution::followup::{Delivery, Repository as _};
-    let _ = repository.mark_followup(
-        workspace,
-        assignment,
-        operation,
-        &Delivery::Delivered {
-            admission_id: admission.into(),
-        },
-    );
+    if repository
+        .mark_followup(
+            workspace,
+            assignment,
+            operation,
+            &Delivery::Delivered {
+                admission_id: admission.into(),
+            },
+        )
+        .is_err()
+    {
+        // Stays `unknown`: a later session re-sends it and the runner replays
+        // the original admission. Never inferred as delivered.
+        tracing::warn!(
+            assignment_id = %assignment,
+            code = "durable-followup-acceptance-unrecorded",
+            "follow-up accepted by the runner but not recorded; it stays unknown"
+        );
+    }
 }
 
 pub(super) const FOLLOWUP_POLL: Duration = Duration::from_millis(500);

@@ -281,3 +281,7 @@ It is not claimed fixed. Its `diagnostic` helper now names the awaited code on t
   not changed.
 
 Production durable dispatch stays withheld; T18 re-reviews the corrected snapshot (third pass).
+
+## Errata (T18 third pass)
+
+Some statements above were corrected after review; see [third-pass corrections](../pi-durable-t18/third-pass-corrections.md#errata-to-earlier-evidence).

@@ -47,19 +47,48 @@ pub enum PredecessorProof {
     Crashed(Box<crate::crash::Receipt>),
     /// The original host's post-watchdog-fence descendant proof.
     Fenced(Box<crate::fence::Receipt>),
+    /// The original host fenced before accepting any grant (T26).
+    Ungranted(Box<crate::fence::UngrantedReceipt>),
 }
 
-/// Exact crash proof, or exact post-fence quiescence proof, for this lease.
+/// The original host's proof that nothing of `lease`'s owner still runs.
+///
+/// Exact crash or post-fence proof for this lease, or else (T18 F1) the same
+/// host's proof for an *earlier* lease of the same Launch, or its ungranted
+/// receipt. Forge commits a lease before delivering it: a commit whose
+/// delivery failed leaves Forge's last lease ahead of the host's. The host's
+/// own crash/fence/ungranted proof binds the last lease it actually accepted
+/// and is written only after ECHILD; a fenced host accepts nothing later.
+/// # Errors
+/// No matching proof, or unsafe or tampered evidence.
+pub fn predecessor_proof(
+    directory: &Path,
+    lease: &forge_app::authorization_lease::Lease,
+) -> io::Result<PredecessorProof> {
+    if let Ok(proof) = crate::crash::receipt(directory, lease) {
+        return Ok(PredecessorProof::Crashed(Box::new(proof)));
+    }
+    if let Ok(proof) = crate::fence::receipt(directory, lease) {
+        return Ok(PredecessorProof::Fenced(Box::new(proof)));
+    }
+    if let Ok(proof) = crate::crash::receipt_for_owner(directory, lease) {
+        return Ok(PredecessorProof::Crashed(Box::new(proof)));
+    }
+    if let Ok(proof) = crate::fence::receipt_for_owner(directory, lease) {
+        return Ok(PredecessorProof::Fenced(Box::new(proof)));
+    }
+    crate::fence::ungranted_receipt(directory)
+        .ok()
+        .filter(|proof| proof.owner == lease.owner)
+        .map(|proof| PredecessorProof::Ungranted(Box::new(proof)))
+        .ok_or_else(invalid)
+}
+
 fn reaped(
     directory: &Path,
     lease: &forge_app::authorization_lease::Lease,
 ) -> io::Result<PredecessorProof> {
-    match crate::crash::receipt(directory, lease) {
-        Ok(proof) => Ok(PredecessorProof::Crashed(Box::new(proof))),
-        Err(_) => crate::fence::receipt(directory, lease)
-            .map(Box::new)
-            .map(PredecessorProof::Fenced),
-    }
+    predecessor_proof(directory, lease)
 }
 
 /// Verify original-host quiescence or a directly reaped crash boundary.

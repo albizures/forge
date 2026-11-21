@@ -265,8 +265,9 @@ The internal `recovery::authorization::Repository::grant_recovery` transition
 accepts an opaque application-owned `Prepared` value constructed only after a
 trusted `RecoveryHost` verification boundary. That boundary must retain protected
 external safety evidence keyed by claim operation; a digest links the audit to
-that proof, not proof of death by itself. No concrete recovery verifier or delivery
-controller is implemented yet. The store revalidates the full claimed candidate
+that proof, not proof of death by itself. The server's recovery controller
+(`server/src/durable_authorization/recovery.rs`, with `quiesced_inspection.rs` and
+`waiting_recovery_inspection.rs`) is that verifier and delivery controller. The store revalidates the full claimed candidate
 and every live gate inside an immediate transaction. Only the exact recovery claim
 is exempted from resource blocking; holds, effects and unrelated resources remain.
 Acceptance commits the next Assignment-wide lease sequence, a retired
@@ -277,9 +278,10 @@ it is not renewal of the old owner's expired deadline. Exact live retries preser
 the original deadline/audit; expiry, revocation, binding drift or later renewal
 reject delivery replay without rewriting history. Generic resource operations
 cannot create/retire either recovery resource kind. Existing ordinary consumers
-reject a first grant above sequence one; the specialized handshake remains missing.
-The current single-claim history also conservatively blocks subsequent recovery
-operations. See [T10 authorization evidence](../../docs/research/pi-durable-t10/recovery-authorization.md). No DDL/schema
+reject a first grant above sequence one; recovery uses the specialized
+`host_prepare_recovery`/`host_recovery` handshake instead. Each recovery is a
+separate immutable claim/grant episode: a new episode begins only from new crash or
+fence proof for the current exact grant. See [T10 authorization evidence](../../docs/research/pi-durable-t10/recovery-authorization.md). No DDL/schema
 or public wire changes are required for this additive opaque resource kind; older
 grant/readiness checks already block unknown retained resources. See
 [T10 reservation evidence](../../docs/research/pi-durable-t10/recovery-reservation.md).
@@ -315,7 +317,8 @@ runtime response is not an Outcome or Check Assessment.
 The existing resource guards retain capacity, replacement/worktree blockers and
 historical backend identity even for closed Assignments. SQL guards prevent generic
 resource retirement/deletion from clearing the durable marker. No durable cleanup
-or safety override is implemented here: verified retirement is later work. A
+or safety override is implemented here; verified retirement is the revision 22
+journal (T09) with the T25 fence and T26 never-granted reconciliation. A
 rejected admission alone is not proof of host-process absence. All external calls
 are outside writer transactions. No credentials, prompts or model responses belong
 in launch identity or result diagnostics.

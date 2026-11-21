@@ -31,7 +31,7 @@ features = ["macros", "net", "rt-multi-thread", "time"]
 tempfile = "3"
 axum = "0.8.8"
 forge-app = { path = "../app" }
-forge-server = { path = "../server" }
+forge-server = { path = "../server", features = ["test-faults"] }
 forge-store = { path = "../store" }
 forge-runner-host = { path = "../runner-host" }
 shlex = "2.0.1"

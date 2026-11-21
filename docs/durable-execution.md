@@ -115,8 +115,12 @@ including the packaged host, but has no model-credential setting; it inherits no
 The key file must be an absolute canonical path to a regular, single-link, owner-owned
 `0600` file in an owner-owned `0700` directory, containing one printable ASCII token
 (1–4096 bytes) with an optional trailing newline. Diagnostics never include the key or its
-path. The key bytes reach only the runner's in-memory provider auth: never the shell
-environment, prompts, transcripts or Forge records. The key file *path* is in the
+path. Forge passes the key bytes only to the runner's in-memory provider auth: never the
+shell environment, prompts or Forge records, and provider events are redacted. This is not
+containment: under the trusted-local-host boundary, a `bash` or `read` tool running as the
+same user can read the key file itself, and that tool output is stored unredacted in the
+runtime store and transcript and sent to the provider. Keep the key file outside every
+Managed Worktree and treat transcripts as sensitive. The key file *path* is in the
 manual daemon's own environment (`FORGE_DURABLE_OPENAI_KEY_FILE`), which processes the
 daemon starts with an inherited environment (hooks, `git`, `gh`) also see; the durable
 host is started with a cleared environment. A model key grants no Forge authority,
@@ -302,8 +306,9 @@ forge dispatcher assignment-followup <assignment-id> --workspace personal --oper
 ```
 
 A follow-up is recorded once in Forge, bound to the original attempt, Check, profile,
-freshness and evidence; it cannot rebind any of them. When the runner is resumed under live
-authority, the daemon delivers it idempotently (`delivery`: `recorded`, `unknown`, then
+freshness and evidence; it cannot rebind any of them. While the original runner runs under live
+authority (the launching session, including after a missing Outcome, or a recovered session),
+the daemon delivers it idempotently (`delivery`: `recorded`, `unknown`, then
 `delivered`). A record is not an Outcome, lease or proof that the agent acted. Revoked
 Assignments, stale bindings and retained uncertainty reject new input. See
 [operator follow-ups](assignment-recovery.md#operator-follow-ups).

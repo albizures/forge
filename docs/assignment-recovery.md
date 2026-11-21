@@ -417,9 +417,10 @@ finalization retries preserve its original retirement timestamp.
 
 The same `assignment-retire` command routes an existing durable Assignment through
 its retained backend, without profile-source preflight, model credentials or Herdr.
-New durable launches remain withheld by the release gate. A directly spawned supervisor must
-have been retained by the trusted controller; a missing live controller cannot
-adopt a PID or infer that its work stopped.
+New durable launches remain withheld by the release gate. Retirement either cancels a
+directly spawned supervisor this daemon still holds, or reconciles from the original
+host's own crash, fence or ungranted receipt (T25/T26). A missing live controller never
+adopts a PID or infers that work stopped from absence.
 
 After durable closure/revocation, Forge journals the original retirement operation,
 Launch and captured owner coordinates before control delivery. The owner must
@@ -445,7 +446,8 @@ recovery reservation for that exact Launch. Cancelling a recovery reservation
 preserves its original identity, timestamps and retry history; it cannot transfer
 a claim or authorize recovery. Malformed or mismatched reservations block and
 roll back reconciliation rather than being treated as generic unknown resources.
-No production path creates these internal controlled reservations yet. The operator
+A daemon composed with matched runner components creates these reservations through its
+recovery controller (`claim_recovery`), only from exact host proof. The operator
 retirement marker finalizes only when every other resource is reconciled. Existing
 unknown provisioning resources still require the separate confirmations below;
 interrupted effects still require their specialized resolution. Neither missing
@@ -697,7 +699,8 @@ A follow-up is durable operator input recorded in Forge (schema revision 23, imm
 - **Rejections:** `followup-assignment-revoked` (closed), `durable-binding-stale` (attempt closed or generation invalidated), `followup-admission-unconfirmed`, and `followup-blocked-by-uncertainty` for retained interrupted-effect, authorization, recovery-claim, retirement or provisioning uncertainty. A message never resumes unsafe work.
 - **Missing Outcome:** allowed as explicit intervention. Recording does not create an Outcome, retire the diagnostic, release capacity or grant a lease.
 - **Visibility:** recorded follow-ups, with operation IDs, are listed by `assignment-status`.
-- **Delivery:** a record is not proof the runtime received or acted on it. When the original runner is resumed under live authority, the daemon's recovery driver sends undelivered follow-ups after the runner reports `resumed`, records `unknown` before each write and `delivered` only after the runner accepts it (runtime request ID `followup:<operation-id>`, deduplicated by content hash). The receipt's `delivery` field reports `recorded`, `unknown` or `delivered`; delivered input appears in the committed transcript. An Assignment that is never resumed keeps its follow-ups recorded but undelivered. Recovery is not configured in the default daemon composition.
+- **Delivery:** a record is not proof the runtime received or acted on it. While the original runner runs under live authority, the daemon sends undelivered follow-ups: the launch driver after an accepted admission (it keeps the lease after a missing Outcome so this works), and the recovery driver after the runner reports `resumed`. It records `unknown` before each write and `delivered` only after the runner accepts it. The runtime request ID `followup:<operation-id>` deduplicates a re-send, so an `unknown` follow-up re-sent to a later session replays its original admission; the message hash is only an integrity check. The receipt's `delivery` field reports `recorded`, `unknown` or `delivered`; delivered input appears in the committed transcript. Recovery is composed whenever matched runner components are configured.
+- **Limitation:** recovery resumes only an unsettled original submission. If a follow-up was committed after the original answer settled (for example during a missing-Outcome intervention) and that session then crashes, recovery refuses (`runner-recovery-intervention-required`) and the follow-up stays `unknown`. Retire the Assignment; nothing is replayed.
 
 ## Migrate existing Check profiles to durable execution
 

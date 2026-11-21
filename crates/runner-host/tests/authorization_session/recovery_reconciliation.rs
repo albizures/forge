@@ -402,12 +402,23 @@ fn unknown_follow_up_is_resent_to_the_next_session_with_exactly_one_admission() 
     let events = f.directory.join("controlled-followup-events");
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut now = 1_000_000;
+    let mut observed_unknown = false;
     // Session 1 commits the input and crashes before its acceptance is read.
     let delivered = loop {
         app.reconcile_agent_dispatch("recovery-test-daemon", now)
             .unwrap();
         now += 40_000;
+        // Read the runner's evidence first: while only session 1's acceptance
+        // exists, Forge must already hold `unknown` (marked before the write).
+        let accepted = fs::read_to_string(&events).map_or(0, |e| e.lines().count());
         let current = f.store.followups("test", "assignment").unwrap()[0].clone();
+        if accepted == 1 {
+            assert_ne!(
+                current.delivery, "recorded",
+                "unknown is committed before delivery"
+            );
+            observed_unknown |= current.delivery == "unknown";
+        }
         if current.delivery == "delivered" {
             break current;
         }
@@ -438,4 +449,13 @@ fn unknown_follow_up_is_resent_to_the_next_session_with_exactly_one_admission() 
         attempt
     );
     assert!(!f.directory.join("controlled-drop-followup-once").exists());
+    // Two recovery sessions: the crashed one and the one that received the re-send.
+    let preparations =
+        fs::read_to_string(f.directory.join("controlled-recovery-preparations")).unwrap();
+    assert_eq!(preparations.lines().count(), 2);
+    // The new session needs a fresh host spawn, far longer than one poll.
+    assert!(
+        observed_unknown,
+        "the store never showed `unknown` between sessions"
+    );
 }

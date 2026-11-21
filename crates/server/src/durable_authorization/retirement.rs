@@ -39,7 +39,10 @@ fn unproven(directory: &std::path::Path) -> RegistrationError {
             "durable-runtime-owner-active",
             "an original runner host still holds this runtime's ownership lock; retirement completes after its lease expires and it proves quiescence",
         ),
-        _ => uncertain(),
+        _ => RegistrationError::new(
+            "durable-runtime-proof-unmatched",
+            "no live owner holds this runtime, but no host proof matches its recorded owner and Launch; capacity stays reserved. Investigate the runtime directory's receipts",
+        ),
     }
 }
 
@@ -55,7 +58,7 @@ pub(super) fn reap_detached(mut child: Child) {
 /// A never-granted launch whose host left ownership evidence without proof.
 fn ungranted_unproven(directory: &std::path::Path) -> RegistrationError {
     match unproven(directory) {
-        error if error.code == "durable-retirement-unverified" => RegistrationError::new(
+        error if error.code == "durable-runtime-proof-unmatched" => RegistrationError::new(
             "durable-launch-ungranted-unproven",
             "the failed launch's host never received a grant but has not proven that its worker and descendants are gone; capacity stays reserved. Investigate the runtime directory's watchdog diagnostics",
         ),
@@ -177,19 +180,19 @@ impl Controller {
             _ => return Ok(false),
         }
         // Every watchdog fence must be settled by its own host's quiescence
-        // receipt, and this exact last lease needs crash or post-fence proof.
+        // receipt, and the last lease's owner needs crash, post-fence or
+        // ungranted proof: for this lease, or for the earlier lease that host
+        // last accepted when a later commit was never delivered (T18 F1).
         if forge_runner_host::fence::settled(directory).is_err()
-            || (forge_runner_host::crash::receipt(directory, lease).is_err()
-                && forge_runner_host::fence::receipt(directory, lease).is_err())
+            || forge_runner_host::quiescence::predecessor_proof(directory, lease).is_err()
         {
             return Ok(false);
         }
-        let components = self.inspection(&operation.launch)?;
         inspect_effects(
             repository,
             workspace,
             &operation.launch,
-            &components,
+            || self.inspection(&operation.launch),
             directory,
             &guard,
         )?;
@@ -207,14 +210,11 @@ impl Controller {
         Ok(true)
     }
 
-    /// A host that never accepted any grant, under the operation recorded for
-    /// it: its exact ungranted receipt, bound to the same owner, every fence
-    /// settled and no host retirement in flight.
     /// Host-written proof for the recorded operation without a live handoff:
-    /// crash or fence proof for the exact last lease or, for an unowned host
-    /// that never accepted a grant, its exact ungranted receipt (T26) — such a
-    /// host whose retirement request was lost with its daemon fenced on the
-    /// closed pipe instead.
+    /// with a committed grant, the last lease owner's crash, fence or
+    /// ungranted proof (`reconcile_proof`); without one, for an unowned host,
+    /// its exact ungranted receipt (T26) — a host whose retirement request was
+    /// lost with its daemon fenced on the closed pipe instead.
     fn reconcile_recorded(
         &self,
         repository: &SqliteProjectRepository,
@@ -234,6 +234,9 @@ impl Controller {
     }
 }
 
+/// A host that never accepted any grant, under the operation recorded for
+/// it: its exact ungranted receipt, bound to the same owner, every fence
+/// settled and no host retirement in flight.
 fn reconcile_ungranted_owner(
     repository: &SqliteProjectRepository,
     workspace: &str,
@@ -334,7 +337,7 @@ fn inspect_effects(
     repository: &SqliteProjectRepository,
     workspace: &str,
     launch: &Launch,
-    components: &super::operator::InspectionComponents,
+    components: impl FnOnce() -> Result<super::operator::InspectionComponents, RegistrationError>,
     directory: &std::path::Path,
     guard: &ExclusiveInspection,
 ) -> Result<(), RegistrationError> {
@@ -347,7 +350,14 @@ fn inspect_effects(
     {
         return super::effect_admission::require_fresh(repository, workspace, launch, directory);
     }
-    super::effects::inspect_retirement(repository, workspace, launch, components, directory, guard)
+    super::effects::inspect_retirement(
+        repository,
+        workspace,
+        launch,
+        &components()?,
+        directory,
+        guard,
+    )
 }
 
 /// Journal a new retirement operation for the directly spawned host this
@@ -473,12 +483,11 @@ impl Controller {
                 }
             })?;
         guard.verify().map_err(|_| uncertain())?;
-        let components = self.inspection(launch)?;
         inspect_effects(
             repository,
             workspace,
             launch,
-            &components,
+            || self.inspection(launch),
             &directory,
             &guard,
         )?;
@@ -594,9 +603,9 @@ impl AgentDispatchAdapter for Adapter {
         {
             return Ok(match state {
                 super::launch::DriverState::Live(observation) => observation,
-                super::launch::DriverState::Crashed | super::launch::DriverState::Ended => {
-                    AgentObservation::Unknown
-                }
+                super::launch::DriverState::Crashed
+                | super::launch::DriverState::Ended
+                | super::launch::DriverState::Reaped => AgentObservation::Unknown,
             });
         }
         self.runtime(context)
@@ -620,8 +629,8 @@ impl AgentDispatchAdapter for Adapter {
                         "durable launch fenced; retain original resources".into(),
                     ));
                 }
-                Some(super::launch::DriverState::Crashed) => {
-                    launcher.release_crashed(&context.assignment.id);
+                Some(super::launch::DriverState::Crashed | super::launch::DriverState::Reaped) => {
+                    launcher.release_finished(&context.assignment.id);
                 }
                 None => {}
             }

@@ -12,7 +12,7 @@ Assignments by hand. New durable launches are withheld by the release gate in pr
 Operator documentation is in [Durable Task execution](../docs/durable-execution.md).
 
 The sections below are the implementation history and evidence of each increment
-(T04–T24). Statements there such as "synthetic-only" or "remains a later Task"
+(T04–T26). Statements there such as "synthetic-only" or "remains a later Task"
 describe that increment, not the current build. Before T22, `main.ts` named the
 synthetic T04 runner; it is now the test fixture `test/synthetic-runner.ts`.
 
@@ -373,7 +373,7 @@ These observational checks are not hostile-agent containment or an atomic
 guarantee that the process cannot exit/change after an observation. Separate
 executable tests below now exercise lease enforcement and watchdog expiry.
 
-## T10 recovery lease consumer (partial; not wired)
+## T10 recovery lease consumer (partial at T10; now wired through `check-runner.ts`)
 
 `Authorization.forRecovery(launch, generation, owner, epoch, expectedGrant)`
 prepares a waiting consumer bound to an exact claim/lease/evidence envelope from

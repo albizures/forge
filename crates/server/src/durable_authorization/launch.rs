@@ -398,6 +398,9 @@ pub enum DriverState {
     Crashed,
     /// The driver ended after a fence or handoff; no local process is supervised.
     Ended,
+    /// After a fence, this driver's host exited and was reaped. Like `Crashed`,
+    /// only the host's own proof may continue: recovery or retirement (T18 F3).
+    Reaped,
 }
 
 struct Slot {
@@ -422,6 +425,7 @@ pub struct Launcher {
 impl Launcher {
     /// Test seam (T26): make every later launch fail at `fault`. It can only
     /// cause a failure, never enable, skip or advance anything.
+    #[cfg(feature = "test-faults")]
     #[doc(hidden)]
     pub fn inject_fault(&self, fault: Fault) {
         if let Ok(mut faults) = self.faults.0.lock() {
@@ -706,7 +710,13 @@ impl Launcher {
             state: state.clone(),
             stops,
         };
-        self.slots.lock().map_err(|_| uncertain())?.insert(
+        let Ok(mut slots) = self.slots.lock() else {
+            // Never drop the live host: the driver closes its pipe and reaps it.
+            driver.failed(&repository, launch_failure::Failure::Owned);
+            std::thread::spawn(move || driver.abandon(child));
+            return Err(uncertain());
+        };
+        slots.insert(
             id,
             Slot {
                 launch,
@@ -716,6 +726,7 @@ impl Launcher {
                 stopped: false,
             },
         );
+        drop(slots);
         std::thread::spawn(move || driver.run(child));
         Ok(())
     }
@@ -748,12 +759,15 @@ impl Launcher {
         Ok(())
     }
 
-    /// Forget a crashed driver so exact recovery proof can take over.
-    pub fn release_crashed(&self, assignment: &str) {
+    /// Forget a driver whose host crashed or was reaped after a fence, so
+    /// exact recovery proof can take over.
+    pub fn release_finished(&self, assignment: &str) {
         if let Ok(mut slots) = self.slots.lock()
-            && slots
-                .get(assignment)
-                .is_some_and(|slot| slot.state.lock().is_ok_and(|s| *s == DriverState::Crashed))
+            && slots.get(assignment).is_some_and(|slot| {
+                slot.state
+                    .lock()
+                    .is_ok_and(|s| matches!(*s, DriverState::Crashed | DriverState::Reaped))
+            })
         {
             slots.remove(assignment);
         }
@@ -854,10 +868,22 @@ impl Driver {
     fn abandon(self, mut child: Child) {
         self.set(DriverState::Ended);
         drop(child.stdin.take());
-        // Dropping the driver closes its stop channel, so retirement never
-        // waits on this thread.
+        self.reap(child);
+    }
+
+    /// Wait however long the host's own proof takes, then mark it reaped.
+    /// Dropping the driver first closes its stop channel, so retirement never
+    /// waits on this thread.
+    fn reap(self, mut child: Child) {
+        let state = self.state.clone();
         drop(self);
-        let _ = child.wait();
+        let reaped = child.wait().is_ok();
+        if let Ok(mut value) = state.lock()
+            && reaped
+            && *value == DriverState::Ended
+        {
+            *value = DriverState::Reaped;
+        }
     }
 
     #[allow(clippy::too_many_lines)] // One ordered sequence; every failure point reaps the host.
@@ -977,8 +1003,7 @@ impl Driver {
             Exit::Ended => {
                 // Never drop a live host: wait however long its own proof takes.
                 self.set(DriverState::Ended);
-                drop(self);
-                let _ = child.wait();
+                self.reap(child);
             }
         }
     }
@@ -1021,7 +1046,12 @@ impl Live<'_, '_> {
         if !self.renew {
             return Ok(());
         }
-        let now = boottime_millis().map_err(|_| uncertain())?;
+        // An unreadable boot clock cannot renew: fence and retain it (RUST-3)
+        // instead of silently letting the lease lapse.
+        let Ok(now) = boottime_millis() else {
+            self.fence(Some(Failure::AuthorityUnavailable));
+            return Err(uncertain());
+        };
         if now < self.next_renewal {
             return Ok(());
         }
