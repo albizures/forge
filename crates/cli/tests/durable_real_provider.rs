@@ -430,7 +430,16 @@ async fn run(key_file: PathBuf) {
     });
     let server = Daemon::new(gate.app())
         .with_assignment_capability_root(root.join("assignment-capabilities"))
-        .with_durable_operator_store(&database)
+        // Matched inspection components, as `serve` composes them, so operator
+        // transcripts are readable as evidence.
+        .with_durable_operator_catalog(
+            &database,
+            forge_server::durable_authorization::launch::ComponentCatalog::new(
+                None,
+                Some(&execution),
+                &[],
+            ),
+        )
         .unwrap();
     let daemon = tokio::spawn(async move {
         axum::serve(
