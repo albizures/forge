@@ -53,9 +53,14 @@ const TASK: &str = "Add a file named `hello.txt` at the repository root containi
 
 const OUTCOME: &str = r#"Your trusted Assignment context (JSON, below) contains `bound.checkAttempt` with `id`, `generation` and `evidence`, plus the Task `record` body. Work only in the current directory (a Git worktree of the bound repository). No human will answer questions.
 
-When done, write the Outcome as JSON to a new file outside the worktree, created with `mktemp`. Its shape is exactly:
+Your work counts ONLY when Forge accepts your Outcome. A prose answer is ignored. Your final tool call MUST be one bash command of exactly this form (fill in the JSON; keep the quoted 'JSON' heredoc delimiter):
+
+f=$(mktemp) && cat > "$f" <<'JSON'
 {"attempt_id": "<bound.checkAttempt.id>", "generation": <bound.checkAttempt.generation as a number>, "evidence": <EVIDENCE>, "verdict": "pass" or "fail", "actor": "worker", "message": "<one sentence>", "disposition": "complete", "findings": [], "verifications": []}
-Then run `forge assignment outcome --file <that file> --json`. If it reports an error, read it, correct the file and retry. When it succeeds, reply with one short sentence and stop."#;
+JSON
+forge assignment outcome --file "$f" --json
+
+Read its output. If it reports an error, fix the JSON and run the command again. Only after it prints the accepted Outcome, reply with one short sentence and stop. Never claim an Outcome was recorded unless that command succeeded."#;
 
 /// Implementation behavior (pinned only to the Implementation Check).
 const IMPLEMENTER: &str = r#"You are an unattended Forge implementation worker. Make exactly the change the Task body asks for, `git add` it and `git commit -m "<summary>"`. Your evidence commit is the new `git rev-parse HEAD`. Verdict `pass` once the change is committed."#;
