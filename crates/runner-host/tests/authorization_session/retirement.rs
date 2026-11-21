@@ -24,11 +24,14 @@ impl RepositoryInspector for NoGit {
     }
 }
 pub(super) fn app(f: &Fixture, controller: Arc<Controller>) -> Application {
+    app_at(&f.database, controller)
+}
+fn app_at(database: &Path, controller: Arc<Controller>) -> Application {
     Application::with_agent_dispatch(
-        Box::new(open(&f.database)),
-        Box::new(open(&f.database)),
+        Box::new(open(database)),
+        Box::new(open(database)),
         Box::new(Factory {
-            database: f.database.clone(),
+            database: database.to_path_buf(),
             controller,
             launcher: None,
             recovery: None,
@@ -512,4 +515,100 @@ fn unknown_launch_and_missing_supervisor_keep_revocation_capacity_and_hold() {
     assert!(info.capacity_reserved());
     assert!(info.dispatch_hold.is_some());
     assert!(!f.directory.join("retirement-intent.json").exists());
+}
+
+/// T25: lease expiry while the issuing daemon is alive (renewal stops, the
+/// pipe stays open). The host fences, proves quiescence and exits. A controller
+/// that never owned the host reaches the same retirement reconciliation through
+/// the protected receipt: specific refusal before proof, capacity release after,
+/// exact retries unchanged, and a tampered receipt refused.
+#[test]
+fn lease_expiry_without_restart_reconciles_retirement_through_fence_receipt() {
+    use forge_app::authorization_lease::session::Tick;
+    let mut f = Fixture::new("model");
+    let controller = inspection_controller(&f);
+    let database = f.database.clone();
+    let retire = || app_at(&database, controller.clone()).retire_agent_assignment("assignment");
+    let authority = DaemonAuthority::new().unwrap();
+    let mut service = authority
+        .bind(&f.store, "test".into(), f.launch.clone(), 1, &mut f.child)
+        .unwrap();
+    let Tick::Delivered { lease, .. } = service.tick(&f.store).unwrap() else {
+        panic!("initial grant was not delivered")
+    };
+    let lease = forge_app::authorization_lease::Lease::clone(&lease);
+    event(&f.output, "authorized");
+    event(&f.output, "started");
+    f.store.begin_send("test", &f.launch).unwrap();
+    f.store
+        .record_result(
+            "test",
+            &f.launch,
+            &Admission::Accepted {
+                admission_id: "controlled".into(),
+            },
+        )
+        .unwrap();
+    // While the original host still owns the runtime, retirement is refused
+    // with a specific code and capacity stays reserved.
+    let early = retire().unwrap_err();
+    assert!(
+        early.message.contains("durable-runtime-owner-active"),
+        "{early:?}"
+    );
+    assert!(
+        open(&f.database)
+            .agent_assignment_info("assignment")
+            .unwrap()
+            .capacity_reserved()
+    );
+    diagnostic(&f.errors, "runner-lease-expired");
+    diagnostic(&f.errors, "runner-watchdog-quiescence-verified");
+    drop(service);
+    assert!(f.child.wait().unwrap().success());
+    forge_runner_host::fence::receipt(&f.directory, &lease).unwrap();
+    // Tampered proof is refused without releasing anything.
+    let name = f
+        .directory
+        .join(format!("watchdog-receipt-{}.json", lease.sequence));
+    let original = fs::read(&name).unwrap();
+    let mut tampered: Value = serde_json::from_slice(&original).unwrap();
+    tampered["lease"]["owner"]["worker_pid"] = 1.into();
+    fs::write(&name, serde_json::to_vec(&tampered).unwrap()).unwrap();
+    let refused = retire().unwrap_err();
+    assert!(
+        refused.message.contains("durable-runtime-fence-unproven"),
+        "{refused:?}"
+    );
+    assert!(
+        open(&f.database)
+            .agent_assignment_info("assignment")
+            .unwrap()
+            .capacity_reserved()
+    );
+    fs::write(&name, &original).unwrap();
+    let retired = retire().unwrap();
+    assert!(retired.closed_at_millis.is_some());
+    let info = open(&f.database)
+        .agent_assignment_info("assignment")
+        .unwrap();
+    assert!(!info.capacity_reserved());
+    let retirement = f.store.retirement("test", &f.launch).unwrap().unwrap();
+    assert!(retirement.reconciled_at_millis.is_some());
+    assert_eq!(retirement.operation.owner, lease.owner);
+    // No host retirement receipt is manufactured; the fence receipt is the proof.
+    assert!(!f.directory.join("retirement-receipt.json").exists());
+    assert_eq!(
+        app(&f, Arc::new(Controller::default()))
+            .retire_agent_assignment("assignment")
+            .unwrap(),
+        retired
+    );
+    assert_eq!(
+        open(&f.database)
+            .retirement("test", &f.launch)
+            .unwrap()
+            .unwrap(),
+        retirement
+    );
 }

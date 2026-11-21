@@ -50,7 +50,20 @@ barrier.listen(`\0forge-t07-start-${process.pid}`);
 await once(barrier, 'listening');
 
 // `packaged` (T24) crashes at the same boundary, then recovers after a Revision switch.
-if ((test.mode === 'recovered' || test.mode === 'packaged') && !recovering) {
+// `daemon-restart*` (T25) stops at the same boundary while its daemon is killed.
+// T25 fault injection: after its daemon dies the shipped runner sees EOF, and
+// closing its Harness under a stuck generation leaves an unhandled rejection
+// that ends the process: the host then records ordinary crash proof
+// (`daemon-restart-exit`). These modes model a runner whose shutdown hangs
+// instead, so only the host watchdog's lease expiry, fence and group KILL end it.
+if (['daemon-restart', 'daemon-restart-retire', 'daemon-restart-tool'].includes(test.mode) && !recovering) {
+  process.stdout.on('error', () => {});
+  process.on('uncaughtException', () => {});
+  process.on('unhandledRejection', () => {});
+  setInterval(() => {}, 1000);
+}
+const boundaryModes = ['recovered', 'packaged', 'daemon-restart', 'daemon-restart-retire', 'daemon-restart-exit'];
+if (boundaryModes.includes(test.mode) && !recovering) {
   // Fault injection at the pinned upstream storage class, in this test process
   // only: stop forever BEFORE the first model generation is committed as running.
   // The boundary is reported out of band; stdout stays strictly protocol 1.

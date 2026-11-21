@@ -91,7 +91,16 @@ fn classify(name: &str) -> Option<Rank> {
             .filter(|p| *p >= 1)
             .map(|_| Rank::Owner);
     }
-    // `watchdog-<host pid>-<host start ticks>-<term|kill>-<sent|unverified>.json`.
+    // Post-fence evidence (fence.rs): episode markers block like `watchdog.json`;
+    // `watchdog-receipt-<lease sequence>.json` is the host's quiescence receipt.
+    if crate::fence::is_marker(name) {
+        return Some(Rank::Marker);
+    }
+    if crate::fence::is_receipt(name) {
+        return Some(Rank::Receipt);
+    }
+    // `watchdog-<host pid>-<host start ticks>-<term|kill>-<sent|unverified>.json`,
+    // or `...-quiescence-unproven.json` when post-fence proof is unavailable.
     if let Some(rest) = name
         .strip_prefix("watchdog-")
         .and_then(|r| r.strip_suffix(".json"))
@@ -108,8 +117,10 @@ fn classify(name: &str) -> Option<Rank> {
         };
         let valid = canonical::<u32>(pid).is_some_and(|p| p >= 1)
             && canonical::<u64>(start).is_some()
-            && matches!(signal, "term" | "kill")
-            && matches!(result, "sent" | "unverified");
+            && matches!(
+                (signal, result),
+                ("term" | "kill", "sent" | "unverified") | ("quiescence", "unproven")
+            );
         return valid.then_some(Rank::Diagnostic);
     }
     None
@@ -261,6 +272,10 @@ mod tests {
             "watchdog-17-123456-term-sent.json".into(),
             "watchdog-17-0-kill-unverified.json".into(),
             "watchdog-4294967295-18446744073709551615-term-unverified.json".into(),
+            "watchdog-17-123456-quiescence-unproven.json".into(),
+            "watchdog-17-123456-fence.json".into(),
+            "watchdog-receipt-1.json".into(),
+            "watchdog-receipt-4294967295.json".into(),
         ]
     }
 
@@ -282,6 +297,12 @@ mod tests {
             Some(Rank::Recovery)
         );
         assert_eq!(classify("watchdog.json"), Some(Rank::Marker));
+        assert_eq!(classify("watchdog-1-2-fence.json"), Some(Rank::Marker));
+        assert_eq!(classify("watchdog-receipt-3.json"), Some(Rank::Receipt));
+        assert_eq!(
+            classify("watchdog-1-2-quiescence-unproven.json"),
+            Some(Rank::Diagnostic)
+        );
         assert_eq!(classify("retirement-intent.json"), Some(Rank::Marker));
         assert_eq!(classify("retirement-receipt.json"), Some(Rank::Receipt));
         assert_eq!(classify("owner.1.pending"), Some(Rank::Owner));
@@ -335,6 +356,15 @@ mod tests {
             "watchdog-1-2-stop-sent.json",
             "watchdog-1-2-term-maybe.json",
             "watchdog-1-2-TERM-sent.json",
+            "watchdog-1-2-quiescence-sent.json",
+            "watchdog-1-2-kill-unproven.json",
+            "watchdog-0-2-fence.json",
+            "watchdog-01-2-fence.json",
+            "watchdog-1-2-fence.json.tmp",
+            "watchdog-receipt-0.json",
+            "watchdog-receipt-01.json",
+            "watchdog-receipt-4294967296.json",
+            "watchdog-receipt-.json",
             "watchdog-1-2-term-sent.json.tmp",
             "watchdog-x-2-term-sent.json",
             "controlled-mode",

@@ -318,11 +318,47 @@ inspect the transcript, send a follow-up, or retire the Assignment. Clearing the
 Execution needs a live Assignment Authorization Lease. Grants last 30 seconds and the daemon
 renews them every 10 seconds; deadlines use the host boot clock. If the daemon is stopped or
 unreachable, the runner cannot renew locally. At expiry its guards refuse new model requests
-and tool calls, and an independent watchdog sends TERM to the runner's process group, then KILL
-after at most 5 seconds. Forge retains capacity and diagnostics. A restarted daemon does not
-renew old grants and does not restart the work automatically. Expiry is not proof that a child
-process or its external action stopped. Plan for an Assignment to need recovery or retirement
-after any daemon outage longer than a grant.
+and tool calls, and an independent watchdog writes a fence marker (`watchdog.json`), sends TERM
+to the runner's process group, then KILL after at most 5 seconds. Expiry alone is not proof that
+a child process or its external action stopped, and a restarted daemon never adopts, signals or
+renews the old host.
+
+What happens next depends on the original host's own proof:
+
+- **Ordinary exit.** When the daemon dies, the runner normally sees its input close and exits.
+  The original host, which is the dedicated subreaper of its runner, then records crash proof
+  for the last lease.
+- **Fenced, then proven.** If the runner does not exit (a hung tool or shutdown), the
+  watchdog fences and kills it. Once the original host has positively reaped its runner and the
+  kernel reports no remaining descendant, it writes a protected
+  `watchdog-receipt-<lease sequence>.json`. That receipt is bound to the fence marker's exact
+  bytes, the owner identity and the last lease. The host then exits, releasing ownership.
+- **Fenced, unproven.** An escaped child (one that left the process group), a signal the host
+  could not verify, or changed ownership evidence produce no receipt. The host keeps ownership
+  and capacity stays reserved. It writes a
+  `watchdog-<pid>-<start>-quiescence-unproven.json` diagnostic, and status reports
+  `runtime_fence: runtime-fence-unproven` (also listed under uncertainty). If an escaped child
+  later really exits, the kernel proof follows and the receipt is written then.
+
+With crash proof or a fence receipt, the restarted daemon continues on its own. Its ordinary
+reconciliation scan recovers the same attempt (same admission, conversation and attempt) when
+Forge authority and effect inspection allow it. Alternatively, `assignment-retire` reconciles the
+runtime from the same proof and releases capacity, even though this daemon never owned the host.
+A committed interrupted effect still blocks recovery, and blocks retirement finalization until
+it is resolved (see below). Until proof exists, recovery refuses to compete with the original
+host, and retirement reports a specific code:
+
+- `durable-runtime-owner-active`: the original host still holds ownership (its lease has not
+  expired yet, or it is still killing its runner). Retry after a lease period.
+- `durable-runtime-fence-unproven`: a fence exists without valid proof. Investigate the runtime
+  directory's `watchdog-*` diagnostics. Look for an escaped descendant of the old host, using
+  `ps` and the host PID in `owner.json`. Do not delete markers or receipts, and do not kill
+  processes by PID alone unless you have identified them. When the descendant ends, the host
+  writes its receipt; then repeat the same command.
+
+Plan for an Assignment to need recovery or retirement after any daemon outage longer than a
+grant. Under the trusted-local-host boundary, both are available once the original host has
+proven quiescence.
 
 ### Interrupted effects
 
@@ -368,8 +404,9 @@ forge dispatcher assignment-purge-runtime <assignment-id> --workspace personal -
 It deletes only the canonically mapped runtime directory of a closed, reconciled Assignment with
 no retained uncertainty, hold or live owner. Retirement places a Dispatch Hold, so deletion is
 refused (`runtime-purge-uncertainty-retained`) until the operator clears it with
-`forge dispatcher resume <task-id>`. The retirement, crash and recovery evidence files the host
-itself wrote are deleted with the runtime; anything else in the directory refuses deletion.
+`forge dispatcher resume <task-id>`. The retirement, crash, watchdog-fence and recovery
+evidence files the host itself wrote are deleted with the runtime; anything else in the
+directory refuses deletion.
 The result records whether this operation `removed` the directory or found it `already-absent`.
 Forge's Assignment, Outcome, Assessment, migration, recovery and retirement records stay. Afterwards transcripts report `runtime-history-purged`,
 and nothing recreates or resumes the store. See
@@ -393,8 +430,8 @@ tool command to make an Assignment look recoverable. Follow the
   another service, is outside the subreaper's proof. Forge keeps the blocker; investigate manually.
 - **No exactly-once effects.** Persistence, idempotent operation IDs and leases deduplicate
   Forge and runtime records, not external commands. An interrupted push may have happened.
-- **No proof of death from persistence or leases.** Only the reconciled subreaper receipt counts,
-  and only for this host's descendants.
+- **No proof of death from persistence or leases.** Only the original subreaper's own receipts
+  count (retirement, crash or post-fence quiescence), and only for this host's descendants.
 - **Storage durability.** Tests cover process crashes, not power loss.
 - **Sensitive data.** Runtime stores and transcripts can contain repository content and tool
   output. Do not attach them or capability files to tickets.

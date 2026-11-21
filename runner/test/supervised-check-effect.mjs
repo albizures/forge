@@ -9,6 +9,14 @@ const file = process.argv[2];
 const input = JSON.parse(readFileSync(file, 'utf8'));
 assert.equal(process.cwd(), input.bound.executionDirectory);
 const directory = dirname(file);
+// T25 `daemon-restart-tool`: a long-running tool that ignores cancellation, so
+// only the host watchdog's group KILL ends it after the daemon is killed.
+if (input.mode === 'daemon-restart-tool') {
+  writeFileSync(join(directory, 'controlled-tool-started'), String(process.pid), { mode: 0o600 });
+  process.on('SIGTERM', () => {});
+  setInterval(() => {}, 1000);
+  await new Promise(() => {});
+}
 const git = args => {
   const result = spawnSync(input.git, args, { cwd: process.cwd(), env: {}, encoding: 'utf8' });
   assert.equal(result.status, 0, 'controlled Git operation failed');

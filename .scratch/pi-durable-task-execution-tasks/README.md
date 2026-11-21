@@ -87,7 +87,20 @@ Mark a Task complete only after its acceptance checks and required verification 
   - **Gates:** all four repository gates pass (908 Rust tests plus 11 supervised scenarios; 1 pre-existing opt-in ignored), runner typecheck and 97 Node tests.
   - **Not claimed:** no real provider; no managed-daemon dispatch (M4 remains).
   - **Next:** the T18 re-review of the corrected snapshot. Production durable dispatch stays withheld.
-- [ ] [T25 — Reconcile after daemon loss](25-reconcile-after-daemon-loss.md) — corrects T18 second-pass B3 (escalated M1).
+- [x] [T25 — Reconcile after daemon loss](25-reconcile-after-daemon-loss.md) — corrects T18 second-pass B3 (escalated M1). [Implementation and evidence](../../docs/research/pi-durable-t25/README.md):
+  - **Host:** after a watchdog fence, the original subreaper writes a protected `watchdog-receipt-<seq>.json` and exits, releasing the lock. It does so only after a positive worker reap, ECHILD and unchanged storage. The receipt binds the exact marker bytes, the owner and the last lease. An escaped child, an unverified signal or ownership drift keeps the indefinite hold and writes a `quiescence-unproven` diagnostic. A later episode writes its own `watchdog-<pid>-<start>-fence.json` marker.
+  - **Forge:** recovery (`waiting_receipt`) and retirement (`reconcile_proof`) accept the exact receipt under `ExclusiveInspection`, with every fence marker settled. No PID adoption.
+    - Unowned runtimes without proof report `durable-runtime-owner-active` or `durable-runtime-fence-unproven`.
+    - Status adds `runtime_fence`, with unproven also listed under uncertainty.
+    - The runner's `unblocked` check and purge recognize the new artifacts.
+  - **Finding:** killing the daemon usually makes the shipped runner exit on EOF (ordinary crash proof, already recoverable). B3 is the case where the runner's shutdown hangs.
+  - **Evidence:**
+    - four real daemon-process-kill tracer scenarios: fence → same-attempt recovery; owner-active and tampered refusals → retirement → purge; long tool → effect blocks → resolution → retirement; natural exit → crash-proof recovery;
+    - host tests for real expiry, tampering, an escaped child and an unverified KILL;
+    - a daemon-alive expiry → retirement test.
+  - **Gates:** all four repository gates pass (910 Rust tests plus 15 supervised scenarios; 1 pre-existing opt-in ignored), runner typecheck and 98 Node tests.
+  - **Not claimed:** a separately started/Forgeup-managed restarted daemon; the commit-before-delivery renewal window (fail closed); pre-grant fences (T26); a real provider.
+  - T26 may proceed. Production durable dispatch stays withheld.
 - [ ] [T26 — Retire failed durable launches](26-retire-failed-durable-launches.md) — corrects T18 second-pass B4.
 - [ ] [T19 — Verify integration and recovery](19-verify-integration-and-recovery.md)
 - [ ] [T20 — Deliver release handoff](20-publish-release-handoff.md)

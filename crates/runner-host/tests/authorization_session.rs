@@ -303,6 +303,7 @@ fn outage(mode: &str) {
     let Tick::Delivered { lease, .. } = service.tick(&f.store).unwrap() else {
         panic!("initial grant was not delivered")
     };
+    let lease = forge_app::authorization_lease::Lease::clone(&lease);
     assert_eq!(event(&f.output, "authorized")["sequence"], 1);
     let started = event(&f.output, "started");
     assert_eq!(started["requests"], 1);
@@ -355,7 +356,7 @@ fn outage(mode: &str) {
         .unwrap();
     assert_eq!(
         serde_json::from_str::<forge_app::authorization_lease::Lease>(&retained).unwrap(),
-        *lease
+        lease
     );
     assert_eq!(
         c.query_row(
@@ -367,14 +368,66 @@ fn outage(mode: &str) {
         1
     );
     drop(c);
+    diagnostic(&f.errors, "runner-worker-exited");
+    assert_fence_proven(&mut f, &lease);
     assert_restart_denied(&mut f);
+}
+
+/// T25: after the watchdog fence the original subreaper proves descendant
+/// absence, writes the exact receipt and exits, freeing the lock. Stale, foreign
+/// or tampered evidence, and a marker without its receipt, are refused.
+fn assert_fence_proven(f: &mut Fixture, lease: &forge_app::authorization_lease::Lease) {
+    use forge_runner_host::fence::{self, Diagnosis};
+    diagnostic(&f.errors, "runner-watchdog-quiescence-verified");
+    assert!(f.child.wait().unwrap().success());
+    let guard = forge_runner_host::inspection::ExclusiveInspection::acquire(&f.directory).unwrap();
+    let receipt = fence::receipt(&f.directory, lease).unwrap();
+    assert_eq!(receipt.marker, "watchdog.json");
+    assert!(receipt.children_absent);
+    fence::settled(&f.directory).unwrap();
+    assert_eq!(Diagnosis::of(&f.directory), Diagnosis::Proven);
+    let mut stale = lease.clone();
+    stale.sequence += 1;
+    assert!(fence::receipt(&f.directory, &stale).is_err());
+    let mut foreign = lease.clone();
+    foreign.owner.host_start = "other-host-start".into();
+    assert!(fence::receipt(&f.directory, &foreign).is_err());
+    let name = f
+        .directory
+        .join(format!("watchdog-receipt-{}.json", lease.sequence));
+    let original = fs::read(&name).unwrap();
+    let mut tampered: Value = serde_json::from_slice(&original).unwrap();
+    tampered["children_absent"] = false.into();
+    fs::write(&name, serde_json::to_vec(&tampered).unwrap()).unwrap();
+    assert!(fence::receipt(&f.directory, lease).is_err());
+    assert!(fence::settled(&f.directory).is_err());
+    tampered["children_absent"] = true.into();
+    tampered["lease"]["sequence"] = (lease.sequence + 1).into();
+    fs::write(&name, serde_json::to_vec(&tampered).unwrap()).unwrap();
+    assert!(fence::receipt(&f.directory, lease).is_err());
+    assert!(fence::settled(&f.directory).is_err());
+    fs::write(&name, &original).unwrap();
+    let marker = f.directory.join("watchdog.json");
+    let bytes = fs::read(&marker).unwrap();
+    fs::write(&marker, [bytes.as_slice(), b" "].concat()).unwrap();
+    assert!(fence::receipt(&f.directory, lease).is_err());
+    assert_eq!(Diagnosis::of(&f.directory), Diagnosis::Unproven);
+    fs::write(&marker, &bytes).unwrap();
+    let moved = f.root.join("moved-receipt");
+    fs::rename(&name, &moved).unwrap();
+    assert!(fence::settled(&f.directory).is_err());
+    assert_eq!(Diagnosis::of(&f.directory), Diagnosis::Unproven);
+    fs::rename(&moved, &name).unwrap();
+    fence::receipt(&f.directory, lease).unwrap();
+    fence::settled(&f.directory).unwrap();
+    drop(guard);
 }
 
 fn assert_restart_denied(f: &mut Fixture) {
     // A genuinely fresh daemon epoch and supervisor cannot turn retained grant
     // history/expired runtime bytes into permission after closure and reopen.
-    diagnostic(&f.errors, "runner-worker-exited");
-    f.child.kill().unwrap();
+    // A settled fence is history: an ordinary grant still needs recovery.
+    let _ = f.child.kill();
     f.child.wait().unwrap();
     let marker = fs::read(f.directory.join("watchdog.json")).unwrap();
     let runtime = fs::read(f.directory.join("controlled.sqlite")).unwrap();
@@ -551,7 +604,73 @@ fn refused_cancellation_persists_uncertainty_and_reserves_closed_assignment_capa
             .unwrap()["cleanup"],
         "unverified"
     );
+    // T25: an unverified KILL never yields quiescence proof. The host keeps the
+    // lock and records a specific diagnostic; even restored evidence cannot help.
+    diagnostic(&f.errors, "runner-watchdog-quiescence-unproven");
+    fs::write(
+        f.directory.join("owner.json"),
+        serde_json::to_vec(&f.evidence).unwrap(),
+    )
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    assert_no_fence_proof(&f.directory);
     drop(service);
+    assert!(f.child.try_wait().unwrap().is_none());
+}
+
+/// No receipt, a retained lock and an `Unproven` diagnosis.
+fn assert_no_fence_proof(directory: &Path) {
+    use forge_runner_host::fence::Diagnosis;
+    assert!(!fs::read_dir(directory).unwrap().any(|e| {
+        e.unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("watchdog-receipt-")
+    }));
+    assert!(fs::read_dir(directory).unwrap().any(|e| {
+        e.unwrap()
+            .file_name()
+            .to_string_lossy()
+            .ends_with("-quiescence-unproven.json")
+    }));
+    assert!(forge_runner_host::inspection::ExclusiveInspection::acquire(directory).is_err());
+    assert_eq!(Diagnosis::of(directory), Diagnosis::Unproven);
+}
+
+/// T25: lease expiry with an escaped (detached, own process group) descendant.
+/// The group KILL cannot reach it, so the subreaper never observes ECHILD: no
+/// receipt, the hold and lock are kept and a specific diagnostic is written.
+/// Once the escaped child really exits, kernel proof follows and the host exits.
+#[test]
+fn escaped_descendant_keeps_the_fence_hold_until_it_really_exits() {
+    let mut f = Fixture::new("retire-escaped");
+    let authority = DaemonAuthority::new().unwrap();
+    let mut service = authority
+        .bind(&f.store, "test".into(), f.launch.clone(), 1, &mut f.child)
+        .unwrap();
+    let Tick::Delivered { lease, .. } = service.tick(&f.store).unwrap() else {
+        panic!("initial grant was not delivered")
+    };
+    let lease = forge_app::authorization_lease::Lease::clone(&lease);
+    event(&f.output, "authorized");
+    let escaped = event(&f.output, "started")["child"].as_u64().unwrap();
+    // Stop renewing but keep the pipe open: closing it would let the worker
+    // stop its own child. The grant expires at its absolute deadline.
+    diagnostic(&f.errors, "runner-lease-expired");
+    diagnostic(&f.errors, "runner-watchdog-kill-sent");
+    diagnostic(&f.errors, "runner-watchdog-quiescence-unproven");
+    assert_no_fence_proof(&f.directory);
+    drop(service);
+    assert!(f.child.try_wait().unwrap().is_none());
+    assert!(forge_runner_host::fence::receipt(&f.directory, &lease).is_err());
+    // Test controller only: the escaped child is this fixture's own process.
+    let pid = rustix::process::Pid::from_raw(i32::try_from(escaped).unwrap()).unwrap();
+    rustix::process::kill_process(pid, rustix::process::Signal::KILL).unwrap();
+    diagnostic(&f.errors, "runner-watchdog-quiescence-verified");
+    assert!(f.child.wait().unwrap().success());
+    let _guard = forge_runner_host::inspection::ExclusiveInspection::acquire(&f.directory).unwrap();
+    forge_runner_host::fence::receipt(&f.directory, &lease).unwrap();
+    forge_runner_host::fence::settled(&f.directory).unwrap();
 }
 
 #[test]

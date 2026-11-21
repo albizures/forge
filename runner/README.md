@@ -480,11 +480,30 @@ boot/time namespace, protected directory and both shared flock descriptors. If
 the leader exited or evidence is uncertain, signalling is refused rather than
 using retained numeric IDs. Descendants may survive; cleanup stays unverified.
 Per-stage 0600 JSON evidence records signal sent/unverified, with file/directory
-sync attempts and stable diagnostics on failure. The host retains its flock
-indefinitely even after worker exit or successful signals. No worktree repair,
-Forge lifecycle update, capacity release or diagnostic deletion occurs.
+sync attempts and stable diagnostics on failure. Worker exit or successful
+signals alone never release the flock. No worktree repair, Forge lifecycle
+update, capacity release or diagnostic deletion occurs.
 
-A retained marker (even malformed or a dangling symlink) blocks future grants;
+**Post-fence quiescence (T25).** After the fence the host keeps its subreaper
+role. It writes a protected `watchdog-receipt-<lease sequence>.json` only when
+these conditions all hold:
+
+- it has positively reaped its own worker;
+- the kernel then reports no remaining child at all (ECHILD);
+- its captured storage and lock identity are unchanged;
+- its fence marker and an accepted lease exist.
+
+The receipt binds the exact marker bytes, the owner and that lease. The host then
+exits, which releases the flock with its last holder. An escaped or surviving
+descendant, an unverified TERM/KILL or ownership drift writes
+`watchdog-<pid>-<start>-quiescence-unproven.json` and keeps the flock
+indefinitely, as before. A later fence in a recovered directory writes its own
+`watchdog-<pid>-<start>-fence.json` marker, because `watchdog.json` is retained
+history. The runner's `unblocked` check accepts a marker only when a receipt
+binds its exact bytes. Forge, not the runner, decides recovery or retirement
+from that receipt.
+
+A retained, unsettled marker (even malformed or a dangling symlink) blocks future grants;
 read-only observation/replay remains available. Marker persistence failure still
 initiates cancellation and retains the live lock; Forge's T03 durable reservations
 must continue to block replacement after both processes die. This marker is not a

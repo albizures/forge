@@ -15,6 +15,8 @@ mod supervised_dispatch;
 mod supervised_packaged;
 #[path = "support/supervised_purge.rs"]
 mod supervised_purge;
+#[path = "support/supervised_restart.rs"]
+mod supervised_restart;
 #[path = "support/supervised_rollback.rs"]
 mod supervised_rollback;
 use forge_app::{
@@ -432,9 +434,22 @@ async fn scenario(mode: &str) {
     // Only this test drives scheduling: a second default Herdr reconciler must
     // not concurrently administer the controlled durable Assignment.
     let server = Daemon::new(adapter.app())
-        .with_assignment_capability_root(root.join("assignment-capabilities"))
-        .with_durable_operator_store(&database)
-        .unwrap();
+        .with_assignment_capability_root(root.join("assignment-capabilities"));
+    // T25 restart scenarios resolve an interrupted effect through the operator
+    // service, which needs the matched components as `serve` composes them.
+    let server = if mode.starts_with("daemon-restart") {
+        server.with_durable_operator_catalog(
+            &database,
+            forge_server::durable_authorization::launch::ComponentCatalog::new(
+                None,
+                Some(&supervised_dispatch::execution(&node, &runner)),
+                &[],
+            ),
+        )
+    } else {
+        server.with_durable_operator_store(&database)
+    }
+    .unwrap();
     let daemon = tokio::spawn(async move {
         axum::serve(
             listener,
@@ -455,6 +470,16 @@ async fn scenario(mode: &str) {
     fs::set_permissions(&model_key, fs::Permissions::from_mode(0o600)).unwrap();
     if mode == "accepted" {
         withheld_refuses(&adapter, &store, record).await;
+    }
+    if mode.starts_with("daemon-restart") {
+        let restart = adapter.clone();
+        let store = SqliteProjectRepository::open(&database).unwrap();
+        tokio::task::spawn_blocking(move || supervised_restart::run(&restart, &store, record))
+            .await
+            .unwrap();
+        daemon.abort();
+        let _ = daemon.await;
+        return;
     }
     let dispatch = adapter.clone();
     let (assignment, existing, mut report) = tokio::task::spawn_blocking(move || {
@@ -764,11 +789,17 @@ fn main() {
     if args.first().is_some_and(|arg| arg == "--supervisor") {
         // The shipped host entry (supervision and `--compatibility`), re-executed.
         std::process::exit(forge_runner_host::entry::run(&args[1..]));
+    } else if args.first().is_some_and(|arg| arg == "--daemon") {
+        // T25: the launching daemon process, killed by its scenario.
+        supervised_restart::daemon(
+            Path::new(&args[1]),
+            args[2].to_str().unwrap().parse().unwrap(),
+        );
     } else if args.iter().any(|arg| arg == "--list") {
-        println!("T07/T09/T10/T24 supervised tracer (eleven parallel controlled scenarios)");
+        println!("T07/T09/T10/T24/T25 supervised tracer (fifteen parallel controlled scenarios)");
     } else {
         // Parallel isolated scenarios are intentional, not a serial-test waiver.
-        tokio::runtime::Builder::new_multi_thread()
+        let count = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(8)
             .enable_all()
             .build()
@@ -786,8 +817,27 @@ fn main() {
                     "revoked",
                     "rollback",
                     "packaged",
+                    "daemon-restart",
+                    "daemon-restart-retire",
+                    "daemon-restart-tool",
+                    "daemon-restart-exit",
                 ];
-                let handles = modes.map(|mode| tokio::spawn(scenario(mode)));
+                // Optional name filters (`cargo test ... -- daemon-restart`);
+                // with none, every scenario runs.
+                let filters: Vec<_> = args
+                    .iter()
+                    .filter_map(|arg| arg.to_str())
+                    .filter(|arg| !arg.starts_with('-'))
+                    .collect();
+                let selected: Vec<_> = modes
+                    .into_iter()
+                    .filter(|mode| filters.is_empty() || filters.iter().any(|f| mode.contains(f)))
+                    .collect();
+                let count = selected.len();
+                let handles: Vec<_> = selected
+                    .into_iter()
+                    .map(|mode| tokio::spawn(scenario(mode)))
+                    .collect();
                 let mut failures = vec![];
                 for handle in handles {
                     if let Err(error) = handle.await {
@@ -798,7 +848,8 @@ fn main() {
                     failures.is_empty(),
                     "supervised tracer scenarios failed: {failures:?}"
                 );
+                count
             });
-        println!("T07/T09/T10/T24 supervised tracer: 11 scenarios passed");
+        println!("T07/T09/T10/T24/T25 supervised tracer: {count} scenarios passed");
     }
 }

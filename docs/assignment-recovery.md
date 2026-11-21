@@ -250,6 +250,47 @@ revocation**, under exclusive inspection and committed-effect checks. It does no
 write or repair a host retirement receipt, erase other blockers or infer absence
 from controller loss. Unrelated later host-fault markers still block that path.
 
+**Watchdog fence and daemon loss (T25).** A lease that expires because the
+daemon stopped renewing makes the original host fence. This happens when the
+daemon process dies, restarts or is upgraded, and when renewal fails while it is
+alive. The fence writes `watchdog.json`, or for a later episode in a recovered
+directory `watchdog-<pid>-<start>-fence.json`, then sends group TERM and KILL. The
+host keeps its subreaper role. It writes a protected
+`watchdog-receipt-<lease sequence>.json` only after it has positively reaped its
+own worker, the kernel reports ECHILD and its captured storage and lock identity
+are unchanged. The receipt binds the marker's exact bytes, the owner identity and
+the last accepted lease (and so the Launch). Then the host exits, releasing the
+flock. It writes no receipt in these cases, keeping ownership and recording
+`watchdog-<pid>-<start>-quiescence-unproven.json`:
+
+- an escaped or surviving descendant;
+- a TERM or KILL it could not verify;
+- ownership drift;
+- a fence before any accepted lease.
+
+Forge accepts the receipt only under `ExclusiveInspection`, for the exact last
+lease and owner, with every fence marker in the directory settled by its own
+receipt:
+
+- **Recovery.** The receipt stands in for the predecessor proof: a restarted
+  daemon's ordinary scan claims and resumes the same attempt. Effect inspection
+  and current Forge authority still decide.
+- **Retirement.** `assignment-retire` reconciles through the receipt, with the
+  same effect checks and capacity rules as crash proof.
+
+A stale, foreign, other-lease or tampered receipt, a changed marker and an
+unsettled marker are all refused. Before proof exists, retirement reports
+`durable-runtime-owner-active` (the original host still holds the lock) or
+`durable-runtime-fence-unproven`. Status reports `runtime_fence`
+(`runtime-fence-unproven` or `runtime-fence-proven`) from the host files, without
+taking the lock. Unproven is also listed under uncertainty. Nothing adopts or
+signals the old host by PID, and lease expiry, process exit or a free lock are
+never treated as proof. To investigate an unproven fence, read the
+`watchdog-*` diagnostics in the runtime directory and look for descendants of
+the host PID recorded in `owner.json`. Never delete markers or receipts. When
+the surviving descendant really ends, the host proves quiescence and exits, and
+the same commands then succeed. See [T25 evidence](research/pi-durable-t25/README.md).
+
 Default production composition still leaves recovery unconfigured and new durable
 launches withheld by the [release gate](durable-execution.md#current-release-state).
 There is no operator CLI/RPC recovery-authorization operation. Matched packaging and
@@ -630,7 +671,7 @@ forge dispatcher assignment-purge-runtime <assignment-id> --operation-id purge-1
 ```
 
 - **Eligibility (Forge, before any deletion):** the Assignment is closed; its retirement is reconciled (or its admission was rejected); no resource is unretired, including unknown identities, interrupted effects, recovery claims and missing-Outcome markers; and no Dispatch Hold exists. Otherwise it is rejected (`runtime-purge-assignment-open`, `runtime-purge-uncertainty-retained`, `runtime-purge-retirement-unreconciled`, `runtime-purge-admission-unknown`) and nothing is journaled or deleted.
-- **Host (deletion):** the directory comes only from the canonical mapping of the immutable store identity, never a caller path. The host takes the same exclusive ownership lock the supervisor and worker hold, so a live or still-held owner (`runtime-purge-owner-active`) refuses. It then checks that the directory holds only recognized, owner-only, single-link regular files: the runtime database and its `-wal`/`-shm`/`-journal`, `check-runtime.json`, and the artifacts runner-host's own lifecycle writes — `owner.json`, an interrupted `owner.<pid>.pending`, `watchdog.json` and `watchdog-<pid>-<start>-<term|kill>-<sent|unverified>.json`, `retirement-intent.json` and `retirement-receipt.json`, `recovery-crash-<sequence>.json`, `recovery-quiescence-intent.json` and `recovery-quiescence-receipt.json`, and `recovery-proof-<64 lowercase hex>.json`. Numeric parts must be canonical decimals in range (no sign, no leading zero); any other name is unrecognized. So a runtime left by real retirement or crash reconciliation can be deleted. Redirected, foreign, linked or unrecognized content (`runtime-purge-storage-unsafe`, `runtime-purge-boundary-invalid`) refuses before any file is removed. Data goes first, then configuration, diagnostics, recovery evidence, fencing markers, the retirement receipt and owner evidence, with `owner.lock` last, then the directory. No sibling runtime or worktree is touched.
+- **Host (deletion):** the directory comes only from the canonical mapping of the immutable store identity, never a caller path. The host takes the same exclusive ownership lock the supervisor and worker hold, so a live or still-held owner (`runtime-purge-owner-active`) refuses. It then checks that the directory holds only recognized, owner-only, single-link regular files: the runtime database and its `-wal`/`-shm`/`-journal`, `check-runtime.json`, and the artifacts runner-host's own lifecycle writes — `owner.json`, an interrupted `owner.<pid>.pending`, `watchdog.json`, episode markers `watchdog-<pid>-<start>-fence.json`, diagnostics `watchdog-<pid>-<start>-<term|kill>-<sent|unverified>.json` and `watchdog-<pid>-<start>-quiescence-unproven.json`, the post-fence receipt `watchdog-receipt-<sequence>.json`, `retirement-intent.json` and `retirement-receipt.json`, `recovery-crash-<sequence>.json`, `recovery-quiescence-intent.json` and `recovery-quiescence-receipt.json`, and `recovery-proof-<64 lowercase hex>.json`. Numeric parts must be canonical decimals in range (no sign, no leading zero); any other name is unrecognized. So a runtime left by real retirement, crash or watchdog-fence reconciliation can be deleted. Redirected, foreign, linked or unrecognized content (`runtime-purge-storage-unsafe`, `runtime-purge-boundary-invalid`) refuses before any file is removed. Data goes first, then configuration, diagnostics, recovery evidence, fencing markers, the retirement receipt and owner evidence, with `owner.lock` last, then the directory. No sibling runtime or worktree is touched.
 - **Journal and retries:** intent is recorded first (schema 23, immutable identity, append-only, final once `purged`). A completed purge also records (schema 24) whether this operation `removed` the directory or found it `already-absent`; an absent path is not proof that Forge deleted it. Purges completed before revision 24 show the outcome as unrecorded. A failure is retained as a diagnostic (`state: retained`) and shown in status; retry with the same operation ID, which revalidates eligibility and resumes a partial deletion. A different operation ID is `runtime-purge-conflict`. A completed purge replays unchanged and never recreates storage.
 - **Unchanged:** the Assignment, Outcomes, Assessments, migration/recovery/retirement audit, accepted operation facts, follow-up records and Managed Worktree contents.
 - **After deletion:** `assignment-transcript` returns `unavailable` with reason `runtime-history-purged` without starting a reader, and `assignment-status` shows the deletion. Nothing synthesizes an empty store or makes recovery, resume or replay executable again. Deletion is irreversible; Forge keeps no copy of the runtime history.

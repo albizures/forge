@@ -200,6 +200,10 @@ test('independent watchdog expires with stopped JavaScript, escalates, and prese
   // Fill the worker pipe: blocked forwarding must not hold the watchdog mutex.
   p.send({ padding: 'x'.repeat(131072) });
   await p.diagnostic(/runner-lease-expired/);
+  // While the fenced host still owns the stopped worker, nothing else may start.
+  const contender = start(t, f);
+  assert.equal((await contender.exited)[0], 1);
+  assert.match(contender.stderr(), /runner-owner-busy/);
   const marker = await readFile(join(f.directory, 'watchdog.json'));
   assert.equal(JSON.parse(marker).cleanup, 'unverified');
   assert.equal((await stat(join(f.directory, 'watchdog.json'))).mode & 0o777, 0o600);
@@ -212,11 +216,16 @@ test('independent watchdog expires with stopped JavaScript, escalates, and prese
     assert.equal((await stat(path)).mode & 0o777, 0o600);
   }
   await p.diagnostic(/runner-worker-exited/);
-  const contender = start(t, f);
-  assert.equal((await contender.exited)[0], 1);
-  assert.match(contender.stderr(), /runner-owner-busy/);
+  // T25: the original subreaper proves descendant absence after its fence,
+  // writes the exact receipt bound to this marker and exits, freeing the lock.
+  await p.diagnostic(/runner-watchdog-quiescence-verified/);
+  assert.equal((await p.exited)[0], 0);
+  const receipt = JSON.parse(await readFile(join(f.directory, 'watchdog-receipt-1.json'), 'utf8'));
+  assert.equal(receipt.marker, 'watchdog.json');
+  assert.equal(receipt.marker_contents, marker.toString('utf8'));
+  assert.equal(receipt.children_absent, true);
   assert.deepEqual(await runInspect(f), before);
-  p.child.kill('SIGKILL'); await p.exited;
+  // A settled fence is history: an ordinary grant is still denied after restart.
   const restarted = start(t, f); await owned(restarted);
   restarted.send(request(id));
   assert.deepEqual((await response(restarted)).admission, accepted.admission);

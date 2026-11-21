@@ -45,22 +45,37 @@ pub(crate) fn quiesce(
 pub enum PredecessorProof {
     Quiesced(Box<Receipt>),
     Crashed(Box<crate::crash::Receipt>),
+    /// The original host's post-watchdog-fence descendant proof.
+    Fenced(Box<crate::fence::Receipt>),
+}
+
+/// Exact crash proof, or exact post-fence quiescence proof, for this lease.
+fn reaped(
+    directory: &Path,
+    lease: &forge_app::authorization_lease::Lease,
+) -> io::Result<PredecessorProof> {
+    match crate::crash::receipt(directory, lease) {
+        Ok(proof) => Ok(PredecessorProof::Crashed(Box::new(proof))),
+        Err(_) => crate::fence::receipt(directory, lease)
+            .map(Box::new)
+            .map(PredecessorProof::Fenced),
+    }
 }
 
 /// Verify original-host quiescence or a directly reaped crash boundary.
 /// # Errors
 /// Missing proof or any unrelated safety marker remains uncertainty.
 pub fn waiting_receipt(directory: &Path, operation: &Operation) -> io::Result<PredecessorProof> {
-    for name in [
-        "watchdog.json",
-        "retirement-intent.json",
-        "retirement-receipt.json",
-    ] {
+    for name in ["retirement-intent.json", "retirement-receipt.json"] {
         match std::fs::symlink_metadata(directory.join(name)) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             _ => return Err(invalid()),
         }
     }
+    // A watchdog fence blocks recovery unless its own original host proved
+    // descendant absence afterwards. A settled marker is history, not proof
+    // for this predecessor: that still needs the exact receipt below.
+    crate::fence::settled(directory)?;
     operation.validate().map_err(|_| invalid())?;
     match std::fs::symlink_metadata(directory.join(INTENT)) {
         Ok(_) => {
@@ -82,15 +97,11 @@ pub fn waiting_receipt(directory: &Path, operation: &Operation) -> io::Result<Pr
                 return Err(invalid());
             }
             // Preserve completed earlier quiescence evidence. It cannot stand in
-            // for the current predecessor: require that exact grant's new crash proof.
-            crate::crash::receipt(directory, &operation.predecessor)
-                .map(Box::new)
-                .map(PredecessorProof::Crashed)
+            // for the current predecessor: require that exact grant's new proof.
+            reaped(directory, &operation.predecessor)
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            crate::crash::receipt(directory, &operation.predecessor)
-                .map(Box::new)
-                .map(PredecessorProof::Crashed)
+            reaped(directory, &operation.predecessor)
         }
         Err(error) => Err(error),
     }

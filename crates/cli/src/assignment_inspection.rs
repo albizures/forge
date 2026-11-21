@@ -219,6 +219,18 @@ pub fn render_durable_status(status: &AssignmentDurableStatusResponse) -> String
         )
         .expect("writing to a string cannot fail");
     }
+    if let Some(fence) = &status.runtime_fence {
+        writeln!(
+            out,
+            "Runtime fence: {fence}{}",
+            if fence == "runtime-fence-unproven" {
+                " (the original host has not proven descendant absence; capacity retained)"
+            } else {
+                " (the original host proved descendant absence after its watchdog fence)"
+            }
+        )
+        .expect("writing to a string cannot fail");
+    }
     for note in &status.notes {
         writeln!(out, "Note: {note}").expect("writing to a string cannot fail");
     }

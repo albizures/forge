@@ -166,11 +166,11 @@ pub fn run(
         }
     }
     for entry in fs::read_dir(directory)? {
-        if entry?
-            .file_name()
-            .to_string_lossy()
-            .starts_with(crate::crash::RECEIPT_PREFIX)
-        {
+        let name = entry?.file_name();
+        let name = name.to_string_lossy();
+        // Crash proof and (settled or not) fence markers of earlier episodes:
+        // only the exact recovery preparation may grant again.
+        if name.starts_with(crate::crash::RECEIPT_PREFIX) || crate::fence::is_marker(&name) {
             retained_blocker = true;
         }
     }

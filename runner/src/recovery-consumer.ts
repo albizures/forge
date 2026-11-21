@@ -1,6 +1,6 @@
 // Private executable recovery channel, not a public runner/agent operation.
 import { createInterface } from 'node:readline';
-import { lstatSync, readlinkSync } from 'node:fs';
+import { lstatSync, readdirSync, readFileSync, readlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { BACKGROUND_CONTEXT as context } from '@earendil-works/chord/context';
 import type { Harness, HarnessOptions, SubmissionId } from '@earendil-works/pi-durable';
@@ -29,9 +29,27 @@ export function workerOwner(directory: string): Owner {
     host_start: evidence.owner.host_start, worker_pid: process.pid, worker_start: evidence.worker_start,
     lock_device: evidence.owner.lock_device, lock_inode: evidence.owner.lock_inode };
 }
+const FENCE_MARKER = /^watchdog(?:-[1-9][0-9]*-(?:0|[1-9][0-9]*)-fence)?\.json$/;
+const FENCE_RECEIPT = /^watchdog-receipt-[1-9][0-9]*\.json$/;
+
+/** Defense in depth beside the host's authoritative check: every watchdog fence
+ * marker must be settled by its original host's post-fence quiescence receipt
+ * (exact marker bytes). A settled marker is history; it grants nothing. */
 export function unblocked(directory: string): void {
-  try { lstatSync(join(directory, 'watchdog.json')); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; }
+  try {
+    const names = readdirSync(directory);
+    const markers = names.filter(name => FENCE_MARKER.test(name));
+    if (markers.length === 0) return;
+    const settled = new Set<string>();
+    for (const name of names.filter(name => FENCE_RECEIPT.test(name))) {
+      const receipt = JSON.parse(readFileSync(join(directory, name), 'utf8'));
+      if (receipt?.version === 1 && receipt.children_absent === true && typeof receipt.marker === 'string'
+        && FENCE_MARKER.test(receipt.marker) && name === `watchdog-receipt-${receipt.lease?.sequence}.json`
+        && lstatSync(join(directory, receipt.marker)).isFile()
+        && readFileSync(join(directory, receipt.marker), 'utf8') === receipt.marker_contents) settled.add(receipt.marker);
+    }
+    if (markers.every(marker => settled.has(marker))) return;
+  } catch { /* unreadable evidence is a fence */ }
   throw new Denied('assignment-lease-denied');
 }
 

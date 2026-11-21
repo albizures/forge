@@ -1,0 +1,221 @@
+//! Watchdog fence markers and the original host's post-fence quiescence receipt.
+//!
+//! A watchdog fence (lease expiry, clock or owner uncertainty, denied control)
+//! writes a marker that blocks every new grant. The original dedicated subreaper
+//! may later prove that its directly spawned worker was positively reaped and
+//! that the kernel reports no remaining descendants (ECHILD). Only then does it
+//! write one protected, exact receipt bound to the marker, the owner and the last
+//! accepted lease, and release ownership by exiting. Without that proof the hold
+//! is retained indefinitely, as before. Nothing here adopts or signals a process.
+use crate::{directory, invalid, protected_file};
+use forge_app::authorization_lease::{Lease, Owner};
+use serde::{Deserialize, Serialize};
+use std::{
+    fs,
+    io::{self, Read},
+    os::unix::fs::MetadataExt,
+    path::Path,
+};
+
+/// The first fence marker of a runtime directory.
+pub(crate) const MARKER: &str = "watchdog.json";
+const RECEIPT_PREFIX: &str = "watchdog-receipt-";
+const MAX_BYTES: u64 = 65_536;
+
+/// The per-episode marker used when an earlier episode's `watchdog.json` exists.
+pub(crate) fn episode_marker(owner: &Owner) -> String {
+    format!(
+        "watchdog-{}-{}-fence.json",
+        owner.host_pid, owner.host_start
+    )
+}
+
+fn receipt_name(lease: &Lease) -> String {
+    format!("{RECEIPT_PREFIX}{}.json", lease.sequence)
+}
+
+/// A canonical decimal, as the purge classifier also requires.
+fn canonical(digits: &str) -> bool {
+    !digits.is_empty()
+        && digits.bytes().all(|b| b.is_ascii_digit())
+        && (digits == "0" || !digits.starts_with('0'))
+}
+
+/// `watchdog.json` or `watchdog-<host pid>-<host start>-fence.json`.
+#[must_use]
+pub fn is_marker(name: &str) -> bool {
+    name == MARKER
+        || name
+            .strip_prefix("watchdog-")
+            .and_then(|rest| rest.strip_suffix("-fence.json"))
+            .and_then(|rest| rest.split_once('-'))
+            .is_some_and(|(pid, start)| {
+                canonical(pid)
+                    && pid != "0"
+                    && pid.parse::<u32>().is_ok()
+                    && canonical(start)
+                    && start.parse::<u64>().is_ok()
+            })
+}
+
+/// `watchdog-receipt-<lease sequence>.json`.
+#[must_use]
+pub fn is_receipt(name: &str) -> bool {
+    name.strip_prefix(RECEIPT_PREFIX)
+        .and_then(|rest| rest.strip_suffix(".json"))
+        .is_some_and(|sequence| {
+            canonical(sequence) && sequence != "0" && sequence.parse::<u32>().is_ok()
+        })
+}
+
+/// Protected post-fence proof. `marker_contents` is the exact marker file.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Receipt {
+    pub version: u32,
+    pub marker: String,
+    pub marker_contents: String,
+    pub lease: Lease,
+    pub children_absent: bool,
+}
+
+#[derive(Deserialize)]
+struct Marker {
+    owner: Owner,
+    last_lease: Option<Lease>,
+}
+
+fn read(path: &Path) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    protected_file(path)?
+        .take(MAX_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_BYTES {
+        return Err(invalid());
+    }
+    Ok(bytes)
+}
+
+/// The marker must name exactly this owner and lease; its bytes must be unchanged.
+fn bound(directory: &Path, receipt: &Receipt) -> io::Result<()> {
+    if receipt.version != 1 || !receipt.children_absent || !is_marker(&receipt.marker) {
+        return Err(invalid());
+    }
+    let bytes = read(&directory.join(&receipt.marker))?;
+    if bytes != receipt.marker_contents.as_bytes() {
+        return Err(invalid());
+    }
+    let marker: Marker = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+    if marker.owner != receipt.lease.owner || marker.last_lease.as_ref() != Some(&receipt.lease) {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+/// Written only by the original supervisor, after `Supervised::fenced_quiescence`.
+pub(crate) fn record(directory: &Path, marker: &str, lease: &Lease) -> io::Result<()> {
+    let contents = String::from_utf8(read(&directory.join(marker))?).map_err(|_| invalid())?;
+    let receipt = Receipt {
+        version: 1,
+        marker: marker.into(),
+        marker_contents: contents,
+        lease: lease.clone(),
+        children_absent: true,
+    };
+    bound(directory, &receipt)?;
+    crate::retirement::persist(directory, &receipt_name(lease), &receipt)
+}
+
+/// Read the exact receipt for this lease under separately held exclusive
+/// inspection. A free lock, an exited host or a marker alone is not proof.
+/// # Errors
+/// Rejects missing, partial, foreign-owner, other-lease or tampered evidence,
+/// a changed marker, and a lock whose identity is not the lease owner's.
+pub fn receipt(directory: &Path, lease: &Lease) -> io::Result<Receipt> {
+    crate::directory(directory)?;
+    let lock = protected_file(&directory.join("owner.lock"))?.metadata()?;
+    if lock.dev().to_string() != lease.owner.lock_device
+        || lock.ino().to_string() != lease.owner.lock_inode
+    {
+        return Err(invalid());
+    }
+    let receipt: Receipt = serde_json::from_slice(&read(&directory.join(receipt_name(lease)))?)
+        .map_err(|_| invalid())?;
+    if receipt.lease != *lease {
+        return Err(invalid());
+    }
+    bound(directory, &receipt)?;
+    Ok(receipt)
+}
+
+fn names(directory: &Path) -> io::Result<Vec<String>> {
+    let mut names = Vec::new();
+    for entry in fs::read_dir(directory)? {
+        names.push(entry?.file_name().into_string().map_err(|_| invalid())?);
+    }
+    names.sort();
+    Ok(names)
+}
+
+/// Fence markers currently present in the directory.
+/// # Errors
+/// Unreadable directories are uncertainty.
+pub fn markers(directory: &Path) -> io::Result<Vec<String>> {
+    Ok(names(directory)?
+        .into_iter()
+        .filter(|name| is_marker(name))
+        .collect())
+}
+
+/// Every fence marker is explained by a valid receipt from its own episode.
+/// A settled marker is history; it does not authorize anything by itself.
+/// # Errors
+/// Any unsettled, unreadable or tampered marker/receipt is uncertainty.
+pub fn settled(directory: &Path) -> io::Result<()> {
+    directory_checked(directory)?;
+    let names = names(directory)?;
+    let mut receipts = Vec::new();
+    for name in names.iter().filter(|name| is_receipt(name)) {
+        let receipt: Receipt =
+            serde_json::from_slice(&read(&directory.join(name))?).map_err(|_| invalid())?;
+        if *name != receipt_name(&receipt.lease) {
+            return Err(invalid());
+        }
+        bound(directory, &receipt)?;
+        receipts.push(receipt.marker);
+    }
+    for marker in names.iter().filter(|name| is_marker(name)) {
+        if !receipts.contains(marker) {
+            return Err(invalid());
+        }
+    }
+    Ok(())
+}
+
+fn directory_checked(path: &Path) -> io::Result<()> {
+    directory(path).map(|_| ())
+}
+
+/// Read-only operator diagnosis of a runtime directory. Descriptive only: it
+/// never grants, releases capacity or substitutes for exclusive inspection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Diagnosis {
+    /// No watchdog fence marker exists.
+    Unfenced,
+    /// A fence exists and every marker is settled by a valid quiescence receipt.
+    Proven,
+    /// A fence exists without valid quiescence proof (still waiting, an escaped
+    /// child, an unverified signal, or tampered evidence): the hold is retained.
+    Unproven,
+}
+
+impl Diagnosis {
+    #[must_use]
+    pub fn of(directory: &Path) -> Self {
+        match markers(directory) {
+            Ok(markers) if markers.is_empty() => Self::Unfenced,
+            Ok(_) if settled(directory).is_ok() => Self::Proven,
+            _ => Self::Unproven,
+        }
+    }
+}

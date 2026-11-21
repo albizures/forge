@@ -94,6 +94,12 @@ pub struct AssignmentDurableStatusResponse {
     /// gone for good; Forge's own records remain.
     #[serde(default)]
     pub runtime_purge: Option<forge_app::durable_execution::purge::Record>,
+    /// Descriptive watchdog-fence state of the runtime directory, read from host
+    /// files without taking ownership: `runtime-fence-unproven` (a fence without
+    /// the original host's quiescence proof; capacity stays reserved) or
+    /// `runtime-fence-proven`. Absent when unfenced or when no directory exists.
+    #[serde(default)]
+    pub runtime_fence: Option<String>,
     pub notes: Vec<String>,
 }
 
@@ -113,6 +119,18 @@ impl AssignmentDurableStatusResponse {
         purge: Option<forge_app::durable_execution::purge::Record>,
     ) -> Self {
         self.runtime_purge = purge;
+        self
+    }
+
+    /// Unproven fences are also listed as retained uncertainty.
+    #[must_use]
+    pub fn with_runtime_fence(mut self, fence: Option<&str>) -> Self {
+        if let Some(code) = fence {
+            if code == "runtime-fence-unproven" && !self.uncertainty.iter().any(|c| c == code) {
+                self.uncertainty.push(code.into());
+            }
+            self.runtime_fence = Some(code.into());
+        }
         self
     }
 
@@ -167,6 +185,7 @@ impl AssignmentDurableStatusResponse {
             retirement_blockers,
             followups: Vec::new(),
             runtime_purge: None,
+            runtime_fence: None,
             notes: vec![
                 "Persisted Forge facts only; this does not contact a runner or prove a process is running or absent.".into(),
                 "A missing Outcome or retained uncertainty keeps capacity reserved; inspection never recovers, retries or releases it.".into(),

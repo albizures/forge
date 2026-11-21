@@ -91,6 +91,30 @@ impl OperatorService {
         )
     }
 
+    /// Descriptive watchdog-fence diagnosis of the mapped runtime directory:
+    /// `runtime-fence-proven`, `runtime-fence-unproven`, or `None` when unfenced
+    /// or absent. Reads files only; never takes the lock, grants or releases.
+    pub(crate) fn runtime_fence(
+        &self,
+        workspace: &str,
+        assignment: &str,
+    ) -> Result<Option<&'static str>, RegistrationError> {
+        use forge_runner_host::fence::Diagnosis;
+        let Some(runtime) = self.repository.runtime(workspace, assignment)? else {
+            return Ok(None);
+        };
+        let Ok(directory) =
+            super::runtime_directory::mapped(&self.repository, workspace, &runtime.launch, false)
+        else {
+            return Ok(None);
+        };
+        Ok(match Diagnosis::of(&directory) {
+            Diagnosis::Unfenced => None,
+            Diagnosis::Proven => Some("runtime-fence-proven"),
+            Diagnosis::Unproven => Some("runtime-fence-unproven"),
+        })
+    }
+
     pub(crate) fn followups(
         &self,
         workspace: &str,

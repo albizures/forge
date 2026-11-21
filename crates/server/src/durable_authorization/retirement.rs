@@ -26,6 +26,23 @@ fn uncertain() -> RegistrationError {
         "owned execution cleanup is uncertain; retain resources and capacity",
     )
 }
+/// A specific retained-uncertainty code for a runtime this daemon does not own
+/// and that has no reconcilable proof. Descriptive only; it releases nothing.
+fn unproven(directory: &std::path::Path) -> RegistrationError {
+    use forge_runner_host::fence::Diagnosis;
+    match Diagnosis::of(directory) {
+        Diagnosis::Unproven => RegistrationError::new(
+            "durable-runtime-fence-unproven",
+            "the original host fenced this runtime but has not proven that no descendant survives; capacity stays reserved. Investigate the runtime directory's watchdog diagnostics",
+        ),
+        _ if ExclusiveInspection::acquire(directory).is_err() => RegistrationError::new(
+            "durable-runtime-owner-active",
+            "an original runner host still holds this runtime's ownership lock; retirement completes after its lease expires and it proves quiescence",
+        ),
+        _ => uncertain(),
+    }
+}
+
 struct Owned {
     child: Child,
     pipe: ControlPipe,
@@ -104,7 +121,7 @@ impl Controller {
         Ok(())
     }
 
-    fn reconcile_crash(
+    fn reconcile_proof(
         &self,
         repository: &SqliteProjectRepository,
         workspace: &str,
@@ -118,13 +135,16 @@ impl Controller {
         let Ok(guard) = ExclusiveInspection::acquire(directory) else {
             return Ok(false);
         };
-        for marker in ["watchdog.json", "retirement-intent.json"] {
-            match std::fs::symlink_metadata(directory.join(marker)) {
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                _ => return Ok(false),
-            }
+        match std::fs::symlink_metadata(directory.join("retirement-intent.json")) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            _ => return Ok(false),
         }
-        if forge_runner_host::crash::receipt(directory, lease).is_err() {
+        // Every watchdog fence must be settled by its own host's quiescence
+        // receipt, and this exact last lease needs crash or post-fence proof.
+        if forge_runner_host::fence::settled(directory).is_err()
+            || (forge_runner_host::crash::receipt(directory, lease).is_err()
+                && forge_runner_host::fence::receipt(directory, lease).is_err())
+        {
             return Ok(false);
         }
         let components = self.inspection(&operation.launch)?;
@@ -197,7 +217,7 @@ impl Controller {
             operation
         };
         if let Some(last) = last
-            && self.reconcile_crash(repository, workspace, &directory, &operation, &last)?
+            && self.reconcile_proof(repository, workspace, &directory, &operation, &last)?
         {
             return Ok(());
         }
@@ -234,9 +254,22 @@ impl Controller {
         }
         // A dead/absent host is not proof. Require protected exact receipt and an
         // exclusive lock continuously through the transactional result commit.
-        let guard = ExclusiveInspection::acquire(&directory).map_err(|_| uncertain())?;
-        let receipt = forge_runner_host::retirement::receipt(&directory, &operation)
-            .map_err(|_| uncertain())?;
+        let unowned = owned.is_none();
+        let guard = ExclusiveInspection::acquire(&directory).map_err(|_| {
+            if unowned {
+                unproven(&directory)
+            } else {
+                uncertain()
+            }
+        })?;
+        let receipt =
+            forge_runner_host::retirement::receipt(&directory, &operation).map_err(|_| {
+                if unowned {
+                    unproven(&directory)
+                } else {
+                    uncertain()
+                }
+            })?;
         guard.verify().map_err(|_| uncertain())?;
         let components = self.inspection(launch)?;
         super::effects::inspect_retirement(

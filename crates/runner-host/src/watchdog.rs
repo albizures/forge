@@ -302,6 +302,9 @@ fn diagnostic(
     fs::File::open(directory)?.sync_all()
 }
 
+/// Returns the marker name actually written. A first fence writes
+/// `watchdog.json`; a later episode in a recovered runtime directory, whose
+/// earlier marker is retained history, writes its own episode marker.
 fn retain(
     directory: &Path,
     identity: (u64, u64),
@@ -309,20 +312,34 @@ fn retain(
     code: &str,
     lease: Option<&Lease>,
     marker: bool,
-) {
-    let name = if marker {
-        "watchdog.json".into()
+) -> Option<String> {
+    let mut names = if marker {
+        vec![
+            crate::fence::MARKER.to_owned(),
+            crate::fence::episode_marker(owner),
+        ]
     } else {
-        format!(
+        vec![format!(
             "watchdog-{}-{}-{code}.json",
             owner.host_pid, owner.host_start
-        )
+        )]
     };
+    if marker
+        && fs::symlink_metadata(directory.join(crate::fence::MARKER))
+            .is_ok_and(|meta| meta.is_file())
+    {
+        names.remove(0);
+    } else {
+        names.truncate(1);
+    }
+    let name = names.remove(0);
     if diagnostic(directory, &name, owner, code, lease, identity).is_err() {
         // Failure does not prevent cancellation or release the held flock. No
         // paths, payloads, credentials or untrusted I/O error strings are logged.
         eprintln!("runner-watchdog-diagnostic-unavailable; ownership retained");
+        return None;
     }
+    Some(name)
 }
 
 // A direct Child wait and original subreaper proof, never a /proc absence guess.
@@ -364,14 +381,25 @@ fn sample_worker(
     Ok(false)
 }
 
+/// Post-fence state: the signals sent, and quiescence proof progress.
+struct Fence {
+    started: Instant,
+    boot_started: Option<u64>,
+    lease: Option<Lease>,
+    marker: Option<String>,
+    kill_attempted: bool,
+    killed_at: Option<Instant>,
+    unproven_recorded: bool,
+    proof_failed: bool,
+}
+
 pub fn supervise(mut worker: Supervised<'_>, directory: &Path, state: &Mutex<State>) {
     let owner = worker.owner().clone();
     let identity = worker.directory_identity();
     let record = |code: &str, lease: Option<&Lease>, marker: bool| {
-        retain(directory, identity, &owner, code, lease, marker);
+        retain(directory, identity, &owner, code, lease, marker)
     };
-    let mut alarm: Option<(Instant, Option<u64>)> = None;
-    let mut kill_attempted = false;
+    let mut fence: Option<Fence> = None;
     let mut exited = false;
     let mut shutdown_attempted = false;
     loop {
@@ -442,38 +470,113 @@ pub fn supervise(mut worker: Supervised<'_>, directory: &Path, state: &Mutex<Sta
             Err(_) => (Some("runner-watchdog-state-unavailable"), None, None),
         };
         if let Some(code) = fault
-            && alarm.is_none()
+            && fence.is_none()
         {
-            alarm = Some((Instant::now(), now));
             // Retain the safety marker before initiating termination. Its
             // mere existence blocks new grants after restart; no adoption.
-            record(code, lease.as_ref(), true);
+            let marker = record(code, lease.as_ref(), true);
             eprintln!("{code}; ownership retained pending reconciliation");
-            let code = if worker.signal(rustix::process::Signal::TERM).is_ok() {
-                "term-sent"
-            } else {
-                "term-unverified"
-            };
-            record(code, lease.as_ref(), false);
-        }
-        if let Some((started, boot_started)) = alarm {
-            let grace_elapsed = match (boot_started, now) {
-                (Some(start), Some(now)) if now >= start => now - start >= TERM_GRACE_MILLIS,
-                _ => started.elapsed() >= Duration::from_millis(TERM_GRACE_MILLIS),
-            };
-            if !kill_attempted && grace_elapsed {
-                kill_attempted = true;
-                let code = if worker.signal(rustix::process::Signal::KILL).is_ok() {
-                    "kill-sent"
-                } else {
-                    "kill-unverified"
-                };
-                record(code, lease.as_ref(), false);
-                eprintln!("runner-watchdog-{code}; cleanup unverified");
+            let mut proof_failed = false;
+            match worker.signal_or_exited(rustix::process::Signal::TERM) {
+                Ok(true) => {
+                    record("term-sent", lease.as_ref(), false);
+                }
+                Ok(false) => {}
+                Err(_) => {
+                    proof_failed = true;
+                    record("term-unverified", lease.as_ref(), false);
+                }
             }
+            fence = Some(Fence {
+                started: Instant::now(),
+                boot_started: now,
+                lease: lease.clone(),
+                marker,
+                kill_attempted: false,
+                killed_at: None,
+                unproven_recorded: false,
+                proof_failed,
+            });
         }
-        // Retain ownership indefinitely. Neither process exit nor successful
-        // signals establish descendant absence or authorize replacement.
+        if let Some(fence) = &mut fence
+            && quiesce_after_fence(&mut worker, directory, fence, now, &record)
+        {
+            return;
+        }
+        // Without positive post-fence proof, retain ownership indefinitely.
+        // Neither process exit nor successful signals establish descendant
+        // absence or authorize replacement.
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// One post-fence step: escalate to KILL after the grace period, then try to
+/// prove descendant absence. Returns true once the exact receipt is persisted;
+/// the caller then exits, releasing the shared lock with its last holder.
+fn quiesce_after_fence(
+    worker: &mut Supervised<'_>,
+    directory: &Path,
+    fence: &mut Fence,
+    now: Option<u64>,
+    record: &impl Fn(&str, Option<&Lease>, bool) -> Option<String>,
+) -> bool {
+    let grace_elapsed = match (fence.boot_started, now) {
+        (Some(start), Some(now)) if now >= start => now - start >= TERM_GRACE_MILLIS,
+        _ => fence.started.elapsed() >= Duration::from_millis(TERM_GRACE_MILLIS),
+    };
+    if !fence.kill_attempted && grace_elapsed {
+        fence.kill_attempted = true;
+        fence.killed_at = Some(Instant::now());
+        let code = match worker.signal_or_exited(rustix::process::Signal::KILL) {
+            Ok(true) => Some("kill-sent"),
+            Ok(false) => None,
+            Err(_) => {
+                fence.proof_failed = true;
+                Some("kill-unverified")
+            }
+        };
+        if let Some(code) = code {
+            record(code, fence.lease.as_ref(), false);
+            eprintln!("runner-watchdog-{code}; cleanup unverified");
+        }
+    }
+    if fence.proof_failed {
+        // An unverified signal or identity: never proof. Say so once, after
+        // the KILL attempt, so the retained hold has a specific diagnostic.
+        if fence.kill_attempted && !fence.unproven_recorded {
+            fence.unproven_recorded = true;
+            record("quiescence-unproven", fence.lease.as_ref(), false);
+            eprintln!("runner-watchdog-quiescence-unproven; ownership retained");
+        }
+        return false;
+    }
+    // Proof needs this episode's own marker and an accepted lease to bind.
+    let (Some(marker), Some(lease)) = (&fence.marker, &fence.lease) else {
+        fence.proof_failed = true;
+        return false;
+    };
+    match worker.fenced_quiescence() {
+        Ok(true) => {
+            if crate::fence::record(directory, marker, lease).is_ok() {
+                eprintln!("runner-watchdog-quiescence-verified");
+                return true;
+            }
+            fence.proof_failed = true;
+        }
+        Ok(false) => {
+            let overdue = fence
+                .killed_at
+                .is_some_and(|killed| killed.elapsed() >= Duration::from_millis(2_000));
+            if overdue && !fence.unproven_recorded {
+                fence.unproven_recorded = true;
+                // A surviving worker or escaped descendant: keep the hold.
+                // Proof may still follow if it exits; nothing is signalled.
+                record("quiescence-unproven", Some(lease), false);
+                eprintln!("runner-watchdog-quiescence-unproven; ownership retained");
+            }
+            return false;
+        }
+        Err(_) => fence.proof_failed = true,
+    }
+    false
 }

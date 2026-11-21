@@ -1323,10 +1323,14 @@ impl AgentDispatchApiServer for Daemon {
         let purge = service
             .purge_record(&workspace, &request.record.assignment_id)
             .map_err(rpc_error)?;
+        let fence = service
+            .runtime_fence(&workspace, &request.record.assignment_id)
+            .map_err(rpc_error)?;
         Ok(
             forge_rpc::AssignmentDurableStatusResponse::compose(info, status)
                 .with_followups(followups)
-                .with_runtime_purge(purge),
+                .with_runtime_purge(purge)
+                .with_runtime_fence(fence),
         )
     }
 
