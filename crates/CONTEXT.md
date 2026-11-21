@@ -169,7 +169,7 @@ An operator-managed, Project-configured ordered set of completion criteria and o
 _Avoid_: live checklist, check runner configuration
 
 **Check**:
-An immutable named Task completion criterion with a stable identity, description, order and optional pinned Agent Profile revision, copied from a Check Template or provided as the mandatory baseline for a Projectless Task. Every Check is required for completion; its profile supplies agent configuration for every dispatched attempt, while Manual execution permits profile-less Checks, and Checks cannot be individually added, edited, or retired on a Task.
+A named Task completion criterion with immutable identity, description and order, initially copied with its optional pinned Agent Profile revision from a Check Template or provided as the mandatory baseline for a Projectless Task. Every Check is required for completion; its effective profile supplies agent configuration for every dispatched attempt, while Manual execution permits profile-less Checks, and Checks cannot be individually added, edited, or retired on a Task. An explicit validated profile migration records a replacement effective selection while preserving the original pin as history and invalidating prior evidence, rather than silently reinterpreting the original revision.
 _Avoid_: executable check, check runner
 
 **Implementation Check**:
@@ -241,7 +241,7 @@ The bounded Forge information an Agent Assignment may read, combining its bound 
 _Avoid_: project visibility, record graph access, execution snapshot
 
 **Agent Profile**:
-An immutable, revisioned Forge-owned configuration for a Record Type containing agent launch policy and role-specific behavioral instructions, subordinate to Forge-owned execution and lifecycle rules. It may select zero or more reusable Skills but does not belong to a Skill. Task Checks pin their revisions through Check Templates, while Forge Workspaces select Grilling revisions; each Agent Assignment retains its bound revision, freezing configuration and behavior rather than the complete runtime or resource filesystem.
+An immutable, revisioned Forge-owned configuration for a Record Type containing agent launch policy and role-specific behavioral instructions, subordinate to Forge-owned execution and lifecycle rules. It may select zero or more reusable Skills but does not belong to a Skill. Task Checks select revisions initially copied from Check Templates and replaceable only through explicit validated migration, while Forge Workspaces select Grilling revisions; each Agent Assignment retains its originally bound revision, freezing configuration and behavior rather than the complete runtime or resource filesystem.
 _Avoid_: agent configuration, mutable profile, record profile
 
 **Agent Workspace**:

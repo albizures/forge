@@ -598,3 +598,19 @@ A follow-up is durable operator input recorded in Forge (schema revision 23, imm
 - **Missing Outcome:** allowed as explicit intervention. Recording does not create an Outcome, retire the diagnostic, release capacity or grant a lease.
 - **Visibility:** recorded follow-ups, with operation IDs, are listed by `assignment-status`.
 - **Not delivery:** a record is not proof the runtime received or acted on it. Delivering recorded input into the conversation, and listing it in the committed runtime transcript, needs a writable authorized runner and is not yet implemented.
+
+## Migrate existing Check profiles to durable execution
+
+```sh
+forge record check-profile-migrate <task-id> --operation-id adopt-1 --expected-generation 1 \
+  --check 7=5 --actor operator --message 'adopt pi-durable' --json
+forge record check-profile-migrations <task-id>
+```
+
+Existing Checks keep their original pinned profile. Changing a Check Template, a Workspace default or registering a new profile never moves them to pi-durable. This operation is the only way, and it is explicit and audited (schema revision 23; append-only, immutable, retained history). It selects an *effective* revision per named Check; the original pin, the Check's identity, description and order, every Assignment's bound profile/backend and all Assessments stay as history. Nothing is registered, dispatched or launched, and live Herdr work is never converted: it finishes or retires through Herdr first.
+
+- **Eligibility:** every selection is a registered Task profile revision whose provider and launch runtime are `pi-durable`; each Check belongs to the Task; the Task is not Done; no open attempt or Assignment exists, and all retained and unknown resources are reconciled (`execution-mode-unsafe-ownership`, `attempt-active`). Target prerequisites are preflighted before the transaction and the store revalidates profile, scope and ownership inside it. An unchanged revision (`check-profile-unchanged`), a Herdr or missing revision and a foreign Check reject, all-or-nothing.
+- **Freshness:** pass `--expected-generation` from the Task's work state; a stale value fails with `stale-work-generation`. A Task with work or Assessments has its freshness invalidated exactly once, so earlier passes and attempts are stale; the receipt reports generation before and after. A pristine Task has no generation change.
+- **Retries:** reuse the operation ID after a dropped reply. The original receipt returns with `replayed: true`, never advancing freshness again, even after later changes. The same ID with different content fails with `check-profile-migration-conflict`.
+- **Next attempt:** the following dispatch uses the effective revision through the ordinary gates (capacity, Dispatch Hold, preflight); a stale old-pin selection is rejected as `check-selection-stale`.
+- **Scope and rollback:** this operation selects only durable-compatible revisions and never deletes history; a further migration may pick another durable revision. Rollout gating and rolling new execution back to Herdr are separate (later) rollout controls. Mixed profiles across a Task's Checks are supported.

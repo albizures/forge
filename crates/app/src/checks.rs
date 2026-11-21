@@ -96,6 +96,65 @@ pub struct RecordCheck {
     pub project: Option<String>,
 }
 impl Application {
+    /// Explicitly select durable-compatible effective profiles for existing Checks.
+    ///
+    /// The target revisions are preflighted before the transaction; the repository
+    /// revalidates scope, profile compatibility, ownership and freshness atomically.
+    /// Nothing is dispatched, launched or registered.
+    ///
+    /// # Errors
+    /// Rejects invalid requests, unusable profiles, unsafe ownership, stale work and conflicts.
+    pub fn migrate_check_profiles(
+        &self,
+        request: &crate::check_profile_migration::Request,
+    ) -> Result<crate::check_profile_migration::Receipt, RegistrationError> {
+        request.validate()?;
+        // Scope authorization precedes any profile or provider access.
+        self.records.show_record(request.task_id)?;
+        // An exact retry must succeed even if a prerequisite later disappeared.
+        if self
+            .records
+            .check_profile_migrations(request.task_id)?
+            .iter()
+            .any(|r| r.operation_id == request.operation_id)
+        {
+            return self.records.migrate_check_profiles(request);
+        }
+        for selection in &request.selections {
+            let profile = self
+                .dispatch()
+                .map_err(|e| RegistrationError::new("invalid-check-profile", e.message))?
+                .agent_profile(crate::RecordType::Task, selection.profile_revision)
+                .map_err(|e| RegistrationError::new("invalid-check-profile", e.message))?;
+            let factory = self.adapter_factory.as_ref().ok_or_else(|| {
+                RegistrationError::new("invalid-check-profile", "profile validation unavailable")
+            })?;
+            factory.validate_preflight(&profile).map_err(|_| {
+                RegistrationError::new(
+                    "invalid-check-profile",
+                    format!(
+                        "revision {} failed profile preflight; restore its prerequisites",
+                        selection.profile_revision
+                    ),
+                )
+            })?;
+        }
+        self.records.migrate_check_profiles(request)
+    }
+
+    /// Migration history for one Task, oldest first.
+    ///
+    /// # Errors
+    /// Rejects scope violations and invalid retained rows.
+    pub fn check_profile_migrations(
+        &self,
+        task: u64,
+    ) -> Result<Vec<crate::check_profile_migration::Receipt>, RegistrationError> {
+        self.records.show_record(task)?;
+        self.records.check_profile_migrations(task)
+    }
+}
+impl Application {
     /// Validate immutable profile bindings without selecting replacements or launching agents.
     /// Manual work does not need this gate; future Dispatched eligibility does.
     ///

@@ -30,6 +30,10 @@ pub use forge_app::retained_work::{RecoveryInput, RetainedWorkRecovery};
 pub use record_selection::*;
 
 pub use forge_app::ExecutionMode;
+pub use forge_app::check_profile_migration::{
+    Receipt as CheckProfileMigrationReceipt, Request as CheckProfileMigrationRequest,
+    Selection as CheckProfileSelection,
+};
 pub use forge_app::stacks::{StackDestination, StackSource, TaskStack};
 use forge_app::{
     AgentDispatchProjectStatus, AgentDispatchReconcileResult, AgentDispatchStatus, AgentProfile,
@@ -416,6 +420,18 @@ pub trait RecordApi {
         &self,
         request: SelectedRecordRequest<SetExecutionModeRequest>,
     ) -> RpcResult<RecordResponse>;
+    /// Explicit, auditable effective-profile migration for existing Checks; never
+    /// rewrites historical pins and invalidates freshness once per operation ID.
+    #[method(name = "checkProfileMigrate")]
+    async fn check_profile_migrate(
+        &self,
+        request: SelectedRecordRequest<forge_app::check_profile_migration::Request>,
+    ) -> RpcResult<forge_app::check_profile_migration::Receipt>;
+    #[method(name = "checkProfileMigrations")]
+    async fn check_profile_migrations(
+        &self,
+        request: SelectedRecordRequest<RecordIdRequest>,
+    ) -> RpcResult<Vec<forge_app::check_profile_migration::Receipt>>;
     #[method(name = "start")]
     async fn start(
         &self,

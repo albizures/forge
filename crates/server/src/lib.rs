@@ -1943,6 +1943,39 @@ impl RecordApiServer for Daemon {
             .map_err(rpc_error)
     }
 
+    async fn check_profile_migrate(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<forge_app::check_profile_migration::Request>,
+    ) -> RpcResult<forge_app::check_profile_migration::Receipt> {
+        let forge_rpc::SelectedRecordRequest {
+            selection,
+            record: request,
+        } = request;
+        // Scope authorization precedes provider/profile access, as for execution mode.
+        self.record_application(&selection, &mut [])?
+            .show_record(request.task_id)
+            .map_err(rpc_error)?;
+        self.application
+            .migrate_check_profiles(&request)
+            .map_err(rpc_error)
+    }
+
+    async fn check_profile_migrations(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<RecordIdRequest>,
+    ) -> RpcResult<Vec<forge_app::check_profile_migration::Receipt>> {
+        let forge_rpc::SelectedRecordRequest {
+            selection,
+            record: request,
+        } = request;
+        self.record_application(&selection, &mut [])?
+            .show_record(request.id)
+            .map_err(rpc_error)?;
+        self.application
+            .check_profile_migrations(request.id)
+            .map_err(rpc_error)
+    }
+
     async fn start(
         &self,
         request: forge_rpc::SelectedRecordRequest<RecordIdRequest>,

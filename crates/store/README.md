@@ -1338,6 +1338,20 @@ blocker. Holds use `INSERT OR IGNORE`, preserving prior safety diagnostics; reso
 never implicitly clears them. The serialized accepted result remains unchanged on
 replay, even when the live Findings or freshness later change.
 
+### Check profile migration tables (schema revision 23)
+
+`check_profile_migrations(id, record_id, operation_id, request_sha256, actor, message,
+generation_before, generation_after, created_at_millis)` is unique per Task and operation ID.
+`check_profile_migration_changes(migration_id, check_id, prior_revision, new_revision)` records
+one row per migrated Check (`new_revision <> prior_revision`). Both tables are append-only:
+triggers reject UPDATE and DELETE. `record_checks.profile_revision` is the original pin and is
+never modified; a Check's effective revision is its latest change row, else the original pin.
+Dispatch, Execution Mode and Stack validation, and `checks::load`, read the effective revision.
+The change commits in one immediate transaction with the Task's freshness invalidation. An
+exact retry returns the original rows; reuse with different content conflicts. Existing
+databases upgrade with empty history; no migration is fabricated. The tables were added to the
+unreleased revision 23 DDL, so there is no revision bump.
+
 ## Initialization and compatibility
 
 Opening a repository first checks SQLite's `application_id` and `user_version`

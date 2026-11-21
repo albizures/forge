@@ -94,7 +94,7 @@ Workspace-local planning, not daemon-wide work.
 | Daemon/store | Herdr socket endpoint |
 | Forge Workspace | Task authoring/configuration profile selection, Grilling profile selection, existing Herdr binding |
 | Project | Check Template, concurrency limit and setup hook |
-| Immutable Task Check | Pinned Task profile revision used for every attempt/retry/remediation |
+| Task Check | Original pin (immutable) and, after an explicit audited migration, an effective Task profile revision used for every new attempt/retry/remediation |
 | Immutable profile revision | Acknowledgement timeout and other supported profile configuration |
 
 Use [dispatch setup](dispatch.md#configure-dispatch) after local planning.

@@ -599,6 +599,10 @@ enum RecordCommand {
     Edit(EditRecordArgs),
     /// Explicitly change Execution Mode after safe ownership/resource handoff.
     ExecutionMode(ExecutionModeArgs),
+    /// Explicitly select durable-compatible effective profiles for a Task's existing Checks.
+    CheckProfileMigrate(CheckProfileMigrateArgs),
+    /// List a Task's Check profile migration history.
+    CheckProfileMigrations(RecordIdArgs),
     /// Advance an open Record to in-progress (Tasks require Manual mode).
     Start(RecordIdArgs),
     /// Complete an in-progress Record.
@@ -631,6 +635,42 @@ struct ExecutionModeArgs {
     server_url: Option<String>,
     #[arg(long)]
     json: bool,
+}
+#[derive(Args, Debug)]
+#[command(
+    after_long_help = "Examples:\n  forge record check-profile-migrate 12 --operation-id adopt-1 --expected-generation 1 --check 7=5 --check 8=5 --actor operator --message 'adopt pi-durable'\n\nSelects the effective Agent Profile revision for the named Checks (CHECK_ID=REVISION; revisions must be registered durable-compatible Task profiles). Historical pins, Assignments and Assessments are preserved; work freshness is invalidated once. Requires no active ownership and reconciled resources. Reuse --operation-id to retry safely; reuse with different content is rejected. Changing a template or Workspace default alone never migrates a Check. Live Herdr work finishes or retires through Herdr."
+)]
+struct CheckProfileMigrateArgs {
+    /// Task ID.
+    id: u64,
+    /// Stable identity for safe retries (letters, digits, - _ . :; up to 128 bytes).
+    #[arg(long, value_name = "ID")]
+    operation_id: String,
+    /// Work generation you inspected; a stale value is rejected.
+    #[arg(long, value_name = "N")]
+    expected_generation: u64,
+    /// `CHECK_ID=REVISION`; repeat for each Check.
+    #[arg(long = "check", value_name = "CHECK_ID=REVISION", required = true, value_parser = parse_check_selection)]
+    checks: Vec<forge_rpc::CheckProfileSelection>,
+    #[arg(long)]
+    actor: String,
+    #[arg(long)]
+    message: String,
+    #[arg(long)]
+    server_url: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+fn parse_check_selection(value: &str) -> Result<forge_rpc::CheckProfileSelection, String> {
+    let (check, revision) = value
+        .split_once('=')
+        .ok_or("use CHECK_ID=REVISION".to_owned())?;
+    Ok(forge_rpc::CheckProfileSelection {
+        check_id: check.parse().map_err(|_| "invalid Check ID".to_owned())?,
+        profile_revision: revision
+            .parse()
+            .map_err(|_| "invalid revision".to_owned())?,
+    })
 }
 #[derive(Args, Debug)]
 struct ListRecordsArgs {
@@ -912,6 +952,7 @@ async fn run(cli: Cli) -> i32 {
         Command::Assignment { command } => assignment(command).await,
     }
 }
+#[allow(clippy::too_many_lines)]
 async fn run_record(command: RecordCommand, workspace: Option<String>) -> i32 {
     match command {
         RecordCommand::Finding { command } => findings::run(command, workspace).await,
@@ -961,6 +1002,10 @@ async fn run_record(command: RecordCommand, workspace: Option<String>) -> i32 {
                 )
                 .await,
             )
+        }
+        RecordCommand::CheckProfileMigrate(args) => check_profile_migrate(args, workspace).await,
+        RecordCommand::CheckProfileMigrations(args) => {
+            check_profile_migrations(args, workspace).await
         }
         RecordCommand::Start(args) => record_result(
             "start",
@@ -1963,6 +2008,72 @@ async fn record_updates(args: RecordIdArgs, workspace: Option<String>) -> i32 {
         }
         Err(error) => {
             eprintln!("forge record updates: {error}");
+            1
+        }
+    }
+}
+
+async fn check_profile_migrate(args: CheckProfileMigrateArgs, workspace: Option<String>) -> i32 {
+    let request = forge_rpc::CheckProfileMigrationRequest {
+        task_id: args.id,
+        operation_id: args.operation_id,
+        expected_generation: args.expected_generation,
+        selections: args.checks,
+        actor: args.actor,
+        message: args.message,
+    };
+    if let Err(error) = request.validate() {
+        eprintln!("forge record check-profile-migrate: {}", error.message);
+        return 1;
+    }
+    match forge_cli::request_migrate_check_profiles(
+        selected_record_endpoint(args.server_url.as_deref(), workspace.as_deref()).await,
+        request,
+    )
+    .await
+    {
+        Ok(receipt) => {
+            println!(
+                "{}",
+                if args.json {
+                    serde_json::to_string(&receipt).expect("typed receipt serializes")
+                } else {
+                    forge_cli::render_check_profile_migration(&receipt)
+                }
+            );
+            0
+        }
+        Err(error) => {
+            eprintln!("forge record check-profile-migrate: {error}");
+            1
+        }
+    }
+}
+
+async fn check_profile_migrations(args: RecordIdArgs, workspace: Option<String>) -> i32 {
+    match forge_cli::request_check_profile_migrations(
+        selected_record_endpoint(args.server_url.as_deref(), workspace.as_deref()).await,
+        args.id,
+    )
+    .await
+    {
+        Ok(history) => {
+            if args.json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&history).expect("typed history serializes")
+                );
+            } else if history.is_empty() {
+                println!("No Check profile migrations recorded for Task {}.", args.id);
+            } else {
+                for receipt in &history {
+                    println!("{}", forge_cli::render_check_profile_migration(receipt));
+                }
+            }
+            0
+        }
+        Err(error) => {
+            eprintln!("forge record check-profile-migrations: {error}");
             1
         }
     }

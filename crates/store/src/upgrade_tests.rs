@@ -398,6 +398,16 @@ fn follow_up_expansion_is_empty_and_stamp_failure_preserves_schema_twenty_two() 
             .rows,
         0
     );
+    // Historical Checks gain no fabricated migration history.
+    for table in [
+        "check_profile_migrations",
+        "check_profile_migration_changes",
+    ] {
+        assert_eq!(
+            after.tables.iter().find(|t| t.name == table).unwrap().rows,
+            0
+        );
+    }
 }
 
 #[test]

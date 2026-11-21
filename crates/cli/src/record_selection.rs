@@ -116,6 +116,8 @@ requests! {
     record_outcome_submit(forge_rpc::RecordOutcomeSubmitRequest) -> forge_rpc::AcceptedOutcome;
     record_work_invalidate(forge_rpc::RecordWorkInvalidateRequest) -> forge_rpc::WorkState;
     execution_mode_set(forge_rpc::SetExecutionModeRequest) -> forge_rpc::RecordResponse;
+    check_profile_migrate(forge_rpc::CheckProfileMigrationRequest) -> forge_rpc::CheckProfileMigrationReceipt;
+    check_profile_migrations(RecordIdRequest) -> Vec<forge_rpc::CheckProfileMigrationReceipt>;
     open_initiative(OpenRecordRequest) -> RecordResponse;
     ready(ReadyRecordsRequest) -> ReadyRecordsResponse;
     open(OpenRecordRequest) -> RecordResponse;

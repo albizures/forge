@@ -10,6 +10,7 @@ pub mod agent_profiles;
 pub mod assignment;
 pub mod assignment_retirement;
 pub mod authorization_lease;
+pub mod check_profile_migration;
 pub mod check_templates;
 pub mod checks;
 pub mod completion;
@@ -1067,6 +1068,33 @@ pub trait RecordRepository: ProjectRepository {
     fn start_owned_record(&self, id: u64, assignment: &str) -> Result<Record, RegistrationError> {
         let _ = assignment;
         self.start_record(id)
+    }
+
+    /// Commit an explicit effective-profile migration for existing Checks.
+    ///
+    /// # Errors
+    /// Rejects unsafe ownership, open attempts, stale work, invalid scope/profiles and conflicts.
+    fn migrate_check_profiles(
+        &self,
+        request: &check_profile_migration::Request,
+    ) -> Result<check_profile_migration::Receipt, RegistrationError> {
+        let _ = request;
+        Err(RegistrationError::new(
+            "unsupported",
+            "Check profile migration unavailable",
+        ))
+    }
+
+    /// Migration history for one Task, oldest first.
+    ///
+    /// # Errors
+    /// Rejects scope violations and invalid retained rows.
+    fn check_profile_migrations(
+        &self,
+        task: u64,
+    ) -> Result<Vec<check_profile_migration::Receipt>, RegistrationError> {
+        let _ = task;
+        Ok(Vec::new())
     }
 
     /// Change explicit execution policy at a safe between-attempt boundary.

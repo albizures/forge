@@ -1523,6 +1523,57 @@ pub async fn request_set_execution_mode(
         .map_err(record_error("execution-mode"))
 }
 /// # Errors
+///
+/// Returns routing, validation or daemon errors. Retry with the same operation ID
+/// after an uncertain reply; it never creates a second migration.
+pub async fn request_migrate_check_profiles(
+    url: impl Into<RecordEndpoint>,
+    request: forge_rpc::CheckProfileMigrationRequest,
+) -> Result<forge_rpc::CheckProfileMigrationReceipt, String> {
+    record_client(url)?
+        .check_profile_migrate(request)
+        .await
+        .map_err(record_error("check-profile-migrate"))
+}
+#[must_use]
+pub fn render_check_profile_migration(receipt: &forge_rpc::CheckProfileMigrationReceipt) -> String {
+    let changes = receipt
+        .changes
+        .iter()
+        .map(|c| {
+            format!(
+                "Check {}: revision {} -> {}",
+                c.check_id, c.prior_revision, c.new_revision
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!(
+        "Check profile migration {} for Task {} {} by {}.\n{changes}\nWork generation {} -> {}. Historical pins, Assignments and Assessments are unchanged; the next attempt uses the new effective revision through the ordinary dispatch gates.",
+        receipt.operation_id,
+        receipt.task_id,
+        if receipt.replayed {
+            "was already recorded"
+        } else {
+            "recorded"
+        },
+        receipt.actor,
+        receipt.generation_before,
+        receipt.generation_after,
+    )
+}
+/// # Errors
+/// Returns routing or daemon errors.
+pub async fn request_check_profile_migrations(
+    url: impl Into<RecordEndpoint>,
+    id: u64,
+) -> Result<Vec<forge_rpc::CheckProfileMigrationReceipt>, String> {
+    record_client(url)?
+        .check_profile_migrations(RecordIdRequest { id })
+        .await
+        .map_err(record_error("check-profile-migrations"))
+}
+/// # Errors
 /// Returns an endpoint or daemon validation error.
 pub async fn request_start_record(
     url: impl Into<RecordEndpoint>,

@@ -31,7 +31,9 @@ const APPLICATION_ID: i64 = 0x464f_5247;
 #[cfg(test)]
 pub(crate) fn remove_durable_expansion(c: &Connection) {
     c.execute_batch(
-        "DROP TABLE durable_assignment_followup_deliveries;
+        "DROP TABLE check_profile_migration_changes;
+        DROP TABLE check_profile_migrations;
+        DROP TABLE durable_assignment_followup_deliveries;
         DROP TABLE durable_assignment_followups;
         DROP TABLE durable_assignment_retirements;
         DROP TABLE assignment_authorization_leases;
@@ -252,6 +254,8 @@ fn reference(schema: u32) -> Result<Connection, RegistrationError> {
     }
     if schema >= 23 {
         c.execute_batch(include_str!("upgrade/durable_followups.sql"))
+            .map_err(storage_error)?;
+        c.execute_batch(include_str!("upgrade/check_profile_migrations.sql"))
             .map_err(storage_error)?;
         c.pragma_update(None, "user_version", 23)
             .map_err(storage_error)?;
@@ -482,6 +486,10 @@ fn migrate_decisions(
     if !before.blockers.is_empty() {
         return Err(error(before.blockers.join(", ")));
     }
+    // Effective-pin reads are used by intermediate validation; empty history is
+    // created first so older sources never observe a missing table. No row is invented.
+    tx.execute_batch(include_str!("upgrade/check_profile_migrations.sql"))
+        .map_err(storage_error)?;
     match before.schema {
         Some(7) => v007_to_v008::apply(&tx)?,
         Some(8..=23) => {}
@@ -577,6 +585,9 @@ fn migrate_decisions(
     if before.schema.is_some_and(|s| s < 23) {
         // Empty history only: no follow-up is fabricated for historical Assignments.
         tx.execute_batch(include_str!("upgrade/durable_followups.sql"))
+            .map_err(storage_error)?;
+        // Empty history: no migration is fabricated for historical Checks.
+        tx.execute_batch(include_str!("upgrade/check_profile_migrations.sql"))
             .map_err(storage_error)?;
         tx.pragma_update(None, "user_version", 23)
             .map_err(storage_error)?;
