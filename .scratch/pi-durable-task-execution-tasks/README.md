@@ -120,8 +120,18 @@ Mark a Task complete only after its acceptance checks and required verification 
   - **Gates:** all four repository gates pass (925 Rust tests plus 25 supervised scenarios; 1 pre-existing opt-in ignored), runner typecheck and 99 Node tests. One transient leased-expiry test failure under full load is recorded, not claimed fixed.
   - **Not claimed:** real provider; Forgeup-managed daemon (M4); `Unknown` admissions.
   - **Next:** the T18 third-pass re-review. Production durable dispatch stays withheld.
-- [ ] [T19 — Verify integration and recovery](19-verify-integration-and-recovery.md)
-- [ ] [T20 — Deliver release handoff](20-publish-release-handoff.md)
+- [x] [T19 — Verify integration and recovery](19-verify-integration-and-recovery.md) — [verification report](../../docs/research/pi-durable-t19/README.md):
+  - **Snapshot:** reviewed snapshot `2097267`; verified tree `6cd2e44`, which differs only in documentation.
+  - **Identities:** runner component `8991977e…`, protocol 1, runtime schema 2, store schema 25, pi-durable 1.5.2, Node 24.18.0.
+  - **Gates, all pass:** fmt and clippy; 931 Rust tests, twice in a row; 25 real-process tracer scenarios; 99 Node tests; packaging, with the bundle manifest hash matching the source attestation.
+  - **Required deterministic fault classes:** each is mapped to passing scenarios.
+  - **Real-provider Implementation → Review gate:** **UNRUN**. No operator-authorized, isolated credential or environment was available. The steps to run it are documented.
+  - **Managed-daemon launch:** impossible (M4).
+  - **Result:** default-rollout approval is **withheld**.
+- [x] [T20 — Deliver release handoff](20-publish-release-handoff.md) — [readiness decision and handoff](../../docs/research/pi-durable-t20/README.md):
+  - **Readiness: WITHHELD** for Revision `6cd2e44` (snapshot `2097267`). The reasons are the unrun real-provider gate (AC22) and open M4.
+  - **Contents:** the passing component identities and compatibility matrix; the prerequisites for granting readiness; the conditions that revoke readiness or require renewed verification; an operator adoption checklist (not to be performed while withheld); the rollback procedure (old Herdr and durable Assignments keep their backends, Grilling stays on Herdr); and retained storage and transcript limits.
+  - **Nothing was changed:** no rollout, registration, selection, migration, dispatch or configuration change was performed.
 
 ## Ordered Tasks and explicit dependency edges
 
