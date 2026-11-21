@@ -1,5 +1,14 @@
 # T12 — Recorded, idempotent operator follow-ups (partial)
 
+## Runner delivery increment
+
+`runner/src/followup.ts` delivers one recorded follow-up into the resumed, authorized root conversation. It uses runtime request ID `followup:<operation_id>`, checks SHA-256 content identity, and requires live guarded authority and no unsettled interrupted effect. It creates no root, Continuation or attempt, and a retry returns the existing admission (`replayed: true`). `observeFollowUp` is read-only and reports `unknown` or `accepted`. `serveRecovery` accepts a `host_followup` control on the protected supervisor pipe only after the harness has resumed, and emits `followup-accepted` or `followup-failed`.
+
+Node test: `follow-up delivery is idempotent by operation ID, visible in committed history and needs live authority`. It covers a bad hash, a first delivery, a retry, one extra model call, the text in committed transcript history, and denial after expiry. Runner typecheck and 90 Node tests pass. Cargo workspace: 844 passed, 0 failed on reruns; the first run had one failure, `returned_tool_without_committed_receipt_retains_forge_blocker_across_daemon_restart`, which passed on unchanged reruns without a claimed fix.
+
+Still missing: the Rust daemon driver that sends `host_followup` and persists delivered/unknown state, plus queue-while-effect-unresolved evidence through the real supervisor.
+
+
 Controlled T12 increment. **Delivery into the runtime conversation is not implemented**; production durable dispatch and automatic recovery stay disabled.
 
 ## Delivered
@@ -21,5 +30,5 @@ Controlled T12 increment. **Delivery into the runtime conversation is not implem
 
 ## Not done
 
-- Delivery of recorded input to a writable, authorized runner (matched resume, runner-side idempotent submit keyed by operation ID), "delivered/unknown" states, and the transcript entry. This is the remaining T12 scope.
+- Rust-side delivery driver, persisted "delivered/unknown" states and real-supervisor composition. The runner-side idempotent submit and committed transcript entry are now done (see above).
 - No unauthorized tool/model call assertions beyond: recording touches only Forge's store.

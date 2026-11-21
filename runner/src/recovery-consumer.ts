@@ -6,6 +6,7 @@ import { BACKGROUND_CONTEXT as context } from '@earendil-works/chord/context';
 import type { Harness, HarnessOptions, SubmissionId } from '@earendil-works/pi-durable';
 import { Authorization, type Owner } from './authorization.ts';
 import { canonical, compatibility, Denied, exactKeys, requireCondition, validateLaunch, type Launch } from './contract.ts';
+import { deliverFollowUp } from './followup.ts';
 import { ownerIdentity } from './owner.ts';
 import { inspectRecoveryCandidate } from './recovery.ts';
 import { resumeAuthorizedRuntime } from './resume-runtime.ts';
@@ -91,6 +92,15 @@ export async function serveRecovery(directory: string, worktree: string,
             } catch { auth.close(); emit({ event: 'runtime-failed' }); }
           })();
         }
+      } else if ('host_followup' in control) {
+        // Whole-envelope operator input from the protected supervisor pipe only.
+        // Delivery requires the resumed harness and current guarded authority.
+        exactKeys(control, ['host_followup', 'followup']);
+        requireCondition(control.host_followup === 1 && harness && authorization && candidate, 'assignment-lease-denied');
+        try {
+          const delivered = await deliverFollowUp(harness, directory, candidate.launch, candidate.attempt.generation, authorization, control.followup);
+          emit({ event: 'followup-accepted', operation_id: control.followup.operation_id, ...delivered });
+        } catch { emit({ event: 'followup-failed', operation_id: typeof control.followup?.operation_id === 'string' ? control.followup.operation_id : null }); }
       } else {
         exactKeys(control, ['host_control', 'lease']);
         requireCondition(control.host_control === 1 && started && authorization, 'assignment-lease-denied');

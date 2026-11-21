@@ -97,3 +97,34 @@ for (const mode of ['ordinary', 'unarmed', 'expired', 'bootstrap-failed', 'wrong
   assert.equal(count.calls, 0);
   assert.equal(preparation, mode === 'bootstrap-failed' ? 1 : 0);
 });
+
+test('follow-up delivery is idempotent by operation ID, visible in committed history and needs live authority', { timeout: 15000 }, async t => {
+  const { createHash } = await import('node:crypto');
+  const { deliverFollowUp, observeFollowUp } = await import('../src/followup.ts');
+  const { observeTranscript } = await import('../src/storage.ts');
+  const f = await crashed(t), a = authority(f), count = { calls: 0 };
+  t.after(() => a.auth.close());
+  const provider = fauxProvider();
+  provider.setResponses([() => { count.calls++; return fauxAssistantMessage('original'); }, () => { count.calls++; return fauxAssistantMessage('follow-up answer'); }]);
+  const models = createModels({ authContext: { env: async () => undefined, fileExists: async () => false } });
+  models.setProvider(guardProvider(provider.provider, a.auth));
+  const recovered = await resumeAuthorizedRuntime(f.directory, f.worktree, f.launch, a.generation, f.admission_id, a.auth,
+    async () => ({ models, registry: createRegistry(), settings: { retry: { enabled: false }, compaction: { enabled: false } }, env: () => undefined }));
+  t.after(() => recovered.harness.close(context));
+  await (await recovered.harness.submission(Number(f.admission_id), context)).wait(context);
+  const content = 'use another commit';
+  const followUp = { operation_id: 'fu-1', content, content_sha256: createHash('sha256').update(content).digest('hex') };
+  assert.deepEqual(await observeFollowUp(f.directory, f.launch, 'fu-1'), { state: 'unknown' });
+  await assert.rejects(deliverFollowUp(recovered.harness, f.directory, f.launch, a.generation, a.auth, { ...followUp, content_sha256: '0'.repeat(64) }), { code: 'runner-followup-invalid' });
+  const first = await deliverFollowUp(recovered.harness, f.directory, f.launch, a.generation, a.auth, followUp);
+  const retry = await deliverFollowUp(recovered.harness, f.directory, f.launch, a.generation, a.auth, followUp);
+  assert.equal(first.replayed, false); assert.equal(retry.replayed, true); assert.equal(retry.admission_id, first.admission_id);
+  await (await recovered.harness.submission(Number(first.admission_id), context)).wait(context);
+  assert.equal(count.calls, 2);
+  assert.equal((await observeFollowUp(f.directory, f.launch, 'fu-1')).state, 'accepted');
+  const page = await observeTranscript(f.directory, f.launch, null, 100);
+  assert.ok(page.entries.some(e => e.content.includes(content)), 'follow-up is in committed history');
+  a.expire();
+  await assert.rejects(deliverFollowUp(recovered.harness, f.directory, f.launch, a.generation, a.auth, { ...followUp, operation_id: 'fu-2' }));
+  assert.equal(count.calls, 2);
+});
