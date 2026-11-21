@@ -113,6 +113,28 @@ impl ControlPipe {
         input.send(&control, 1_048_576)
     }
 
+    /// Deliver one already recorded follow-up. Success is transport only: the
+    /// runner's `followup-accepted` event is the admission evidence, and any
+    /// uncertain send fences the pipe with no byte replay.
+    /// # Errors
+    /// Rejects an invalid request before writing; uncertain delivery fences all controls.
+    pub fn deliver_followup(
+        &mut self,
+        request: &forge_app::durable_execution::followup::Request,
+    ) -> Result<(), RegistrationError> {
+        request.validate()?;
+        let control = forge_rpc::durable_execution::SupervisorFollowUp {
+            host_followup: forge_rpc::durable_execution::SUPERVISOR_FOLLOWUP_VERSION,
+            followup: forge_rpc::durable_execution::FollowUpPayload {
+                operation_id: request.operation_id.clone(),
+                content: request.message.clone(),
+                content_sha256: request.digest(),
+            },
+        };
+        let mut input = self.input.lock().map_err(|_| uncertain())?;
+        input.send(&control, 1_048_576)
+    }
+
     /// Send only an already persisted, revoked retirement operation. Partial or
     /// blocked delivery remains uncertain; this does not acknowledge cancellation.
     /// # Errors

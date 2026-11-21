@@ -59,6 +59,24 @@ pub struct SupervisorQuiescence {
     pub operation: forge_app::durable_execution::recovery::quiescence::Operation,
 }
 
+/// Exact recorded operator input for the resumed conversation, sent only on the
+/// protected supervisor pipe. It carries identity and text, never binding fields.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FollowUpPayload {
+    pub operation_id: String,
+    pub content: String,
+    pub content_sha256: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupervisorFollowUp {
+    pub host_followup: u32,
+    pub followup: FollowUpPayload,
+}
+
+pub const SUPERVISOR_FOLLOWUP_VERSION: u32 = 1;
 pub const SUPERVISOR_RECOVERY_PREPARATION_VERSION: u32 = 1;
 pub const SUPERVISOR_QUIESCENCE_VERSION: u32 = 1;
 pub const SUPERVISOR_RECOVERY_VERSION: u32 = 1;

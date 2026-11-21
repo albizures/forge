@@ -6,6 +6,8 @@
 
 Node test: `follow-up delivery is idempotent by operation ID, visible in committed history and needs live authority`. It covers a bad hash, a first delivery, a retry, one extra model call, the text in committed transcript history, and denial after expiry. Runner typecheck and 90 Node tests pass. Cargo workspace: 844 passed, 0 failed on reruns; the first run had one failure, `returned_tool_without_committed_receipt_retains_forge_blocker_across_daemon_restart`, which passed on unchanged reruns without a claimed fix.
 
+Rust transport increment: `SupervisorFollowUp` strict wire type (`host_followup`, payload of operation ID, content, SHA-256 only) and `ControlPipe::deliver_followup`, which validates the request, sends one nonblocking write and fences the pipe on any uncertain send. A new test covers exact round trip, unknown-field rejection, separation from recovery control and five fault kinds. The runner content limit is aligned to Forge's 16 KiB. Gates: 845 Rust passed, 0 failed; clippy clean; runner typecheck and 90 Node tests pass (real Node 24 on PATH).
+
 Still missing: the Rust daemon driver that sends `host_followup` and persists delivered/unknown state, plus queue-while-effect-unresolved evidence through the real supervisor.
 
 

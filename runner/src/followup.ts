@@ -8,7 +8,7 @@ import { canonical, exactKeys, requireCondition, type Launch } from './contract.
 import { requireNoInterruptedEffects } from './interrupted-effects.ts';
 import { journal, readStorage } from './storage.ts';
 
-export const FOLLOWUP_CONTENT_BYTES = 8192;
+export const FOLLOWUP_CONTENT_BYTES = 16384;
 export interface FollowUp { operation_id: string; content: string; content_sha256: string }
 export type FollowUpState = { state: 'unknown' } | { state: 'accepted'; admission_id: string; status: string };
 
