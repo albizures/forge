@@ -12,6 +12,8 @@ use forge_server::durable_authorization::DaemonAuthority;
 use forge_store::SqliteProjectRepository;
 #[path = "authorization_session/effect_admission.rs"]
 mod effect_admission;
+#[path = "authorization_session/purge_runtime.rs"]
+mod purge_runtime;
 #[path = "authorization_session/quiesced_inspection.rs"]
 mod quiesced_inspection;
 #[path = "authorization_session/quiescence.rs"]

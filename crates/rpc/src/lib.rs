@@ -201,6 +201,13 @@ pub trait AgentDispatchApi {
     ) -> RpcResult<AssignmentTranscriptResponse>;
     /// Durably record idempotent operator input bound to the original attempt. It
     /// grants no lease, Outcome, recovery or rebinding and does not prove delivery.
+    /// Explicitly delete retired runtime history. Rejects open, unreconciled or
+    /// uncertain Assignments before deletion; never starts a runner or edits Forge records.
+    #[method(name = "assignmentPurgeRuntime")]
+    async fn assignment_purge_runtime(
+        &self,
+        request: SelectedRecordRequest<forge_app::durable_execution::purge::Request>,
+    ) -> RpcResult<forge_app::durable_execution::purge::Record>;
     #[method(name = "assignmentFollowUp")]
     async fn assignment_follow_up(
         &self,

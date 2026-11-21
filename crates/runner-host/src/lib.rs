@@ -5,6 +5,7 @@ pub mod control;
 pub mod crash;
 pub mod inspection;
 pub mod model_auth;
+pub mod purge;
 pub mod quiescence;
 pub mod recovery_proof;
 pub mod retirement;

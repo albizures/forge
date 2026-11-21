@@ -614,3 +614,17 @@ Existing Checks keep their original pinned profile. Changing a Check Template, a
 - **Retries:** reuse the operation ID after a dropped reply. The original receipt returns with `replayed: true`, never advancing freshness again, even after later changes. The same ID with different content fails with `check-profile-migration-conflict`.
 - **Next attempt:** the following dispatch uses the effective revision through the ordinary gates (capacity, Dispatch Hold, preflight); a stale old-pin selection is rejected as `check-selection-stale`.
 - **Scope and rollback:** this operation selects only durable-compatible revisions and never deletes history; a further migration may pick another durable revision. Rollout gating and rolling new execution back to Herdr are separate (later) rollout controls. Mixed profiles across a Task's Checks are supported.
+
+## Retained runtime history and explicit deletion
+
+Retiring or closing an Assignment never deletes its runtime history. The runtime directory (`<workspace>/.forge/assignment-runtimes/<digest>`, owner-only `0700`, files `0600`) holds the conversation, tool output and runtime evidence, which can contain sensitive repository content even with credentials redacted. It stays readable through `assignment-status` and `assignment-transcript` until an operator deletes it.
+
+```sh
+forge dispatcher assignment-purge-runtime <assignment-id> --operation-id purge-1 --json
+```
+
+- **Eligibility (Forge, before any deletion):** the Assignment is closed; its retirement is reconciled (or its admission was rejected); no resource is unretired, including unknown identities, interrupted effects, recovery claims and missing-Outcome markers; and no Dispatch Hold exists. Otherwise it is rejected (`runtime-purge-assignment-open`, `runtime-purge-uncertainty-retained`, `runtime-purge-retirement-unreconciled`, `runtime-purge-admission-unknown`) and nothing is journaled or deleted.
+- **Host (deletion):** the directory comes only from the canonical mapping of the immutable store identity, never a caller path. The host takes the same exclusive ownership lock the supervisor and worker hold, so a live or still-held owner (`runtime-purge-owner-active`) refuses. It then checks that the directory holds only recognized, owner-only, single-link regular files (runtime database and its `-wal`/`-shm`/`-journal`, owner/watchdog/check/receipt records). Redirected, foreign, linked or unrecognized content (`runtime-purge-storage-unsafe`, `runtime-purge-boundary-invalid`) refuses before any file is removed. Data goes first, `owner.lock` last, then the directory. No sibling runtime or worktree is touched.
+- **Journal and retries:** intent is recorded first (schema 23, immutable identity, append-only, final once `purged`). A failure is retained as a diagnostic (`state: retained`) and shown in status; retry with the same operation ID, which revalidates eligibility and resumes a partial deletion. A different operation ID is `runtime-purge-conflict`. A completed purge replays unchanged and never recreates storage.
+- **Unchanged:** the Assignment, Outcomes, Assessments, migration/recovery/retirement audit, accepted operation facts, follow-up records and Managed Worktree contents.
+- **After deletion:** `assignment-transcript` returns `unavailable` with reason `runtime-history-purged` without starting a reader, and `assignment-status` shows the deletion. Nothing synthesizes an empty store or makes recovery, resume or replay executable again. Deletion is irreversible; Forge keeps no copy of the runtime history.

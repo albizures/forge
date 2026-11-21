@@ -31,7 +31,8 @@ const APPLICATION_ID: i64 = 0x464f_5247;
 #[cfg(test)]
 pub(crate) fn remove_durable_expansion(c: &Connection) {
     c.execute_batch(
-        "DROP TABLE check_profile_migration_changes;
+        "DROP TABLE durable_runtime_purges;
+        DROP TABLE check_profile_migration_changes;
         DROP TABLE check_profile_migrations;
         DROP TABLE durable_assignment_followup_deliveries;
         DROP TABLE durable_assignment_followups;
@@ -164,6 +165,7 @@ fn check_integrity(c: &Connection) -> Result<(), RegistrationError> {
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)] // One linear schema-by-schema fixture builder; splitting would hide the order.
 fn reference(schema: u32) -> Result<Connection, RegistrationError> {
     let c = Connection::open_in_memory().map_err(storage_error)?;
     let ddl = match schema {
@@ -253,10 +255,12 @@ fn reference(schema: u32) -> Result<Connection, RegistrationError> {
             .map_err(storage_error)?;
     }
     if schema >= 23 {
-        c.execute_batch(include_str!("upgrade/durable_followups.sql"))
-            .map_err(storage_error)?;
-        c.execute_batch(include_str!("upgrade/check_profile_migrations.sql"))
-            .map_err(storage_error)?;
+        c.execute_batch(concat!(
+            include_str!("upgrade/durable_followups.sql"),
+            include_str!("upgrade/check_profile_migrations.sql"),
+            include_str!("upgrade/durable_purges.sql"),
+        ))
+        .map_err(storage_error)?;
         c.pragma_update(None, "user_version", 23)
             .map_err(storage_error)?;
     }
@@ -490,6 +494,8 @@ fn migrate_decisions(
     // created first so older sources never observe a missing table. No row is invented.
     tx.execute_batch(include_str!("upgrade/check_profile_migrations.sql"))
         .map_err(storage_error)?;
+    tx.execute_batch(include_str!("upgrade/durable_purges.sql"))
+        .map_err(storage_error)?;
     match before.schema {
         Some(7) => v007_to_v008::apply(&tx)?,
         Some(8..=23) => {}
@@ -588,6 +594,8 @@ fn migrate_decisions(
             .map_err(storage_error)?;
         // Empty history: no migration is fabricated for historical Checks.
         tx.execute_batch(include_str!("upgrade/check_profile_migrations.sql"))
+            .map_err(storage_error)?;
+        tx.execute_batch(include_str!("upgrade/durable_purges.sql"))
             .map_err(storage_error)?;
         tx.pragma_update(None, "user_version", 23)
             .map_err(storage_error)?;

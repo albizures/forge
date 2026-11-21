@@ -5,6 +5,7 @@ mod effect_admission;
 pub mod effects;
 mod inspection_process;
 pub mod operator;
+pub mod purge;
 pub mod quiesced_inspection;
 pub mod recovery;
 pub mod recovery_inspection;

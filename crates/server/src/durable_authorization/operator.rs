@@ -118,6 +118,49 @@ impl OperatorService {
         )
     }
 
+    /// Delete retired runtime history after Forge authorizes it. Needs no runtime
+    /// components, profile or credential and never starts a runner.
+    pub(crate) fn purge_runtime(
+        &self,
+        workspace: &str,
+        request: &forge_app::durable_execution::purge::Request,
+    ) -> Result<forge_app::durable_execution::purge::Record, RegistrationError> {
+        request.validate()?;
+        // Scope is authorized by the repository before any binding is read.
+        forge_app::durable_execution::purge::Repository::purge_record(
+            &self.repository,
+            workspace,
+            &request.assignment_id,
+        )?;
+        let runtime = self
+            .repository
+            .runtime(workspace, &request.assignment_id)?
+            .ok_or_else(|| {
+                RegistrationError::new(
+                    "durable-intent-missing",
+                    "Assignment has no retained durable runtime",
+                )
+            })?;
+        super::purge::run(
+            &self.repository,
+            workspace,
+            &runtime.launch,
+            &request.operation_id,
+        )
+    }
+
+    pub(crate) fn purge_record(
+        &self,
+        workspace: &str,
+        assignment: &str,
+    ) -> Result<Option<forge_app::durable_execution::purge::Record>, RegistrationError> {
+        forge_app::durable_execution::purge::Repository::purge_record(
+            &self.repository,
+            workspace,
+            assignment,
+        )
+    }
+
     /// Read one committed page. Needs trusted matched components but never the
     /// host lock, so it works beside a live writer and for stopped runners.
     pub(crate) async fn transcript(

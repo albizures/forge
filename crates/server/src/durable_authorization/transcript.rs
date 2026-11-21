@@ -48,6 +48,23 @@ pub async fn page(
     request: &AssignmentTranscriptRequest,
 ) -> Result<AssignmentTranscriptResponse, RegistrationError> {
     request.validate()?;
+    // A completed purge is final: never contact a reader or recreate storage.
+    if forge_app::durable_execution::purge::Repository::purge_record(
+        repository,
+        workspace,
+        &launch.assignment_id,
+    )?
+    .is_some_and(|r| r.state == forge_app::durable_execution::purge::State::Purged)
+    {
+        return Ok(AssignmentTranscriptResponse {
+            assignment_id: launch.assignment_id.clone(),
+            history: forge_rpc::TranscriptHistory::Unavailable,
+            reason: Some("runtime-history-purged".into()),
+            entries: Vec::new(),
+            next_after: request.after.clone(),
+            more: false,
+        });
+    }
     let directory = runtime_directory::mapped(repository, workspace, launch, false)?;
     let wire = Request {
         protocol: forge_rpc::durable_execution::RUNNER_PROTOCOL_VERSION,

@@ -1338,6 +1338,16 @@ blocker. Holds use `INSERT OR IGNORE`, preserving prior safety diagnostics; reso
 never implicitly clears them. The serialized accepted result remains unchanged on
 replay, even when the live Findings or freshness later change.
 
+### Runtime purge journal (schema revision 23)
+
+`durable_runtime_purges(assignment_id PK, operation_id, state pending|purged|retained,
+diagnostic, requested_at_millis, completed_at_millis)` journals explicit deletion of
+retired runtime history. Identity is immutable, `purged` is final and rows are never
+deleted. `begin_purge` authorizes scope and eligibility (closed, retirement reconciled
+or admission rejected, no unretired resource, no Dispatch Hold) in one immediate
+transaction; an exact retry returns the original record. The filesystem step runs
+outside the transaction, and `finish_purge` records the result.
+
 ### Check profile migration tables (schema revision 23)
 
 `check_profile_migrations(id, record_id, operation_id, request_sha256, actor, message,

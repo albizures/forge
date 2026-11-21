@@ -8,8 +8,9 @@ mod assignment_checks;
 pub use assignment_checks::{AssignmentCheckAction, assignment_check};
 mod assignment_inspection;
 pub use assignment_inspection::{
-    render_durable_status, render_follow_up, render_transcript, request_assignment_durable_status,
-    request_assignment_follow_up, request_assignment_transcript,
+    render_durable_status, render_follow_up, render_purge, render_transcript,
+    request_assignment_durable_status, request_assignment_follow_up,
+    request_assignment_purge_runtime, request_assignment_transcript,
 };
 mod effect_resolution;
 pub use effect_resolution::request_resolve_interrupted_effect;

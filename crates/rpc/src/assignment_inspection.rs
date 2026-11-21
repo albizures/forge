@@ -4,6 +4,9 @@ use crate::AgentAssignmentInfoResponse;
 pub use forge_app::durable_execution::followup::{
     Receipt as FollowUpReceipt, Request as FollowUpRequest,
 };
+pub use forge_app::durable_execution::purge::{
+    Record as RuntimePurgeRecord, Request as RuntimePurgeRequest,
+};
 use forge_app::durable_execution::{
     Admission,
     status::{LeaseState, Status, View, view},
@@ -82,6 +85,10 @@ pub struct AssignmentDurableStatusResponse {
     /// intent bound to the original attempt, not proof of runtime delivery.
     #[serde(default)]
     pub followups: Vec<forge_app::durable_execution::followup::Receipt>,
+    /// Runtime-history deletion record, if one was requested. `purged` history is
+    /// gone for good; Forge's own records remain.
+    #[serde(default)]
+    pub runtime_purge: Option<forge_app::durable_execution::purge::Record>,
     pub notes: Vec<String>,
 }
 
@@ -92,6 +99,15 @@ impl AssignmentDurableStatusResponse {
         followups: Vec<forge_app::durable_execution::followup::Receipt>,
     ) -> Self {
         self.followups = followups;
+        self
+    }
+
+    #[must_use]
+    pub fn with_runtime_purge(
+        mut self,
+        purge: Option<forge_app::durable_execution::purge::Record>,
+    ) -> Self {
+        self.runtime_purge = purge;
         self
     }
 
@@ -145,6 +161,7 @@ impl AssignmentDurableStatusResponse {
             uncertainty: uncertainty.into_iter().map(String::from).collect(),
             retirement_blockers,
             followups: Vec::new(),
+            runtime_purge: None,
             notes: vec![
                 "Persisted Forge facts only; this does not contact a runner or prove a process is running or absent.".into(),
                 "A missing Outcome or retained uncertainty keeps capacity reserved; inspection never recovers, retries or releases it.".into(),

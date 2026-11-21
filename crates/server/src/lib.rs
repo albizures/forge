@@ -1238,10 +1238,30 @@ impl AgentDispatchApiServer for Daemon {
         let followups = service
             .followups(&workspace, &request.record.assignment_id)
             .map_err(rpc_error)?;
+        let purge = service
+            .purge_record(&workspace, &request.record.assignment_id)
+            .map_err(rpc_error)?;
         Ok(
             forge_rpc::AssignmentDurableStatusResponse::compose(info, status)
-                .with_followups(followups),
+                .with_followups(followups)
+                .with_runtime_purge(purge),
         )
+    }
+
+    async fn assignment_purge_runtime(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<forge_app::durable_execution::purge::Request>,
+    ) -> RpcResult<forge_app::durable_execution::purge::Record> {
+        let workspace = self.record_workspace(&request.selection, &mut [])?;
+        let service = self.durable_effect_resolution.as_ref().ok_or_else(|| {
+            rpc_error(RegistrationError::new(
+                "runtime-purge-unconfigured",
+                "runtime purge requires the daemon's retained store",
+            ))
+        })?;
+        service
+            .purge_runtime(&workspace, &request.record)
+            .map_err(rpc_error)
     }
 
     async fn assignment_follow_up(

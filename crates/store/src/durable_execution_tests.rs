@@ -5,6 +5,8 @@ mod effect_resolution_tests;
 mod effects_tests;
 #[path = "durable_execution/followup_tests.rs"]
 mod followup_tests;
+#[path = "durable_execution/purge_tests.rs"]
+mod purge_tests;
 #[path = "durable_execution/recovery_tests.rs"]
 mod recovery_tests;
 #[path = "durable_execution/retirement_application_tests.rs"]

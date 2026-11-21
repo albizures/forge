@@ -77,6 +77,33 @@ pub async fn request_assignment_follow_up(
         .map_err(|error| format!("could not record follow-up through Forge daemon: {error}"))
 }
 
+/// # Errors
+/// Returns routing, validation, transport or daemon errors. Retry with the same
+/// operation ID after an uncertain reply or a retained diagnostic.
+pub async fn request_assignment_purge_runtime(
+    endpoint: impl Into<RecordEndpoint>,
+    request: forge_rpc::RuntimePurgeRequest,
+) -> Result<forge_rpc::RuntimePurgeRecord, String> {
+    let endpoint = endpoint.into();
+    client(&endpoint)?
+        .assignment_purge_runtime(SelectedRecordRequest {
+            selection: selection(&endpoint)?,
+            record: request,
+        })
+        .await
+        .map_err(|error| format!("could not purge runtime history through Forge daemon: {error}"))
+}
+
+#[must_use]
+pub fn render_purge(record: &forge_rpc::RuntimePurgeRecord) -> String {
+    format!(
+        "Runtime history for Assignment {} is {} (operation {}).\nForge's Assignment, Outcomes, Assessments and audit records are unchanged; the deleted runtime history cannot be recreated or resumed.",
+        record.assignment_id,
+        record.state.as_str(),
+        record.operation_id,
+    )
+}
+
 #[must_use]
 pub fn render_follow_up(receipt: &forge_rpc::FollowUpReceipt) -> String {
     format!(
@@ -163,6 +190,18 @@ pub fn render_durable_status(status: &AssignmentDurableStatusResponse) -> String
             out,
             "Follow-up #{}: {} (sha256 {}, attempt {} generation {}; recorded input, delivery not proven)",
             f.sequence, f.operation_id, f.message_sha256, f.binding.attempt_id, f.binding.generation
+        )
+        .expect("writing to a string cannot fail");
+    }
+    if let Some(p) = &status.runtime_purge {
+        writeln!(
+            out,
+            "Runtime history deletion {}: {}{}",
+            p.operation_id,
+            p.state.as_str(),
+            p.diagnostic.as_ref().map_or_else(String::new, |d| format!(
+                " ({d}; remaining storage retained)"
+            )),
         )
         .expect("writing to a string cannot fail");
     }

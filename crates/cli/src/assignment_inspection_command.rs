@@ -63,6 +63,59 @@ pub struct FollowUpArgs {
     json: bool,
 }
 
+#[derive(Debug, Args)]
+#[command(
+    after_long_help = "Examples:\n  forge dispatcher assignment-purge-runtime <assignment-id> --operation-id purge-1\n\nDeletes only the Assignment's protected runtime history (conversation and runtime files) after it is closed, retired and free of retained uncertainty, with no live owner. Open, unreconciled, held or unknown-resource Assignments are rejected before anything is deleted. Assignment, Outcome, Assessment, migration, recovery and retirement records stay in Forge. Purged history is reported as unavailable and is never recreated or resumed. If deletion stops part-way a diagnostic is retained; retry with the same --operation-id."
+)]
+pub struct PurgeArgs {
+    assignment_id: String,
+    /// Stable identity for safe retries (letters, digits, - _ . :; up to 128 bytes).
+    #[arg(long, value_name = "ID")]
+    operation_id: String,
+    #[arg(long, value_name = "URL")]
+    server_url: Option<String>,
+    /// Print the typed record as one JSON object on stdout.
+    #[arg(long)]
+    json: bool,
+}
+
+pub async fn purge_runtime(args: PurgeArgs, workspace: Option<String>) -> i32 {
+    let request = forge_rpc::RuntimePurgeRequest {
+        assignment_id: args.assignment_id,
+        operation_id: args.operation_id,
+    };
+    if let Err(error) = request.validate() {
+        eprintln!(
+            "forge dispatcher assignment-purge-runtime: {}",
+            error.message
+        );
+        return 1;
+    }
+    let endpoint = super::resolve_endpoint(args.server_url.as_deref()).await;
+    match forge_cli::request_assignment_purge_runtime(
+        (endpoint.as_str(), workspace.as_deref()),
+        request,
+    )
+    .await
+    {
+        Ok(record) => {
+            if args.json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&record).expect("typed record serializes")
+                );
+            } else {
+                println!("{}", forge_cli::render_purge(&record));
+            }
+            0
+        }
+        Err(error) => {
+            eprintln!("forge dispatcher assignment-purge-runtime: {error}");
+            1
+        }
+    }
+}
+
 pub async fn follow_up(args: FollowUpArgs, workspace: Option<String>) -> i32 {
     let message = match (&args.message, &args.message_file) {
         (Some(m), _) => m.clone(),

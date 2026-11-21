@@ -407,6 +407,8 @@ enum AgentDispatchCommand {
     ResetContinuations(ResetContinuationsArgs),
     /// Authorize clean or content-bound dirty/staged/untracked salvage after verified retirement; retains holds.
     RecoverRetainedWork(RecoverRetainedWorkArgs),
+    /// Explicitly delete a retired Assignment's runtime history; Forge's own records are kept.
+    AssignmentPurgeRuntime(assignment_inspection_command::PurgeArgs),
     /// Clear a Dispatch Hold and reset interrupted-Check retries (not remediation or recovery blockers).
     Resume(DispatchTaskArgs),
     /// Inspect persisted Assignment evidence without contacting the provider.
@@ -1508,6 +1510,9 @@ async fn agent_dispatch(command: AgentDispatchCommand, workspace: Option<String>
         }
         AgentDispatchCommand::AssignmentFollowup(args) => {
             return assignment_inspection_command::follow_up(args, workspace).await;
+        }
+        AgentDispatchCommand::AssignmentPurgeRuntime(args) => {
+            return assignment_inspection_command::purge_runtime(args, workspace).await;
         }
         AgentDispatchCommand::AssignmentRetire(args) => return dispatcher_retire(args).await,
     };
