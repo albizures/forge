@@ -50,6 +50,8 @@ fn parse_options() -> Result<ServerOptions, String> {
     let mut lifecycle_control_endpoint = None;
     let mut lifecycle_credential = None;
     let mut daemon_instance_id = None;
+    let mut durable_node = None;
+    let mut durable_inspector = None;
 
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -73,9 +75,18 @@ fn parse_options() -> Result<ServerOptions, String> {
             "--daemon-instance-id" => {
                 daemon_instance_id = Some(argument_value(&mut arguments, "--daemon-instance-id")?);
             }
+            "--durable-node" => {
+                durable_node = Some(argument_value(&mut arguments, "--durable-node")?);
+            }
+            "--durable-effect-inspector" => {
+                durable_inspector = Some(argument_value(
+                    &mut arguments,
+                    "--durable-effect-inspector",
+                )?);
+            }
             "--help" | "-h" => {
                 println!(
-                    "Usage: forge-server [--bind-addr IP:PORT] [--managed --store-path PATH --runtime-record-path PATH --lifecycle-control-endpoint PATH --lifecycle-credential VALUE --daemon-instance-id ID]\n\nFORGE_BIND_ADDR and FORGE_STORE_PATH supply manual-launch defaults. FORGE_DURABLE_OPENAI_KEY_FILE optionally selects an owner-only API-key file for durable profile preflight (not a key value or dispatch enablement). FORGE_DURABLE_NODE and FORGE_DURABLE_EFFECT_INSPECTOR optionally select both absolute trusted matched inspection components for operator effect resolution, never dispatch/recovery enablement. Partial configuration rejects. Managed launches inherit none of these durable environment settings and must explicitly provide every managed input. Remote bindings are unauthenticated; use only a trusted private network."
+                    "Usage: forge-server [--bind-addr IP:PORT] [--managed --store-path PATH --runtime-record-path PATH --lifecycle-control-endpoint PATH --lifecycle-credential VALUE --daemon-instance-id ID [--durable-node PATH --durable-effect-inspector PATH]]\n\nFORGE_BIND_ADDR and FORGE_STORE_PATH supply manual-launch defaults. FORGE_DURABLE_OPENAI_KEY_FILE optionally selects an owner-only API-key file for durable profile preflight (not a key value or dispatch enablement). FORGE_DURABLE_NODE and FORGE_DURABLE_EFFECT_INSPECTOR optionally select both absolute trusted matched inspection components for operator effect resolution, never dispatch/recovery enablement. Partial configuration rejects. Managed launches inherit none of these durable environment settings; Forgeup explicitly supplies the Revision's attested matched components as --durable-node and --durable-effect-inspector (both or neither). Remote bindings are unauthenticated; use only a trusted private network."
                 );
                 std::process::exit(0);
             }
@@ -95,6 +106,8 @@ fn parse_options() -> Result<ServerOptions, String> {
                 .ok_or("--managed requires --lifecycle-credential")?,
             daemon_instance_id: daemon_instance_id
                 .ok_or("--managed requires --daemon-instance-id")?,
+            durable_node,
+            durable_inspector,
         })
     } else {
         if store_path.is_some()
@@ -102,6 +115,8 @@ fn parse_options() -> Result<ServerOptions, String> {
             || lifecycle_control_endpoint.is_some()
             || lifecycle_credential.is_some()
             || daemon_instance_id.is_some()
+            || durable_node.is_some()
+            || durable_inspector.is_some()
         {
             return Err("managed launch inputs require --managed".into());
         }

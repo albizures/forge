@@ -23,6 +23,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+pub mod runner;
 pub mod upgrade;
 
 const REGISTRY_SCHEMA_VERSION: u32 = 2;
@@ -150,6 +151,9 @@ pub struct Installation {
     pub cli_sha256: String,
     pub daemon_sha256: String,
     pub endpoint: String,
+    /// Matched durable-runner components shipped with this Revision, when attested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner: Option<runner::InstalledRunner>,
 }
 
 /// Isolated persistent locations for one Forge Revision.
@@ -305,6 +309,8 @@ pub struct RegistrationOptions<'a> {
     pub replace: Option<&'a str>,
     pub reuse_state: Option<&'a str>,
     pub purge_state: bool,
+    /// A packaged matched runner bundle to attest and install with this Revision.
+    pub runner_bundle: Option<&'a Path>,
 }
 
 /// Registers a verified executable pair as an immutable Revision Installation.
@@ -351,6 +357,10 @@ fn register_at(
 ) -> Result<Installation, ForgeupError> {
     let (cli_identity, selector, cli_hash, daemon_hash) =
         attest_registration(source_label, cli, daemon, local_build_alias)?;
+    let bundle_identity = match options.runner_bundle {
+        Some(bundle) => Some((runner::attest(bundle, &cli_identity)?.tree_sha256, bundle)),
+        None => None,
+    };
     let store = RegistryStore::open(paths.clone())?;
     let mut registry = store.load()?;
     reconcile_active_path(paths, &registry)?;
@@ -381,7 +391,13 @@ fn register_at(
     }
     if let Some(index) = existing_index {
         let existing = &registry.installations[index];
-        if existing.cli_sha256 == cli_hash && existing.daemon_sha256 == daemon_hash && !replacing {
+        let same_runner = existing.runner.as_ref().map(|r| r.tree_sha256.as_str())
+            == bundle_identity.as_ref().map(|(tree, _)| tree.as_str());
+        if existing.cli_sha256 == cli_hash
+            && existing.daemon_sha256 == daemon_hash
+            && same_runner
+            && !replacing
+        {
             return Ok(existing.clone());
         }
         if !replacing {
@@ -419,7 +435,7 @@ fn register_at(
         local_build_alias,
         cli_identity,
         (cli_hash, daemon_hash),
-        (cli, daemon),
+        (cli, daemon, options.runner_bundle),
     )?;
     append_diagnostic(&state, "registered Revision Installation")?;
     if let Some(index) = existing_index {
@@ -438,10 +454,10 @@ fn snapshot_installation(
     local_build_alias: Option<&str>,
     identity: RevisionIdentity,
     hashes: (String, String),
-    executables: (&Path, &Path),
+    executables: (&Path, &Path, Option<&Path>),
 ) -> Result<Installation, ForgeupError> {
     let (cli_sha256, daemon_sha256) = hashes;
-    let (cli, daemon) = executables;
+    let (cli, daemon, bundle) = executables;
     let destination = paths.installations().join(&selector);
     if destination.exists() {
         fs::remove_dir_all(&destination).map_err(|source| ForgeupError::Io {
@@ -458,6 +474,18 @@ fn snapshot_installation(
     let daemon_path = destination.join("forge-server");
     copy_executable(cli, &cli_path)?;
     copy_executable(daemon, &daemon_path)?;
+    let runner = match bundle {
+        Some(bundle) => {
+            match runner::install(bundle, &destination.join("runner-bundle"), &identity) {
+                Ok(runner) => Some(runner),
+                Err(error) => {
+                    let _ = fs::remove_dir_all(&destination);
+                    return Err(error);
+                }
+            }
+        }
+        None => None,
+    };
     let installation = Installation {
         source_label: source_label.to_owned(),
         selector,
@@ -468,6 +496,7 @@ fn snapshot_installation(
         cli_sha256,
         daemon_sha256,
         endpoint: allocate_endpoint()?,
+        runner,
     };
     let manifest =
         toml::to_string_pretty(&installation).map_err(|source| ForgeupError::InvalidRegistry {
@@ -585,6 +614,12 @@ fn remove_at(paths: &ForgeupPaths, selector: &str, purge: bool) -> Result<(), Fo
         return Err(ForgeupError::ActiveRemoval(installation.selector));
     }
     upgrade::check_mutation(paths, &installation.selector)?;
+    if !purge
+        && installation.runner.is_some()
+        && paths.state(&installation.selector).database.exists()
+    {
+        return Err(ForgeupError::RunnerRetained(installation.selector));
+    }
     let destination = paths.installations().join(&installation.selector);
     if destination.exists() {
         fs::remove_dir_all(&destination).map_err(|source| ForgeupError::Io {
@@ -633,7 +668,67 @@ fn validate_installation(installation: &Installation) -> Result<(), ForgeupError
             installation.selector.clone(),
         ));
     }
+    if installation
+        .runner
+        .as_ref()
+        .is_some_and(|r| !runner::present(r))
+    {
+        return Err(ForgeupError::InvalidInstallation(
+            installation.selector.clone(),
+        ));
+    }
     Ok(())
+}
+
+/// Full matched-component attestation of one Installation; hashes the whole bundle.
+/// # Errors
+/// Fails when the Installation has no runner or any component is missing/modified.
+pub fn verify_runner(
+    installation: &Installation,
+) -> Result<&runner::InstalledRunner, ForgeupError> {
+    let runner = installation.runner.as_ref().ok_or_else(|| {
+        ForgeupError::RunnerBundle(format!(
+            "Revision `{}` has no matched runner bundle; register it with --runner-bundle",
+            installation.selector
+        ))
+    })?;
+    runner::verify_installed(runner, &installation.identity)?;
+    Ok(runner)
+}
+
+/// Finds the retained Installation whose verified runner has exactly this tree hash,
+/// so cleanup/recovery of a retained Assignment uses its original compatible
+/// component, never whichever Revision is currently active or any PATH/npm runner.
+/// # Errors
+/// Fails closed when no registered Revision provides that exact verified component.
+pub fn runner_for_component(tree_sha256: &str) -> Result<Installation, ForgeupError> {
+    let paths = ForgeupPaths::from_environment()?;
+    runner_for_component_at(&paths, tree_sha256)
+}
+
+fn runner_for_component_at(
+    paths: &ForgeupPaths,
+    tree_sha256: &str,
+) -> Result<Installation, ForgeupError> {
+    let Some(store) = RegistryStore::open_read_only(paths.clone())? else {
+        return Err(ForgeupError::NoActiveRevision);
+    };
+    let registry = store.load_read_only()?;
+    for installation in registry.installations {
+        if installation
+            .runner
+            .as_ref()
+            .is_some_and(|r| r.tree_sha256 == tree_sha256)
+        {
+            verify_runner(&installation)?;
+            return Ok(installation);
+        }
+    }
+    Err(ForgeupError::RunnerBundle(
+        "no registered Revision provides the original matched runner component; \
+         retained Assignments are not redirected to another runner"
+            .into(),
+    ))
 }
 
 /// Makes the manager command path match the registry's authoritative desired state.
@@ -759,6 +854,9 @@ pub fn daemon_start() -> Result<String, ForgeupError> {
         .ok_or(ForgeupError::NoActiveRevision)?;
     let installation = resolve_in_registry(&registry, &selector)?;
     validate_installation(&installation)?;
+    if installation.runner.is_some() {
+        verify_runner(&installation)?;
+    }
     upgrade::check_start(&paths, &selector)?;
     let state = paths.state(&selector);
     ensure_state(&state)?;
@@ -805,6 +903,13 @@ pub fn daemon_start() -> Result<String, ForgeupError> {
     let mut command = Command::new(&installation.daemon_path);
     for (key, _) in env::vars_os().filter(|(key, _)| key.to_string_lossy().starts_with("FORGE_")) {
         command.env_remove(key);
+    }
+    if let Some(runner) = &installation.runner {
+        command
+            .arg("--durable-node")
+            .arg(&runner.node_path)
+            .arg("--durable-effect-inspector")
+            .arg(&runner.inspector_path);
     }
     let child = command
         .args([
@@ -1167,11 +1272,19 @@ pub enum ForgeupError {
     DaemonNotReady(PathBuf),
     UnsupportedDaemonPlatform(PathBuf),
     UpgradeBlocked(String),
+    RunnerBundle(String),
+    RunnerRetained(String),
 }
 impl fmt::Display for ForgeupError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UpgradeBlocked(message) => write!(f, "state upgrade blocked: {message}"),
+            Self::RunnerBundle(message) => write!(f, "matched runner bundle: {message}"),
+            Self::RunnerRetained(selector) => write!(
+                f,
+                "Revision `{selector}` provides the matched runner for retained state; \
+                 purge state explicitly to remove it"
+            ),
             Self::InvalidLocation(m) => write!(f, "invalid Forgeup location: {m}"),
             Self::Io { path, source } => write!(f, "{}: {source}", path.display()),
             Self::UnsafePermissions(path) => {

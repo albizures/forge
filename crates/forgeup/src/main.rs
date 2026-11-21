@@ -29,6 +29,9 @@ enum Command {
         /// Discard Revision State while replacing the Installation.
         #[arg(long, requires = "replace")]
         purge_state: bool,
+        /// Packaged matched durable-runner bundle (see runner/package-bundle.mjs).
+        #[arg(long)]
+        runner_bundle: Option<PathBuf>,
     },
     /// Remove a Revision Installation, preserving its state by default.
     Remove {
@@ -58,6 +61,11 @@ enum Command {
     Daemon {
         #[command(subcommand)]
         command: DaemonCommand,
+    },
+    /// Attest or resolve the matched durable-runner components shipped with Revisions.
+    Runner {
+        #[command(subcommand)]
+        command: RunnerCommand,
     },
     /// Print paths to captured managed-daemon output for the active Revision.
     Logs,
@@ -120,6 +128,17 @@ enum UpgradeCommand {
 }
 
 #[derive(Debug, Subcommand)]
+enum RunnerCommand {
+    /// Fully re-attest a Revision's installed runner (tree hash, lock, Node, protocol).
+    Verify { selector: String },
+    /// Print the verified components of the Revision that shipped this exact tree hash.
+    Resolve {
+        #[arg(long)]
+        component_hash: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum DaemonCommand {
     /// Report managed ownership for the active Revision, or inspect an explicit manual endpoint.
     Status {
@@ -142,14 +161,18 @@ fn main() {
             replace,
             reuse_state,
             purge_state,
+            runner_bundle,
         } => register(
             &source_label,
             &cli,
             &daemon,
             local_build_alias.as_deref(),
-            replace.as_deref(),
-            reuse_state.as_deref(),
-            purge_state,
+            forgeup::RegistrationOptions {
+                replace: replace.as_deref(),
+                reuse_state: reuse_state.as_deref(),
+                purge_state,
+                runner_bundle: runner_bundle.as_deref(),
+            },
         ),
         Command::Remove {
             selector,
@@ -164,6 +187,7 @@ fn main() {
         Command::Upgrade { command } => upgrade(command),
         Command::Deactivate => deactivate(),
         Command::Daemon { command } => daemon(command),
+        Command::Runner { command } => runner(command),
         Command::Logs => logs(),
         Command::Doctor => doctor(),
     });
@@ -173,21 +197,9 @@ fn register(
     cli: &std::path::Path,
     daemon: &std::path::Path,
     alias: Option<&str>,
-    replace: Option<&str>,
-    reuse_state: Option<&str>,
-    purge_state: bool,
+    options: forgeup::RegistrationOptions<'_>,
 ) -> i32 {
-    match forgeup::register_with_options(
-        source_label,
-        cli,
-        daemon,
-        alias,
-        forgeup::RegistrationOptions {
-            replace,
-            reuse_state,
-            purge_state,
-        },
-    ) {
+    match forgeup::register_with_options(source_label, cli, daemon, alias, options) {
         Ok(item) => {
             println!("{}", item.selector);
             0
@@ -277,6 +289,37 @@ fn daemon(command: DaemonCommand) -> i32 {
         }
         Err(error) => {
             eprintln!("forgeup daemon: {error}");
+            1
+        }
+    }
+}
+fn runner(command: RunnerCommand) -> i32 {
+    let result = match command {
+        RunnerCommand::Verify { selector } => forgeup::current(&selector),
+        RunnerCommand::Resolve { component_hash } => forgeup::runner_for_component(&component_hash),
+    }
+    .and_then(|item| {
+        forgeup::verify_runner(&item).map(|runner| {
+            format!(
+                "{}\nnode\t{}\nentry\t{}\ninspector\t{}\nprotocol\t{}\nnode-version\t{}\nlock-sha256\t{}\ntree-sha256\t{}",
+                item.selector,
+                runner.node_path.display(),
+                runner.entry_path.display(),
+                runner.inspector_path.display(),
+                runner.protocol,
+                runner.node_version,
+                runner.package_lock_sha256,
+                runner.tree_sha256,
+            )
+        })
+    });
+    match result {
+        Ok(output) => {
+            println!("{output}");
+            0
+        }
+        Err(error) => {
+            eprintln!("forgeup runner: {error}");
             1
         }
     }

@@ -85,6 +85,9 @@ pub struct ManagedLaunchInputs {
     pub lifecycle_control_endpoint: String,
     pub lifecycle_credential: String,
     pub daemon_instance_id: String,
+    /// Forgeup-attested matched Node and effect-inspector paths: both or neither.
+    pub durable_node: Option<String>,
+    pub durable_inspector: Option<String>,
 }
 
 /// Managed-only configuration retained at the server composition boundary.
@@ -206,11 +209,16 @@ impl DaemonConfig {
         if let Some((name, _)) = required.iter().find(|(_, value)| value.trim().is_empty()) {
             return Err(format!("managed daemon {name} must not be empty"));
         }
+        let durable_inspection = durable_authorization::operator::InspectionComponents::select(
+            inputs.durable_node.map(PathBuf::from),
+            inputs.durable_inspector.map(PathBuf::from),
+        )
+        .map_err(|error| error.message)?;
         Ok(Self {
             bind_addr,
             store_path: PathBuf::from(inputs.store_path),
             durable_model_key_file: None,
-            durable_inspection: None,
+            durable_inspection,
             managed: Some(ManagedDaemonConfig {
                 runtime_record_path: PathBuf::from(inputs.runtime_record_path),
                 lifecycle_control_endpoint: PathBuf::from(inputs.lifecycle_control_endpoint),
@@ -4653,6 +4661,8 @@ mod tests {
             lifecycle_control_endpoint: "control.sock".into(),
             lifecycle_credential: "credential".into(),
             daemon_instance_id: "instance-123".into(),
+            durable_node: None,
+            durable_inspector: None,
         };
         let config =
             DaemonConfig::from_process(Some("127.0.0.1:45005"), Some(inputs.clone())).unwrap();
@@ -4669,9 +4679,29 @@ mod tests {
             lifecycle_control_endpoint: "control.sock".into(),
             lifecycle_credential: "credential".into(),
             daemon_instance_id: "instance-123".into(),
+            durable_node: None,
+            durable_inspector: None,
         })
         .unwrap_err();
         assert!(error.contains("invalid managed daemon bind address"));
+
+        // Attested matched components are explicit, absolute and both-or-neither.
+        let mut matched = inputs.clone();
+        matched.durable_node = Some("/revision/runner-bundle/node/node".into());
+        matched.durable_inspector =
+            Some("/revision/runner-bundle/runner/src/inspect-effects.ts".into());
+        let components = DaemonConfig::managed(matched.clone())
+            .unwrap()
+            .durable_inspection
+            .unwrap();
+        assert_eq!(
+            components.node,
+            PathBuf::from("/revision/runner-bundle/node/node")
+        );
+        matched.durable_inspector = None;
+        assert!(DaemonConfig::managed(matched.clone()).is_err());
+        matched.durable_inspector = Some("relative.ts".into());
+        assert!(DaemonConfig::managed(matched).is_err());
 
         let error = DaemonConfig::managed(ManagedLaunchInputs {
             bind_addr: "127.0.0.1:45004".into(),
@@ -4680,6 +4710,8 @@ mod tests {
             lifecycle_control_endpoint: "control.sock".into(),
             lifecycle_credential: "credential".into(),
             daemon_instance_id: "instance-123".into(),
+            durable_node: None,
+            durable_inspector: None,
         })
         .unwrap_err();
         assert_eq!(error, "managed daemon store path must not be empty");
@@ -4712,6 +4744,8 @@ mod tests {
             lifecycle_control_endpoint: endpoint.to_string_lossy().into_owned(),
             lifecycle_credential: "expected-credential".into(),
             daemon_instance_id: "instance-123".into(),
+            durable_node: None,
+            durable_inspector: None,
         })
         .unwrap();
         let mut server = tokio::spawn(serve(config));

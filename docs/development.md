@@ -102,10 +102,32 @@ trusted executable/entrypoint paths. Partial or relative selection rejects;
 there is no PATH/npm/current-checkout discovery. The retained runtime's component
 hash must match the inspector, which uses committed read-only storage. The paths
 are host configuration, never RPC input. Managed launches do not inherit these
-settings; matched Revision packaging/selection remains later work. Missing
+ambient settings. A Revision registered with `forgeup register --runner-bundle` instead
+receives its own attested components, which `forgeup daemon start` passes explicitly
+(see [matched runner packaging](#matched-runner-packaging)). Missing
 components block new resolutions, but exact accepted-result audit reads still work.
 This configuration supplies no model key/capability and enables no durable dispatch
 or automatic recovery. See [effect investigation](assignment-recovery.md#interrupted-durable-effects-controlled-implementation).
+
+### Matched runner packaging
+
+`node runner/package-bundle.mjs --out DIR --forge-commit <40-hex SHA>` (run with the pinned
+Node 24.18.0 on `PATH`) assembles the pinned Node executable, runner sources and the
+`npm ci --omit=dev --ignore-scripts` dependency closure plus the derived read-only adapter into a
+bundle with `forge-runner-bundle.json` (runner protocol, Node version, Forge commit, lockfile
+hash and a content tree hash). `forgeup register ... --runner-bundle DIR` verifies it against
+the candidate Revision (commit, protocol 1, Node version, lock, tree hash, no symlinks), copies it
+into the immutable Installation and re-verifies the *installed copy*. `forgeup daemon start`
+re-attests the whole bundle and then launches the managed daemon with
+`--durable-node`/`--durable-effect-inspector` pointing inside the Installation; any missing,
+modified or mismatched component blocks startup with a redacted diagnostic. Global `PATH`, npm
+and the checkout are never consulted. `forgeup runner verify SELECTOR` re-attests on demand and
+`forgeup runner resolve --component-hash H` finds the Revision that shipped exactly that tree.
+`forgeup remove` refuses to delete a Revision's runner while its state exists unless `--purge-state`
+is explicit, and selecting another Revision never changes a retained Assignment's component.
+The management protocol is unchanged (the new daemon flags are optional and only passed to a daemon
+built from the same attested commit); runner wire protocol 1 and storage schema are unchanged.
+This does not enable durable dispatch or automatic recovery.
 
 ## Browser and RPC
 
