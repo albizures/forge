@@ -6,6 +6,8 @@
 mod supervised_chain;
 #[path = "support/supervised_dispatch.rs"]
 mod supervised_dispatch;
+#[path = "support/supervised_purge.rs"]
+mod supervised_purge;
 #[path = "support/supervised_rollback.rs"]
 mod supervised_rollback;
 use forge_app::{
@@ -620,6 +622,16 @@ async fn scenario(mode: &str) {
         );
         assert_eq!(adapter.provisions.load(Ordering::SeqCst), 1);
         report.finish_retired(&capability);
+        if mode == "retired" {
+            supervised_purge::run(
+                &adapter,
+                &store,
+                &assignment.id,
+                record,
+                &report.directory,
+                &claim.path,
+            );
+        }
         if mode == "rollback" {
             supervised_rollback::refused_after_retirement(&adapter, &store, replacement);
         }

@@ -311,8 +311,12 @@ forge dispatcher assignment-purge-runtime <assignment-id> --workspace personal -
 ```
 
 It deletes only the canonically mapped runtime directory of a closed, reconciled Assignment with
-no retained uncertainty, hold or live owner. Forge's Assignment, Outcome, Assessment, migration,
-recovery and retirement records stay. Afterwards transcripts report `runtime-history-purged`,
+no retained uncertainty, hold or live owner. Retirement places a Dispatch Hold, so deletion is
+refused (`runtime-purge-uncertainty-retained`) until the operator clears it with
+`forge dispatcher resume <task-id>`. The retirement, crash and recovery evidence files the host
+itself wrote are deleted with the runtime; anything else in the directory refuses deletion.
+The result records whether this operation `removed` the directory or found it `already-absent`.
+Forge's Assignment, Outcome, Assessment, migration, recovery and retirement records stay. Afterwards transcripts report `runtime-history-purged`,
 and nothing recreates or resumes the store. See
 [retained runtime history](assignment-recovery.md#retained-runtime-history-and-explicit-deletion).
 

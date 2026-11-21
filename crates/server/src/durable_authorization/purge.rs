@@ -5,10 +5,13 @@ use forge_app::{
     RegistrationError, WorkspaceRepository,
     durable_execution::{
         Launch,
-        purge::{Finish, Record, Repository as _, State},
+        purge::{Finish, Record, Removal, Repository as _, State},
     },
 };
-use forge_runner_host::{purge::purge, storage::existing_runtime_directory};
+use forge_runner_host::{
+    purge::{Purged, purge},
+    storage::existing_runtime_directory,
+};
 use forge_store::SqliteProjectRepository;
 use sha2::{Digest, Sha256};
 use std::io::ErrorKind;
@@ -24,7 +27,7 @@ fn delete(
     repository: &SqliteProjectRepository,
     workspace: &str,
     launch: &Launch,
-) -> Result<(), &'static str> {
+) -> Result<Removal, &'static str> {
     let root = repository
         .workspace(workspace)
         .map_err(|_| "runtime-purge-boundary-invalid")?
@@ -32,7 +35,11 @@ fn delete(
     let digest = format!("{:x}", Sha256::digest(launch.store_id.as_bytes()));
     let directory =
         existing_runtime_directory(&root, &digest).map_err(|_| "runtime-purge-boundary-invalid")?;
-    purge(directory.as_deref()).map(|_| ()).map_err(|error| {
+    let removal = |purged| match purged {
+        Purged::Removed => Removal::Removed,
+        Purged::AlreadyAbsent => Removal::AlreadyAbsent,
+    };
+    purge(directory.as_deref()).map(removal).map_err(|error| {
         if error.kind() == ErrorKind::WouldBlock {
             "runtime-purge-owner-active"
         } else {
@@ -55,7 +62,9 @@ pub fn run(
         return Ok(record);
     }
     match delete(repository, workspace, launch) {
-        Ok(()) => repository.finish_purge(workspace, launch, operation_id, &Finish::Purged),
+        Ok(removal) => {
+            repository.finish_purge(workspace, launch, operation_id, &Finish::Purged { removal })
+        }
         Err(code) => {
             repository.finish_purge(
                 workspace,

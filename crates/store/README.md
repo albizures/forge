@@ -27,7 +27,8 @@ by migrations—not just the initial `CREATE TABLE` statements.
   admission intent/results and conservative capacity reservation (schema 20),
   append-only authorization grant history (schema 21), and identity-bound
   revoked retirement reconciliation (`src/durable_execution/retirement.rs`, schema 22),
-  plus follow-ups, runtime purge journal and sticky launch rollback (schema 23).
+  plus follow-ups, runtime purge journal and sticky launch rollback (schema 23), and
+  recorded purge removal outcomes (schema 24).
   Runtime conversations live in separate per-Assignment stores, not this database; see
   [Durable Task execution](../../docs/durable-execution.md).
 
@@ -1360,6 +1361,17 @@ deleted. `begin_purge` authorizes scope and eligibility (closed, retirement reco
 or admission rejected, no unretired resource, no Dispatch Hold) in one immediate
 transaction; an exact retry returns the original record. The filesystem step runs
 outside the transaction, and `finish_purge` records the result.
+
+### Runtime purge removal outcome (schema revision 24)
+
+`durable_runtime_purge_removals(assignment_id PK -> durable_runtime_purges, removal
+removed|already-absent)` records, in the same transaction that marks a purge `purged`,
+whether that operation removed the mapped runtime directory or found it already absent.
+An absent path is not proof that Forge deleted anything, so the two stay distinct.
+Triggers allow an insert only for a `purged` journal row and reject UPDATE and DELETE.
+Revision 24 is a separate table so revision 23 journal rows upgrade byte-exact: a purge
+completed before 24 has no removal row and reads as unrecorded (`removal: null`), never
+as a fabricated deletion. The explicit offline upgrade from 23 adds the empty table.
 
 ### Durable launch rollback (schema revision 23)
 

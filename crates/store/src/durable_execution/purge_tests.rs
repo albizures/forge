@@ -3,8 +3,12 @@
 use super::supervised_retirement_tests::{operation, revoke};
 use super::*;
 use forge_app::durable_execution::{
-    purge::{Finish, Repository as _, State},
+    purge::{Finish, Removal, Repository as _, State},
     retirement::{Receipt, Repository as _},
+};
+
+const REMOVED: Finish = Finish::Purged {
+    removal: Removal::Removed,
 };
 
 fn retire(f: &Fixture) {
@@ -128,7 +132,7 @@ fn journal_is_idempotent_conflict_checked_final_and_leaves_audit_intact() {
     );
     assert_eq!(
         f.store
-            .finish_purge("test", &f.launch, "other", &Finish::Purged)
+            .finish_purge("test", &f.launch, "other", &REMOVED)
             .unwrap_err()
             .code,
         "runtime-purge-intent-missing"
@@ -161,9 +165,10 @@ fn journal_is_idempotent_conflict_checked_final_and_leaves_audit_intact() {
     assert_eq!((again.state, again.diagnostic), (State::Pending, None));
     let done = f
         .store
-        .finish_purge("test", &f.launch, "purge", &Finish::Purged)
+        .finish_purge("test", &f.launch, "purge", &REMOVED)
         .unwrap();
     assert_eq!(done.state, State::Purged);
+    assert_eq!(done.removal, Some(Removal::Removed));
     assert!(done.completed_at_millis.is_some());
     assert_eq!(
         f.reopen().begin_purge("test", &f.launch, "purge").unwrap(),
@@ -200,4 +205,98 @@ fn journal_is_idempotent_conflict_checked_final_and_leaves_audit_intact() {
         before,
         "Forge audit/history is untouched by purge"
     );
+}
+
+#[test]
+fn already_absent_is_distinguishable_and_revision_23_completion_reads_unrecorded() {
+    let f = Fixture::new();
+    accept_runtime(&f);
+    retire(&f);
+    f.store.begin_purge("test", &f.launch, "purge").unwrap();
+    {
+        // A removal can be recorded only for a completed purge.
+        let c = f.store.connection.lock().unwrap();
+        assert!(
+            c.execute(
+                "INSERT INTO durable_runtime_purge_removals VALUES ('assignment', 'removed')",
+                []
+            )
+            .is_err()
+        );
+    }
+    let done = f
+        .store
+        .finish_purge(
+            "test",
+            &f.launch,
+            "purge",
+            &Finish::Purged {
+                removal: Removal::AlreadyAbsent,
+            },
+        )
+        .unwrap();
+    // A later different filesystem result never rewrites the recorded removal.
+    assert_eq!(
+        f.store
+            .finish_purge(
+                "test",
+                &f.launch,
+                "purge",
+                &Finish::Purged {
+                    removal: Removal::Removed,
+                },
+            )
+            .unwrap(),
+        done
+    );
+    {
+        let c = f.store.connection.lock().unwrap();
+        assert!(
+            c.execute("DELETE FROM durable_runtime_purge_removals", [])
+                .is_err()
+        );
+        assert!(
+            c.execute(
+                "UPDATE durable_runtime_purge_removals SET removal = 'removed'",
+                []
+            )
+            .is_err()
+        );
+    }
+    assert_eq!(
+        (done.state, done.removal),
+        (State::Purged, Some(Removal::AlreadyAbsent))
+    );
+    assert_eq!(
+        f.reopen()
+            .purge_record("test", "assignment")
+            .unwrap()
+            .unwrap(),
+        done
+    );
+    // A purge completed before revision 24 kept no removal row: it reads as
+    // unrecorded, never as a fabricated deletion.
+    let legacy = Fixture::new();
+    accept_runtime(&legacy);
+    retire(&legacy);
+    legacy
+        .store
+        .begin_purge("test", &legacy.launch, "purge")
+        .unwrap();
+    legacy
+        .store
+        .connection
+        .lock()
+        .unwrap()
+        .execute(
+            "UPDATE durable_runtime_purges SET state = 'purged', completed_at_millis = 1",
+            [],
+        )
+        .unwrap();
+    let record = legacy
+        .reopen()
+        .purge_record("test", "assignment")
+        .unwrap()
+        .unwrap();
+    assert_eq!((record.state, record.removal), (State::Purged, None));
 }

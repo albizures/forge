@@ -5,33 +5,43 @@ use forge_app::{
     RegistrationError,
     durable_execution::{
         Admission, Launch,
-        purge::{Finish, Record, Repository, State},
+        purge::{Finish, Record, Removal, Repository, State},
     },
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
-type Row = (String, String, Option<String>, i64, Option<i64>);
+type Row = (
+    String,
+    String,
+    Option<String>,
+    i64,
+    Option<i64>,
+    Option<String>,
+);
 
 fn read(c: &Connection, assignment: &str) -> Result<Option<Record>, RegistrationError> {
     let row: Option<Row> = c
         .query_row(
-            "SELECT operation_id, state, diagnostic, requested_at_millis, completed_at_millis FROM durable_runtime_purges WHERE assignment_id = ?1",
+            "SELECT p.operation_id, p.state, p.diagnostic, p.requested_at_millis, p.completed_at_millis, r.removal FROM durable_runtime_purges p LEFT JOIN durable_runtime_purge_removals r ON r.assignment_id = p.assignment_id WHERE p.assignment_id = ?1",
             [assignment],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
         )
         .optional()
         .map_err(storage_error)?;
-    row.map(|(operation_id, state, diagnostic, requested, completed)| {
-        let millis = |v: i64| u64::try_from(v).map_err(|_| error("durable-storage-invalid"));
-        Ok(Record {
-            assignment_id: assignment.into(),
-            operation_id,
-            state: State::parse(&state)?,
-            diagnostic,
-            requested_at_millis: millis(requested)?,
-            completed_at_millis: completed.map(millis).transpose()?,
-        })
-    })
+    row.map(
+        |(operation_id, state, diagnostic, requested, completed, removal)| {
+            let millis = |v: i64| u64::try_from(v).map_err(|_| error("durable-storage-invalid"));
+            Ok(Record {
+                assignment_id: assignment.into(),
+                operation_id,
+                state: State::parse(&state)?,
+                diagnostic,
+                requested_at_millis: millis(requested)?,
+                completed_at_millis: completed.map(millis).transpose()?,
+                removal: removal.as_deref().map(Removal::parse).transpose()?,
+            })
+        },
+    )
     .transpose()
 }
 
@@ -142,10 +152,17 @@ impl Repository for SqliteProjectRepository {
             return Ok(existing);
         }
         match finish {
-            Finish::Purged => tx.execute(
-                "UPDATE durable_runtime_purges SET state = 'purged', diagnostic = NULL, completed_at_millis = ?2 WHERE assignment_id = ?1",
-                params![launch.assignment_id, now_millis()?],
-            ),
+            Finish::Purged { removal } => tx
+                .execute(
+                    "UPDATE durable_runtime_purges SET state = 'purged', diagnostic = NULL, completed_at_millis = ?2 WHERE assignment_id = ?1",
+                    params![launch.assignment_id, now_millis()?],
+                )
+                .and_then(|_| {
+                    tx.execute(
+                        "INSERT INTO durable_runtime_purge_removals(assignment_id, removal) VALUES (?1, ?2)",
+                        params![launch.assignment_id, removal.as_str()],
+                    )
+                }),
             Finish::Retained { code } => tx.execute(
                 "UPDATE durable_runtime_purges SET state = 'retained', diagnostic = ?2 WHERE assignment_id = ?1",
                 params![launch.assignment_id, code],

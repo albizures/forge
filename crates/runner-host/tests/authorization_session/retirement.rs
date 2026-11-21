@@ -23,7 +23,7 @@ impl RepositoryInspector for NoGit {
         panic!("retirement must preserve Git")
     }
 }
-fn app(f: &Fixture, controller: Arc<Controller>) -> Application {
+pub(super) fn app(f: &Fixture, controller: Arc<Controller>) -> Application {
     Application::with_agent_dispatch(
         Box::new(open(&f.database)),
         Box::new(open(&f.database)),
@@ -39,7 +39,7 @@ fn app(f: &Fixture, controller: Arc<Controller>) -> Application {
 
 // Own test cleanup evidence independently of the product registry. A failed
 // retirement intentionally leaves its host/descendants running and fenced.
-struct Cleanup {
+pub(super) struct Cleanup {
     pid: u32,
     start: String,
 }
@@ -76,7 +76,7 @@ fn inspection_controller(f: &Fixture) -> Arc<Controller> {
             .unwrap(),
     )
 }
-fn handoff(f: &mut Fixture) -> (Arc<Controller>, Cleanup) {
+pub(super) fn handoff(f: &mut Fixture) -> (Arc<Controller>, Cleanup) {
     handoff_to(f, inspection_controller(f))
 }
 fn handoff_to(f: &mut Fixture, controller: Arc<Controller>) -> (Arc<Controller>, Cleanup) {

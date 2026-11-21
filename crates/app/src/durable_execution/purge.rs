@@ -40,7 +40,8 @@ impl Request {
 pub enum State {
     /// Deletion was authorized and may be partial. Retry with the same operation ID.
     Pending,
-    /// Every runtime file and the directory are gone, or were already absent.
+    /// Every runtime file and the directory are gone; [`Record::removal`] says
+    /// whether this operation removed them or found the mapped path absent.
     Purged,
     /// Deletion stopped; the diagnostic says why. Remaining storage is retained.
     Retained,
@@ -71,6 +72,40 @@ impl State {
     }
 }
 
+/// What the filesystem step found for a completed purge. An absent mapped path is
+/// not proof that the runtime was deleted by Forge, so it is kept distinguishable.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Removal {
+    /// This operation removed the runtime directory.
+    Removed,
+    /// The mapped runtime directory was already absent; nothing was removed.
+    AlreadyAbsent,
+}
+
+impl Removal {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Removed => "removed",
+            Self::AlreadyAbsent => "already-absent",
+        }
+    }
+
+    /// # Errors
+    /// Unknown stored values are invalid storage, not a default.
+    pub fn parse(value: &str) -> Result<Self, RegistrationError> {
+        match value {
+            "removed" => Ok(Self::Removed),
+            "already-absent" => Ok(Self::AlreadyAbsent),
+            _ => Err(RegistrationError::new(
+                "durable-storage-invalid",
+                "unknown runtime purge removal",
+            )),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Record {
     pub assignment_id: String,
@@ -80,12 +115,16 @@ pub struct Record {
     pub diagnostic: Option<String>,
     pub requested_at_millis: u64,
     pub completed_at_millis: Option<u64>,
+    /// Set only when `state` is `purged`. `None` on a purged record means it was
+    /// completed before schema revision 24 and the distinction was not recorded.
+    #[serde(default)]
+    pub removal: Option<Removal>,
 }
 
 /// Result of the external filesystem step, reported back to Forge.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Finish {
-    Purged,
+    Purged { removal: Removal },
     Retained { code: String },
 }
 

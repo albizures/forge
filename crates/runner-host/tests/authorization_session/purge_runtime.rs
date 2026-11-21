@@ -2,7 +2,10 @@
 //! Forge store: live ownership and unrecognized content block deletion untouched, an
 //! eligible stopped runtime is removed exactly once, and Forge's audit stays intact.
 use super::*;
-use forge_app::durable_execution::purge::{Repository as _, State};
+use forge_app::durable_execution::{
+    purge::{Removal, Repository as _, State},
+    retirement::Repository as _,
+};
 use forge_rpc::{AssignmentTranscriptRequest, TranscriptHistory};
 use forge_server::durable_authorization::purge::run;
 
@@ -196,4 +199,112 @@ fn purge_requires_exclusive_eligibility_removes_only_bound_history_and_never_res
     assert_eq!(page.history, TranscriptHistory::Unavailable);
     assert_eq!(page.reason.as_deref(), Some("runtime-history-purged"));
     assert!(page.entries.is_empty() && !f.directory.exists());
+}
+
+/// Names the synthetic test workers and fixtures write beside real runtime files.
+/// Production never writes them, so they are removed by the test, never by purge.
+fn remove_fixture_files(directory: &Path) {
+    for entry in fs::read_dir(directory).unwrap() {
+        let entry = entry.unwrap();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with("controlled") || name == "preserved-history" {
+            fs::remove_file(entry.path()).unwrap();
+        }
+    }
+}
+
+/// Purge a runtime left by a real lifecycle path. Forge eligibility is the real
+/// result of that path (no SQL-inserted retirement): only the Dispatch Hold the
+/// retirement placed is cleared, by the operator's ordinary `resume`.
+fn purge_after_lifecycle(f: &Fixture, worktree: &Path, lifecycle: &[&str]) {
+    assert_eq!(
+        run(&f.store, "test", &f.launch, "purge").unwrap_err().code,
+        "runtime-purge-uncertainty-retained",
+        "the retirement hold still blocks deletion"
+    );
+    assert!(
+        f.store
+            .purge_record("test", "assignment")
+            .unwrap()
+            .is_none()
+    );
+    f.store.resume_dispatch(f.record).unwrap();
+    remove_fixture_files(&f.directory);
+    let names: Vec<_> = listing(&f.directory).into_iter().map(|(n, _)| n).collect();
+    // Each expected entry is an exact name or, ending in '-', a generated prefix.
+    for name in lifecycle {
+        assert!(
+            names
+                .iter()
+                .any(|n| n == name || (name.ends_with('-') && n.starts_with(name))),
+            "{name} missing: {names:?}"
+        );
+    }
+    let before_audit = audit(&f.database);
+    let worktree_before = listing(worktree);
+    let done = run(&f.store, "test", &f.launch, "purge")
+        .unwrap_or_else(|e| panic!("{e:?} with {names:?}"));
+    assert_eq!(done.state, State::Purged);
+    assert_eq!(done.removal, Some(Removal::Removed));
+    assert!(!f.directory.exists());
+    assert!(f.directory.parent().unwrap().exists());
+    assert_eq!(run(&f.store, "test", &f.launch, "purge").unwrap(), done);
+    assert_eq!(
+        run(&f.store, "test", &f.launch, "other").unwrap_err().code,
+        "runtime-purge-conflict"
+    );
+    assert!(!f.directory.exists());
+    assert_eq!(audit(&f.database), before_audit);
+    assert_eq!(listing(worktree), worktree_before);
+}
+
+#[test]
+fn real_retirement_and_reconciliation_leave_a_purgeable_runtime() {
+    let mut f = Fixture::new("model");
+    let (controller, _cleanup) = super::retirement::handoff(&mut f);
+    let retired = super::retirement::app(&f, controller)
+        .retire_agent_assignment("assignment")
+        .unwrap();
+    assert!(retired.closed_at_millis.is_some());
+    assert!(
+        f.store
+            .retirement("test", &f.launch)
+            .unwrap()
+            .unwrap()
+            .reconciled_at_millis
+            .is_some()
+    );
+    diagnostic(&f.errors, "runner-retirement-verified");
+    let worktree = f.root.join("worktree");
+    purge_after_lifecycle(
+        &f,
+        &worktree,
+        &[
+            "retirement-intent.json",
+            "retirement-receipt.json",
+            "owner.json",
+            "owner.lock",
+        ],
+    );
+}
+
+#[test]
+fn crash_reconciliation_then_retirement_leaves_a_purgeable_runtime() {
+    let f = super::recovery_reconciliation::reconcile(true);
+    let worktree = forge_app::managed_worktree_path(&f.root, "alpha", f.record);
+    purge_after_lifecycle(
+        &f,
+        &worktree,
+        &[
+            "recovery-crash-1.json",
+            "recovery-crash-2.json",
+            "recovery-proof-",
+            "retirement-intent.json",
+            "retirement-receipt.json",
+            "runtime.sqlite",
+            "runtime.sqlite-wal",
+            "owner.json",
+            "owner.lock",
+        ],
+    );
 }

@@ -9,7 +9,8 @@ pub use forge_app::durable_execution::launch_control::{
     Status as DurableLaunchStatus,
 };
 pub use forge_app::durable_execution::purge::{
-    Record as RuntimePurgeRecord, Request as RuntimePurgeRequest,
+    Record as RuntimePurgeRecord, Removal as RuntimePurgeRemoval, Request as RuntimePurgeRequest,
+    State as RuntimePurgeState,
 };
 use forge_app::durable_execution::{
     Admission,

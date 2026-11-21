@@ -94,13 +94,26 @@ pub async fn request_assignment_purge_runtime(
         .map_err(|error| format!("could not purge runtime history through Forge daemon: {error}"))
 }
 
+fn purge_removal(record: &forge_rpc::RuntimePurgeRecord) -> &'static str {
+    use forge_rpc::{RuntimePurgeRemoval as Removal, RuntimePurgeState as State};
+    match (record.state, record.removal) {
+        (_, Some(Removal::Removed)) => "; this operation removed the runtime directory",
+        (_, Some(Removal::AlreadyAbsent)) => {
+            "; the mapped runtime directory was already absent, so nothing was removed"
+        }
+        (State::Purged, None) => "; whether this operation removed it was not recorded",
+        _ => "",
+    }
+}
+
 #[must_use]
 pub fn render_purge(record: &forge_rpc::RuntimePurgeRecord) -> String {
     format!(
-        "Runtime history for Assignment {} is {} (operation {}).\nForge's Assignment, Outcomes, Assessments and audit records are unchanged; the deleted runtime history cannot be recreated or resumed.",
+        "Runtime history for Assignment {} is {} (operation {}{}).\nForge's Assignment, Outcomes, Assessments and audit records are unchanged; the deleted runtime history cannot be recreated or resumed.",
         record.assignment_id,
         record.state.as_str(),
         record.operation_id,
+        purge_removal(record),
     )
 }
 
@@ -196,9 +209,10 @@ pub fn render_durable_status(status: &AssignmentDurableStatusResponse) -> String
     if let Some(p) = &status.runtime_purge {
         writeln!(
             out,
-            "Runtime history deletion {}: {}{}",
+            "Runtime history deletion {}: {}{}{}",
             p.operation_id,
             p.state.as_str(),
+            purge_removal(p),
             p.diagnostic.as_ref().map_or_else(String::new, |d| format!(
                 " ({d}; remaining storage retained)"
             )),
@@ -339,4 +353,43 @@ pub fn render_durable_launch(status: &forge_rpc::DurableLaunchStatus) -> String 
         let _ = writeln!(out, "{note}");
     }
     out.trim_end().to_owned()
+}
+
+#[cfg(test)]
+mod purge_render_tests {
+    use super::render_purge;
+    use forge_rpc::{RuntimePurgeRecord, RuntimePurgeRemoval, RuntimePurgeState};
+
+    fn record(
+        state: RuntimePurgeState,
+        removal: Option<RuntimePurgeRemoval>,
+    ) -> RuntimePurgeRecord {
+        RuntimePurgeRecord {
+            assignment_id: "a".into(),
+            operation_id: "purge-1".into(),
+            state,
+            diagnostic: None,
+            requested_at_millis: 1,
+            completed_at_millis: Some(2),
+            removal,
+        }
+    }
+
+    #[test]
+    fn removal_and_already_absent_and_unrecorded_render_distinctly() {
+        let removed = render_purge(&record(
+            RuntimePurgeState::Purged,
+            Some(RuntimePurgeRemoval::Removed),
+        ));
+        let absent = render_purge(&record(
+            RuntimePurgeState::Purged,
+            Some(RuntimePurgeRemoval::AlreadyAbsent),
+        ));
+        let legacy = render_purge(&record(RuntimePurgeState::Purged, None));
+        assert!(removed.contains("this operation removed the runtime directory"));
+        assert!(absent.contains("already absent, so nothing was removed"));
+        assert!(legacy.contains("not recorded"));
+        let pending = render_purge(&record(RuntimePurgeState::Pending, None));
+        assert!(!pending.contains("removed") && !pending.contains("recorded"));
+    }
 }

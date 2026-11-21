@@ -31,6 +31,8 @@ pub(super) fn schema(c: &Connection) -> Result<(), RegistrationError> {
     c.execute_batch(include_str!("upgrade/durable_purges.sql"))
         .map_err(storage_error)?;
     c.execute_batch(include_str!("upgrade/durable_launch_controls.sql"))
+        .map_err(storage_error)?;
+    c.execute_batch(include_str!("upgrade/durable_purge_removals.sql"))
         .map_err(storage_error)
 }
 

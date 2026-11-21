@@ -166,15 +166,15 @@ fn recovery_controller_refuses_missing_foreign_and_revoked_proof_before_spawning
 
 #[test]
 fn daemon_reconciliation_recovers_once_and_keeps_missing_outcome_as_intervention() {
-    reconcile(false);
+    let _ = reconcile(false);
 }
 
 #[test]
 fn daemon_reconciliation_handles_a_second_proven_crash_without_new_attempt_or_input() {
-    reconcile(true);
+    let _ = reconcile(true);
 }
 
-fn reconcile(crash_once: bool) {
+pub(super) fn reconcile(crash_once: bool) -> Fixture {
     let (f, _, _) = recovery_crash::crashed();
     if crash_once {
         fs::write(f.directory.join("controlled-crash-once"), "controlled").unwrap();
@@ -270,6 +270,7 @@ fn reconcile(crash_once: bool) {
             .unwrap()
             .capacity_reserved()
     );
+    f
 }
 
 #[test]
