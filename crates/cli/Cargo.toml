@@ -42,6 +42,11 @@ shlex = "2.0.1"
 name = "durable_supervised_tracer"
 harness = false
 
+# T19/AC22 real-provider gate: opt-in via FORGE_REAL_PROVIDER_KEY_FILE, else a no-op.
+[[test]]
+name = "durable_real_provider"
+harness = false
+
 [[bin]]
 name = "forge"
 path = "src/main.rs"
