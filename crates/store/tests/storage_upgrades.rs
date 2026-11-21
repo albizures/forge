@@ -39,7 +39,7 @@ impl Fixture {
         drop(repo);
         let c = Connection::open(&source).unwrap();
         if schema < 23 {
-            c.execute_batch("DROP TABLE durable_assignment_followups;")
+            c.execute_batch("DROP TABLE durable_assignment_followup_deliveries; DROP TABLE durable_assignment_followups;")
                 .unwrap();
         }
         if schema < 22 {

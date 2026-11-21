@@ -5,7 +5,7 @@ use forge_app::{
     RegistrationError,
     durable_execution::{
         Admission,
-        followup::{Binding, Receipt, Repository, Request},
+        followup::{Binding, Delivery, Receipt, Repository, Request},
     },
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -20,10 +20,18 @@ const BLOCKING_KINDS: [&str; 5] = [
     "retirement-pending",
 ];
 
-type Row = (String, u32, String, String, u64);
+type Row = (
+    String,
+    u32,
+    String,
+    String,
+    u64,
+    Option<String>,
+    Option<String>,
+);
 
 fn row_receipt(assignment: &str, row: Row, replayed: bool) -> Result<Receipt, RegistrationError> {
-    let (operation_id, sequence, sha, binding, recorded) = row;
+    let (operation_id, sequence, sha, binding, recorded, state, admission_id) = row;
     Ok(Receipt {
         assignment_id: assignment.into(),
         operation_id,
@@ -32,6 +40,8 @@ fn row_receipt(assignment: &str, row: Row, replayed: bool) -> Result<Receipt, Re
         binding: serde_json::from_str(&binding).map_err(|_| error("durable-storage-invalid"))?,
         recorded_at_millis: recorded,
         replayed,
+        delivery: state.unwrap_or_else(|| "recorded".into()),
+        admission_id,
     })
 }
 
@@ -41,9 +51,9 @@ fn existing(
     operation: &str,
 ) -> Result<Option<Row>, RegistrationError> {
     c.query_row(
-        "SELECT operation_id, sequence, message_sha256, binding_json, recorded_at_millis FROM durable_assignment_followups WHERE assignment_id = ?1 AND operation_id = ?2",
+        "SELECT f.operation_id, f.sequence, f.message_sha256, f.binding_json, f.recorded_at_millis, d.state, d.admission_id FROM durable_assignment_followups f LEFT JOIN durable_assignment_followup_deliveries d ON d.assignment_id = f.assignment_id AND d.operation_id = f.operation_id WHERE f.assignment_id = ?1 AND f.operation_id = ?2",
         params![assignment, operation],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get::<_, i64>(4)?.cast_unsigned())),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get::<_, i64>(4)?.cast_unsigned(), r.get(5)?, r.get(6)?)),
     ).optional().map_err(storage_error)
 }
 
@@ -162,6 +172,8 @@ impl Repository for SqliteProjectRepository {
             binding,
             recorded_at_millis: now.cast_unsigned(),
             replayed: false,
+            delivery: "recorded".into(),
+            admission_id: None,
         })
     }
 
@@ -174,7 +186,7 @@ impl Repository for SqliteProjectRepository {
         let tx = c.transaction().map_err(storage_error)?;
         scope(&tx, workspace, assignment)?;
         let mut stmt = tx
-            .prepare("SELECT operation_id, sequence, message_sha256, binding_json, recorded_at_millis FROM durable_assignment_followups WHERE assignment_id = ?1 ORDER BY sequence")
+            .prepare("SELECT f.operation_id, f.sequence, f.message_sha256, f.binding_json, f.recorded_at_millis, d.state, d.admission_id FROM durable_assignment_followups f LEFT JOIN durable_assignment_followup_deliveries d ON d.assignment_id = f.assignment_id AND d.operation_id = f.operation_id WHERE f.assignment_id = ?1 ORDER BY f.sequence")
             .map_err(storage_error)?;
         let rows = stmt
             .query_map([assignment], |r| {
@@ -184,6 +196,8 @@ impl Repository for SqliteProjectRepository {
                     r.get(2)?,
                     r.get(3)?,
                     r.get::<_, i64>(4)?.cast_unsigned(),
+                    r.get(5)?,
+                    r.get(6)?,
                 ))
             })
             .map_err(storage_error)?
@@ -192,5 +206,76 @@ impl Repository for SqliteProjectRepository {
         rows.into_iter()
             .map(|row| row_receipt(assignment, row, false))
             .collect()
+    }
+
+    fn undelivered_followups(
+        &self,
+        workspace: &str,
+        assignment: &str,
+    ) -> Result<Vec<Request>, RegistrationError> {
+        let mut c = self.connection.lock().map_err(|_| error("storage"))?;
+        let tx = c.transaction().map_err(storage_error)?;
+        scope(&tx, workspace, assignment)?;
+        let mut stmt = tx
+            .prepare("SELECT f.operation_id, f.message FROM durable_assignment_followups f LEFT JOIN durable_assignment_followup_deliveries d ON d.assignment_id = f.assignment_id AND d.operation_id = f.operation_id WHERE f.assignment_id = ?1 AND COALESCE(d.state, '') <> 'delivered' ORDER BY f.sequence")
+            .map_err(storage_error)?;
+        stmt.query_map([assignment], |r| {
+            Ok(Request {
+                assignment_id: assignment.into(),
+                operation_id: r.get(0)?,
+                message: r.get(1)?,
+            })
+        })
+        .map_err(storage_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(storage_error)
+    }
+
+    fn mark_followup(
+        &self,
+        workspace: &str,
+        assignment: &str,
+        operation_id: &str,
+        delivery: &Delivery,
+    ) -> Result<(), RegistrationError> {
+        let mut c = self.connection.lock().map_err(|_| error("storage"))?;
+        let tx = c
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        scope(&tx, workspace, assignment)?;
+        if existing(&tx, assignment, operation_id)?.is_none() {
+            return Err(RegistrationError::new(
+                "followup-not-recorded",
+                "no recorded follow-up has this operation ID",
+            ));
+        }
+        let now = now_millis()?;
+        let current: Option<(String, Option<String>)> = tx
+            .query_row(
+                "SELECT state, admission_id FROM durable_assignment_followup_deliveries WHERE assignment_id = ?1 AND operation_id = ?2",
+                params![assignment, operation_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(storage_error)?;
+        match (delivery, current) {
+            (Delivery::Unknown, None) => {
+                tx.execute("INSERT INTO durable_assignment_followup_deliveries(assignment_id, operation_id, state, admission_id, updated_at_millis) VALUES (?1, ?2, 'unknown', NULL, ?3)", params![assignment, operation_id, now]).map_err(storage_error)?;
+            }
+            (Delivery::Unknown, Some(_)) => {}
+            (Delivery::Delivered { admission_id }, None) => {
+                tx.execute("INSERT INTO durable_assignment_followup_deliveries(assignment_id, operation_id, state, admission_id, updated_at_millis) VALUES (?1, ?2, 'delivered', ?3, ?4)", params![assignment, operation_id, admission_id, now]).map_err(storage_error)?;
+            }
+            (Delivery::Delivered { admission_id }, Some((state, prior))) => {
+                if state == "delivered" {
+                    if prior.as_deref() != Some(admission_id.as_str()) {
+                        return Err(error("durable-storage-invalid"));
+                    }
+                } else {
+                    tx.execute("UPDATE durable_assignment_followup_deliveries SET state = 'delivered', admission_id = ?3, updated_at_millis = ?4 WHERE assignment_id = ?1 AND operation_id = ?2", params![assignment, operation_id, admission_id, now]).map_err(storage_error)?;
+                }
+            }
+        }
+        tx.commit().map_err(storage_error)
     }
 }

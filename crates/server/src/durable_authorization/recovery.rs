@@ -378,6 +378,74 @@ impl Worker {
         Ok(next)
     }
 
+    /// Send each recorded, undelivered follow-up once per supervised session. The
+    /// `unknown` state is committed before the write, so a crash or a lost event
+    /// never reads as delivered; the runtime deduplicates any later resend.
+    fn send_followups(
+        &self,
+        repository: &SqliteProjectRepository,
+        pipe: &mut ControlPipe,
+        sent: &mut std::collections::HashSet<String>,
+    ) {
+        use forge_app::durable_execution::followup::{Delivery, Repository as _};
+        let Ok(pending) =
+            repository.undelivered_followups(&self.workspace, &self.claim.launch.assignment_id)
+        else {
+            return;
+        };
+        for request in pending {
+            if sent.contains(&request.operation_id) {
+                continue;
+            }
+            let id = &self.claim.launch.assignment_id;
+            if repository
+                .mark_followup(
+                    &self.workspace,
+                    id,
+                    &request.operation_id,
+                    &Delivery::Unknown,
+                )
+                .is_err()
+            {
+                return;
+            }
+            sent.insert(request.operation_id.clone());
+            if pipe.deliver_followup(&request).is_err() {
+                return;
+            }
+        }
+    }
+
+    fn record_followup_event(
+        &self,
+        repository: &SqliteProjectRepository,
+        event: &serde_json::Value,
+        accepted: bool,
+    ) {
+        use forge_app::durable_execution::followup::{Delivery, Repository as _};
+        let (Some(operation), true) = (
+            event
+                .get("operation_id")
+                .and_then(serde_json::Value::as_str),
+            accepted,
+        ) else {
+            return; // Failure stays `unknown`; nothing is fabricated or replayed.
+        };
+        if let Some(admission) = event
+            .get("admission_id")
+            .and_then(serde_json::Value::as_str)
+        {
+            let _ = repository.mark_followup(
+                &self.workspace,
+                &self.claim.launch.assignment_id,
+                operation,
+                &Delivery::Delivered {
+                    admission_id: admission.into(),
+                },
+            );
+        }
+    }
+
     async fn run_active(
         &self,
         repository: &SqliteProjectRepository,
@@ -388,7 +456,16 @@ impl Worker {
         mut next: u64,
     ) -> Result<Exit, RegistrationError> {
         let mut renew = true;
+        let mut resumed = false;
+        let mut sent = std::collections::HashSet::new();
+        let mut last_poll = std::time::Instant::now()
+            .checked_sub(FOLLOWUP_POLL)
+            .unwrap_or_else(std::time::Instant::now);
         loop {
+            if renew && resumed && last_poll.elapsed() >= FOLLOWUP_POLL {
+                last_poll = std::time::Instant::now();
+                self.send_followups(repository, pipe, &mut sent);
+            }
             match self.stops.try_recv() {
                 Ok(done) => {
                     active.stop(repository)?;
@@ -401,6 +478,25 @@ impl Worker {
                 Err(mpsc::TryRecvError::Empty) => {}
             }
             match output.recv_timeout(Duration::from_millis(50)) {
+                Ok(value)
+                    if value.get("event").and_then(serde_json::Value::as_str)
+                        == Some("resumed") =>
+                {
+                    resumed = true;
+                    last_poll = last_poll.checked_sub(FOLLOWUP_POLL).unwrap_or(last_poll);
+                }
+                Ok(value)
+                    if value.get("event").and_then(serde_json::Value::as_str)
+                        == Some("followup-accepted") =>
+                {
+                    self.record_followup_event(repository, &value, true);
+                }
+                Ok(value)
+                    if value.get("event").and_then(serde_json::Value::as_str)
+                        == Some("followup-failed") =>
+                {
+                    self.record_followup_event(repository, &value, false);
+                }
                 Ok(value)
                     if value.get("event").and_then(serde_json::Value::as_str)
                         == Some("settled") =>
@@ -451,6 +547,8 @@ impl Worker {
         }
     }
 }
+
+const FOLLOWUP_POLL: Duration = Duration::from_millis(500);
 
 fn events(source: impl Read + Send + 'static) -> Receiver<serde_json::Value> {
     let (tx, rx) = mpsc::channel();

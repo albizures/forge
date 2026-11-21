@@ -271,3 +271,75 @@ fn reconcile(crash_once: bool) {
             .capacity_reserved()
     );
 }
+
+#[test]
+fn daemon_delivers_a_recorded_follow_up_once_to_the_resumed_original_conversation() {
+    use forge_app::durable_execution::followup::{Repository as _, Request};
+    let (f, _, _) = recovery_crash::crashed();
+    fs::write(f.directory.join("controlled-slow-model"), "slow").unwrap();
+    rusqlite::Connection::open(&f.database)
+        .unwrap()
+        .execute(
+            "UPDATE records SET status = 'in_progress' WHERE id = ?1",
+            [f.record.cast_signed()],
+        )
+        .unwrap();
+    let request = Request {
+        assignment_id: "assignment".into(),
+        operation_id: "operator:1".into(),
+        message: "use another commit".into(),
+    };
+    let receipt = f.store.record_followup("test", &request).unwrap();
+    assert_eq!(receipt.delivery, "recorded");
+    let retirement = Arc::new(
+        retirement::Controller::default()
+            .with_inspection(effect_admission::components())
+            .unwrap(),
+    );
+    let recovery = Arc::new(
+        recovery::Controller::new(
+            f.database.clone(),
+            controlled_components(),
+            retirement.clone(),
+        )
+        .unwrap(),
+    );
+    let app = Application::with_agent_dispatch(
+        Box::new(open(&f.database)),
+        Box::new(open(&f.database)),
+        Box::new(retirement::Factory {
+            database: f.database.clone(),
+            controller: retirement,
+            recovery: Some(recovery),
+            original: Box::new(NoHerdr),
+        }),
+        Box::new(NoGit),
+    );
+    let attempt = f.store.assignment_check_attempt("assignment").unwrap();
+    app.reconcile_agent_dispatch("recovery-test-daemon", 1_000_000)
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let delivered = loop {
+        let current = &f.store.followups("test", "assignment").unwrap()[0];
+        if current.delivery == "delivered" {
+            break current.clone();
+        }
+        assert!(Instant::now() < deadline, "follow-up never confirmed");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert!(delivered.admission_id.is_some());
+    // Idempotent: a retry still returns the one original record.
+    let again = f.store.record_followup("test", &request).unwrap();
+    assert!(again.replayed && again.sequence == 1);
+    assert_eq!(f.store.followups("test", "assignment").unwrap().len(), 1);
+    assert_eq!(
+        f.store.assignment_check_attempt("assignment").unwrap(),
+        attempt
+    );
+    assert!(
+        f.store
+            .undelivered_followups("test", "assignment")
+            .unwrap()
+            .is_empty()
+    );
+}

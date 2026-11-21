@@ -269,3 +269,70 @@ fn concurrent_duplicate_retries_create_one_record() {
     assert_eq!(replays, 3);
     assert_eq!(count(&f), 1);
 }
+
+#[test]
+fn delivery_state_is_persisted_final_and_never_downgraded_or_fabricated() {
+    use forge_app::durable_execution::followup::Delivery;
+    let f = Fixture::new();
+    accept_runtime(&f);
+    f.store
+        .record_followup("test", &request("op-1", "one"))
+        .unwrap();
+    f.store
+        .record_followup("test", &request("op-2", "two"))
+        .unwrap();
+    let unknown = Delivery::Unknown;
+    f.store
+        .mark_followup("test", "assignment", "op-1", &unknown)
+        .unwrap();
+    let pending = f.store.undelivered_followups("test", "assignment").unwrap();
+    assert_eq!(pending.len(), 2, "unknown is retried, never delivered");
+    assert_eq!(
+        f.store.followups("test", "assignment").unwrap()[0].delivery,
+        "unknown"
+    );
+    let done = Delivery::Delivered {
+        admission_id: "7".into(),
+    };
+    f.store
+        .mark_followup("test", "assignment", "op-1", &done)
+        .unwrap();
+    f.store
+        .mark_followup("test", "assignment", "op-1", &done)
+        .unwrap();
+    f.store
+        .mark_followup("test", "assignment", "op-1", &unknown)
+        .unwrap();
+    let rows = f.reopen().followups("test", "assignment").unwrap();
+    assert_eq!(
+        (rows[0].delivery.as_str(), rows[0].admission_id.as_deref()),
+        ("delivered", Some("7"))
+    );
+    assert_eq!(rows[1].delivery, "recorded");
+    assert!(
+        f.store
+            .mark_followup(
+                "test",
+                "assignment",
+                "op-1",
+                &Delivery::Delivered {
+                    admission_id: "8".into()
+                }
+            )
+            .is_err()
+    );
+    assert_eq!(
+        code(
+            f.store
+                .mark_followup("test", "assignment", "nope", &unknown)
+        ),
+        "followup-not-recorded"
+    );
+    assert_eq!(
+        f.store
+            .undelivered_followups("test", "assignment")
+            .unwrap()
+            .len(),
+        1
+    );
+}

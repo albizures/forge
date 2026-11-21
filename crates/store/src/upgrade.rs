@@ -31,7 +31,8 @@ const APPLICATION_ID: i64 = 0x464f_5247;
 #[cfg(test)]
 pub(crate) fn remove_durable_expansion(c: &Connection) {
     c.execute_batch(
-        "DROP TABLE durable_assignment_followups;
+        "DROP TABLE durable_assignment_followup_deliveries;
+        DROP TABLE durable_assignment_followups;
         DROP TABLE durable_assignment_retirements;
         DROP TABLE assignment_authorization_leases;
         DROP TABLE durable_assignment_runtimes;

@@ -34,3 +34,11 @@ Controlled T12 increment. **Delivery into the runtime conversation is not implem
 
 - Rust-side delivery driver, persisted "delivered/unknown" states and real-supervisor composition. The runner-side idempotent submit and committed transcript entry are now done (see above).
 - No unauthorized tool/model call assertions beyond: recording touches only Forge's store.
+
+
+## Daemon delivery completion
+
+- Delivery state lives in `durable_assignment_followup_deliveries` (`unknown` -> `delivered`, final, append-only; added to the unreleased schema 23 DDL, so no revision bump). `Receipt` now reports `delivery` (`recorded`/`unknown`/`delivered`) and `admission_id`.
+- The recovery grant driver (`durable_authorization/recovery.rs`) sends undelivered follow-ups only after the runner's `resumed` event and only while it still renews authority. It commits `unknown` before the write, never downgrades `delivered`, and records `delivered` only from the runner's `followup-accepted` event. A `followup-failed` event or fenced pipe stays `unknown` and is never faked.
+- Tests: store delivery-state test; actual daemon reconcile -> real host/Node worker test (`daemon_delivers_a_recorded_follow_up_once_to_the_resumed_original_conversation`) confirms `delivered`, one record, unchanged attempt, nothing left undelivered. Gates: 847 Rust passed, 0 failed, clippy clean; runner typecheck and 90 Node tests pass (real Node 24 on PATH).
+- Not separately asserted at daemon level: model-call counts for the follow-up input and a follow-up queued while an effect is unresolved. These rest on the store gate (all five blocking kinds), the runner's `requireNoInterruptedEffects` check and the runner Node test.

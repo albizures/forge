@@ -75,6 +75,23 @@ pub struct Receipt {
     pub recorded_at_millis: u64,
     /// True when an exact retry returned the original record without a new one.
     pub replayed: bool,
+    /// `recorded` (not yet sent), `unknown` (sent or attempted; admission unconfirmed)
+    /// or `delivered` (the runtime committed the input).
+    #[serde(default = "recorded")]
+    pub delivery: String,
+    #[serde(default)]
+    pub admission_id: Option<String>,
+}
+
+fn recorded() -> String {
+    "recorded".into()
+}
+
+/// Delivery progress reported by the matched runtime.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Delivery {
+    Unknown,
+    Delivered { admission_id: String },
 }
 
 pub trait Repository: Send + Sync {
@@ -98,6 +115,26 @@ pub trait Repository: Send + Sync {
         workspace: &str,
         assignment: &str,
     ) -> Result<Vec<Receipt>, RegistrationError>;
+    /// Recorded follow-ups not yet confirmed delivered, in order. `unknown` ones
+    /// are included: the runtime deduplicates by operation ID, so a resend is safe.
+    /// # Errors
+    /// Rejects unauthorized scope and invalid retained rows.
+    fn undelivered_followups(
+        &self,
+        workspace: &str,
+        assignment: &str,
+    ) -> Result<Vec<Request>, RegistrationError>;
+    /// Persist delivery progress. `delivered` is final and idempotent; `unknown`
+    /// never downgrades a delivered record.
+    /// # Errors
+    /// Rejects unauthorized scope, unrecorded operations and storage failures.
+    fn mark_followup(
+        &self,
+        workspace: &str,
+        assignment: &str,
+        operation_id: &str,
+        delivery: &Delivery,
+    ) -> Result<(), RegistrationError>;
 }
 
 #[cfg(test)]

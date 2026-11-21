@@ -16,11 +16,14 @@ try {
       await new Promise(() => {});
     }
     const provider = fauxProvider();
-    provider.setResponses([() => {
+    const model = () => {
       appendFileSync(join(directory, 'controlled-recovery-models'), 'model\n');
+      // Keep the first answer in flight so the daemon can send recorded input.
+      if (existsSync(join(directory, 'controlled-slow-model'))) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1500);
       console.log(JSON.stringify({ event: 'recovered-model' }));
       return fauxAssistantMessage('Recovered the original bound input; not an accepted Forge Outcome.');
-    }]);
+    };
+    provider.setResponses([model, model]);
     const models = createModels({ authContext: { env: async () => undefined, fileExists: async () => false } });
     models.setProvider(guardProvider(provider.provider, authorization));
     return { models, registry: createRegistry(), settings: { retry: { enabled: false }, compaction: { enabled: false } }, env: () => undefined };
