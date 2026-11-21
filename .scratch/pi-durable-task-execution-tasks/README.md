@@ -49,7 +49,7 @@ Mark a Task complete only after its acceptance checks and required verification 
     - F3–F7;
     - the M2′ residuals, M6 and RUST-3 items.
   - **Gates:** 931 Rust tests passed, twice in a row, plus 25 supervised scenarios; 99 Node tests.
-  - **Open, non-blocking:** M4 (managed daemon has no model credential, so the handoff is limited to manual daemons); no class (c) test; listed minors and test gaps.
+  - **Open, non-blocking:** no class (c) test; listed minors and test gaps. M4 was open at the third pass and was resolved afterwards ([addendum](../../docs/research/pi-durable-t18/README.md#m4-addendum--2026-11-21-snapshot-206f999-plus-the-follow-up-fix)).
   - T19 may start on `2097267`.
   - **Earlier passes:** the first pass was delivered blocking (2026-11-20, snapshot `1fc65a5`, diff `4870692..1fc65a5`).
   - **Blockers:**
