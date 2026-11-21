@@ -64,6 +64,34 @@ fn fresh(next: &supervised_dispatch::Report, previous: &supervised_dispatch::Rep
     assert_ne!(next.directory, previous.directory);
 }
 
+/// Explicit acceptance for the Continuation; the independent Review is launched by
+/// normal automatic scheduling (T16), through the release gate, only after accepted
+/// evidence and retirement.
+async fn launch(next: &SupervisedDispatch, record: u64, mode: &str) -> forge_app::AgentAssignment {
+    let dispatch = next.clone();
+    if mode == "review" {
+        tokio::task::spawn_blocking(move || {
+            let app = dispatch.app();
+            app.reconcile_agent_dispatch("t16-scheduler", 1).unwrap();
+            let store = SqliteProjectRepository::open(&dispatch.database).unwrap();
+            store.list_agent_assignments(record).unwrap().remove(0)
+        })
+        .await
+        .unwrap()
+    } else {
+        let (assignment, replay) = tokio::task::spawn_blocking(move || {
+            dispatch
+                .app()
+                .execute_task_check_acceptance(record)
+                .unwrap()
+        })
+        .await
+        .unwrap();
+        assert!(!replay);
+        assignment
+    }
+}
+
 pub(super) async fn run(
     adapter: &SupervisedDispatch,
     store: &SqliteProjectRepository,
@@ -85,16 +113,8 @@ pub(super) async fn run(
         next.mode = mode.into();
         next.provisions = Arc::new(AtomicUsize::new(0));
         next.reports = Arc::new(Mutex::new(vec![]));
-        let dispatch = next.clone();
-        let (assignment, replay) = tokio::task::spawn_blocking(move || {
-            dispatch
-                .app()
-                .execute_task_check_acceptance(record)
-                .unwrap()
-        })
-        .await
-        .unwrap();
-        assert!(!replay);
+        let assignment = launch(&next, record, mode).await;
+        assert_eq!(next.provisions.load(std::sync::atomic::Ordering::SeqCst), 1);
         let mut report = next.reports.lock().unwrap().pop().unwrap();
         assert_eq!(report.answer, Some(AnswerObservation::OutcomeAccepted));
         let attempt = store

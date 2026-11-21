@@ -208,6 +208,18 @@ pub trait AgentDispatchApi {
         &self,
         request: SelectedRecordRequest<forge_app::durable_execution::purge::Request>,
     ) -> RpcResult<forge_app::durable_execution::purge::Record>;
+    /// Read the persisted new-durable-launch policy. Starts nothing and contacts no provider.
+    #[method(name = "durableLaunchStatus")]
+    async fn durable_launch_status(
+        &self,
+    ) -> RpcResult<forge_app::durable_execution::launch_control::Status>;
+    /// Sticky rollback of NEW durable launches. Never moves, retires or rebinds existing
+    /// Assignments, rewrites Check pins or affects Herdr Tasks/Grilling.
+    #[method(name = "durableLaunchDisable")]
+    async fn durable_launch_disable(
+        &self,
+        request: forge_app::durable_execution::launch_control::DisableRequest,
+    ) -> RpcResult<forge_app::durable_execution::launch_control::Status>;
     #[method(name = "assignmentFollowUp")]
     async fn assignment_follow_up(
         &self,

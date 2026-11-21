@@ -283,6 +283,11 @@ mod recovery {
     include!("workspace_recovery_tests.rs");
 }
 
+mod rollout {
+    use super::*;
+    include!("rollout_tests.rs");
+}
+
 fn has(ready: &forge_app::WorkspaceDispatchReadiness, code: &str) -> bool {
     ready.blockers.iter().any(|blocker| blocker.code == code)
 }

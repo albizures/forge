@@ -6,6 +6,8 @@
 mod supervised_chain;
 #[path = "support/supervised_dispatch.rs"]
 mod supervised_dispatch;
+#[path = "support/supervised_rollback.rs"]
+mod supervised_rollback;
 use forge_app::{
     AgentDispatchRepository, ExecutionMode, ManagedWorktreeRepository, NewTypedRecord, Project,
     ProjectRepository, RecordRepository, RecordStatus, RecordType, WorkspaceDispatchRepository,
@@ -324,12 +326,20 @@ async fn scenario(mode: &str) {
                 )
                 .unwrap(),
         ),
+        launch: {
+            let launch =
+                forge_server::durable_authorization::release_gate::LaunchControl::default();
+            assert!(launch.enable_controlled());
+            launch
+        },
     };
     // Embed the actual server with the explicitly injected controlled adapter.
     // Only this test drives scheduling: a second default Herdr reconciler must
     // not concurrently administer the controlled durable Assignment.
     let server = Daemon::new(adapter.app())
-        .with_assignment_capability_root(root.join("assignment-capabilities"));
+        .with_assignment_capability_root(root.join("assignment-capabilities"))
+        .with_durable_operator_store(&database)
+        .unwrap();
     let daemon = tokio::spawn(async move {
         axum::serve(
             listener,
@@ -388,7 +398,7 @@ async fn scenario(mode: &str) {
         println!("T10 supervised continuation/review chain: passed");
         return;
     }
-    if matches!(mode, "accepted" | "retired" | "recovered") {
+    if matches!(mode, "accepted" | "retired" | "recovered" | "rollback") {
         assert_eq!(report.answer, Some(AnswerObservation::OutcomeAccepted));
         assert_eq!(
             store.show_record(record).unwrap().status,
@@ -470,7 +480,10 @@ async fn scenario(mode: &str) {
             );
         }
     }
-    if matches!(mode, "accepted" | "rejected" | "retired" | "recovered") {
+    if matches!(
+        mode,
+        "accepted" | "rejected" | "retired" | "recovered" | "rollback"
+    ) {
         assert_eq!(
             fs::read_to_string(report.directory.join("controlled-effects")).unwrap(),
             "effect\n"
@@ -488,7 +501,10 @@ async fn scenario(mode: &str) {
             .is_empty()
     );
     assert_eq!(adapter.provisions.load(Ordering::SeqCst), 1);
-    if mode == "retired" {
+    if mode == "rollback" {
+        supervised_rollback::disable(&adapter, record, &assignment.id, &capability, &profile);
+    }
+    if matches!(mode, "retired" | "rollback") {
         // Actual CLI/RPC -> application revocation -> registered original host.
         // Historical cleanup must survive missing source/authentication files.
         fs::remove_file(&model_key).unwrap();
@@ -524,7 +540,9 @@ async fn scenario(mode: &str) {
             if !success {
                 assert!(
                     String::from_utf8_lossy(&output.stderr)
-                        .contains("assignment-retirement-unreconciled")
+                        .contains("assignment-retirement-unreconciled"),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
                 );
             }
         };
@@ -602,6 +620,9 @@ async fn scenario(mode: &str) {
         );
         assert_eq!(adapter.provisions.load(Ordering::SeqCst), 1);
         report.finish_retired(&capability);
+        if mode == "rollback" {
+            supervised_rollback::refused_after_retirement(&adapter, &store, replacement);
+        }
     } else {
         // Explicit fixture closure is not retirement proof. Reopening retains all
         // resources/capacity/diagnostics and never rewrites the accepted admission.
@@ -649,7 +670,7 @@ fn main() {
             std::process::exit(1);
         }
     } else if args.iter().any(|arg| arg == "--list") {
-        println!("T07/T09/T10 supervised tracer (nine parallel controlled scenarios)");
+        println!("T07/T09/T10 supervised tracer (ten parallel controlled scenarios)");
     } else {
         // Parallel isolated scenarios are intentional, not a serial-test waiver.
         tokio::runtime::Builder::new_multi_thread()
@@ -668,6 +689,7 @@ fn main() {
                     "bootstrap-denied",
                     "bootstrap-uncertain",
                     "revoked",
+                    "rollback",
                 ];
                 let handles = modes.map(|mode| tokio::spawn(scenario(mode)));
                 let mut failures = vec![];
@@ -681,6 +703,6 @@ fn main() {
                     "supervised tracer scenarios failed: {failures:?}"
                 );
             });
-        println!("T07/T09/T10 supervised tracer: 9 scenarios passed");
+        println!("T07/T09/T10 supervised tracer: 10 scenarios passed");
     }
 }

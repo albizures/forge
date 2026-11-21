@@ -10,6 +10,21 @@ impl crate::Daemon {
         self.capability_secret_root = Some(root);
         self
     }
+
+    /// Attach the operator service over the embedded server's retained store, as
+    /// production `serve` does. Grants no launch eligibility.
+    ///
+    /// # Errors
+    /// Returns store-open failures.
+    pub fn with_durable_operator_store(
+        mut self,
+        store: &std::path::Path,
+    ) -> Result<Self, forge_app::RegistrationError> {
+        self.durable_effect_resolution = Some(std::sync::Arc::new(
+            crate::durable_authorization::operator::OperatorService::new(store, None)?,
+        ));
+        Ok(self)
+    }
 }
 
 /// Wrap an explicitly selected provider with server-owned capability delivery.

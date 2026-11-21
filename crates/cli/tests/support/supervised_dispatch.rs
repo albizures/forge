@@ -71,6 +71,8 @@ pub struct SupervisedDispatch {
     pub provisions: Arc<AtomicUsize>,
     pub reports: Arc<Mutex<Vec<Report>>>,
     pub retirement: Arc<forge_server::durable_authorization::retirement::Controller>,
+    /// Explicit controlled eligibility for this verification composition only.
+    pub launch: forge_server::durable_authorization::release_gate::LaunchControl,
 }
 
 impl SupervisedDispatch {
@@ -82,7 +84,15 @@ impl SupervisedDispatch {
             Box::new(forge_server::GitWorktreeAdapter),
             open(),
             forge_server::assignment_delivery::adapter_factory(
-                Box::new(self.clone()),
+                // Every scenario runs through the production release gate and its
+                // persisted rollback, with controlled eligibility granted explicitly.
+                Box::new(
+                    forge_server::durable_authorization::release_gate::ReleaseGate {
+                        control: self.launch.clone(),
+                        rollback_store: Some(self.database.clone()),
+                        inner: Box::new(self.clone()),
+                    },
+                ),
                 self.endpoint.clone(),
                 self.root.join("assignment-capabilities"),
                 self.cli.clone(),
@@ -353,7 +363,7 @@ impl SupervisedDispatch {
         let secret = fs::read_to_string(&delivery.secret_file).unwrap();
         let retained_process = if matches!(
             self.mode.as_str(),
-            "retired" | "continuation-chain" | "chain-complete" | "review"
+            "retired" | "rollback" | "continuation-chain" | "chain-complete" | "review"
         ) {
             let mut placeholder = Command::new("/bin/true").spawn().unwrap();
             placeholder.wait().unwrap();

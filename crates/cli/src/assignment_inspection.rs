@@ -272,3 +272,71 @@ pub fn render_transcript(page: &AssignmentTranscriptResponse) -> String {
     );
     out
 }
+
+/// # Errors
+/// Returns transport or daemon read errors. Nothing is started or changed.
+pub async fn request_durable_launch_status(
+    endpoint: impl Into<RecordEndpoint>,
+) -> Result<forge_rpc::DurableLaunchStatus, String> {
+    let endpoint = endpoint.into();
+    client(&endpoint)?
+        .durable_launch_status()
+        .await
+        .map_err(|error| {
+            format!("could not read durable launch policy through Forge daemon: {error}")
+        })
+}
+
+/// # Errors
+/// Returns validation, transport or daemon errors; a failed request records nothing.
+pub async fn request_durable_launch_disable(
+    endpoint: impl Into<RecordEndpoint>,
+    request: forge_rpc::DurableLaunchDisableRequest,
+) -> Result<forge_rpc::DurableLaunchStatus, String> {
+    let endpoint = endpoint.into();
+    client(&endpoint)?
+        .durable_launch_disable(request)
+        .await
+        .map_err(|error| {
+            format!("could not disable durable launches through Forge daemon: {error}")
+        })
+}
+
+#[must_use]
+pub fn render_durable_launch(status: &forge_rpc::DurableLaunchStatus) -> String {
+    use forge_rpc::DurableLaunchState as State;
+    let mut out = String::new();
+    let state = match status.state {
+        State::Withheld => "withheld (pending release verification)",
+        State::Controlled => "controlled (verification composition only)",
+        State::Disabled => "disabled (rolled back)",
+    };
+    let _ = writeln!(out, "New durable launches: {state}");
+    let _ = writeln!(
+        out,
+        "Admitted by this daemon: {}",
+        if status.new_launches_admitted {
+            "yes"
+        } else {
+            "no"
+        }
+    );
+    if let Some(rollback) = &status.rollback {
+        let _ = writeln!(
+            out,
+            "Rollback: operation {} at {} ms{}\nReason: {}",
+            rollback.operation_id,
+            rollback.disabled_at_millis,
+            if status.replayed {
+                " (already recorded; unchanged)"
+            } else {
+                ""
+            },
+            rollback.reason
+        );
+    }
+    for note in &status.notes {
+        let _ = writeln!(out, "{note}");
+    }
+    out.trim_end().to_owned()
+}

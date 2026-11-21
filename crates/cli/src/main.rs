@@ -409,6 +409,10 @@ enum AgentDispatchCommand {
     RecoverRetainedWork(RecoverRetainedWorkArgs),
     /// Explicitly delete a retired Assignment's runtime history; Forge's own records are kept.
     AssignmentPurgeRuntime(assignment_inspection_command::PurgeArgs),
+    /// Read whether this daemon admits NEW durable launches (withheld by default); starts nothing.
+    DurableLaunchStatus(assignment_inspection_command::LaunchStatusArgs),
+    /// Sticky rollback of NEW durable launches; existing Assignments keep their original backend.
+    DurableLaunchDisable(assignment_inspection_command::LaunchDisableArgs),
     /// Clear a Dispatch Hold and reset interrupted-Check retries (not remediation or recovery blockers).
     Resume(DispatchTaskArgs),
     /// Inspect persisted Assignment evidence without contacting the provider.
@@ -1513,6 +1517,12 @@ async fn agent_dispatch(command: AgentDispatchCommand, workspace: Option<String>
         }
         AgentDispatchCommand::AssignmentPurgeRuntime(args) => {
             return assignment_inspection_command::purge_runtime(args, workspace).await;
+        }
+        AgentDispatchCommand::DurableLaunchStatus(args) => {
+            return assignment_inspection_command::launch_status(args, workspace).await;
+        }
+        AgentDispatchCommand::DurableLaunchDisable(args) => {
+            return assignment_inspection_command::launch_disable(args, workspace).await;
         }
         AgentDispatchCommand::AssignmentRetire(args) => return dispatcher_retire(args).await,
     };

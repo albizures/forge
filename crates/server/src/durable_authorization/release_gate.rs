@@ -5,12 +5,17 @@
 //! existing Assignment keeps its original backend for inspection, recovery and retirement.
 //! Default eligibility is withheld; nothing in production composition can enable it before
 //! the retained verification gate (T19) and release handoff (T20).
+use forge_app::durable_execution::launch_control::Repository as _;
 use forge_app::{
     AgentAdapterError, AgentDispatchAdapter, AgentDispatchAdapterFactory, AgentProfile,
 };
-use std::sync::{
-    Arc,
-    atomic::{AtomicU8, Ordering},
+use forge_store::SqliteProjectRepository;
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicU8, Ordering},
+    },
 };
 
 const WITHHELD: u8 = 0;
@@ -71,7 +76,33 @@ impl LaunchControl {
 
 pub struct ReleaseGate {
     pub control: LaunchControl,
+    /// Store holding the persisted, sticky operator rollback. When set, it is read on every
+    /// new-launch validation and an unreadable store refuses (fails closed).
+    pub rollback_store: Option<PathBuf>,
     pub inner: Box<dyn AgentDispatchAdapterFactory>,
+}
+
+impl ReleaseGate {
+    fn admit(&self) -> Result<(), AgentAdapterError> {
+        if let Some(path) = &self.rollback_store {
+            match SqliteProjectRepository::open(path)
+                .and_then(|store| store.durable_launch_rollback())
+            {
+                Ok(None) => {}
+                Ok(Some(_)) => {
+                    // Mirror the persisted rollback so no racing enable can undo it here.
+                    self.control.disable();
+                }
+                Err(error) => {
+                    return Err(AgentAdapterError::InvalidRequest(format!(
+                        "durable launch policy is unreadable ({}); new durable launches are refused",
+                        error.code
+                    )));
+                }
+            }
+        }
+        self.control.admit()
+    }
 }
 
 fn durable(profile: &AgentProfile) -> bool {
@@ -81,13 +112,13 @@ fn durable(profile: &AgentProfile) -> bool {
 impl AgentDispatchAdapterFactory for ReleaseGate {
     fn validate_profile(&self, profile: &AgentProfile) -> Result<(), AgentAdapterError> {
         if durable(profile) {
-            self.control.admit()?;
+            self.admit()?;
         }
         self.inner.validate_profile(profile)
     }
     fn validate_preflight(&self, profile: &AgentProfile) -> Result<(), AgentAdapterError> {
         if durable(profile) {
-            self.control.admit()?;
+            self.admit()?;
         }
         self.inner.validate_preflight(profile)
     }
@@ -160,6 +191,7 @@ mod tests {
         let control = LaunchControl::default();
         let gate = ReleaseGate {
             control: control.clone(),
+            rollback_store: None,
             inner: Box::new(Inner(calls.clone())),
         };
         assert_eq!(control.state(), LaunchState::Withheld);
@@ -178,6 +210,7 @@ mod tests {
         let control = LaunchControl::default();
         let gate = ReleaseGate {
             control: control.clone(),
+            rollback_store: None,
             inner: Box::new(Inner(calls.clone())),
         };
         assert!(control.enable_controlled());
@@ -195,5 +228,69 @@ mod tests {
         assert!(adapter.probe().is_ok());
         // Herdr remains available throughout.
         assert!(gate.validate_profile(&profile("herdr")).is_ok());
+    }
+
+    #[test]
+    fn persisted_rollback_refuses_across_restart_and_unreadable_policy_fails_closed() {
+        use forge_app::durable_execution::launch_control::{DisableRequest, Repository};
+        let root = std::env::temp_dir().join(format!(
+            "forge-release-gate-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("forge.sqlite3");
+        drop(SqliteProjectRepository::open(&path).unwrap());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let gate = |control: LaunchControl, store: PathBuf| ReleaseGate {
+            control,
+            rollback_store: Some(store),
+            inner: Box::new(Inner(calls.clone())),
+        };
+        let first = LaunchControl::default();
+        assert!(first.enable_controlled());
+        assert!(
+            gate(first.clone(), path.clone())
+                .validate_preflight(&profile("pi-durable"))
+                .is_ok()
+        );
+        SqliteProjectRepository::open(&path)
+            .unwrap()
+            .disable_durable_launches(&DisableRequest {
+                operation_id: "rollback-1".into(),
+                reason: "incident".into(),
+            })
+            .unwrap();
+        // The same process observes the persisted rollback and becomes sticky disabled.
+        let live = gate(first.clone(), path.clone());
+        assert!(live.validate_preflight(&profile("pi-durable")).is_err());
+        assert_eq!(first.state(), LaunchState::Disabled);
+        // "Restart": a fresh control that a verification composition tries to enable.
+        let restarted = LaunchControl::default();
+        assert!(restarted.enable_controlled());
+        let after = gate(restarted.clone(), path.clone());
+        let refused = after.validate_profile(&profile("pi-durable"));
+        assert!(
+            matches!(refused, Err(AgentAdapterError::InvalidRequest(m)) if m.contains("disabled"))
+        );
+        assert_eq!(restarted.state(), LaunchState::Disabled);
+        // Original-backend operations and Herdr remain available.
+        assert!(after.adapter_for(&profile("pi-durable")).is_ok());
+        assert!(after.validate_profile(&profile("herdr")).is_ok());
+        // An unreadable policy store refuses new durable launches only.
+        let missing = root.join("not-a-dir").join("missing").join("forge.sqlite3");
+        std::fs::write(root.join("not-a-dir"), b"file").unwrap();
+        let control = LaunchControl::default();
+        assert!(control.enable_controlled());
+        let broken = gate(control, missing);
+        let refused = broken.validate_preflight(&profile("pi-durable"));
+        assert!(
+            matches!(refused, Err(AgentAdapterError::InvalidRequest(m)) if m.contains("unreadable"))
+        );
+        assert!(broken.validate_preflight(&profile("herdr")).is_ok());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

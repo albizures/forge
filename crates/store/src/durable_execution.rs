@@ -10,6 +10,7 @@ mod completion;
 mod effect_resolution;
 mod effects;
 mod followup;
+mod launch_control;
 mod purge;
 mod recovery;
 mod recovery_authorization;
@@ -28,6 +29,8 @@ pub(super) fn schema(c: &Connection) -> Result<(), RegistrationError> {
     c.execute_batch(include_str!("upgrade/check_profile_migrations.sql"))
         .map_err(storage_error)?;
     c.execute_batch(include_str!("upgrade/durable_purges.sql"))
+        .map_err(storage_error)?;
+    c.execute_batch(include_str!("upgrade/durable_launch_controls.sql"))
         .map_err(storage_error)
 }
 

@@ -1348,6 +1348,16 @@ or admission rejected, no unretired resource, no Dispatch Hold) in one immediate
 transaction; an exact retry returns the original record. The filesystem step runs
 outside the transaction, and `finish_purge` records the result.
 
+### Durable launch rollback (schema revision 23)
+
+`durable_launch_rollbacks(id = 1, operation_id, reason, disabled_at_millis)` holds at most
+one sticky operator rollback of NEW durable launches. Rows can be neither updated nor
+deleted. `disable_durable_launches` validates the request, then in one immediate
+transaction returns any existing row unchanged (`replayed`) or inserts the first one.
+The release gate reads it on every new durable admission and refuses when it exists or
+cannot be read. It never touches Assignments, Check pins or Workspace selections, and
+there is no stored "enabled" state: default eligibility is withheld in code.
+
 ### Check profile migration tables (schema revision 23)
 
 `check_profile_migrations(id, record_id, operation_id, request_sha256, actor, message,

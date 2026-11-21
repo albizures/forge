@@ -286,6 +286,19 @@ impl Daemon {
     }
 }
 
+impl Daemon {
+    fn durable_launch_service(
+        &self,
+    ) -> RpcResult<&durable_authorization::operator::OperatorService> {
+        self.durable_effect_resolution.as_deref().ok_or_else(|| {
+            rpc_error(RegistrationError::new(
+                "durable-launch-policy-unconfigured",
+                "durable launch policy requires the daemon's retained store",
+            ))
+        })
+    }
+}
+
 /// Git command implementation kept at the daemon composition edge.
 pub struct GitInspector;
 
@@ -917,6 +930,7 @@ fn application_from_config_with_cli(
             provider: Box::new(durable_authorization::release_gate::ReleaseGate {
                 // Default eligibility stays withheld until T19 evidence and T20 handoff.
                 control: durable_authorization::release_gate::LaunchControl::default(),
+                rollback_store: Some(config.store_path.clone()),
                 inner: Box::new(durable_authorization::retirement::Factory {
                     database: config.store_path.clone(),
                     controller: Arc::new(match &config.durable_inspection {
@@ -1275,6 +1289,23 @@ impl AgentDispatchApiServer for Daemon {
         })?;
         service
             .purge_runtime(&workspace, &request.record)
+            .map_err(rpc_error)
+    }
+
+    async fn durable_launch_status(
+        &self,
+    ) -> RpcResult<forge_app::durable_execution::launch_control::Status> {
+        self.durable_launch_service()?
+            .durable_launch_status()
+            .map_err(rpc_error)
+    }
+
+    async fn durable_launch_disable(
+        &self,
+        request: forge_app::durable_execution::launch_control::DisableRequest,
+    ) -> RpcResult<forge_app::durable_execution::launch_control::Status> {
+        self.durable_launch_service()?
+            .disable_durable_launches(&request)
             .map_err(rpc_error)
     }
 

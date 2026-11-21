@@ -118,6 +118,31 @@ impl OperatorService {
         )
     }
 
+    /// Persisted new-launch policy. Production composition never grants controlled
+    /// eligibility (T19/T20 own that), so admission is reported as not granted.
+    pub(crate) fn durable_launch_status(
+        &self,
+    ) -> Result<forge_app::durable_execution::launch_control::Status, RegistrationError> {
+        use forge_app::durable_execution::launch_control::{Repository, Status};
+        Ok(Status::compose(
+            self.repository.durable_launch_rollback()?,
+            false,
+        ))
+    }
+
+    /// Record the sticky rollback; existing Assignments and Herdr work are untouched.
+    pub(crate) fn disable_durable_launches(
+        &self,
+        request: &forge_app::durable_execution::launch_control::DisableRequest,
+    ) -> Result<forge_app::durable_execution::launch_control::Status, RegistrationError> {
+        use forge_app::durable_execution::launch_control::{Repository, Status};
+        request.validate()?;
+        let (rollback, replayed) = self.repository.disable_durable_launches(request)?;
+        let mut status = Status::compose(Some(rollback), false);
+        status.replayed = replayed;
+        Ok(status)
+    }
+
     /// Delete retired runtime history after Forge authorizes it. Needs no runtime
     /// components, profile or credential and never starts a runner.
     pub(crate) fn purge_runtime(

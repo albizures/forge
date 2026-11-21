@@ -4,6 +4,10 @@ use crate::AgentAssignmentInfoResponse;
 pub use forge_app::durable_execution::followup::{
     Receipt as FollowUpReceipt, Request as FollowUpRequest,
 };
+pub use forge_app::durable_execution::launch_control::{
+    DisableRequest as DurableLaunchDisableRequest, State as DurableLaunchState,
+    Status as DurableLaunchStatus,
+};
 pub use forge_app::durable_execution::purge::{
     Record as RuntimePurgeRecord, Request as RuntimePurgeRequest,
 };

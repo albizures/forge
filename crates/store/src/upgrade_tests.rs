@@ -403,6 +403,7 @@ fn follow_up_expansion_is_empty_and_stamp_failure_preserves_schema_twenty_two() 
         "check_profile_migrations",
         "check_profile_migration_changes",
         "durable_runtime_purges",
+        "durable_launch_rollbacks",
     ] {
         assert_eq!(
             after.tables.iter().find(|t| t.name == table).unwrap().rows,

@@ -224,3 +224,86 @@ pub async fn transcript(args: TranscriptArgs, workspace: Option<String>) -> i32 
         }
     }
 }
+
+#[derive(Debug, Args)]
+#[command(
+    after_long_help = "Examples:\n  forge dispatcher durable-launch-status\n  forge dispatcher durable-launch-status --json\n\nReports whether this daemon admits NEW durable launches. Default eligibility is withheld pending release verification. Reads persisted policy only; starts and contacts nothing."
+)]
+pub struct LaunchStatusArgs {
+    #[arg(long, value_name = "URL")]
+    server_url: Option<String>,
+    /// Print the typed status as one JSON object on stdout.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+#[command(
+    after_long_help = "Examples:\n  forge dispatcher durable-launch-disable --operation-id rollback-1 --reason 'incident 42'\n\nRolls back NEW durable launches for this store, permanently. Existing durable Assignments keep their original backend: status, transcripts, follow-ups, recovery, retirement and purge still work, and nothing is moved to Herdr. Check pins and Workspace selections are not rewritten; Herdr Tasks and Grilling are unaffected. A repeated request returns the first retained rollback unchanged."
+)]
+pub struct LaunchDisableArgs {
+    /// Stable identity for safe retries (letters, digits, - _ . :; up to 128 bytes).
+    #[arg(long, value_name = "ID")]
+    operation_id: String,
+    /// Why new durable launches are being stopped (retained as audit).
+    #[arg(long)]
+    reason: String,
+    #[arg(long, value_name = "URL")]
+    server_url: Option<String>,
+    /// Print the typed status as one JSON object on stdout.
+    #[arg(long)]
+    json: bool,
+}
+
+fn print_launch(status: &forge_rpc::DurableLaunchStatus, json: bool) {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(status).expect("typed status serializes")
+        );
+    } else {
+        println!("{}", forge_cli::render_durable_launch(status));
+    }
+}
+
+pub async fn launch_status(args: LaunchStatusArgs, workspace: Option<String>) -> i32 {
+    let endpoint = super::resolve_endpoint(args.server_url.as_deref()).await;
+    match forge_cli::request_durable_launch_status((endpoint.as_str(), workspace.as_deref())).await
+    {
+        Ok(status) => {
+            print_launch(&status, args.json);
+            0
+        }
+        Err(error) => {
+            eprintln!("forge dispatcher durable-launch-status: {error}");
+            1
+        }
+    }
+}
+
+pub async fn launch_disable(args: LaunchDisableArgs, workspace: Option<String>) -> i32 {
+    let request = forge_rpc::DurableLaunchDisableRequest {
+        operation_id: args.operation_id,
+        reason: args.reason,
+    };
+    if let Err(error) = request.validate() {
+        eprintln!("forge dispatcher durable-launch-disable: {}", error.message);
+        return 1;
+    }
+    let endpoint = super::resolve_endpoint(args.server_url.as_deref()).await;
+    match forge_cli::request_durable_launch_disable(
+        (endpoint.as_str(), workspace.as_deref()),
+        request,
+    )
+    .await
+    {
+        Ok(status) => {
+            print_launch(&status, args.json);
+            0
+        }
+        Err(error) => {
+            eprintln!("forge dispatcher durable-launch-disable: {error}");
+            1
+        }
+    }
+}
