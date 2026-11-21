@@ -120,7 +120,7 @@ Mark a Task complete only after its acceptance checks and required verification 
   - **Gates:** all four repository gates pass (925 Rust tests plus 25 supervised scenarios; 1 pre-existing opt-in ignored), runner typecheck and 99 Node tests. One transient leased-expiry test failure under full load is recorded, not claimed fixed.
   - **Not claimed:** real provider; Forgeup-managed daemon (M4); `Unknown` admissions.
   - **Next:** the T18 third-pass re-review. Production durable dispatch stays withheld.
-- [x] [T19 — Verify integration and recovery](19-verify-integration-and-recovery.md) — [verification report](../../docs/research/pi-durable-t19/README.md):
+- [ ] [T19 — Verify integration and recovery](19-verify-integration-and-recovery.md) — **Incomplete: the real-provider gate awaits operator authorization and an isolated credential.** Deterministic part delivered: [verification report](../../docs/research/pi-durable-t19/README.md):
   - **Snapshot:** reviewed snapshot `2097267`; verified tree `6cd2e44`, which differs only in documentation.
   - **Identities:** runner component `8991977e…`, protocol 1, runtime schema 2, store schema 25, pi-durable 1.5.2, Node 24.18.0.
   - **Gates, all pass:** fmt and clippy; 931 Rust tests, twice in a row; 25 real-process tracer scenarios; 99 Node tests; packaging, with the bundle manifest hash matching the source attestation.
@@ -128,7 +128,7 @@ Mark a Task complete only after its acceptance checks and required verification 
   - **Real-provider Implementation → Review gate:** **UNRUN**. No operator-authorized, isolated credential or environment was available. The steps to run it are documented.
   - **Managed-daemon launch:** impossible (M4).
   - **Result:** default-rollout approval is **withheld**.
-- [x] [T20 — Deliver release handoff](20-publish-release-handoff.md) — [readiness decision and handoff](../../docs/research/pi-durable-t20/README.md):
+- [ ] [T20 — Deliver release handoff](20-publish-release-handoff.md) — **Provisional: it rests on T19, which is incomplete.** [Current withheld-readiness handoff](../../docs/research/pi-durable-t20/README.md):
   - **Readiness: WITHHELD.** The remaining reason is the unrun real-provider gate (AC22).
   - **M4 resolved afterwards** (`206f999` plus its fix): `forgeup daemon start --durable-openai-key-file`. It was re-reviewed and the gates were renewed (932 Rust tests, 25 scenarios).
   - **Contents:** the passing component identities and compatibility matrix; the prerequisites for granting readiness; the conditions that revoke readiness or require renewed verification; an operator adoption checklist (not to be performed while withheld); the rollback procedure (old Herdr and durable Assignments keep their backends, Grilling stays on Herdr); and retained storage and transcript limits.
