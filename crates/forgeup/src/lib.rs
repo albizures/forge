@@ -347,7 +347,11 @@ pub fn register_with_options(
     )
 }
 
-fn register_at(
+/// [`register_with_options`] against an explicit Forgeup layout instead of the
+/// environment's (for isolated callers and tests).
+/// # Errors
+/// Same as [`register_with_options`].
+pub fn register_at(
     paths: &ForgeupPaths,
     source_label: &str,
     cli: &Path,
@@ -696,19 +700,24 @@ pub fn verify_runner(
     Ok(runner)
 }
 
-/// Finds the retained Installation whose verified runner has exactly this tree hash,
-/// so cleanup/recovery of a retained Assignment uses its original compatible
-/// component, never whichever Revision is currently active or any PATH/npm runner.
+/// Finds the retained Installation whose verified runner has exactly this
+/// component identity: either its bundle tree hash or the runner component hash
+/// that a durable Launch records. Cleanup/recovery of a retained Assignment
+/// thereby uses its original compatible component, never whichever Revision is
+/// currently active or any PATH/npm runner.
 /// # Errors
 /// Fails closed when no registered Revision provides that exact verified component.
-pub fn runner_for_component(tree_sha256: &str) -> Result<Installation, ForgeupError> {
+pub fn runner_for_component(hash: &str) -> Result<Installation, ForgeupError> {
     let paths = ForgeupPaths::from_environment()?;
-    runner_for_component_at(&paths, tree_sha256)
+    runner_for_component_at(&paths, hash)
 }
 
-fn runner_for_component_at(
+/// [`runner_for_component`] against an explicit Forgeup layout.
+/// # Errors
+/// Same as [`runner_for_component`].
+pub fn runner_for_component_at(
     paths: &ForgeupPaths,
-    tree_sha256: &str,
+    hash: &str,
 ) -> Result<Installation, ForgeupError> {
     let Some(store) = RegistryStore::open_read_only(paths.clone())? else {
         return Err(ForgeupError::NoActiveRevision);
@@ -718,7 +727,7 @@ fn runner_for_component_at(
         if installation
             .runner
             .as_ref()
-            .is_some_and(|r| r.tree_sha256 == tree_sha256)
+            .is_some_and(|r| r.tree_sha256 == hash || r.component_sha256.as_deref() == Some(hash))
         {
             verify_runner(&installation)?;
             return Ok(installation);
@@ -729,6 +738,68 @@ fn runner_for_component_at(
          retained Assignments are not redirected to another runner"
             .into(),
     ))
+}
+
+/// Durable launch inputs Forgeup passes to the managed daemon of `installation`.
+///
+/// - A schema 2 runner (with a packaged host) is passed as
+///   `--durable-runner-bundle ROOT`, which composes durable launch. Every *other*
+///   registered Installation whose schema 2 runner verifies, with a distinct
+///   component hash, is passed as `--durable-retained-runner-bundle ROOT`, so the
+///   daemon can inspect, recover and retire Assignments launched by an earlier
+///   Revision with their original components. A retained bundle that fails
+///   verification is left out (and diagnosed), so its Assignments refuse
+///   explicitly instead of switching code.
+/// - A schema 1 runner keeps the T15 inspection-only inputs `--durable-node` and
+///   `--durable-effect-inspector`.
+/// - No runner: no durable inputs.
+///
+/// The selected Installation's own runner must already be verified. `registry`
+/// is the caller's already loaded (and, for `daemon start`, locked) registry;
+/// this function never reopens it.
+/// # Errors
+/// Fails when a diagnostic cannot be recorded.
+pub fn managed_durable_arguments(
+    paths: &ForgeupPaths,
+    registry: &Registry,
+    installation: &Installation,
+) -> Result<Vec<std::ffi::OsString>, ForgeupError> {
+    let Some(runner) = &installation.runner else {
+        return Ok(vec![]);
+    };
+    if !runner.launchable() {
+        return Ok(vec![
+            "--durable-node".into(),
+            runner.node_path.clone().into(),
+            "--durable-effect-inspector".into(),
+            runner.inspector_path.clone().into(),
+        ]);
+    }
+    let mut arguments: Vec<std::ffi::OsString> =
+        vec!["--durable-runner-bundle".into(), runner.root.clone().into()];
+    let mut seen = vec![runner.component_sha256.clone()];
+    for other in &registry.installations {
+        let Some(retained) = other.runner.as_ref().filter(|r| r.launchable()) else {
+            continue;
+        };
+        if other.selector == installation.selector || seen.contains(&retained.component_sha256) {
+            continue;
+        }
+        if let Err(error) = verify_runner(other) {
+            append_diagnostic(
+                &paths.state(&installation.selector),
+                &format!(
+                    "retained runner of Revision `{}` not offered to the daemon: {error}",
+                    other.selector
+                ),
+            )?;
+            continue;
+        }
+        seen.push(retained.component_sha256.clone());
+        arguments.push("--durable-retained-runner-bundle".into());
+        arguments.push(retained.root.clone().into());
+    }
+    Ok(arguments)
 }
 
 /// Makes the manager command path match the registry's authoritative desired state.
@@ -904,13 +975,7 @@ pub fn daemon_start() -> Result<String, ForgeupError> {
     for (key, _) in env::vars_os().filter(|(key, _)| key.to_string_lossy().starts_with("FORGE_")) {
         command.env_remove(key);
     }
-    if let Some(runner) = &installation.runner {
-        command
-            .arg("--durable-node")
-            .arg(&runner.node_path)
-            .arg("--durable-effect-inspector")
-            .arg(&runner.inspector_path);
-    }
+    command.args(managed_durable_arguments(&paths, &registry, &installation)?);
     let child = command
         .args([
             "--managed",

@@ -49,7 +49,8 @@ const released = new Promise(resolve => barrier.once('connection', socket => {
 barrier.listen(`\0forge-t07-start-${process.pid}`);
 await once(barrier, 'listening');
 
-if (test.mode === 'recovered' && !recovering) {
+// `packaged` (T24) crashes at the same boundary, then recovers after a Revision switch.
+if ((test.mode === 'recovered' || test.mode === 'packaged') && !recovering) {
   // Fault injection at the pinned upstream storage class, in this test process
   // only: stop forever BEFORE the first model generation is committed as running.
   // The boundary is reported out of band; stdout stays strictly protocol 1.

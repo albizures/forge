@@ -112,23 +112,90 @@ or automatic recovery. See [effect investigation](assignment-recovery.md#interru
 
 ### Matched runner packaging
 
-`node runner/package-bundle.mjs --out DIR --forge-commit <40-hex SHA>` (run with the pinned
-Node 24.18.0 on `PATH`) assembles the pinned Node executable, runner sources and the
-`npm ci --omit=dev --ignore-scripts` dependency closure plus the derived read-only adapter into a
-bundle with `forge-runner-bundle.json` (runner protocol, Node version, Forge commit, lockfile
-hash and a content tree hash). `forgeup register ... --runner-bundle DIR` verifies it against
-the candidate Revision (commit, protocol 1, Node version, lock, tree hash, no symlinks), copies it
-into the immutable Installation and re-verifies the *installed copy*. `forgeup daemon start`
-re-attests the whole bundle and then launches the managed daemon with
-`--durable-node`/`--durable-effect-inspector` pointing inside the Installation; any missing,
-modified or mismatched component blocks startup with a redacted diagnostic. Global `PATH`, npm
-and the checkout are never consulted. `forgeup runner verify SELECTOR` re-attests on demand and
-`forgeup runner resolve --component-hash H` finds the Revision that shipped exactly that tree.
-`forgeup remove` refuses to delete a Revision's runner while its state exists unless `--purge-state`
-is explicit, and selecting another Revision never changes a retained Assignment's component.
-The management protocol is unchanged (the new daemon flags are optional and only passed to a daemon
-built from the same attested commit); runner wire protocol 1 and storage schema are unchanged.
-This does not enable durable dispatch or automatic recovery.
+Build the bundle with the pinned Node 24.18.0 on `PATH`:
+
+```sh
+cargo build --release -p forge-runner-host
+node runner/package-bundle.mjs --out DIR --forge-commit <40-hex SHA> \
+  --runner-host target/release/forge-runner-host
+```
+
+The packager assembles a **schema 2** bundle:
+
+- the pinned Node executable (`node/node`);
+- the `forge-runner-host` supervisor (`host/forge-runner-host`), which must
+  report runner protocol 1 and the same commit through `--compatibility`;
+- the runner sources (`runner/src`);
+- the `npm ci --omit=dev --ignore-scripts --no-bin-links` dependency closure,
+  plus the derived read-only adapter.
+
+`forge-runner-bundle.json` records:
+
+- the runner protocol, Node version and Forge commit;
+- the lockfile hash and a content tree hash;
+- the **runner component hash**. This is the `component_hash` that every
+  durable Launch records, as attested by the bundled sources with the bundled
+  Node.
+
+`forgeup register ... --runner-bundle DIR` verifies the bundle against the
+candidate Revision before it copies anything:
+
+- commit, protocol 1, Node version, lock and tree hash;
+- no symlinks or special files;
+- the packaged host's compatibility and Revision;
+- the recomputed runner component hash.
+
+It then copies the bundle into the immutable Installation and verifies the
+*installed copy* again. Schema 1 (T15) bundles still register. They have no host
+and serve only retained inspection, never a launch.
+
+`forgeup daemon start` re-attests the whole bundle and then passes the
+Installation's components to the managed daemon:
+
+- **schema 2:** `--durable-runner-bundle ROOT`;
+- **schema 1:** `--durable-node`/`--durable-effect-inspector`.
+
+For a schema 2 Revision, Forgeup also passes `--durable-retained-runner-bundle
+ROOT` for every other registered Revision whose schema 2 bundle verifies (see the
+[management protocol](../crates/docs/management-protocol.md#optional-durable-runner-inputs)).
+A missing, modified or mismatched component blocks startup with a redacted
+diagnostic. Global `PATH`, npm and the checkout are never consulted.
+
+**Launch preflight.** Before any allocation, the daemon checks the selected
+components on every durable profile validation, adapter probe and provision:
+
+- every component is present at its canonical path;
+- the host and Node files are unchanged since the daemon composed them;
+- Node is exactly v24.18.0;
+- the host reports this daemon's runner protocol, runtime schema and Forge
+  Revision;
+- the runner sources still attest the composed component hash.
+
+A failure is `durable-components-incompatible` and names the component.
+
+**Retained Assignments after a Revision switch.** The daemon serves an existing
+Launch only with the configured bundle whose runner component hash equals the
+Launch's `component_hash`. This covers transcripts, effect inspection and
+resolution, retirement reconciliation and recovery. When no configured bundle
+matches, the operation refuses with `durable-components-unavailable`, naming the
+hash. Find the Revision that shipped it with `forgeup runner resolve
+--component-hash H`, which accepts either a Launch component hash or a bundle
+tree hash. Register that Revision and restart the daemon.
+
+**Other commands.**
+
+- `forgeup runner verify SELECTOR` re-attests a Revision's runner on demand.
+- `forgeup remove` refuses to delete a Revision's runner while its state exists,
+  unless `--purge-state` is given.
+- Selecting another Revision never changes a retained Assignment's components.
+
+**Compatibility.** The management protocol stays at revision 1. The new daemon
+inputs are optional, and Forgeup passes them only to a daemon built from the
+bundle's own commit. Runner wire protocol 1 and the storage schemas are
+unchanged.
+
+None of this enables durable dispatch or automatic recovery, and a managed
+daemon still has no model-credential mechanism (T18 M4).
 
 ## Browser and RPC
 

@@ -4,6 +4,7 @@
 pub mod check_runtime;
 pub mod control;
 pub mod crash;
+pub mod entry;
 pub mod inspection;
 pub mod model_auth;
 pub mod purge;

@@ -98,6 +98,244 @@ pub fn attest_component_hash(node: &Path, sources: &Path) -> Result<String, Regi
     Ok(hash)
 }
 
+fn incompatible(message: &str) -> RegistrationError {
+    RegistrationError::new("durable-components-incompatible", message.to_owned())
+}
+
+/// Identity of an executable file at composition, so launch preflight notices a
+/// component replaced or modified afterwards without rehashing it every time.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Fingerprint {
+    device: u64,
+    inode: u64,
+    length: u64,
+    modified: (i64, i64),
+}
+
+impl Fingerprint {
+    fn of(path: &Path) -> Option<Self> {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = std::fs::metadata(path).ok()?;
+        metadata.is_file().then(|| Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            length: metadata.len(),
+            modified: (metadata.mtime(), metadata.mtime_nsec()),
+        })
+    }
+}
+
+/// The matched Node must be exactly the version this Forge build pins.
+fn require_pinned_node(node: &Path) -> Result<(), RegistrationError> {
+    let output = Command::new(node)
+        .env_clear()
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|_| incompatible("the matched Node cannot run"))?;
+    let expected = format!(
+        "v{}",
+        forge_app::durable_execution::bundle::PINNED_NODE_VERSION
+    );
+    if !output.status.success() || String::from_utf8_lossy(&output.stdout).trim() != expected {
+        return Err(incompatible(&format!(
+            "the matched Node is not the pinned {expected}; reinstall this Revision's runner bundle"
+        )));
+    }
+    Ok(())
+}
+
+/// The matched host must implement this daemon's runner protocol and runtime
+/// schema and come from this daemon's own Forge Revision.
+fn require_compatible_host(
+    components: &recovery::Components,
+    forge_revision: &str,
+) -> Result<(), RegistrationError> {
+    let output = Command::new(&components.host)
+        .env_clear()
+        .args(&components.host_arguments)
+        .arg(forge_runner_host::entry::COMPATIBILITY_FLAG)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|_| incompatible("the matched runner host cannot run"))?;
+    let reported: forge_runner_host::entry::HostCompatibility =
+        serde_json::from_slice(&output.stdout)
+            .ok()
+            .filter(|_| output.status.success())
+            .ok_or_else(|| {
+                incompatible("the matched runner host does not report its compatibility")
+            })?;
+    if reported.protocol != RUNNER_PROTOCOL_VERSION
+        || reported.runtime_schema != DURABLE_RUNTIME_SCHEMA
+    {
+        return Err(incompatible(
+            "the matched runner host implements a different runner protocol or runtime schema",
+        ));
+    }
+    if reported.forge_revision != forge_revision {
+        return Err(incompatible(
+            "the matched runner host was built from a different Forge Revision than this daemon",
+        ));
+    }
+    Ok(())
+}
+
+/// Composition-time identity of the launch components, checked again by
+/// [`Launcher::preflight`] before every new launch.
+struct Attestation {
+    host: Fingerprint,
+    node: Fingerprint,
+}
+
+fn unavailable_components(launch: &Launch) -> RegistrationError {
+    RegistrationError::new(
+        "durable-components-unavailable",
+        format!(
+            "the matched runner components that launched this Assignment (component hash {}) are not available to this daemon; register the original Revision's runner bundle with Forgeup (`forgeup runner resolve --component-hash {}`) and restart the daemon. Retained work never runs under other components",
+            launch.component_hash, launch.component_hash
+        ),
+    )
+}
+
+#[derive(Clone)]
+struct Entry {
+    inspection: super::operator::InspectionComponents,
+    execution: Option<Execution>,
+    hash: std::sync::OnceLock<Option<String>>,
+}
+
+impl Entry {
+    /// The attested component hash of these sources, computed once on demand
+    /// with the entry's own matched Node. `None` when it cannot be attested.
+    fn hash(&self) -> Option<&str> {
+        self.hash
+            .get_or_init(|| {
+                let sources = self.inspection.inspector.parent()?;
+                attest_component_hash(&self.inspection.node, sources).ok()
+            })
+            .as_deref()
+    }
+}
+
+/// Every set of matched components this daemon was configured with: this
+/// Revision's own, and those of other installed Revisions. An existing Launch
+/// is served only by the set whose attested component hash equals the Launch's
+/// `component_hash`. When no attested set matches, the operation refuses with
+/// `durable-components-unavailable` instead of switching code. The only
+/// exception is an inspection-only set that cannot be attested at all (a legacy
+/// manual selection): it is used as before, and the inspector itself rejects
+/// a Launch whose hash it does not match.
+#[derive(Clone, Default)]
+pub struct ComponentCatalog {
+    entries: Vec<Entry>,
+}
+
+impl ComponentCatalog {
+    /// Build from the daemon's configuration. Attestation is deferred until a
+    /// retained Launch needs a set.
+    #[must_use]
+    pub fn new(
+        inspection: Option<&super::operator::InspectionComponents>,
+        execution: Option<&Execution>,
+        retained: &[Execution],
+    ) -> Self {
+        let mut catalog = Self::default();
+        if let Some(execution) = execution {
+            catalog.push_execution(execution.clone());
+        }
+        if let Some(inspection) = inspection {
+            catalog.push_inspection(inspection.clone());
+        }
+        for execution in retained {
+            catalog.push_execution(execution.clone());
+        }
+        catalog
+    }
+
+    fn push_execution(&mut self, execution: Execution) {
+        self.entries.push(Entry {
+            inspection: execution.inspection(),
+            execution: Some(execution),
+            hash: std::sync::OnceLock::new(),
+        });
+    }
+
+    /// Add an inspection-only set unless an existing set already uses it.
+    pub fn push_inspection(&mut self, inspection: super::operator::InspectionComponents) {
+        if self
+            .entries
+            .iter()
+            .all(|entry| entry.inspection != inspection)
+        {
+            self.entries.push(Entry {
+                inspection,
+                execution: None,
+                hash: std::sync::OnceLock::new(),
+            });
+        }
+    }
+
+    /// Record an already attested hash for the set using exactly these components.
+    fn seed(&self, execution: &Execution, hash: &str) {
+        if let Some(entry) = self
+            .entries
+            .iter()
+            .find(|entry| entry.execution.as_ref() == Some(execution))
+        {
+            let _ = entry.hash.set(Some(hash.to_owned()));
+        }
+    }
+
+    /// Whether any components are configured.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Read-only inspection components for an existing Launch. `Ok(None)` when
+    /// no durable components are configured at all.
+    /// # Errors
+    /// `durable-components-unavailable` when configured sets exist but none
+    /// matches the Launch's component hash.
+    pub fn inspection_for(
+        &self,
+        launch: &Launch,
+    ) -> Result<Option<super::operator::InspectionComponents>, RegistrationError> {
+        if self.entries.is_empty() {
+            return Ok(None);
+        }
+        if let Some(entry) = self
+            .entries
+            .iter()
+            .find(|entry| entry.hash() == Some(launch.component_hash.as_str()))
+        {
+            return Ok(Some(entry.inspection.clone()));
+        }
+        if let Some(entry) = self
+            .entries
+            .iter()
+            .find(|entry| entry.execution.is_none() && entry.hash().is_none())
+        {
+            return Ok(Some(entry.inspection.clone()));
+        }
+        Err(unavailable_components(launch))
+    }
+
+    /// Execution components (host, Node, runner, inspectors) for an existing Launch.
+    /// # Errors
+    /// `durable-components-unavailable` when no configured set matches exactly.
+    pub fn execution_for(&self, launch: &Launch) -> Result<Execution, RegistrationError> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.execution.is_some())
+            .find(|entry| entry.hash() == Some(launch.component_hash.as_str()))
+            .and_then(|entry| entry.execution.clone())
+            .ok_or_else(|| unavailable_components(launch))
+    }
+}
+
 /// Trusted daemon composition inputs for new durable launches.
 #[derive(Clone)]
 pub struct Settings {
@@ -135,6 +373,7 @@ struct Slot {
 /// daemon spawned directly; a restarted daemon starts empty and never adopts.
 pub struct Launcher {
     settings: Settings,
+    attestation: Attestation,
     authority: Arc<DaemonAuthority>,
     retirement: Arc<retirement::Controller>,
     slots: Mutex<HashMap<String, Slot>>,
@@ -153,19 +392,69 @@ impl Launcher {
         if settings.component_hash.len() != 64 || settings.forge_revision.trim().is_empty() {
             return Err(invalid("matched component identity is required"));
         }
+        let attestation = Attestation {
+            host: Fingerprint::of(&settings.components.host)
+                .ok_or_else(|| incompatible("the matched runner host is missing"))?,
+            node: Fingerprint::of(&settings.components.node)
+                .ok_or_else(|| incompatible("the matched Node is missing"))?,
+        };
         Ok(Self {
             settings,
+            attestation,
             authority,
             retirement,
             slots: Mutex::new(HashMap::new()),
         })
     }
 
-    /// Validate the explicit profile and host authentication for a new launch.
-    /// The cwd is re-validated against the bound Managed Worktree at provision.
+    /// Launch preflight for every matched component, before any allocation:
+    /// all components present and canonical; host and Node unchanged since
+    /// composition; Node is the pinned version; the host implements this
+    /// daemon's runner protocol and runtime schema and comes from this daemon's
+    /// Forge Revision; and the runner sources still attest the Launch component
+    /// hash. Nothing is found through `PATH` or npm.
     /// # Errors
-    /// Rejects incompatible profiles and missing or unprotected credentials.
+    /// `durable-components-incompatible` naming the failing component.
+    pub fn preflight(&self) -> Result<(), RegistrationError> {
+        let components = &self.settings.components;
+        components.validate().map_err(|_| {
+            incompatible("a matched runner component is missing or not at its canonical path")
+        })?;
+        if Fingerprint::of(&components.host).as_ref() != Some(&self.attestation.host) {
+            return Err(incompatible(
+                "the matched runner host changed since the daemon composed it; restart the daemon from a verified Installation",
+            ));
+        }
+        if Fingerprint::of(&components.node).as_ref() != Some(&self.attestation.node) {
+            return Err(incompatible(
+                "the matched Node changed since the daemon composed it; restart the daemon from a verified Installation",
+            ));
+        }
+        require_pinned_node(&components.node)?;
+        require_compatible_host(components, &self.settings.forge_revision)?;
+        let sources = components
+            .inspector
+            .parent()
+            .ok_or_else(|| incompatible("the matched runner sources are missing"))?;
+        if attest_component_hash(&components.node, sources)
+            .ok()
+            .as_deref()
+            != Some(self.settings.component_hash.as_str())
+        {
+            return Err(incompatible(
+                "the matched runner sources no longer attest the composed component hash (tampered or replaced)",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Validate the matched components, the explicit profile and host
+    /// authentication for a new launch. The cwd is re-validated against the
+    /// bound Managed Worktree at provision.
+    /// # Errors
+    /// Rejects incompatible components or profiles and missing or unprotected credentials.
     pub fn validate_profile(&self, profile: &AgentProfile) -> Result<(), RegistrationError> {
+        self.preflight()?;
         crate::durable_profiles::prepare(
             profile,
             Path::new("/"),
@@ -180,7 +469,7 @@ impl Launcher {
         &self,
         context: &AgentDispatchContext,
     ) -> Result<(), RegistrationError> {
-        self.settings.components.validate()?;
+        self.preflight()?;
         let cwd = context
             .agent_workspace
             .as_ref()
@@ -236,6 +525,7 @@ impl Launcher {
             .agent_workspace
             .clone()
             .ok_or_else(|| invalid("durable launch requires the bound Managed Worktree"))?;
+        self.preflight()?;
         let prepared = crate::durable_profiles::prepare(
             &context.assignment.profile,
             &cwd,
@@ -863,9 +1153,11 @@ impl Transport for PipeTransport<'_, '_, '_> {
 /// Map a launcher failure to the adapter port without leaking private details.
 pub(super) fn adapter_error(error: &RegistrationError) -> AgentAdapterError {
     match error.code {
-        "invalid-durable-profile" | "durable-model-auth-unavailable" | "durable-launch-invalid" => {
-            AgentAdapterError::InvalidRequest(error.code.into())
-        }
+        "invalid-durable-profile"
+        | "durable-model-auth-unavailable"
+        | "durable-launch-invalid"
+        | "durable-components-incompatible"
+        | "durable-components-unavailable" => AgentAdapterError::InvalidRequest(error.code.into()),
         "durable-launch-claimed" => AgentAdapterError::Conflict(error.code.into()),
         _ => AgentAdapterError::Transient(error.code.into()),
     }
@@ -887,6 +1179,37 @@ impl std::fmt::Debug for Execution {
 }
 
 impl Execution {
+    /// Derive every component from a Forgeup-attested runner bundle root, using
+    /// only the fixed layout (`forge_app::durable_execution::bundle`).
+    /// # Errors
+    /// Rejects a relative root.
+    pub fn from_bundle(root: &Path) -> Result<Self, RegistrationError> {
+        use forge_app::durable_execution::bundle;
+        if !root.is_absolute() {
+            return Err(invalid("select an absolute attested runner bundle root"));
+        }
+        Ok(Self {
+            components: recovery::Components {
+                host: root.join(bundle::HOST),
+                host_arguments: vec![],
+                node: root.join(bundle::NODE),
+                runner: root.join(bundle::ENTRY),
+                inspector: root.join(bundle::RECOVERY_INSPECTOR),
+                answer_inspector: root.join(bundle::ANSWER_INSPECTOR),
+            },
+            effect_inspector: root.join(bundle::EFFECT_INSPECTOR),
+        })
+    }
+
+    /// The read-only interrupted-effect/transcript inspection pair of this set.
+    #[must_use]
+    pub fn inspection(&self) -> super::operator::InspectionComponents {
+        super::operator::InspectionComponents {
+            node: self.components.node.clone(),
+            inspector: self.effect_inspector.clone(),
+        }
+    }
+
     /// Select a packaged layout: the runner entry and every inspector are siblings
     /// in one matched source directory. Host and entry are both set or neither;
     /// a launch selection also requires the matched Node and effect inspector.
@@ -937,67 +1260,63 @@ impl Execution {
 
 /// Compose the durable provider factory exactly as the daemon does. Without an
 /// execution selection, new durable launches and recovery stay refused while
-/// historical retirement keeps working. The caller wraps the result in the
-/// release gate; this function grants no launch eligibility.
+/// historical retirement keeps working. `retained` are other installed
+/// Revisions' matched components: they serve only Launches with their exact
+/// component hash (inspection, recovery, retirement), never a new launch. The
+/// caller wraps the result in the release gate; this function grants no launch
+/// eligibility.
 /// # Errors
 /// Rejects invalid components, failed component attestation or unavailable identity.
 pub fn compose(
     database: &Path,
     inspection: Option<&super::operator::InspectionComponents>,
     execution: Option<&Execution>,
+    retained: &[Execution],
     model_key_file: Option<PathBuf>,
     original: Box<dyn forge_app::AgentDispatchAdapterFactory>,
 ) -> Result<retirement::Factory, RegistrationError> {
-    let mut controller = retirement::Controller::default();
     if let Some(inspection) = inspection {
-        controller = controller.with_inspection(inspection.clone())?;
+        inspection.validate()?;
     }
-    let (launcher, recovery) = match execution {
-        None => (None, None),
-        Some(execution) => {
-            let effects = super::operator::InspectionComponents {
-                node: execution.components.node.clone(),
-                inspector: execution.effect_inspector.clone(),
-            };
-            if inspection.is_none() {
-                controller = controller.with_inspection(effects.clone())?;
-            }
-            let controller = Arc::new(controller);
-            let sources = execution
-                .effect_inspector
-                .parent()
-                .ok_or_else(|| invalid("effect inspector has no component directory"))?;
-            let component_hash = attest_component_hash(&execution.components.node, sources)?;
-            let launcher = Launcher::new(
-                Settings {
-                    database: database.to_path_buf(),
-                    components: execution.components.clone(),
-                    component_hash,
-                    forge_revision: current_forge_revision(),
-                    model_key_file,
-                },
-                Arc::new(DaemonAuthority::new()?.with_inspection(effects)?),
-                controller.clone(),
-            )?;
-            let recovery = recovery::Controller::new(
-                database.to_path_buf(),
-                execution.components.clone(),
-                controller.clone(),
-            )?;
-            return Ok(retirement::Factory {
-                database: database.to_path_buf(),
-                controller,
-                launcher: Some(Arc::new(launcher)),
-                recovery: Some(Arc::new(recovery)),
-                original,
-            });
-        }
+    let catalog = Arc::new(ComponentCatalog::new(inspection, execution, retained));
+    let controller = Arc::new(retirement::Controller::with_catalog(catalog.clone()));
+    let Some(execution) = execution else {
+        return Ok(retirement::Factory {
+            database: database.to_path_buf(),
+            controller,
+            launcher: None,
+            recovery: None,
+            original,
+        });
     };
+    let sources = execution
+        .effect_inspector
+        .parent()
+        .ok_or_else(|| invalid("effect inspector has no component directory"))?;
+    let component_hash = attest_component_hash(&execution.components.node, sources)?;
+    catalog.seed(execution, &component_hash);
+    let launcher = Launcher::new(
+        Settings {
+            database: database.to_path_buf(),
+            components: execution.components.clone(),
+            component_hash,
+            forge_revision: current_forge_revision(),
+            model_key_file,
+        },
+        Arc::new(DaemonAuthority::new()?.with_inspection(execution.inspection())?),
+        controller.clone(),
+    )?;
+    let recovery = recovery::Controller::new(
+        database.to_path_buf(),
+        execution.components.clone(),
+        controller.clone(),
+    )?
+    .with_catalog(catalog);
     Ok(retirement::Factory {
         database: database.to_path_buf(),
-        controller: Arc::new(controller),
-        launcher,
-        recovery,
+        controller,
+        launcher: Some(Arc::new(launcher)),
+        recovery: Some(Arc::new(recovery)),
         original,
     })
 }

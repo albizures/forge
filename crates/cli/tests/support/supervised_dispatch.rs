@@ -86,7 +86,7 @@ pub struct SupervisedDispatch {
 }
 
 /// Original-backend stand-in: any non-durable or fallback call fails the test.
-struct NoHerdr;
+pub struct NoHerdr;
 impl AgentDispatchAdapterFactory for NoHerdr {
     fn validate_profile(&self, _: &AgentProfile) -> Result<(), AgentAdapterError> {
         panic!("no Herdr fallback")
@@ -128,6 +128,7 @@ pub fn compose(
         database,
         None,
         Some(&execution),
+        &[],
         Some(credential.into()),
         Box::new(NoHerdr),
     )
@@ -260,6 +261,26 @@ impl SupervisedDispatch {
         if self.mode == "recovered" {
             return self.recover(&store, launch, directory, capability_file);
         }
+        if self.mode == "packaged" {
+            // T24: the first launch runs the Installation's packaged host and Node.
+            let installed = self.node.parent().and_then(Path::parent).unwrap();
+            let record = super::supervised_dispatch::owner(&directory);
+            let exe = |pid: &Value| {
+                fs::read_link(format!("/proc/{}/exe", pid.as_u64().unwrap())).unwrap()
+            };
+            assert_eq!(
+                exe(&record["owner"]["host_pid"]),
+                installed.join(forge_app::durable_execution::bundle::HOST)
+            );
+            assert_eq!(exe(&record["worker_pid"]), self.node);
+            self.crash_at_boundary(&store, &launch, &directory);
+            return Report {
+                launch,
+                directory,
+                answer: None,
+                capability_file,
+            };
+        }
         let state = self.wait_state(id, |s| {
             matches!(
                 s,
@@ -292,7 +313,15 @@ impl SupervisedDispatch {
     /// a restarted daemon's fresh composition: neither spawns, adopts or recovers.
     fn duplicate_provision(&self, context: &AgentDispatchContext) {
         let store = SqliteProjectRepository::open(&self.database).unwrap();
-        let before = store.agent_assignment_info(&context.assignment.id).unwrap();
+        // Let the live driver finish reconciling its one-shot provisioning marker
+        // after the accepted admission, so the snapshot is not racing it.
+        let before = wait(|| {
+            let info = store.agent_assignment_info(&context.assignment.id).unwrap();
+            info.resources
+                .iter()
+                .any(|r| r.resource_kind == "provision-intent" && r.retired_at_millis.is_some())
+                .then_some(info)
+        });
         let adapter = self
             .production
             .adapter_for(&context.assignment.profile)
@@ -457,7 +486,7 @@ pub fn wait<T>(mut ready: impl FnMut() -> Option<T>) -> T {
     }
 }
 
-fn owner(directory: &Path) -> Value {
+pub fn owner(directory: &Path) -> Value {
     wait(|| {
         fs::read(directory.join("owner.json"))
             .ok()

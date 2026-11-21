@@ -231,6 +231,7 @@ impl Fixture {
                 durable_model_key_file: None,
                 durable_inspection: None,
                 durable_execution: None,
+                durable_retained: Vec::new(),
                 managed: None,
             },
             Some(std::env::current_exe().unwrap()),

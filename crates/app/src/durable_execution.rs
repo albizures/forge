@@ -2,6 +2,7 @@
 use crate::RegistrationError;
 use serde::{Deserialize, Serialize};
 
+pub mod bundle;
 pub mod completion;
 pub mod effect_resolution;
 pub mod effects;

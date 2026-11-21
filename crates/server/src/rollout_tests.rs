@@ -78,7 +78,7 @@ fn durable_task(fixture: &Fixture, workspace: &str) -> forge_app::Record {
 fn daemon(fixture: &Fixture, app: Application) -> Daemon {
     let mut daemon = Daemon::new(app);
     daemon.durable_effect_resolution = Some(Arc::new(
-        durable_authorization::operator::OperatorService::new(&fixture.database, None).unwrap(),
+        durable_authorization::operator::OperatorService::new(&fixture.database, durable_authorization::launch::ComponentCatalog::default()).unwrap(),
     ));
     daemon
 }

@@ -17,11 +17,28 @@ impl crate::Daemon {
     /// # Errors
     /// Returns store-open failures.
     pub fn with_durable_operator_store(
-        mut self,
+        self,
         store: &std::path::Path,
     ) -> Result<Self, forge_app::RegistrationError> {
+        self.with_durable_operator_catalog(
+            store,
+            crate::durable_authorization::launch::ComponentCatalog::default(),
+        )
+    }
+
+    /// As [`Self::with_durable_operator_store`], with the daemon's matched
+    /// component catalog, so transcripts and effect resolution of retained
+    /// Launches use their original components, as `serve` composes them.
+    ///
+    /// # Errors
+    /// Returns store-open failures.
+    pub fn with_durable_operator_catalog(
+        mut self,
+        store: &std::path::Path,
+        catalog: crate::durable_authorization::launch::ComponentCatalog,
+    ) -> Result<Self, forge_app::RegistrationError> {
         self.durable_effect_resolution = Some(std::sync::Arc::new(
-            crate::durable_authorization::operator::OperatorService::new(store, None)?,
+            crate::durable_authorization::operator::OperatorService::new(store, catalog)?,
         ));
         Ok(self)
     }

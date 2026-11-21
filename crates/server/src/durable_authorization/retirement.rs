@@ -37,9 +37,19 @@ struct Owned {
 #[derive(Default)]
 pub struct Controller {
     owners: Mutex<HashMap<String, Arc<Mutex<Owned>>>>,
-    inspection: Option<super::operator::InspectionComponents>,
+    /// Matched read-only components, selected per Launch by its component hash.
+    catalog: Arc<super::launch::ComponentCatalog>,
 }
 impl Controller {
+    /// Use the daemon's matched component catalog for reconciliation inspection.
+    #[must_use]
+    pub fn with_catalog(catalog: Arc<super::launch::ComponentCatalog>) -> Self {
+        Self {
+            owners: Mutex::default(),
+            catalog,
+        }
+    }
+
     /// Configure explicitly selected matched read-only components. No credential
     /// or writable runner is needed; missing inspection blocks new reconciliation.
     /// # Errors
@@ -49,8 +59,17 @@ impl Controller {
         components: super::operator::InspectionComponents,
     ) -> Result<Self, RegistrationError> {
         components.validate()?;
-        self.inspection = Some(components);
+        Arc::make_mut(&mut self.catalog).push_inspection(components);
         Ok(self)
+    }
+
+    /// The matched inspection components for this Launch, or an explicit
+    /// `durable-components-unavailable` refusal; never another Revision's code.
+    fn inspection(
+        &self,
+        launch: &Launch,
+    ) -> Result<super::operator::InspectionComponents, RegistrationError> {
+        self.catalog.inspection_for(launch)?.ok_or_else(uncertain)
     }
 
     /// Transfer a directly spawned, ready supervisor after stopping its grant
@@ -108,12 +127,12 @@ impl Controller {
         if forge_runner_host::crash::receipt(directory, lease).is_err() {
             return Ok(false);
         }
-        let components = self.inspection.as_ref().ok_or_else(uncertain)?;
+        let components = self.inspection(&operation.launch)?;
         super::effects::inspect_retirement(
             repository,
             workspace,
             &operation.launch,
-            components,
+            &components,
             directory,
             &guard,
         )?;
@@ -219,9 +238,14 @@ impl Controller {
         let receipt = forge_runner_host::retirement::receipt(&directory, &operation)
             .map_err(|_| uncertain())?;
         guard.verify().map_err(|_| uncertain())?;
-        let components = self.inspection.as_ref().ok_or_else(uncertain)?;
+        let components = self.inspection(launch)?;
         super::effects::inspect_retirement(
-            repository, workspace, launch, components, &directory, &guard,
+            repository,
+            workspace,
+            launch,
+            &components,
+            &directory,
+            &guard,
         )?;
         guard.verify().map_err(|_| uncertain())?;
         repository.reconcile_retirement(workspace, &receipt)?;
@@ -299,9 +323,14 @@ impl Adapter {
     }
 }
 impl AgentDispatchAdapter for Adapter {
-    /// Matched launch components are configured. This is not launch eligibility.
+    /// Matched launch components are configured and pass launch preflight.
+    /// This is not launch eligibility (the release gate decides that).
     fn probe(&self) -> Result<(), AgentAdapterError> {
-        self.launcher.as_ref().map(|_| ()).ok_or_else(disabled)
+        self.launcher
+            .as_ref()
+            .ok_or_else(disabled)?
+            .preflight()
+            .map_err(|error| super::launch::adapter_error(&error))
     }
     fn validate_provision(&self, context: &AgentDispatchContext) -> Result<(), AgentAdapterError> {
         let launcher = self.launcher.as_ref().ok_or_else(disabled)?;
@@ -367,10 +396,12 @@ impl AgentDispatchAdapter for Adapter {
             let (_, workspace, launch) = self.runtime(context)?;
             controller.recover(&workspace, &launch)
         };
-        run().map_err(|_: RegistrationError| {
-            AgentAdapterError::Transient(
-                "durable recovery unavailable; retain original resources".into(),
-            )
+        run().map_err(|error: RegistrationError| {
+            AgentAdapterError::Transient(if error.code == "durable-components-unavailable" {
+                format!("{}: {}", error.code, error.message)
+            } else {
+                "durable recovery unavailable; retain original resources".into()
+            })
         })
     }
     fn retire(

@@ -4,11 +4,15 @@
 //! Node bootstrap/Harness/Bash/CLI tracer. Test-only substitutions: controlled
 //! launch eligibility and a faux model provider in the runner entry. The custom
 //! harness re-execs the same supervisor library as the shipped host binary; it
-//! needs no arbitrary PATH host, sibling artifact or nested Cargo build.
+//! needs no arbitrary PATH host or nested Cargo build. Only the `packaged` (T24)
+//! scenario packages the real `forge-runner-host` that this Cargo invocation
+//! built next to the test binary, and refuses a stale one.
 #[path = "support/supervised_chain.rs"]
 mod supervised_chain;
 #[path = "support/supervised_dispatch.rs"]
 mod supervised_dispatch;
+#[path = "support/supervised_packaged.rs"]
+mod supervised_packaged;
 #[path = "support/supervised_purge.rs"]
 mod supervised_purge;
 #[path = "support/supervised_rollback.rs"]
@@ -368,16 +372,45 @@ async fn scenario(mode: &str) {
     } else {
         None
     };
+    // T24: compose from a Forgeup-installed Revision instead of this checkout.
+    let packaged =
+        (mode == "packaged").then(|| supervised_packaged::Packaged::install(&root, &node));
+    let (production, launch_node, launch_runner, launch_hash) = if let Some(packaged) = &packaged {
+        // Both Revisions are installed: the first's daemon is also offered the
+        // second's bundle, but only for Launches with that component hash.
+        let (current, retained) = packaged.daemon_components(&packaged.first);
+        assert_eq!(retained.len(), 1);
+        let retained: Vec<_> = retained
+            .into_iter()
+            .map(|execution| packaged.substitute(execution))
+            .collect();
+        let current = packaged.substitute(current);
+        assert_eq!(
+            component_hash(&current.components.node, &packaged.worker),
+            packaged.first_component()
+        );
+        (
+            supervised_packaged::Packaged::compose(&database, &current, &retained, &model_key),
+            current.components.node.clone(),
+            packaged.worker.clone(),
+            packaged.first_component(),
+        )
+    } else {
+        (
+            supervised_dispatch::compose(&database, &node, &runner, &model_key),
+            node.clone(),
+            runner.clone(),
+            component_hash(&node, &runner),
+        )
+    };
     let adapter = SupervisedDispatch {
         root: root.clone(),
         database: database.clone(),
-        component_hash: component_hash(&node, &runner),
-        production: Arc::new(supervised_dispatch::compose(
-            &database, &node, &runner, &model_key,
-        )),
-        node: node.clone(),
+        component_hash: launch_hash,
+        production: Arc::new(production),
+        node: launch_node,
         git: git_program.clone(),
-        runner: runner.clone(),
+        runner: launch_runner,
         cli: Path::new(env!("CARGO_BIN_EXE_forge"))
             .canonicalize()
             .unwrap(),
@@ -459,6 +492,13 @@ async fn scenario(mode: &str) {
     let info = store.agent_assignment_info(&assignment.id).unwrap();
     assert!(info.capacity_reserved());
     assert_eq!(store.list_agent_assignments(record).unwrap().len(), 1);
+    if let Some(packaged) = &packaged {
+        supervised_packaged::switch(&adapter, &store, &base, report, packaged).await;
+        daemon.abort();
+        let _ = daemon.await;
+        println!("T24 packaged Revision dispatch and switch: passed");
+        return;
+    }
     if mode == "continuation-chain" {
         supervised_chain::run(&adapter, &store, record, report).await;
         daemon.abort();
@@ -722,18 +762,10 @@ async fn scenario(mode: &str) {
 fn main() {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     if args.first().is_some_and(|arg| arg == "--supervisor") {
-        assert_eq!(args.len(), 5);
-        if let Err(error) = forge_runner_host::supervisor::run(
-            Path::new(&args[1]),
-            Path::new(&args[2]),
-            Path::new(&args[3]),
-            Path::new(&args[4]),
-        ) {
-            eprintln!("controlled-host: {error}");
-            std::process::exit(1);
-        }
+        // The shipped host entry (supervision and `--compatibility`), re-executed.
+        std::process::exit(forge_runner_host::entry::run(&args[1..]));
     } else if args.iter().any(|arg| arg == "--list") {
-        println!("T07/T09/T10 supervised tracer (ten parallel controlled scenarios)");
+        println!("T07/T09/T10/T24 supervised tracer (eleven parallel controlled scenarios)");
     } else {
         // Parallel isolated scenarios are intentional, not a serial-test waiver.
         tokio::runtime::Builder::new_multi_thread()
@@ -753,6 +785,7 @@ fn main() {
                     "bootstrap-uncertain",
                     "revoked",
                     "rollback",
+                    "packaged",
                 ];
                 let handles = modes.map(|mode| tokio::spawn(scenario(mode)));
                 let mut failures = vec![];
@@ -766,6 +799,6 @@ fn main() {
                     "supervised tracer scenarios failed: {failures:?}"
                 );
             });
-        println!("T07/T09/T10 supervised tracer: 10 scenarios passed");
+        println!("T07/T09/T10/T24 supervised tracer: 11 scenarios passed");
     }
 }

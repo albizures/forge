@@ -5,15 +5,25 @@ consumes a pinned pi-durable release (1.5.2) directly, not the Pi CLI, behind th
 versioned Forge runner protocol 1. The daemon spawns it per Assignment under a
 supervising `forge-runner-host`, in the Task's Managed Worktree, after authorization;
 Forge's Rust application keeps all scheduling, Check, evidence and Outcome
-authority. It is shipped with a Forge Revision as a matched bundle
-(`package-bundle.mjs`); never run it from `PATH`/npm or against live Assignments by
-hand. New durable launches are withheld by the release gate in production Revisions.
+authority. It is shipped with a Forge Revision as a matched bundle, together with
+the pinned Node and the `forge-runner-host` built from the same commit
+(`package-bundle.mjs --runner-host`); never run it from `PATH`/npm or against live
+Assignments by hand. New durable launches are withheld by the release gate in production Revisions.
 Operator documentation is in [Durable Task execution](../docs/durable-execution.md).
 
 The sections below are the implementation history and evidence of each increment
-(T04–T22). Statements there such as "synthetic-only" or "remains a later Task"
+(T04–T24). Statements there such as "synthetic-only" or "remains a later Task"
 describe that increment, not the current build. Before T22, `main.ts` named the
 synthetic T04 runner; it is now the test fixture `test/synthetic-runner.ts`.
+
+## T24 packaged host and launch component identity
+
+Bundle schema 2 adds `host/forge-runner-host` and records the runner component hash
+(`contract.ts::componentHash`, the Launch `component_hash`) in
+`forge-runner-bundle.json`. The host answers `--compatibility` with its runner
+protocol, runtime schema and Forge Revision. Forgeup and the daemon's launch preflight
+check both. A retained Launch is served only by the installed bundle whose component
+hash it records. Evidence: [T24](../docs/research/pi-durable-t24/README.md).
 
 ## T22 production Check runner entry
 

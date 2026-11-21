@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 forge-app = { path = "../app" }
+forge-build-info = { path = "../build-info" }
 forge-rpc = { path = "../rpc" }
 fs2.workspace = true
 serde = { version = "1", features = ["derive"] }

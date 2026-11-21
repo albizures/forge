@@ -84,6 +84,9 @@ struct Slot {
 pub struct Controller {
     database: PathBuf,
     components: Components,
+    /// When composed, each Launch recovers only with the set whose attested
+    /// component hash equals its own; otherwise `components` (legacy single set).
+    catalog: Option<Arc<super::launch::ComponentCatalog>>,
     authority: Arc<DaemonAuthority>,
     retirement: Arc<retirement::Controller>,
     slots: Mutex<HashMap<String, Slot>>,
@@ -100,10 +103,18 @@ impl Controller {
         Ok(Self {
             database,
             components,
+            catalog: None,
             authority: Arc::new(DaemonAuthority::new()?),
             retirement,
             slots: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Select recovery components per Launch from the daemon's matched catalog.
+    #[must_use]
+    pub fn with_catalog(mut self, catalog: Arc<super::launch::ComponentCatalog>) -> Self {
+        self.catalog = Some(catalog);
+        self
     }
 
     /// Start only after protected original-host proof and exclusive read-only
@@ -123,6 +134,12 @@ impl Controller {
             }
             return slot.observation.lock().map(|v| *v).map_err(|_| denied());
         }
+        // The Launch's own matched components, or an explicit refusal before any
+        // claim or spawn: retained work never runs under other components.
+        let components = match &self.catalog {
+            Some(catalog) => catalog.execution_for(launch)?.components,
+            None => self.components.clone(),
+        };
         let repository = SqliteProjectRepository::open(&self.database)?;
         let candidate = repository.recovery_candidate(workspace, launch)?;
         let claim = Claim::for_candidate(
@@ -149,7 +166,7 @@ impl Controller {
         let (started, start) = mpsc::channel();
         let worker = Worker {
             database: self.database.clone(),
-            components: self.components.clone(),
+            components,
             retirement: self.retirement.clone(),
             workspace: workspace.into(),
             claim,

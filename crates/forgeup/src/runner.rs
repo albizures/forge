@@ -1,12 +1,17 @@
 //! Matched durable-runner bundle attestation for a Forge Revision Installation.
 //!
-//! A bundle is Revision-relative: the pinned Node executable, the runner sources and
-//! the locked JavaScript dependency closure are copied into the immutable
-//! Installation and attested by a content tree hash. Nothing here consults `PATH`,
-//! global npm state or the checkout, and nothing here authorizes execution: it only
-//! proves which exact components belong to which Revision.
+//! A bundle is Revision-relative: the pinned Node executable, the
+//! `forge-runner-host` supervisor (schema 2), the runner sources and the locked
+//! JavaScript dependency closure are copied into the immutable Installation and
+//! attested by a content tree hash. The manifest also records the runner
+//! component hash that every durable Launch carries, so a retained Assignment
+//! resolves back to exactly the Installation that launched it. Nothing here
+//! consults `PATH`, global npm state or the checkout, and nothing here
+//! authorizes execution: it only proves which exact components belong to which
+//! Revision.
 
 use super::{ForgeupError, RevisionIdentity, offline_output, sha256};
+use forge_app::durable_execution::bundle;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -16,17 +21,21 @@ use std::{
 };
 
 /// Bundle manifest file name at the bundle root.
-pub const BUNDLE_MANIFEST: &str = "forge-runner-bundle.json";
+pub const BUNDLE_MANIFEST: &str = bundle::MANIFEST;
 /// Forge-owned runner wire protocol implemented by this Forgeup.
 pub const SUPPORTED_RUNNER_PROTOCOL: u32 = 1;
 /// Fixed, not manifest-selected, component locations inside a bundle.
-pub const NODE_RELATIVE: &str = "node/node";
+pub const NODE_RELATIVE: &str = bundle::NODE;
+/// The packaged `forge-runner-host` (schema 2 bundles).
+pub const HOST_RELATIVE: &str = bundle::HOST;
 /// The shipped production Check runner entry (`runCheckRunner`, no substitution).
 /// The synthetic T04 runner is a test fixture under `runner/test/`, never bundled.
-pub const ENTRY_RELATIVE: &str = "runner/src/check-entry.ts";
-pub const INSPECTOR_RELATIVE: &str = "runner/src/inspect-effects.ts";
-pub const LOCK_RELATIVE: &str = "runner/package-lock.json";
-const SUPPORTED_SCHEMA: u32 = 1;
+pub const ENTRY_RELATIVE: &str = bundle::ENTRY;
+pub const INSPECTOR_RELATIVE: &str = bundle::EFFECT_INSPECTOR;
+pub const LOCK_RELATIVE: &str = bundle::LOCK;
+/// Schema 1 (T15): Node, runner and inspectors only; inspection, never launch.
+/// Schema 2 (T24): adds the matched host and the Launch component hash.
+const SUPPORTED_SCHEMAS: [u32; 2] = [1, 2];
 const MAX_FILES: usize = 200_000;
 
 /// Facts declared by the packager and independently recomputed by Forgeup.
@@ -39,6 +48,9 @@ pub struct BundleManifest {
     pub forge_commit: String,
     pub package_lock_sha256: String,
     pub tree_sha256: String,
+    /// The runner component hash recorded on every Launch (schema 2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner_component_sha256: Option<String>,
 }
 
 /// The attested components of one Installation, recorded in its manifest.
@@ -53,6 +65,31 @@ pub struct InstalledRunner {
     pub node_version: String,
     pub package_lock_sha256: String,
     pub tree_sha256: String,
+    /// The packaged `forge-runner-host`; absent for a schema 1 bundle, which
+    /// can serve retained inspection but never a launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_path: Option<PathBuf>,
+    /// The Launch component hash these runner sources attest (schema 2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component_sha256: Option<String>,
+}
+
+impl InstalledRunner {
+    /// Whether this Installation can launch durable work (schema 2 with a host).
+    #[must_use]
+    pub fn launchable(&self) -> bool {
+        self.host_path.is_some() && self.component_sha256.is_some()
+    }
+}
+
+/// `forge-runner-host --compatibility` output, checked at attestation.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HostCompatibility {
+    protocol: u32,
+    #[allow(dead_code)] // Checked by the Revision's own daemon preflight.
+    runtime_schema: u32,
+    forge_revision: String,
 }
 
 fn invalid(message: impl Into<String>) -> ForgeupError {
@@ -135,7 +172,7 @@ fn read_manifest(root: &Path) -> Result<BundleManifest, ForgeupError> {
     let bytes = fs::read(&path).map_err(|e| io(&path, e))?;
     let manifest: BundleManifest = serde_json::from_slice(&bytes)
         .map_err(|e| invalid(format!("malformed {BUNDLE_MANIFEST}: {e}")))?;
-    if manifest.schema != SUPPORTED_SCHEMA {
+    if !SUPPORTED_SCHEMAS.contains(&manifest.schema) {
         return Err(invalid(format!(
             "bundle schema {} is unsupported",
             manifest.schema
@@ -150,6 +187,15 @@ fn read_manifest(root: &Path) -> Result<BundleManifest, ForgeupError> {
     if !hex(&manifest.tree_sha256) || !hex(&manifest.package_lock_sha256) {
         return Err(invalid("bundle hashes must be lowercase SHA-256"));
     }
+    match (manifest.schema, &manifest.runner_component_sha256) {
+        (1, None) => {}
+        (2, Some(component)) if hex(component) => {}
+        _ => {
+            return Err(invalid(
+                "schema 2 bundles must record a lowercase SHA-256 runner component hash (schema 1 must not)",
+            ));
+        }
+    }
     if manifest.node_version.is_empty()
         || !manifest
             .node_version
@@ -159,6 +205,78 @@ fn read_manifest(root: &Path) -> Result<BundleManifest, ForgeupError> {
         return Err(invalid("bundle Node version is malformed"));
     }
     Ok(manifest)
+}
+
+fn regular(root: &Path, relative: &str) -> Result<(), ForgeupError> {
+    let metadata = fs::symlink_metadata(root.join(relative))
+        .map_err(|_| invalid(format!("bundle is missing required component `{relative}`")))?;
+    if !metadata.is_file() {
+        return Err(invalid(format!(
+            "component `{relative}` is not a regular file"
+        )));
+    }
+    Ok(())
+}
+
+/// The Forge Revision string a host built from this identity reports.
+fn expected_revision(identity: &RevisionIdentity) -> String {
+    if identity.dirty {
+        format!("{}-dirty", identity.commit)
+    } else {
+        identity.commit.clone()
+    }
+}
+
+fn verify_host(
+    root: &Path,
+    manifest: &BundleManifest,
+    identity: &RevisionIdentity,
+) -> Result<(), ForgeupError> {
+    let host = root.join(HOST_RELATIVE);
+    let output = offline_output(Command::new(&host).arg("--compatibility").env_clear())
+        .map_err(|e| io(&host, e))?;
+    let reported: HostCompatibility = serde_json::from_slice(&output.stdout)
+        .ok()
+        .filter(|_| output.status.success())
+        .ok_or_else(|| {
+            invalid("packaged forge-runner-host does not report its compatibility; repackage it")
+        })?;
+    if reported.protocol != manifest.runner_protocol {
+        return Err(invalid(format!(
+            "packaged forge-runner-host implements runner protocol {}, the bundle declares {}",
+            reported.protocol, manifest.runner_protocol
+        )));
+    }
+    if reported.forge_revision != expected_revision(identity) {
+        return Err(invalid(
+            "packaged forge-runner-host was built from a different Forge Revision",
+        ));
+    }
+    Ok(())
+}
+
+/// Recompute the Launch component hash from the bundled sources with the bundled Node.
+fn component_hash(root: &Path) -> Result<String, ForgeupError> {
+    let node = root.join(NODE_RELATIVE);
+    let contract = root.join("runner/src/contract.ts");
+    let module = serde_json::to_string(&contract)
+        .map_err(|_| invalid("runner contract path is not representable"))?;
+    let output = offline_output(
+        Command::new(&node)
+            .env_clear()
+            .args(["--input-type=module", "-e"])
+            .arg(format!(
+                "import {{componentHash}} from {module}; process.stdout.write(componentHash());"
+            )),
+    )
+    .map_err(|e| io(&node, e))?;
+    let hash = String::from_utf8_lossy(&output.stdout).into_owned();
+    if !output.status.success() || !hex(&hash) {
+        return Err(invalid(
+            "bundled runner sources do not report a component hash",
+        ));
+    }
+    Ok(hash)
 }
 
 /// Verifies a bundle directory (source or installed) against its own manifest, the
@@ -181,14 +299,10 @@ pub fn verify_bundle(
         INSPECTOR_RELATIVE,
         LOCK_RELATIVE,
     ] {
-        let path = root.join(relative);
-        let metadata = fs::symlink_metadata(&path)
-            .map_err(|_| invalid(format!("bundle is missing required component `{relative}`")))?;
-        if !metadata.is_file() {
-            return Err(invalid(format!(
-                "component `{relative}` is not a regular file"
-            )));
-        }
+        regular(root, relative)?;
+    }
+    if manifest.schema >= 2 {
+        regular(root, HOST_RELATIVE)?;
     }
     if sha256(&root.join(LOCK_RELATIVE))? != manifest.package_lock_sha256 {
         return Err(invalid(
@@ -210,6 +324,14 @@ pub fn verify_bundle(
             "bundled Node reports `{reported}`, expected v{}",
             manifest.node_version
         )));
+    }
+    if let Some(expected) = &manifest.runner_component_sha256 {
+        verify_host(root, &manifest, identity)?;
+        if component_hash(root)? != *expected {
+            return Err(invalid(
+                "bundled runner sources do not match the attested runner component hash",
+            ));
+        }
     }
     Ok(manifest)
 }
@@ -239,6 +361,11 @@ fn describe(root: &Path, manifest: &BundleManifest) -> InstalledRunner {
         node_version: manifest.node_version.clone(),
         package_lock_sha256: manifest.package_lock_sha256.clone(),
         tree_sha256: manifest.tree_sha256.clone(),
+        host_path: manifest
+            .runner_component_sha256
+            .as_ref()
+            .map(|_| root.join(HOST_RELATIVE)),
+        component_sha256: manifest.runner_component_sha256.clone(),
     }
 }
 
@@ -264,11 +391,13 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<(), ForgeupError> {
 #[must_use]
 pub fn present(runner: &InstalledRunner) -> bool {
     [
-        &runner.node_path,
-        &runner.entry_path,
-        &runner.inspector_path,
+        Some(&runner.node_path),
+        Some(&runner.entry_path),
+        Some(&runner.inspector_path),
+        runner.host_path.as_ref(),
     ]
     .iter()
+    .flatten()
     .all(|path| path.is_file())
 }
 
@@ -285,6 +414,8 @@ pub fn verify_installed(
         || manifest.package_lock_sha256 != runner.package_lock_sha256
         || manifest.node_version != runner.node_version
         || manifest.runner_protocol != runner.protocol
+        || manifest.runner_component_sha256 != runner.component_sha256
+        || describe(&runner.root, &manifest) != *runner
     {
         return Err(invalid(
             "installed bundle differs from the identity recorded at registration",
@@ -337,14 +468,30 @@ mod tests {
         fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
     }
 
-    /// A synthetic bundle whose "Node" is a shell script reporting the pinned version.
+    /// The fake Node: reports the pinned version, or a component hash of the
+    /// bundled sources (so tampering is detected exactly like the real runner).
+    const FAKE_NODE: &str = "#!/bin/sh\nPATH=/usr/bin:/bin\nif [ \"$1\" = --version ]; then echo v24.18.0; exit 0; fi\nroot=$(dirname \"$0\")/..\nprintf %s \"$(cat \"$root\"/runner/src/*.ts | sha256sum | cut -c1-64)\"\n";
+
+    fn host_script(protocol: u32, revision: &str) -> String {
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = --compatibility ]; then echo '{{\"protocol\":{protocol},\"runtime_schema\":2,\"forge_revision\":\"{revision}\"}}'; exit 0; fi\nexit 1\n"
+        )
+    }
+
+    /// A synthetic schema 2 bundle: shell-script "Node" and "host" that answer
+    /// the same questions the real components do.
     fn bundle(root: &Path, mutate: impl FnOnce(&mut BundleManifest)) -> PathBuf {
+        bundle_with_host(root, &host_script(1, COMMIT), mutate)
+    }
+
+    fn bundle_with_host(
+        root: &Path,
+        host: &str,
+        mutate: impl FnOnce(&mut BundleManifest),
+    ) -> PathBuf {
         let bundle = root.join("bundle");
-        write(
-            &bundle.join(NODE_RELATIVE),
-            "#!/bin/sh\necho v24.18.0\n",
-            0o755,
-        );
+        write(&bundle.join(NODE_RELATIVE), FAKE_NODE, 0o755);
+        write(&bundle.join(HOST_RELATIVE), host, 0o755);
         write(&bundle.join(ENTRY_RELATIVE), "// entry", 0o644);
         write(&bundle.join(INSPECTOR_RELATIVE), "// inspector", 0o644);
         write(
@@ -354,14 +501,33 @@ mod tests {
         );
         write(&bundle.join(LOCK_RELATIVE), "{\"lock\":1}", 0o644);
         let mut manifest = BundleManifest {
-            schema: 1,
+            schema: 2,
             runner_protocol: 1,
             node_version: "24.18.0".into(),
             forge_commit: COMMIT.into(),
             package_lock_sha256: sha256(&bundle.join(LOCK_RELATIVE)).unwrap(),
             tree_sha256: tree_hash(&bundle).unwrap(),
+            runner_component_sha256: Some(component_hash(&bundle).unwrap()),
         };
         mutate(&mut manifest);
+        fs::write(
+            bundle.join(BUNDLE_MANIFEST),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        bundle
+    }
+
+    /// A T15 schema 1 bundle: no host and no recorded component hash.
+    fn bundle_v1(root: &Path) -> PathBuf {
+        let bundle = bundle(root, |_| {});
+        fs::remove_file(bundle.join(HOST_RELATIVE)).unwrap();
+        fs::remove_dir(bundle.join("host")).unwrap();
+        let mut manifest: BundleManifest =
+            serde_json::from_slice(&fs::read(bundle.join(BUNDLE_MANIFEST)).unwrap()).unwrap();
+        manifest.schema = 1;
+        manifest.runner_component_sha256 = None;
+        manifest.tree_sha256 = tree_hash(&bundle).unwrap();
         fs::write(
             bundle.join(BUNDLE_MANIFEST),
             serde_json::to_vec(&manifest).unwrap(),
@@ -506,6 +672,7 @@ mod tests {
         let mut manifest: BundleManifest =
             serde_json::from_slice(&fs::read(source.join(BUNDLE_MANIFEST)).unwrap()).unwrap();
         manifest.tree_sha256 = tree_hash(&source).unwrap();
+        manifest.runner_component_sha256 = Some(component_hash(&source).unwrap());
         fs::write(
             source.join(BUNDLE_MANIFEST),
             serde_json::to_vec(&manifest).unwrap(),
@@ -566,7 +733,7 @@ mod tests {
         }
         assert_eq!(
             std::fs::read_to_string(runner.root.join(NODE_RELATIVE)).unwrap(),
-            "#!/bin/sh\necho v24.18.0\n"
+            FAKE_NODE
         );
     }
 
@@ -579,5 +746,277 @@ mod tests {
         // Only `runner/src` is bundled; the synthetic runner lives outside it.
         assert!(!repository.join("runner/src/main.ts").exists());
         assert!(repository.join("runner/test/synthetic-runner.ts").exists());
+    }
+
+    /// Register a Revision with its own commit identity into an explicit layout.
+    fn revision(
+        root: &Path,
+        paths: &ForgeupPaths,
+        label: &str,
+        commit: &str,
+        bundle: Option<&Path>,
+    ) -> Result<crate::Installation, ForgeupError> {
+        let identity = format!(
+            r#"{{"commit":"{commit}","dirty":false,"management_protocol_revision":1,"version":"test"}}"#
+        );
+        let cli = root.join(format!("{label}-cli"));
+        let daemon = root.join(format!("{label}-daemon"));
+        for path in [&cli, &daemon] {
+            write(
+                path,
+                &format!(
+                    "#!/bin/sh\nif [ \"$1\" = \"--build-info\" ]; then echo '{identity}'; exit 0; fi\n"
+                ),
+                0o700,
+            );
+        }
+        register_at(
+            paths,
+            label,
+            &cli,
+            &daemon,
+            None,
+            RegistrationOptions {
+                runner_bundle: bundle,
+                ..RegistrationOptions::default()
+            },
+        )
+    }
+
+    fn registry(paths: &ForgeupPaths) -> crate::Registry {
+        crate::RegistryStore::open(paths.clone())
+            .unwrap()
+            .load()
+            .unwrap()
+    }
+
+    fn layout(root: &Path) -> ForgeupPaths {
+        ForgeupPaths {
+            config: root.join("home/config"),
+            data: root.join("home/data"),
+            runtime: root.join("home/runtime"),
+            bin: root.join("home/bin"),
+        }
+    }
+
+    /// A schema 2 bundle for `commit` whose sources differ by `marker`, so its
+    /// runner component hash differs from every other marker's.
+    fn bundle_for(root: &Path, commit: &str, marker: &str) -> PathBuf {
+        let source = bundle_with_host(root, &host_script(1, commit), |_| {});
+        write(&source.join("runner/src/contract.ts"), marker, 0o644);
+        let mut manifest: BundleManifest =
+            serde_json::from_slice(&fs::read(source.join(BUNDLE_MANIFEST)).unwrap()).unwrap();
+        manifest.forge_commit = commit.into();
+        manifest.tree_sha256 = tree_hash(&source).unwrap();
+        manifest.runner_component_sha256 = Some(component_hash(&source).unwrap());
+        fs::write(
+            source.join(BUNDLE_MANIFEST),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        source
+    }
+
+    fn rewrite(bundle: &Path, mutate: impl FnOnce(&mut BundleManifest)) {
+        let mut manifest: BundleManifest =
+            serde_json::from_slice(&fs::read(bundle.join(BUNDLE_MANIFEST)).unwrap()).unwrap();
+        mutate(&mut manifest);
+        fs::write(
+            bundle.join(BUNDLE_MANIFEST),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn schema_2_bundle_attests_its_host_and_the_launch_component_identity() {
+        let root = scratch("schema2");
+        let source = bundle(&root, |_| {});
+        let installed = install(&source, &root.join("installed"), &identity()).unwrap();
+        assert!(installed.launchable());
+        assert_eq!(
+            installed.host_path.as_deref(),
+            Some(root.join("installed/host/forge-runner-host").as_path())
+        );
+        // The recorded identity is what the bundled sources themselves attest.
+        assert_eq!(
+            installed.component_sha256,
+            Some(component_hash(&installed.root).unwrap())
+        );
+        assert!(present(&installed));
+        verify_installed(&installed, &identity()).unwrap();
+        // A tampered installed host fails re-attestation and presence holds only
+        // while the file exists.
+        let original = fs::read(installed.host_path.as_ref().unwrap()).unwrap();
+        let mut tampered = original.clone();
+        tampered.extend_from_slice(b"# extra\n");
+        fs::write(installed.host_path.as_ref().unwrap(), &tampered).unwrap();
+        assert!(message(verify_installed(&installed, &identity())).contains("tampered"));
+        fs::write(installed.host_path.as_ref().unwrap(), &original).unwrap();
+        verify_installed(&installed, &identity()).unwrap();
+        fs::remove_file(installed.host_path.as_ref().unwrap()).unwrap();
+        assert!(!present(&installed));
+        assert!(
+            message(verify_installed(&installed, &identity()))
+                .contains("missing required component `host/forge-runner-host`")
+        );
+    }
+
+    #[test]
+    fn host_protocol_revision_and_component_faults_block_with_actionable_messages() {
+        let case = |name: &str, host: String, mutate: fn(&mut BundleManifest)| {
+            let root = scratch(name);
+            let source = bundle_with_host(&root, &host, mutate);
+            message(install(&source, &root.join("i"), &identity()))
+        };
+        assert!(
+            case("host-protocol", host_script(2, COMMIT), |_| {})
+                .contains("implements runner protocol 2")
+        );
+        assert!(
+            case("host-revision", host_script(1, &"e".repeat(40)), |_| {})
+                .contains("different Forge Revision")
+        );
+        assert!(
+            case("host-silent", "#!/bin/sh\nexit 1\n".into(), |_| {})
+                .contains("does not report its compatibility")
+        );
+        assert!(
+            case("component", host_script(1, COMMIT), |m| {
+                m.runner_component_sha256 = Some("2".repeat(64));
+            })
+            .contains("runner component hash")
+        );
+        assert!(
+            case("schema2-without", host_script(1, COMMIT), |m| {
+                m.runner_component_sha256 = None;
+            })
+            .contains("schema 2 bundles must record")
+        );
+        assert!(
+            case("schema1-with", host_script(1, COMMIT), |m| m.schema = 1)
+                .contains("schema 2 bundles must record")
+        );
+        // Sources edited and the tree hash re-declared still cannot pass: the
+        // sources no longer attest the recorded Launch identity.
+        let root = scratch("sources");
+        let source = bundle(&root, |_| {});
+        write(&source.join(ENTRY_RELATIVE), "// edited", 0o644);
+        let tree = tree_hash(&source).unwrap();
+        rewrite(&source, |m| m.tree_sha256 = tree);
+        assert!(
+            message(install(&source, &root.join("i"), &identity()))
+                .contains("runner component hash")
+        );
+    }
+
+    #[test]
+    fn schema_1_bundle_remains_an_inspection_only_installation() {
+        let root = scratch("schema1");
+        let source = bundle_v1(&root);
+        let installed = install(&source, &root.join("installed"), &identity()).unwrap();
+        assert!(!installed.launchable());
+        assert!(installed.host_path.is_none() && installed.component_sha256.is_none());
+        verify_installed(&installed, &identity()).unwrap();
+        // A T15 registry entry (without the new fields) still deserializes.
+        let mut value = serde_json::to_value(&installed).unwrap();
+        assert!(value.get("host_path").is_none());
+        value.as_object_mut().unwrap().remove("component_sha256");
+        let reloaded: InstalledRunner = serde_json::from_value(value).unwrap();
+        assert_eq!(reloaded, installed);
+    }
+
+    #[test]
+    fn launch_component_hash_resolves_its_installation_and_the_daemon_gets_matched_bundles() {
+        let root = scratch("retained");
+        let paths = layout(&root);
+        let (a, b, c) = ("a".repeat(40), "b".repeat(40), "c".repeat(40));
+        let first = revision(
+            &root,
+            &paths,
+            "first",
+            &a,
+            Some(&bundle_for(&scratch("first"), &a, "// first")),
+        )
+        .unwrap();
+        let second = revision(
+            &root,
+            &paths,
+            "second",
+            &b,
+            Some(&bundle_for(&scratch("second"), &b, "// second")),
+        )
+        .unwrap();
+        let legacy_source = bundle_v1(&scratch("legacy"));
+        rewrite(&legacy_source, |m| m.forge_commit.clone_from(&c));
+        let legacy = revision(&root, &paths, "legacy", &c, Some(&legacy_source)).unwrap();
+        let (first_runner, second_runner) = (
+            first.runner.clone().unwrap(),
+            second.runner.clone().unwrap(),
+        );
+        assert_ne!(
+            first_runner.component_sha256,
+            second_runner.component_sha256
+        );
+
+        // A Launch's component hash (and the bundle tree hash) resolve exactly.
+        let launch_hash = first_runner.component_sha256.clone().unwrap();
+        assert_eq!(
+            runner_for_component_at(&paths, &launch_hash)
+                .unwrap()
+                .selector,
+            first.selector
+        );
+        assert_eq!(
+            runner_for_component_at(&paths, &first_runner.tree_sha256)
+                .unwrap()
+                .selector,
+            first.selector
+        );
+
+        // The daemon of `second` composes launch from its own bundle and is
+        // offered `first` for retained work; the schema 1 Revision is not.
+        // As in `daemon start`: computed while the registry lock is held.
+        let locked = crate::RegistryStore::open(paths.clone()).unwrap();
+        let arguments =
+            crate::managed_durable_arguments(&paths, &locked.load().unwrap(), &second).unwrap();
+        drop(locked);
+        assert_eq!(
+            arguments,
+            vec![
+                std::ffi::OsString::from("--durable-runner-bundle"),
+                second_runner.root.clone().into(),
+                "--durable-retained-runner-bundle".into(),
+                first_runner.root.clone().into(),
+            ]
+        );
+        // A schema 1 Revision keeps the T15 inspection-only inputs.
+        let legacy_runner = legacy.runner.clone().unwrap();
+        assert_eq!(
+            crate::managed_durable_arguments(&paths, &registry(&paths), &legacy).unwrap(),
+            vec![
+                std::ffi::OsString::from("--durable-node"),
+                legacy_runner.node_path.into(),
+                "--durable-effect-inspector".into(),
+                legacy_runner.inspector_path.into(),
+            ]
+        );
+        // A retained bundle that no longer verifies is withheld (and diagnosed),
+        // so its Assignments refuse explicitly instead of running other code.
+        fs::write(&first_runner.entry_path, "// tampered").unwrap();
+        assert_eq!(
+            crate::managed_durable_arguments(&paths, &registry(&paths), &second).unwrap(),
+            vec![
+                std::ffi::OsString::from("--durable-runner-bundle"),
+                second_runner.root.into(),
+            ]
+        );
+        assert!(runner_for_component_at(&paths, &launch_hash).is_err());
+        let diagnostics =
+            fs::read_to_string(paths.state(&second.selector).logs.join("forgeup.log")).unwrap();
+        assert!(diagnostics.contains(&format!(
+            "retained runner of Revision `{}` not offered to the daemon",
+            first.selector
+        )));
     }
 }

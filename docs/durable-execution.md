@@ -38,9 +38,13 @@ daemon-owned driver then delivers and renews the authorization lease and admits 
 supervisor's private pipe. Same-attempt recovery from exact crash proof, follow-up
 delivery and retirement use that same composition. It is assembled only when matched
 runner components are configured (see below), and it is still behind the gate above:
-configuring components never admits a launch. Forgeup does not yet package the host or
-pass these components to a managed daemon (T24), so a managed daemon composes neither
-launch nor automatic recovery. The behavior described under
+configuring components never admits a launch.
+
+A Forgeup-managed daemon of a Revision with a schema 2 runner bundle composes this
+path from the Installation's packaged components (see
+[Install and run the matched runner](#install-and-run-the-matched-runner)). It still has
+no model-credential setting (see the known gap below), so it cannot validate a durable
+profile. The behavior described under
 [Assignment recovery](assignment-recovery.md#same-assignment-durable-recovery-controlled-rollout-disabled)
 therefore remains a controlled-test capability, not an operational one.
 
@@ -101,11 +105,11 @@ readiness check.
 | Tools | Unique subset of `read`, `write`, `edit`, `bash` | Other tools, extensions, MCP servers |
 | Context | Selected Skill/Markdown resources as data, re-verified by hash, 256 KiB total | Automatic `AGENTS.md`, Pi settings, executable Pi skills |
 | Model authentication | Raw OpenAI API key **file** named by `FORGE_DURABLE_OPENAI_KEY_FILE` on a manual daemon | OAuth, Pi `auth.json`/settings, key values in environment/arguments/YAML, copied Pi configuration |
-| Daemon launch | Manual `forge-server`; Forgeup-managed daemon for inspection/cleanup components | Model credentials for a Forgeup-managed daemon (see below) |
+| Daemon launch | Manual `forge-server`; Forgeup-managed daemon with the Revision's packaged components (schema 2 bundle) | Model credentials for a Forgeup-managed daemon (see below) |
 
-**Known gap:** a Forgeup-managed daemon receives the Revision's matched runner components
-but has no model-credential setting; it inherits none of the `FORGE_DURABLE_*` environment
-values. Durable profile preview/registration there fails with
+**Known gap:** a Forgeup-managed daemon receives the Revision's matched runner components,
+including the packaged host, but has no model-credential setting; it inherits none of the
+`FORGE_DURABLE_*` environment values. Durable profile preview/registration there fails with
 `durable-model-auth-unavailable`. Closing this gap is release work, not an operator workaround.
 
 The key file must be an absolute canonical path to a regular, single-link, owner-owned
@@ -120,32 +124,60 @@ for the full authoring and context rules.
 
 ## Install and run the matched runner
 
-The runner, bundled Node and locked JavaScript dependencies are distributed as one matched
-component of a Forge Revision. Build and register it with the Revision
+The runner, its `forge-runner-host` supervisor, the bundled Node and the locked JavaScript
+dependencies are distributed as one matched component of a Forge Revision. Build and
+register it with the Revision
 ([matched runner packaging](development.md#matched-runner-packaging)):
 
 ```sh
-node runner/package-bundle.mjs --out /tmp/forge-runner-bundle --forge-commit <40-hex-commit>
+cargo build --release -p forge-runner-host
+node runner/package-bundle.mjs --out /tmp/forge-runner-bundle --forge-commit <40-hex-commit> \
+  --runner-host target/release/forge-runner-host
 forgeup register --source-label local --cli target/release/forge \
   --daemon target/release/forge-server --runner-bundle /tmp/forge-runner-bundle
 forgeup runner verify <selector>
 forgeup daemon start
 ```
 
-`register` and `daemon start` attest the commit, runner protocol 1, Node version, lock hash
-and content tree hash, and refuse a missing, modified or mismatched component with an
-actionable message. `daemon start` passes the Installation's own `--durable-node` and
-`--durable-effect-inspector` to the daemon. Global `PATH`, npm and the checkout are never
-consulted. A Revision without a bundle has no matched components, so durable transcripts,
-effect resolution and retirement reconciliation stay blocked there.
-Removing a runner-bearing Revision requires `--purge-state` while its state exists, and
-selecting another Revision never changes a retained Assignment's component.
+`register` and `daemon start` attest the following, and refuse a missing,
+modified or mismatched component with an actionable message:
+
+- the commit, runner protocol 1 and Node version;
+- the lock hash and content tree hash;
+- the packaged host's compatibility and Revision;
+- the runner component hash.
+
+`daemon start` passes the Installation's bundle as `--durable-runner-bundle`. It
+also passes, as `--durable-retained-runner-bundle`, every other registered
+Revision's bundle that still verifies. Global `PATH`, npm and the checkout are
+never consulted.
+
+Before any allocation, each durable dispatch checks every matched component again
+(launch preflight). It refuses with `durable-components-incompatible` when any of
+these holds:
+
+- a component is missing or was replaced after daemon start;
+- Node is not v24.18.0;
+- the host reports another protocol, runtime schema or Revision;
+- the runner sources no longer attest the composed hash.
+
+**Retained Assignments.** An Assignment keeps the runner components that launched
+it. After you switch Revisions, the daemon uses an earlier Revision's bundle for
+that Assignment's transcripts, effect inspection, recovery and retirement, matched
+by the Launch's component hash. If no configured bundle matches, those operations
+refuse with `durable-components-unavailable`, which names the hash. They never
+fall back to the current Revision's components.
+`forgeup runner resolve --component-hash <hash>` finds the Revision that shipped
+it. Register that Revision (and keep its bundle intact), then restart the daemon.
+A Revision without a bundle, or with an inspection-only schema 1 bundle, cannot
+launch. Removing a runner-bearing Revision requires `--purge-state` while its
+state exists.
 
 For a manual daemon, name the components explicitly (both or neither; absolute paths only)
 and, for profile registration, the key file:
 
 ```text
-FORGE_DURABLE_NODE=/abs/path/bundle/node/bin/node
+FORGE_DURABLE_NODE=/abs/path/bundle/node/node
 FORGE_DURABLE_EFFECT_INSPECTOR=/abs/path/bundle/runner/src/inspect-effects.ts
 FORGE_DURABLE_OPENAI_KEY_FILE=/abs/owner-only-dir/openai.key
 ```
@@ -157,11 +189,13 @@ directory, and the component hash recorded on each Launch is attested from that 
 at startup:
 
 ```text
-FORGE_DURABLE_RUNNER_HOST=/abs/path/forge-runner-host
+FORGE_DURABLE_RUNNER_HOST=/abs/path/bundle/host/forge-runner-host
 FORGE_DURABLE_RUNNER_ENTRY=/abs/path/bundle/runner/src/check-entry.ts
 ```
 
-This selects components only; new launches stay withheld.
+This selects components only; new launches stay withheld. A manual daemon has no
+retained-bundle setting: it serves existing Launches only when their component hash
+matches these components, and otherwise refuses with `durable-components-unavailable`.
 
 A partial or relative component selection stops the daemon at startup. Without components,
 status still works from the store, but transcripts fail with

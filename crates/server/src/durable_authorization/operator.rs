@@ -63,20 +63,18 @@ mod tests;
 
 pub(crate) struct OperatorService {
     repository: SqliteProjectRepository,
-    components: Option<InspectionComponents>,
+    /// Matched components, selected per retained Launch by its component hash.
+    catalog: super::launch::ComponentCatalog,
 }
 
 impl OperatorService {
     pub(crate) fn new(
         store: &Path,
-        components: Option<InspectionComponents>,
+        catalog: super::launch::ComponentCatalog,
     ) -> Result<Self, RegistrationError> {
-        if let Some(components) = &components {
-            components.validate()?;
-        }
         Ok(Self {
             repository: SqliteProjectRepository::open(store)?,
-            components,
+            catalog,
         })
     }
 
@@ -203,7 +201,7 @@ impl OperatorService {
                     "Assignment has no retained durable runtime",
                 )
             })?;
-        let components = self.components.as_ref().ok_or_else(|| {
+        let components = self.catalog.inspection_for(&runtime.launch)?.ok_or_else(|| {
             RegistrationError::new(
                 "durable-transcript-unconfigured",
                 "configure trusted matched inspection components on the daemon to read transcripts",
@@ -246,7 +244,7 @@ impl OperatorService {
         )? {
             return Ok(receipt);
         }
-        let components = self.components.as_ref().ok_or_else(|| RegistrationError::new(
+        let components = self.catalog.inspection_for(&runtime.launch)?.ok_or_else(|| RegistrationError::new(
             "durable-effect-inspector-unconfigured", "configure trusted matched effect inspection components on the daemon; preserve uncertainty and do not replay",
         ))?;
         resolve_exclusive(

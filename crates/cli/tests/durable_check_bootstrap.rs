@@ -404,6 +404,7 @@ async fn inspecting_daemon(
                 },
             ),
             durable_execution: None,
+            durable_retained: Vec::new(),
             managed: None,
         }));
         let listening = tokio::time::timeout(std::time::Duration::from_secs(10), async {
@@ -660,6 +661,7 @@ async fn check_execution(mode: &str) {
         durable_model_key_file: None,
         durable_inspection: None,
         durable_execution: None,
+        durable_retained: Vec::new(),
         managed: None,
     }));
     let endpoint = format!("http://{addr}");
@@ -873,6 +875,7 @@ async fn check_execution(mode: &str) {
                 },
             ),
             durable_execution: None,
+            durable_retained: Vec::new(),
             managed: None,
         }));
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
@@ -912,6 +915,7 @@ async fn check_execution(mode: &str) {
             durable_model_key_file: None,
             durable_inspection: None,
             durable_execution: None,
+            durable_retained: Vec::new(),
             managed: None,
         }));
         tokio::time::timeout(std::time::Duration::from_secs(10), async {

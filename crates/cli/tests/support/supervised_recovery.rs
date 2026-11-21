@@ -4,13 +4,16 @@
 use super::*;
 
 impl SupervisedDispatch {
-    pub(super) fn recover(
+    /// Kill the worker at its injected pre-generation boundary after the
+    /// production driver committed the runner's admission; the original host
+    /// verifies the crash and exits, and the driver observes `Crashed`. Returns
+    /// the committed admission ID.
+    pub fn crash_at_boundary(
         &self,
         store: &SqliteProjectRepository,
-        launch: Launch,
-        directory: PathBuf,
-        capability_file: PathBuf,
-    ) -> Report {
+        launch: &Launch,
+        directory: &Path,
+    ) -> String {
         let id = launch.assignment_id.clone();
         let boundary = directory.join("controlled-recovery-boundary.json");
         let original: Value = wait(|| {
@@ -28,16 +31,28 @@ impl SupervisedDispatch {
             )
             .then_some(())
         });
-        let attempt = store.assignment_check_attempt(&id).unwrap().unwrap();
-        // Crash the worker at the injected boundary. The original host verifies
-        // the crash and exits; the production driver observes the closed stream.
-        let worker = owner(&directory)["worker_pid"].as_u64().unwrap();
+        let worker = owner(directory)["worker_pid"].as_u64().unwrap();
         rustix::process::kill_process(
             rustix::process::Pid::from_raw(i32::try_from(worker).unwrap()).unwrap(),
             rustix::process::Signal::KILL,
         )
         .unwrap();
         self.wait_state(&id, |state| state == DriverState::Crashed);
+        admission
+    }
+
+    pub(super) fn recover(
+        &self,
+        store: &SqliteProjectRepository,
+        launch: Launch,
+        directory: PathBuf,
+        capability_file: PathBuf,
+    ) -> Report {
+        let id = launch.assignment_id.clone();
+        let attempt = store.assignment_check_attempt(&id).unwrap().unwrap();
+        // Crash the worker at the injected boundary. The original host verifies
+        // the crash and exits; the production driver observes the closed stream.
+        let admission = self.crash_at_boundary(store, &launch, &directory);
         // The recovered process reads the SAME protected input the first
         // admission wrote; nothing is rewritten for recovery.
         let input = fs::read(directory.join("check-runtime.json")).unwrap();

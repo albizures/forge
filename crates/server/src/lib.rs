@@ -86,8 +86,16 @@ pub struct ManagedLaunchInputs {
     pub lifecycle_credential: String,
     pub daemon_instance_id: String,
     /// Forgeup-attested matched Node and effect-inspector paths: both or neither.
+    /// A schema 1 (inspection-only) runner bundle; never with a runner bundle.
     pub durable_node: Option<String>,
     pub durable_inspector: Option<String>,
+    /// Forgeup-attested schema 2 runner bundle root of this Revision. Every
+    /// durable component is derived from its fixed layout; composes launch.
+    pub durable_runner_bundle: Option<String>,
+    /// Forgeup-attested runner bundle roots of other registered Revisions, used
+    /// only for Assignments those Revisions launched (inspection, recovery and
+    /// retirement with their original components). Requires a runner bundle.
+    pub durable_retained_runner_bundles: Vec<String>,
 }
 
 /// Managed-only configuration retained at the server composition boundary.
@@ -136,6 +144,9 @@ pub struct DaemonConfig {
     /// Explicit matched host/runner components for durable launch and recovery.
     /// Composition only: the release gate still withholds new launches by default.
     pub durable_execution: Option<durable_authorization::launch::Execution>,
+    /// Matched components of other installed Revisions, selected only by a
+    /// retained Launch's exact component hash; never used for new launches.
+    pub durable_retained: Vec<durable_authorization::launch::Execution>,
     /// Present only when Forgeup explicitly owns this daemon launch.
     pub managed: Option<ManagedDaemonConfig>,
 }
@@ -158,6 +169,7 @@ impl std::fmt::Debug for DaemonConfig {
                 "durable_execution_configured",
                 &self.durable_execution.is_some(),
             )
+            .field("durable_retained_components", &self.durable_retained.len())
             .finish()
     }
 }
@@ -194,6 +206,7 @@ impl DaemonConfig {
                 env::var_os("FORGE_DURABLE_RUNNER_ENTRY").map(PathBuf::from),
             )
             .map_err(|error| error.message)?,
+            durable_retained: Vec::new(),
             managed: None,
         })
     }
@@ -223,18 +236,45 @@ impl DaemonConfig {
         if let Some((name, _)) = required.iter().find(|(_, value)| value.trim().is_empty()) {
             return Err(format!("managed daemon {name} must not be empty"));
         }
-        let durable_inspection = durable_authorization::operator::InspectionComponents::select(
-            inputs.durable_node.map(PathBuf::from),
-            inputs.durable_inspector.map(PathBuf::from),
-        )
-        .map_err(|error| error.message)?;
+        let bundle = |root: &String| {
+            durable_authorization::launch::Execution::from_bundle(Path::new(root))
+                .map_err(|error| error.message)
+        };
+        let (durable_inspection, durable_execution, durable_retained) = if let Some(root) =
+            &inputs.durable_runner_bundle
+        {
+            if inputs.durable_node.is_some() || inputs.durable_inspector.is_some() {
+                return Err(
+                    "a managed runner bundle already selects the matched Node and effect inspector"
+                        .into(),
+                );
+            }
+            let execution = bundle(root)?;
+            let retained = inputs
+                .durable_retained_runner_bundles
+                .iter()
+                .map(bundle)
+                .collect::<Result<Vec<_>, _>>()?;
+            (Some(execution.inspection()), Some(execution), retained)
+        } else {
+            if !inputs.durable_retained_runner_bundles.is_empty() {
+                return Err("retained runner bundles require this Revision's runner bundle".into());
+            }
+            let inspection = durable_authorization::operator::InspectionComponents::select(
+                inputs.durable_node.map(PathBuf::from),
+                inputs.durable_inspector.map(PathBuf::from),
+            )
+            .map_err(|error| error.message)?;
+            (inspection, None, Vec::new())
+        };
         Ok(Self {
             bind_addr,
             store_path: PathBuf::from(inputs.store_path),
+            // A managed daemon has no model-credential mechanism yet (T18 M4).
             durable_model_key_file: None,
             durable_inspection,
-            // Forgeup does not yet supply a packaged host (T24).
-            durable_execution: None,
+            durable_execution,
+            durable_retained,
             managed: Some(ManagedDaemonConfig {
                 runtime_record_path: PathBuf::from(inputs.runtime_record_path),
                 lifecycle_control_endpoint: PathBuf::from(inputs.lifecycle_control_endpoint),
@@ -952,6 +992,7 @@ fn application_from_config_with_cli(
                         &config.store_path,
                         config.durable_inspection.as_ref(),
                         config.durable_execution.as_ref(),
+                        &config.durable_retained,
                         config.durable_model_key_file.clone(),
                         Box::new(HerdrAdapterFactory::from_configuration_store(
                             config.store_path.clone(),
@@ -2450,7 +2491,11 @@ pub async fn serve(config: DaemonConfig) -> Result<(), std::io::Error> {
     daemon.durable_effect_resolution = Some(Arc::new(
         durable_authorization::operator::OperatorService::new(
             &config.store_path,
-            config.durable_inspection.clone(),
+            durable_authorization::launch::ComponentCatalog::new(
+                config.durable_inspection.as_ref(),
+                config.durable_execution.as_ref(),
+                &config.durable_retained,
+            ),
         )
         .map_err(|error| std::io::Error::other(error.message))?,
     ));
@@ -3189,6 +3234,7 @@ mod tests {
             durable_model_key_file: None,
             durable_inspection: None,
             durable_execution: None,
+            durable_retained: Vec::new(),
             managed: None,
         })
         .unwrap();
@@ -4665,6 +4711,7 @@ mod tests {
             durable_model_key_file: None,
             durable_inspection: None,
             durable_execution: None,
+            durable_retained: Vec::new(),
             managed: None,
         })
         .await
@@ -4715,6 +4762,8 @@ mod tests {
             daemon_instance_id: "instance-123".into(),
             durable_node: None,
             durable_inspector: None,
+            durable_runner_bundle: None,
+            durable_retained_runner_bundles: Vec::new(),
         };
         let config =
             DaemonConfig::from_process(Some("127.0.0.1:45005"), Some(inputs.clone())).unwrap();
@@ -4733,6 +4782,8 @@ mod tests {
             daemon_instance_id: "instance-123".into(),
             durable_node: None,
             durable_inspector: None,
+            durable_runner_bundle: None,
+            durable_retained_runner_bundles: Vec::new(),
         })
         .unwrap_err();
         assert!(error.contains("invalid managed daemon bind address"));
@@ -4755,6 +4806,37 @@ mod tests {
         matched.durable_inspector = Some("relative.ts".into());
         assert!(DaemonConfig::managed(matched).is_err());
 
+        // A schema 2 runner bundle composes launch from its fixed layout, and
+        // retained bundles serve only Launches of other installed Revisions.
+        let mut bundled = inputs.clone();
+        bundled.durable_runner_bundle = Some("/revision/b/runner-bundle".into());
+        bundled.durable_retained_runner_bundles = vec!["/revision/a/runner-bundle".into()];
+        let config = DaemonConfig::managed(bundled.clone()).unwrap();
+        let execution = config.durable_execution.clone().unwrap();
+        assert_eq!(
+            execution.components.host,
+            PathBuf::from("/revision/b/runner-bundle/host/forge-runner-host")
+        );
+        assert_eq!(config.durable_inspection, Some(execution.inspection()));
+        assert_eq!(config.durable_retained.len(), 1);
+        assert_eq!(
+            config.durable_retained[0].components.node,
+            PathBuf::from("/revision/a/runner-bundle/node/node")
+        );
+        // Still no managed model credential (T18 M4); launch stays gate-withheld.
+        assert!(config.durable_model_key_file.is_none());
+        let mut both = bundled.clone();
+        both.durable_node = Some("/revision/b/runner-bundle/node/node".into());
+        both.durable_inspector =
+            Some("/revision/b/runner-bundle/runner/src/inspect-effects.ts".into());
+        assert!(DaemonConfig::managed(both).is_err());
+        let mut orphan = inputs.clone();
+        orphan.durable_retained_runner_bundles = vec!["/revision/a/runner-bundle".into()];
+        assert!(DaemonConfig::managed(orphan).is_err());
+        let mut relative = bundled;
+        relative.durable_runner_bundle = Some("runner-bundle".into());
+        assert!(DaemonConfig::managed(relative).is_err());
+
         let error = DaemonConfig::managed(ManagedLaunchInputs {
             bind_addr: "127.0.0.1:45004".into(),
             store_path: String::new(),
@@ -4764,6 +4846,8 @@ mod tests {
             daemon_instance_id: "instance-123".into(),
             durable_node: None,
             durable_inspector: None,
+            durable_runner_bundle: None,
+            durable_retained_runner_bundles: Vec::new(),
         })
         .unwrap_err();
         assert_eq!(error, "managed daemon store path must not be empty");
@@ -4798,6 +4882,8 @@ mod tests {
             daemon_instance_id: "instance-123".into(),
             durable_node: None,
             durable_inspector: None,
+            durable_runner_bundle: None,
+            durable_retained_runner_bundles: Vec::new(),
         })
         .unwrap();
         let mut server = tokio::spawn(serve(config));

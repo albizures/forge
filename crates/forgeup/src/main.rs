@@ -129,9 +129,10 @@ enum UpgradeCommand {
 
 #[derive(Debug, Subcommand)]
 enum RunnerCommand {
-    /// Fully re-attest a Revision's installed runner (tree hash, lock, Node, protocol).
+    /// Fully re-attest a Revision's installed runner (tree hash, lock, Node, host, protocol).
     Verify { selector: String },
-    /// Print the verified components of the Revision that shipped this exact tree hash.
+    /// Print the verified components of the Revision that shipped this exact bundle tree
+    /// hash or runner component hash (the `component_hash` a durable Launch records).
     Resolve {
         #[arg(long)]
         component_hash: String,
@@ -301,15 +302,20 @@ fn runner(command: RunnerCommand) -> i32 {
     .and_then(|item| {
         forgeup::verify_runner(&item).map(|runner| {
             format!(
-                "{}\nnode\t{}\nentry\t{}\ninspector\t{}\nprotocol\t{}\nnode-version\t{}\nlock-sha256\t{}\ntree-sha256\t{}",
+                "{}\nnode\t{}\nhost\t{}\nentry\t{}\ninspector\t{}\nprotocol\t{}\nnode-version\t{}\nlock-sha256\t{}\ntree-sha256\t{}\ncomponent-sha256\t{}",
                 item.selector,
                 runner.node_path.display(),
+                runner
+                    .host_path
+                    .as_ref()
+                    .map_or_else(|| "(schema 1: none; inspection only)".into(), |p| p.display().to_string()),
                 runner.entry_path.display(),
                 runner.inspector_path.display(),
                 runner.protocol,
                 runner.node_version,
                 runner.package_lock_sha256,
                 runner.tree_sha256,
+                runner.component_sha256.as_deref().unwrap_or("(schema 1: not recorded)"),
             )
         })
     });
