@@ -80,6 +80,53 @@ impl OperatorService {
         })
     }
 
+    /// Persisted durable facts only; scope is authorized before any read.
+    pub(crate) fn status(
+        &self,
+        workspace: &str,
+        assignment: &str,
+    ) -> Result<Option<forge_app::durable_execution::status::Status>, RegistrationError> {
+        forge_app::durable_execution::status::Repository::durable_status(
+            &self.repository,
+            workspace,
+            assignment,
+        )
+    }
+
+    /// Read one committed page. Needs trusted matched components but never the
+    /// host lock, so it works beside a live writer and for stopped runners.
+    pub(crate) async fn transcript(
+        &self,
+        workspace: &str,
+        request: &forge_rpc::AssignmentTranscriptRequest,
+    ) -> Result<forge_rpc::AssignmentTranscriptResponse, RegistrationError> {
+        request.validate()?;
+        let runtime = self
+            .repository
+            .runtime(workspace, &request.assignment_id)?
+            .ok_or_else(|| {
+                RegistrationError::new(
+                    "durable-intent-missing",
+                    "Assignment has no retained durable runtime",
+                )
+            })?;
+        let components = self.components.as_ref().ok_or_else(|| {
+            RegistrationError::new(
+                "durable-transcript-unconfigured",
+                "configure trusted matched inspection components on the daemon to read transcripts",
+            )
+        })?;
+        super::transcript::page(
+            &self.repository,
+            workspace,
+            &runtime.launch,
+            &components.node,
+            &components.inspector,
+            request,
+        )
+        .await
+    }
+
     pub(crate) async fn resolve(
         &self,
         workspace: &str,

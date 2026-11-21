@@ -11,6 +11,7 @@ pub mod recovery_inspection;
 pub mod recovery_worktree;
 pub mod retirement;
 mod runtime_directory;
+pub mod transcript;
 pub mod waiting_recovery_inspection;
 use forge_app::{
     RegistrationError,

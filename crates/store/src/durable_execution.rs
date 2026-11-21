@@ -12,6 +12,7 @@ mod effects;
 mod recovery;
 mod recovery_authorization;
 mod retirement;
+mod status;
 
 pub(super) fn schema(c: &Connection) -> Result<(), RegistrationError> {
     c.execute_batch(include_str!("upgrade/durable_execution.sql"))

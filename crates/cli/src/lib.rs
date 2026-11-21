@@ -6,6 +6,11 @@ mod assignment_findings;
 pub use assignment_findings::{AssignmentFindingAction, assignment_finding};
 mod assignment_checks;
 pub use assignment_checks::{AssignmentCheckAction, assignment_check};
+mod assignment_inspection;
+pub use assignment_inspection::{
+    render_durable_status, render_transcript, request_assignment_durable_status,
+    request_assignment_transcript,
+};
 mod effect_resolution;
 pub use effect_resolution::request_resolve_interrupted_effect;
 mod record_selection;

@@ -1,6 +1,7 @@
 mod agent_profiles;
 mod assignment_check_commands;
 mod assignment_finding_commands;
+mod assignment_inspection_command;
 mod check_templates;
 mod checks;
 mod effect_resolution_command;
@@ -410,6 +411,10 @@ enum AgentDispatchCommand {
     Resume(DispatchTaskArgs),
     /// Inspect persisted Assignment evidence without contacting the provider.
     AssignmentInfo(AssignmentRetireArgs),
+    /// Read-only durable runtime identity, lease history, missing Outcome, uncertainty and retirement blockers.
+    AssignmentStatus(assignment_inspection_command::StatusArgs),
+    /// Read one paginated page of committed durable transcript entries; never starts or repairs a runner.
+    AssignmentTranscript(assignment_inspection_command::TranscriptArgs),
     /// Revoke an Assignment and verify provider cleanup; retains unresolved capacity and hold.
     AssignmentRetire(AssignmentRetireArgs),
     /// Assert unknown resources are safe after retirement (risk of duplicate agents).
@@ -1447,6 +1452,12 @@ async fn agent_dispatch(command: AgentDispatchCommand, workspace: Option<String>
         }
         AgentDispatchCommand::AssignmentResolveEffect(args) => {
             return effect_resolution_command::run(args, workspace).await;
+        }
+        AgentDispatchCommand::AssignmentStatus(args) => {
+            return assignment_inspection_command::status(args, workspace).await;
+        }
+        AgentDispatchCommand::AssignmentTranscript(args) => {
+            return assignment_inspection_command::transcript(args, workspace).await;
         }
         AgentDispatchCommand::AssignmentRetire(args) => return dispatcher_retire(args).await,
     };

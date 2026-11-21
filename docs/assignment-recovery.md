@@ -255,6 +255,34 @@ repair the worktree to bypass these gates. See the
 [T10 completion evidence](research/pi-durable-t10/completion.md) for reproducible
 controlled recovery, blocked counterexamples and verification limits.
 
+## Inspect durable status and committed transcripts (read-only)
+
+```sh
+forge dispatcher assignment-status <assignment-id> --workspace <owner> [--json]
+forge dispatcher assignment-transcript <assignment-id> --workspace <owner> \
+  [--after <entry-id>] [--limit 1..100] [--json]
+```
+
+Both commands call trusted daemon RPC (`assignmentDurableStatus`, `assignmentTranscript`). They start no
+runner, scheduler, model call, tool call or lease, never acquire host ownership and never open runtime
+storage writable. They work for running, crashed, retired and missing-Outcome Assignments.
+
+- **Status** reports persisted Forge facts: backend/runtime/attempt identity, admission result, retained
+  lease history (`never-granted`, `granted-unverified`, `revoked`), missing Outcome, retained uncertainty,
+  capacity and retirement blockers. Lease boot-clock values are informational; neither lease state nor a
+  missing runtime proves a process is running or absent. `granted-unverified` never means authority is live.
+- **Transcript** pages committed root-conversation entries in ascending immutable entry ID order. Pass the
+  previous `next_after` as `--after`. Live appends only add larger IDs, so a page is never reordered or
+  duplicated. `more=false` is not end of history for a live Assignment: poll `next_after`.
+  `history` is `available`, `not-started` or `unavailable` (with a fixed non-secret reason code). Corrupt,
+  foreign or unreadable storage is `unavailable`, never an empty transcript, and is not repaired.
+- The daemon needs the same explicitly configured matched components as effect inspection
+  (`FORGE_DURABLE_NODE`, `FORGE_DURABLE_EFFECT_INSPECTOR`); the transcript reader is the sibling
+  `inspect-transcript.ts` of that inspector, verified against the component hash retained in the Launch.
+  Without them the command fails with `durable-transcript-unconfigured`; status still needs only the store.
+- Entry content is bounded (8 KiB per entry, `truncated` flagged) runtime data. Tool output can contain
+  sensitive data, so treat transcripts as sensitive. Forge adds no capabilities, credentials or store paths.
+
 ## Revoke and clean up known resources
 
 ```sh

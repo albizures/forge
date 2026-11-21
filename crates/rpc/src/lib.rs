@@ -5,9 +5,11 @@ mod assignment;
 pub mod durable_execution;
 pub mod effect_resolution;
 pub use effect_resolution::ResolveInterruptedEffectRequest;
+mod assignment_inspection;
 mod task_inspection;
 pub use agent_profiles::*;
 pub use assignment::*;
+pub use assignment_inspection::*;
 pub use task_inspection::*;
 mod workspaces;
 pub use workspaces::*;
@@ -181,6 +183,18 @@ pub trait AgentDispatchApi {
         &self,
         request: AssignmentInfoRequest,
     ) -> RpcResult<AgentAssignmentInfoResponse>;
+    /// Read-only persisted status; starts no runner, scheduler, model call or lease.
+    #[method(name = "assignmentDurableStatus")]
+    async fn assignment_durable_status(
+        &self,
+        request: SelectedRecordRequest<AssignmentInfoRequest>,
+    ) -> RpcResult<AssignmentDurableStatusResponse>;
+    /// Read-only committed transcript page; never acquires host ownership or opens storage writable.
+    #[method(name = "assignmentTranscript")]
+    async fn assignment_transcript(
+        &self,
+        request: SelectedRecordRequest<AssignmentTranscriptRequest>,
+    ) -> RpcResult<AssignmentTranscriptResponse>;
     #[method(name = "assignmentRetire")]
     async fn assignment_retire(&self, request: RetireAgentAssignmentRequest) -> RpcResult<()>;
     /// Evidence-based resolution after revocation and exclusive committed inspection.

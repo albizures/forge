@@ -1216,6 +1216,47 @@ impl AgentDispatchApiServer for Daemon {
             .map_err(rpc_error)
     }
 
+    async fn assignment_durable_status(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<forge_rpc::AssignmentInfoRequest>,
+    ) -> RpcResult<forge_rpc::AssignmentDurableStatusResponse> {
+        let workspace = self.record_workspace(&request.selection, &mut [])?;
+        let service = self.durable_effect_resolution.as_ref().ok_or_else(|| {
+            rpc_error(RegistrationError::new(
+                "durable-status-unconfigured",
+                "durable status requires the daemon's retained store",
+            ))
+        })?;
+        // Authorize Workspace scope first; only then read the unscoped Assignment info.
+        let status = service
+            .status(&workspace, &request.record.assignment_id)
+            .map_err(rpc_error)?;
+        let info = self
+            .application
+            .agent_assignment_info(&request.record.assignment_id)
+            .map_err(rpc_error)?;
+        Ok(forge_rpc::AssignmentDurableStatusResponse::compose(
+            info, status,
+        ))
+    }
+
+    async fn assignment_transcript(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<forge_rpc::AssignmentTranscriptRequest>,
+    ) -> RpcResult<forge_rpc::AssignmentTranscriptResponse> {
+        let workspace = self.record_workspace(&request.selection, &mut [])?;
+        let service = self.durable_effect_resolution.as_ref().ok_or_else(|| {
+            rpc_error(RegistrationError::new(
+                "durable-transcript-unconfigured",
+                "transcripts require the daemon's retained store",
+            ))
+        })?;
+        service
+            .transcript(&workspace, &request.record)
+            .await
+            .map_err(rpc_error)
+    }
+
     async fn assignment_resolve_effect(
         &self,
         request: forge_rpc::SelectedRecordRequest<forge_rpc::ResolveInterruptedEffectRequest>,

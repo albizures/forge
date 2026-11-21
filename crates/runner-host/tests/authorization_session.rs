@@ -30,6 +30,8 @@ mod recovery_receiver;
 mod recovery_reconciliation;
 #[path = "authorization_session/retirement.rs"]
 mod retirement;
+#[path = "authorization_session/transcript_status.rs"]
+mod transcript_status;
 #[path = "authorization_session/waiting_recovery_inspection.rs"]
 mod waiting_recovery_inspection;
 use rusqlite::params;

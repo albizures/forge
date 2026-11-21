@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod answer_inspection;
 pub mod recovery_inspection;
+pub mod transcript_inspection;
 
 /// Separate trusted daemon-to-supervisor pipe control, not operator JSON-RPC or
 /// an agent capability. Only the holder of the directly spawned host's stdin

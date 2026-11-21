@@ -8,6 +8,7 @@ pub mod effects;
 mod reconciliation;
 pub mod recovery;
 pub mod retirement;
+pub mod status;
 
 /// Immutable identities only: no capability, provider credential or prompt content.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
