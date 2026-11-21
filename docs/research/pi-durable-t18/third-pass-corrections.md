@@ -58,15 +58,18 @@ inspect.
   overwrites. Before this, an automatic recovery after an undelivered recovery grant
   could re-strand the Assignment.
 - **Negative unit tests.** `runner-host/src/quiescence.rs::predecessor_tests` (class (a),
-  real protected files) covers fence, crash and ungranted proof. Each case rejects:
-  - another owner or episode;
-  - another Launch;
-  - a lease earlier than the proof;
-  - a tampered receipt;
-  - changed marker bytes;
-  - a lease-naming marker for an ungranted receipt.
+  real protected files):
+  - **fence:** rejects another owner, another Launch, an earlier lease than the proof, a
+    tampered receipt and changed marker bytes;
+  - **crash:** rejects another owner, another Launch and an earlier lease;
+  - **ungranted:** the overwritten-`owner.json` regression (fails against the previous
+    lookup); a receipt copied under another owner's name (owner equality); another lock
+    identity; and a receipt whose exact marker bytes name a lease (`last_lease`).
 
-  The ungranted case also tests the overwritten `owner.json` regression.
+  The fence and crash cases cover `receipt_for_owner` logic that this delta did not
+  change. `reconcile_ungranted_owner` also uses the owner-keyed lookup now; the
+  no-lease retirement path still reads `owner.json`, which is correct there because no
+  later host can exist without a grant.
 
 ## F2: the recovery spawn path dropped live `Child`ren
 
@@ -163,3 +166,25 @@ runner's `replayed` flag and the equal admission IDs stand in for it.
 | `cargo test --workspace --no-fail-fast` | 931 passed, 0 failed, 1 ignored (pre-existing opt-in), after the delta re-review corrections (928 before) |
 | `durable_supervised_tracer` | 25 scenarios pass |
 | runner `npm run check` / `npm test` | pass / 99 of 99 |
+
+## Final delta (after `7262396`)
+
+The final small delta re-review found no blocker or major issue. It found three minors,
+all corrected:
+- two negative tests asserted less than they claimed;
+- `reconcile_ungranted_owner` still used the `owner.json` lookup;
+- the coverage and doc wording overstated what was tested.
+
+**Two pre-T26 host tests made order-independent.** A full run then exposed that
+`revoked_assignment_and_already_stopped_driver_never_deliver_initial_permission` (and the
+equivalent wait in `failed_binding_…`) assumed one pre-grant path. Since T26, losing the
+pipe before any grant races two valid host paths:
+- the worker exits on EOF first (`runner-worker-exited…`);
+- the host fences on the lost issuer first (`runner-issuer-lost`).
+
+Both tests now accept either diagnostic. The revoked test additionally asserts a clean
+host exit with its ungranted receipt.
+
+**Gates on the final tree.** fmt, clippy and diff-check pass. Two consecutive complete
+`cargo test --workspace --no-fail-fast` runs both gave 931 passed, 0 failed, 1 ignored,
+with all 25 tracer scenarios passing.

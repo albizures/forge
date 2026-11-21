@@ -87,6 +87,20 @@ fn diagnostic(receiver: &Receiver<String>, code: &str) {
         }
     }
 }
+/// T26: a pipe lost before any grant races two valid host paths — the worker
+/// exits on EOF first, or the host fences on the lost issuer first. Wait for
+/// whichever diagnostic of `codes` appears.
+fn diagnostic_any(receiver: &Receiver<String>, codes: &[&str]) {
+    loop {
+        let line = receiver
+            .recv_timeout(Duration::from_secs(40))
+            .unwrap_or_else(|error| panic!("supervisor diagnostics {codes:?} timed out: {error}"));
+        if codes.iter().any(|code| line.contains(code)) {
+            return;
+        }
+    }
+}
+
 fn open(path: &Path) -> SqliteProjectRepository {
     SqliteProjectRepository::open(path)
         .unwrap()
@@ -718,7 +732,10 @@ fn revoked_assignment_and_already_stopped_driver_never_deliver_initial_permissio
             service.run(&f.store, &receiver).unwrap();
         }
         drop(service);
-        diagnostic(&f.errors, "runner-worker-exited");
+        // Either path ends in the host's own pre-grant quiescence proof (T26).
+        diagnostic_any(&f.errors, &["runner-worker-exited", "runner-issuer-lost"]);
+        assert!(f.child.wait().unwrap().success());
+        assert!(forge_runner_host::fence::ungranted_receipt(&f.directory).is_ok());
         assert!(!f.directory.join("controlled.sqlite").exists());
         let c = rusqlite::Connection::open(&f.database).unwrap();
         assert_eq!(
@@ -761,7 +778,7 @@ fn failed_binding_retains_scope_bound_pipe_or_owner_uncertainty_before_any_grant
                 .bind(&f.store, "test".into(), f.launch.clone(), 1, &mut f.child)
                 .is_err()
         );
-        diagnostic(&f.errors, "runner-worker-exited");
+        diagnostic_any(&f.errors, &["runner-worker-exited", "runner-issuer-lost"]);
         let reopened = open(&f.database);
         assert!(reopened.dispatch_hold(f.record).unwrap().is_some());
         assert!(

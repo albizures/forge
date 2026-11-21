@@ -250,10 +250,9 @@ fn reconcile_ungranted_owner(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         _ => return Ok(false),
     }
-    let Ok(receipt) = forge_runner_host::fence::ungranted_receipt(directory) else {
-        return Ok(false);
-    };
-    if receipt.owner != operation.owner || forge_runner_host::fence::settled(directory).is_err() {
+    if forge_runner_host::fence::ungranted_receipt_for(directory, &operation.owner).is_err()
+        || forge_runner_host::fence::settled(directory).is_err()
+    {
         return Ok(false);
     }
     guard.verify().map_err(|_| uncertain())?;

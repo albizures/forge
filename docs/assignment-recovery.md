@@ -284,7 +284,8 @@ accepted, and a fenced host accepts nothing later (T18 third pass):
 - **Retirement.** `assignment-retire` reconciles through the receipt, with the
   same effect checks and capacity rules as crash proof.
 
-A foreign-owner or other-Launch receipt, a receipt for a later lease than Forge's,
+A foreign-owner receipt, a crash or fence receipt for another Launch or for a later
+lease than Forge's, an ungranted receipt whose marker names a lease,
 a tampered receipt, a changed marker and an unsettled marker are all refused.
 Before proof exists, retirement reports `durable-runtime-owner-active` (the
 original host still holds the lock), `durable-runtime-fence-unproven`, or

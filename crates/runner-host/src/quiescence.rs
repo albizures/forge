@@ -315,8 +315,24 @@ mod predecessor_tests {
         let lock = fs::metadata(path.join("owner.lock")).unwrap();
         let later = make_owner(99, &lock);
         assert!(predecessor_proof(&path, &lease(&later, 2)).is_err());
-        // A marker that names a lease cannot settle an ungranted receipt.
+        // The same receipt copied under another owner's name: owner equality refuses.
+        let receipt = fs::read(path.join("ungranted-receipt-7-100.json")).unwrap();
+        protected(&path.join("ungranted-receipt-99-100.json"), &receipt);
+        assert!(predecessor_proof(&path, &lease(&later, 2)).is_err());
+        // Another lock identity than the owner's refuses before reading.
+        let mut relocked = owner.clone();
+        relocked.lock_inode = "1".into();
+        assert!(predecessor_proof(&path, &lease(&relocked, 1)).is_err());
+        // A receipt whose exact marker bytes name a lease never settles as
+        // ungranted (the marker bytes still match, so only `last_lease` refuses).
         marker(&path, &owner, Some(&lease(&owner, 1)));
+        let named = fs::read_to_string(path.join("watchdog.json")).unwrap();
+        let forged = serde_json::json!({ "version": 1, "marker": "watchdog.json", "marker_contents": named, "owner": owner, "children_absent": true });
+        fs::remove_file(path.join("ungranted-receipt-7-100.json")).unwrap();
+        protected(
+            &path.join("ungranted-receipt-7-100.json"),
+            &serde_json::to_vec(&forged).unwrap(),
+        );
         assert!(predecessor_proof(&path, &lease(&owner, 1)).is_err());
     }
 }
