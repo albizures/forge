@@ -88,7 +88,7 @@ This run confirms that every listed class (a) and (b) test passes on the verifie
 | --- | --- |
 | Deterministic duplicate admission, daemon and runner crashes, lease expiry, interrupted effects, revoked recovery, missing Outcomes, incompatible components, incomplete retirement | **Run, pass** (above) |
 | Real-provider Implementation → independent Review cycle: authenticated bootstrap/Outcomes, changed output commit, exact Review binding, retirement before successor | **UNRUN**: no operator-authorized, isolated real-provider credential and environment was provided. Per the Task, live work and credentials must never be used without authorization. Only the faux-provider `continuation-chain` scenario covers this shape (class b). |
-| Managed (Forgeup) daemon launch | **UNRUN / not possible**: M4, a managed daemon has no model credential |
+| Managed (Forgeup) daemon launch | **Configuration verified, launch unrun.** M4 was resolved after this report (`--durable-openai-key-file`). The `packaged` scenario composes from Forgeup's managed arguments, including the key, in-process. No real `forgeup daemon start` launch with a real provider has been run. |
 | Review handback/Continuation and publication/unchanged rules | Covered by the retained integration gates in class (b) (`continuation-chain`, rollout tests). Publication with a durable pin was not re-exercised (T16 note). |
 
 ## How to run the missing real-provider gate
@@ -96,7 +96,8 @@ This run confirms that every listed class (a) and (b) test passes on the verifie
 Run this only with operator authorization, and never against ordinary live work.
 
 1. **Environment.** Use a dedicated Workspace and store, a scratch Git repository, and a
-   **manual** daemon. A managed daemon cannot work because of M4. Configure:
+   manual daemon. A managed daemon with `--durable-openai-key-file` also works now that
+   M4 is resolved. For a manual daemon, configure:
    - `FORGE_DURABLE_RUNNER_HOST` and `FORGE_DURABLE_RUNNER_ENTRY`, pointing at a bundle
      built from the verified Revision;
    - `FORGE_DURABLE_NODE` and `FORGE_DURABLE_EFFECT_INSPECTOR`;

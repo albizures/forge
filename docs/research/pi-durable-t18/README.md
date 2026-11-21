@@ -4,6 +4,36 @@ This report has three passes. The **third pass** (below) is current. The
 [second pass](#second-pass--2026-11-21-snapshot-646abd9) and the
 [first pass](#first-pass--2026-11-20-snapshot-1fc65a5) are kept unchanged as history.
 
+## M4 addendum — 2026-11-21, snapshot `206f999` plus the follow-up fix
+
+**M4 is resolved.** Forgeup-managed daemons now have a deliberate model-credential
+mechanism, `forgeup daemon start --durable-openai-key-file PATH`. It carries a key-file path,
+never key bytes:
+- Forgeup checks that the path is absolute and that the Revision has a schema 2 runner
+  bundle. It never reads the file.
+- It passes the path as the managed daemon's `--durable-openai-key-file`.
+- The daemon validates the file exactly as for a manual daemon's
+  `FORGE_DURABLE_OPENAI_KEY_FILE`.
+- An implicit start passes no key.
+
+**Review of the change.** An independent read-only reviewer verified the path-only
+plumbing, the validation and the docs. It found one MAJOR, now fixed: `daemon start` with
+the option on an already-running daemon returned `running` and silently dropped the key.
+- The option is now validated before the ownership check.
+- A running daemon refuses with a stop-first error (`ForgeupError::ModelKeyFile`).
+- Unit tests cover the no-runner, relative-path, inspection-only and already-running
+  cases.
+- The `packaged` tracer scenario now receives its credential through Forgeup's managed
+  arguments.
+
+**Not covered.** Parsing the real `forge-server` argv for this flag is not exercised end to
+end; the `packaged` tracer parses Forgeup's arguments in-process.
+
+**Gates:** fmt, clippy and diff-check pass. 932 Rust tests passed, 0 failed, 1 ignored;
+25 scenarios.
+
+**Remaining release blocker:** only the unrun real-provider gate (AC22).
+
 ## Third pass — 2026-11-21, final snapshot `2097267`
 
 - **Reviewed snapshots:**

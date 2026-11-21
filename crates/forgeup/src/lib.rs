@@ -742,6 +742,37 @@ pub fn runner_for_component_at(
     ))
 }
 
+/// An explicit managed model key file must be an absolute path, for a Revision
+/// whose runner bundle can launch. Forgeup never opens it.
+fn validate_model_key_file(installation: &Installation, path: &Path) -> Result<(), ForgeupError> {
+    if !path.is_absolute() {
+        return Err(ForgeupError::ModelKeyFile(
+            "must be an absolute path".into(),
+        ));
+    }
+    if !installation
+        .runner
+        .as_ref()
+        .is_some_and(runner::InstalledRunner::launchable)
+    {
+        return Err(ForgeupError::ModelKeyFile(
+            "requires a Revision registered with a launch-capable (schema 2) runner bundle".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// A running daemon keeps the credential it started with: never report success
+/// while silently dropping an explicit key file (T18 M4).
+fn already_running(model_key_file: Option<&Path>) -> Result<String, ForgeupError> {
+    if model_key_file.is_some() {
+        return Err(ForgeupError::ModelKeyFile(
+            "the managed daemon is already running and keeps the model credential it started with; run `forgeup daemon stop`, then start it again with this option".into(),
+        ));
+    }
+    Ok("running".into())
+}
+
 /// Durable launch inputs Forgeup passes to the managed daemon of `installation`.
 ///
 /// - A schema 2 runner (with a packaged host) is passed as
@@ -773,20 +804,7 @@ pub fn managed_durable_arguments(
     model_key_file: Option<&Path>,
 ) -> Result<Vec<std::ffi::OsString>, ForgeupError> {
     if let Some(path) = model_key_file {
-        if !path.is_absolute() {
-            return Err(ForgeupError::RunnerBundle(
-                "--durable-openai-key-file must be an absolute path".into(),
-            ));
-        }
-        if !installation
-            .runner
-            .as_ref()
-            .is_some_and(runner::InstalledRunner::launchable)
-        {
-            return Err(ForgeupError::RunnerBundle(
-                "--durable-openai-key-file requires a Revision registered with a launch-capable (schema 2) runner bundle".into(),
-            ));
-        }
+        validate_model_key_file(installation, path)?;
     }
     let Some(runner) = &installation.runner else {
         return Ok(vec![]);
@@ -956,6 +974,10 @@ pub fn daemon_start(model_key_file: Option<&Path>) -> Result<String, ForgeupErro
     if installation.runner.is_some() {
         verify_runner(&installation)?;
     }
+    // Validate the explicit option before anything else, so it is never ignored.
+    if let Some(path) = model_key_file {
+        validate_model_key_file(&installation, path)?;
+    }
     upgrade::check_start(&paths, &selector)?;
     let state = paths.state(&selector);
     ensure_state(&state)?;
@@ -963,7 +985,7 @@ pub fn daemon_start(model_key_file: Option<&Path>) -> Result<String, ForgeupErro
     if record_path.exists() {
         let record = read_daemon_record(&record_path)?;
         match proved_owned(&record, &installation) {
-            Ownership::Owned => return Ok("running".into()),
+            Ownership::Owned => return already_running(model_key_file),
             Ownership::Stale => {
                 fs::remove_file(&record_path).map_err(|source| ForgeupError::Io {
                     path: record_path.clone(),
@@ -1343,9 +1365,15 @@ pub fn doctor() -> Result<DoctorReport, ForgeupError> {
 #[derive(Debug)]
 pub enum ForgeupError {
     InvalidLocation(&'static str),
-    Io { path: PathBuf, source: io::Error },
+    Io {
+        path: PathBuf,
+        source: io::Error,
+    },
     UnsafePermissions(PathBuf),
-    InvalidRegistry { path: PathBuf, message: String },
+    InvalidRegistry {
+        path: PathBuf,
+        message: String,
+    },
     FutureSchema(u32),
     UnsupportedSchema(u32),
     InvalidLabel(String),
@@ -1357,9 +1385,15 @@ pub enum ForgeupError {
     AliasConflict(String),
     UnknownSelector(String),
     AmbiguousSelector(String),
-    ReplacementSelectorMismatch { replace: String, candidate: String },
+    ReplacementSelectorMismatch {
+        replace: String,
+        candidate: String,
+    },
     PurgeRequiresReplacement,
-    StateReuseMismatch { requested: String, selector: String },
+    StateReuseMismatch {
+        requested: String,
+        selector: String,
+    },
     StateUnavailable(String),
     ActiveRemoval(String),
     InvalidInstallation(String),
@@ -1372,12 +1406,15 @@ pub enum ForgeupError {
     UpgradeBlocked(String),
     RunnerBundle(String),
     RunnerRetained(String),
+    /// `daemon start --durable-openai-key-file` cannot be applied (T18 M4).
+    ModelKeyFile(String),
 }
 impl fmt::Display for ForgeupError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UpgradeBlocked(message) => write!(f, "state upgrade blocked: {message}"),
             Self::RunnerBundle(message) => write!(f, "matched runner bundle: {message}"),
+            Self::ModelKeyFile(message) => write!(f, "--durable-openai-key-file: {message}"),
             Self::RunnerRetained(selector) => write!(
                 f,
                 "Revision `{selector}` provides the matched runner for retained state; \

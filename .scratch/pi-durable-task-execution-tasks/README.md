@@ -129,7 +129,8 @@ Mark a Task complete only after its acceptance checks and required verification 
   - **Managed-daemon launch:** impossible (M4).
   - **Result:** default-rollout approval is **withheld**.
 - [x] [T20 — Deliver release handoff](20-publish-release-handoff.md) — [readiness decision and handoff](../../docs/research/pi-durable-t20/README.md):
-  - **Readiness: WITHHELD** for Revision `6cd2e44` (snapshot `2097267`). The reasons are the unrun real-provider gate (AC22) and open M4.
+  - **Readiness: WITHHELD.** The remaining reason is the unrun real-provider gate (AC22).
+  - **M4 resolved afterwards** (`206f999` plus its fix): `forgeup daemon start --durable-openai-key-file`. It was re-reviewed and the gates were renewed (932 Rust tests, 25 scenarios).
   - **Contents:** the passing component identities and compatibility matrix; the prerequisites for granting readiness; the conditions that revoke readiness or require renewed verification; an operator adoption checklist (not to be performed while withheld); the rollback procedure (old Herdr and durable Assignments keep their backends, Grilling stays on Herdr); and retained storage and transcript limits.
   - **Nothing was changed:** no rollout, registration, selection, migration, dispatch or configuration change was performed.
 

@@ -113,12 +113,16 @@ Forgeup requires an absolute path and a schema 2 runner bundle, never reads the 
 passes the path as `--durable-openai-key-file`; the daemon validates the file exactly as for a
 manual daemon. A daemon started implicitly (for example by a CLI command that ensures the
 active daemon is running) gets no key, so durable preview/registration there fails with
-`durable-model-auth-unavailable` until the operator restarts it explicitly with the option.
+`durable-model-auth-unavailable` until the operator restarts it with the option. A running
+daemon keeps the credential it started with: `daemon start --durable-openai-key-file` on a
+running daemon refuses (`--durable-openai-key-file: the managed daemon is already running …`)
+instead of reporting `running`, so run `forgeup daemon stop` first.
 
 The key file must be an absolute canonical path to a regular, single-link, owner-owned
 `0600` file in an owner-owned `0700` directory, containing one printable ASCII token
 (1–4096 bytes) with an optional trailing newline. Diagnostics never include the key or its
-path. Forge passes the key bytes only to the runner's in-memory provider auth: never the
+path; a managed daemon's key-file path does appear in its process arguments, visible to
+local users like its other arguments under the trusted-local-host boundary. Forge passes the key bytes only to the runner's in-memory provider auth: never the
 shell environment, prompts or Forge records, and provider events are redacted. This is not
 containment: under the trusted-local-host boundary, a `bash` or `read` tool running as the
 same user can read the key file itself, and that tool output is stored unredacted in the

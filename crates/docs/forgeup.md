@@ -68,6 +68,7 @@ Starting and stopping are separate, explicit operations:
 ```sh
 forgeup daemon status
 forgeup daemon start
+forgeup daemon start --durable-openai-key-file /abs/path/openai-key   # durable launch credential
 forgeup daemon stop
 forgeup logs
 forgeup deactivate

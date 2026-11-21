@@ -1017,6 +1017,18 @@ mod tests {
             crate::managed_durable_arguments(&paths, &registry(&paths), &legacy, Some(key))
                 .is_err()
         );
+        let mut runnerless = legacy.clone();
+        runnerless.runner = None;
+        assert!(matches!(
+            crate::managed_durable_arguments(&paths, &registry(&paths), &runnerless, Some(key)),
+            Err(crate::ForgeupError::ModelKeyFile(_))
+        ));
+        // An already running daemon never silently drops an explicit key file.
+        assert_eq!(crate::already_running(None).unwrap(), "running");
+        assert!(matches!(
+            crate::already_running(Some(key)),
+            Err(crate::ForgeupError::ModelKeyFile(_))
+        ));
         // A schema 1 Revision keeps the T15 inspection-only inputs.
         let legacy_runner = legacy.runner.clone().unwrap();
         assert_eq!(

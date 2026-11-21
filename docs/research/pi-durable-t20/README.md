@@ -10,8 +10,8 @@ from this source.
 | Reviewed snapshot | `2097267`: T18 third pass, no open blocker ([report](../pi-durable-t18/README.md#third-pass--2026-11-21-final-snapshot-2097267)) |
 | Verified tree | `6cd2e44` (`2097267` plus two documentation files), Forge Revision `6cd2e44f801f6fe5d84330569d5ab74810ba4172` ([T19](../pi-durable-t19/README.md)) |
 | Deterministic gates | **Pass:** fmt, clippy, 931 Rust tests twice in a row, 25 real-process tracer scenarios, 99 Node tests, packaging |
-| Release gate (Spec AC22) | **UNRUN:** no real-provider Implementation → Review cycle; no managed-daemon launch |
-| Open MAJOR | **M4:** a Forgeup-managed daemon has no model-credential mechanism |
+| Release gate (Spec AC22) | **UNRUN:** no real-provider Implementation → Review cycle |
+| M4 (managed-daemon credential) | **Resolved** after T19: `forgeup daemon start --durable-openai-key-file` ([addendum](../pi-durable-t18/README.md#m4-addendum--2026-11-21-snapshot-206f999-plus-the-follow-up-fix)). Changes after the verified tree need T19's gates renewed: they were re-run and pass (932 Rust tests, 25 scenarios). |
 
 A failed or unrun release gate is a withheld result. It is not a conditional success.
 
@@ -44,19 +44,17 @@ Supported:
 - the Task Record Type only;
 - model `openai/gpt-4.1` with thinking `off`;
 - the tools `read`, `write`, `edit`, `bash`;
-- a raw OpenAI key file on a **manual** daemon.
+- a raw OpenAI key file, on a manual daemon or a managed one.
 
 Everything else is rejected, fail-closed:
 - Grilling;
 - any other model or provider, and OAuth;
 - Pi settings;
-- a managed-daemon credential (M4).
+- a managed key file without a schema 2 runner bundle.
 
 ## What must happen before readiness can be granted
 
-1. **Close or formally descope M4.** Either give Forgeup-managed daemons a deliberate
-   model-credential mechanism (then re-review and re-verify), or have the operator
-   explicitly limit the supported deployment to manual daemons.
+1. **M4 is closed.** Managed daemons take `--durable-openai-key-file`. (This step is done.)
 2. **Run the real-provider gate.** Follow the steps in
    [T19, "How to run the missing real-provider gate"](../pi-durable-t19/README.md#how-to-run-the-missing-real-provider-gate),
    on the exact Revision to be released, in an operator-authorized, isolated environment,
@@ -93,9 +91,10 @@ Every command below exists and is documented in the
    Keep every older Revision's bundle registered while it still has retained durable
    Assignments, so they run only on their own components (`forgeup runner resolve
    --component-hash`).
-2. **Supply the model credential** on a manual daemon with `FORGE_DURABLE_OPENAI_KEY_FILE`:
-   an owner-only `0600` key file, kept outside every Managed Worktree. (M4: not possible
-   on a managed daemon.)
+2. **Supply the model credential.** Use `forgeup daemon start --durable-openai-key-file PATH`
+   for a managed daemon, or `FORGE_DURABLE_OPENAI_KEY_FILE` for a manual one. Either way it
+   is an owner-only `0600` key file, kept outside every Managed Worktree. Stop a running
+   managed daemon before starting it with the option.
 3. **Prepare a profile.** Run `forge agent-profile preview`, then
    `forge agent-profile register`
    ([prepare a durable profile](../../durable-execution.md#prepare-a-durable-profile)).
