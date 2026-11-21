@@ -914,6 +914,7 @@ fn application_from_config_with_cli(
                         .map_err(|error| error.code.to_owned())?,
                     None => durable_authorization::retirement::Controller::default(),
                 }),
+                recovery: None,
                 original: Box::new(HerdrAdapterFactory::from_configuration_store(
                     config.store_path.clone(),
                 )),

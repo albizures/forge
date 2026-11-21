@@ -60,6 +60,11 @@ async function execute() {
         const text = JSON.stringify(transcript);
         assert.ok(text.includes('T07-SUPERVISED-BEHAVIOR'));
         assert.ok(text.includes(launch.attempt_id));
+        if (input.mode === 'chain-complete') {
+          assert.ok(input.bound.checkAttempt.continuation);
+          assert.ok(text.includes('accepted-continuation-handoff'));
+        }
+        if (input.mode === 'review') assert.equal(input.bound.checkAttempt.continuation, null);
         assert.ok(!text.includes(input.capability.FORGE_ASSIGNMENT_CAPABILITY_SECRET_FILE));
         return fauxAssistantMessage(fauxToolCall('bash', {
           command: [process.execPath, input.effect_script, join(directory, 'controlled-launch.json')].map(quote).join(' '),
@@ -77,9 +82,26 @@ async function execute() {
     ]);
     const executionContext = withAbortSignal(authorization.signal, context);
     persistIntent(directory, launch);
-    harness = await Harness.open(await openNodeSqliteStorage(databasePath(directory)), { ...runtime.options, models }, executionContext);
+    const storage = await openNodeSqliteStorage(databasePath(directory));
+    let originalRoot;
+    const controlled = new Proxy(storage, {
+      get(target, key) {
+        if (key === 'commit' && input.mode === 'recovered') return async (batches, ...args) => {
+          if (batches.flat().some(row => row.type === 'task' && row.value.kind === 'pi.generation' && row.value.state.status === 'running')) {
+            const submission = await storage.submissionByRequest(originalRoot.id, launch.operation_id, context);
+            emit({ event: 'recovery-boundary', root: originalRoot.id, admission_id: String(submission.id), calls, tools });
+            await new Promise(() => {}); // controlled crash BEFORE model admission
+          }
+          return target.commit(batches, ...args);
+        };
+        const value = Reflect.get(target, key, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    harness = await Harness.open(controlled, { ...runtime.options, models }, executionContext);
     authorization.admitFor(launch, input.generation);
     const root = await harness.root(executionContext, { agent: { ...runtime.agent, model: { provider: 'faux', modelId: 'faux-1' } } });
+    originalRoot = root;
     persistRoot(directory, root.id);
     authorization.admitFor(launch, input.generation);
     const submission = await root.submit({ type: 'input', requestId: launch.operation_id, content: 'Execute the authenticated bound Check only.' }, executionContext);

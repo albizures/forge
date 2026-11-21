@@ -143,7 +143,7 @@ still require the ordinary transactional authority/freshness/hold/resource check
 This supplies the interrupted-effect recovery precondition, not the later writable
 same-attempt recovery feature. No scheduler or production durable rollout is enabled.
 
-## Durable recovery authorization foundation (not yet runnable)
+## Same-Assignment durable recovery (controlled; rollout disabled)
 
 The internal controlled recovery port can reserve an original candidate and,
 following a trusted external-verification boundary, atomically commit a first
@@ -196,8 +196,8 @@ faults fence even an unarmed host before its first grant; restoring files cannot
 revive that host or waive its retained marker. Preparation
 success is transport only until the matched worker confirms it; preparation itself
 opens no writable Harness and resumes no model/tool. The controlled receiver tracer
-uses an actual SQLite recovery commit but explicitly synthetic Git/protected-digest
-verification. See [waiting-owner/receiver evidence](research/pi-durable-t10/waiting-receiver.md).
+originally used an actual SQLite recovery commit but synthetic Git/protected-digest
+verification; the final T10 tracer now uses the real protected verifier and writable reopen. See [waiting-owner/receiver evidence](research/pi-durable-t10/waiting-receiver.md).
 
 A separate read-only repository-progress verifier now checks the original claimed
 worktree/repository/branch and both Base Commit and attempt-input ancestry. It
@@ -205,16 +205,55 @@ fingerprints retained bytes/index without adopting Implementation progress as a
 checkpoint; other Checks require exact clean bound input. Hidden index flags are
 not proof of clean review input. Fsmonitor execution is disabled for these reads;
 configured clean/process filters, submodules and unsafe filesystem observations
-block this component. It grants no authority and is not yet composed into the
-waiting-owner handoff. See [worktree verification evidence](research/pi-durable-t10/recovery-worktree.md).
+block this component. It grants no authority. A new combined read-only guard
+retains directly spawned waiting ownership around this verifier and fresh bounded
+original-input/effect inspection, with live claim/receipt checks. Any failure
+terminally fences the combined object even if files are restored. This guard is
+pre-grant only: the separate protected handoff bridges claim consumption rather
+than treating a retained observation as post-commit authority. See
+[worktree verification evidence](research/pi-durable-t10/recovery-worktree.md) and
+[combined waiting-progress evidence](research/pi-durable-t10/waiting-progress.md).
 
-There is still no complete trusted recovery verifier/ownership handoff orchestration,
-daemon reconciliation or authorized writable reopen. Executables still reject a
-continued global sequence sent as an ordinary first grant. No CLI/RPC operation
-exposes recovery authorization, and production/automatic durable recovery remain disabled. Do not replay retained grant files, reset
-sequence/watchdogs, edit resource markers or repair the worktree to bypass this
-boundary. See [T10 authorization evidence](research/pi-durable-t10/recovery-authorization.md)
-and [coordinator/watchdog evidence](research/pi-durable-t10/recovery-session.md).
+The final T10 path persists bounded immutable claim-bound protected proof, prepares
+the unarmed consumer, rechecks runtime/effects and commits a fresh owner-bound lease
+before exact private delivery. The waiting owner/lock is retained throughout.
+The writable Check runner bootstraps again through the original capability,
+revalidates cwd and original pending input, opens the matched Harness and resumes
+that submission. It never creates another root, input, `continue`, Check attempt
+or accepted Continuation. Dirty Implementation progress remains observed work,
+not adopted completion evidence; reviews still require exact clean input.
+
+An original supervisor can also write a protected **crash receipt** after directly
+reaping its worker and observing kernel ECHILD. A single ownership sample racing
+exit may spend at most 100 ms awaiting a positive Child reap, with captured storage
+revalidated; a prior failed sample is never revived. Surviving descendants,
+identity drift, host faults and supervisor loss before proof remain blocked.
+Neither a dead PID nor a newly free lock substitutes for this exact-grant proof.
+Receipts are retained per lease sequence, not overwritten across recoveries.
+
+The application daemon scan has a controlled recovery-adapter port. With explicit
+trusted matched components it preflights original proof before claiming/spawning,
+reinspects under a new waiting owner, drives committed grants/renewal and observes
+answers read-only. Only another proven safe crash can create a new recovery
+episode with fresh issuer authority; pending claims and uncertain delivery are
+not taken over. In-flight model requests remain governed by disabled retries and
+may settle unanswered; neither they nor arbitrary commands are silently replayed.
+Missing Outcomes retain a hold/capacity and cannot create a successor. A deliberate
+accepted Implementation Continuation and independent Review instead receive fresh
+conversations/stores and Forge-approved checkpoint/output context after retirement.
+
+Operator retirement can reconcile an exact original crash receipt only **after
+revocation**, under exclusive inspection and committed-effect checks. It does not
+write or repair a host retirement receipt, erase other blockers or infer absence
+from controller loss. Unrelated later host-fault markers still block that path.
+
+Default production composition still leaves recovery unconfigured and durable
+launch disabled. There is no operator CLI/RPC recovery-authorization operation;
+packaging, real-provider release verification and rollout remain later Tasks.
+Do not replay retained grants, reset sequences/watchdogs, edit resource markers or
+repair the worktree to bypass these gates. See the
+[T10 completion evidence](research/pi-durable-t10/completion.md) for reproducible
+controlled recovery, blocked counterexamples and verification limits.
 
 ## Revoke and clean up known resources
 

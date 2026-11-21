@@ -41,7 +41,16 @@ pub(crate) fn quiesce(
 /// these markers alone grants nothing. Any metadata error remains uncertainty.
 /// # Errors
 /// Rejects unrelated safety fences and all failures of exact receipt inspection.
-pub fn waiting_receipt(directory: &Path, operation: &Operation) -> io::Result<Receipt> {
+#[derive(serde::Serialize)]
+pub enum PredecessorProof {
+    Quiesced(Box<Receipt>),
+    Crashed(Box<crate::crash::Receipt>),
+}
+
+/// Verify original-host quiescence or a directly reaped crash boundary.
+/// # Errors
+/// Missing proof or any unrelated safety marker remains uncertainty.
+pub fn waiting_receipt(directory: &Path, operation: &Operation) -> io::Result<PredecessorProof> {
     for name in [
         "watchdog.json",
         "retirement-intent.json",
@@ -52,7 +61,39 @@ pub fn waiting_receipt(directory: &Path, operation: &Operation) -> io::Result<Re
             _ => return Err(invalid()),
         }
     }
-    receipt(directory, operation)
+    operation.validate().map_err(|_| invalid())?;
+    match std::fs::symlink_metadata(directory.join(INTENT)) {
+        Ok(_) => {
+            let mut bytes = Vec::new();
+            protected_file(&directory.join(INTENT))?
+                .take(65_537)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() > 65_536 {
+                return Err(invalid());
+            }
+            let old: Operation = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+            let proof = receipt(directory, &old)?;
+            if old == *operation {
+                return Ok(PredecessorProof::Quiesced(Box::new(proof)));
+            }
+            if old.claim.launch != operation.claim.launch
+                || old.predecessor.sequence >= operation.predecessor.sequence
+            {
+                return Err(invalid());
+            }
+            // Preserve completed earlier quiescence evidence. It cannot stand in
+            // for the current predecessor: require that exact grant's new crash proof.
+            crate::crash::receipt(directory, &operation.predecessor)
+                .map(Box::new)
+                .map(PredecessorProof::Crashed)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            crate::crash::receipt(directory, &operation.predecessor)
+                .map(Box::new)
+                .map(PredecessorProof::Crashed)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Read the exact protected original-host receipt under separately held exclusive

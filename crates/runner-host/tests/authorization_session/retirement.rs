@@ -30,6 +30,7 @@ fn app(f: &Fixture, controller: Arc<Controller>) -> Application {
         Box::new(Factory {
             database: f.database.clone(),
             controller,
+            recovery: None,
             original: Box::new(NoHerdr),
         }),
         Box::new(NoGit),

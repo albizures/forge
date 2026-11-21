@@ -6,6 +6,7 @@ use forge_app::{
 };
 use serde::{Deserialize, Serialize};
 
+pub mod answer_inspection;
 pub mod recovery_inspection;
 
 /// Separate trusted daemon-to-supervisor pipe control, not operator JSON-RPC or

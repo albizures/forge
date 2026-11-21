@@ -1,8 +1,31 @@
 # T10 — Recovery inspection, reservation and authorization increments
 
-## Status: partial; T10 remains pending
+## Status: controlled T10 deliverable complete; rollout disabled
 
-The latest [read-only repository-progress verification](recovery-worktree.md)
+The [T10 completion evidence](completion.md) connects these increments into the
+full controlled path: protected crash/quiescence proof, a daemon recovery controller
+with explicit matched components, a protected claim-bound handoff, writable resume
+of the original admission/conversation, and read-only answer observation. It also
+covers a deliberate Continuation → Implementation → independent Review chain with
+fresh conversations. Final gates pass: 824 Rust harness tests plus nine supervised
+scenarios, one opt-in ignored; runner typecheck and 85 Node tests pass. Production
+durable dispatch and automatic recovery remain disabled. The increment notes below
+are historical; any "T10 remains pending" wording in them was true at that point.
+
+The [combined waiting-owner/repository-progress inspection](waiting-progress.md)
+retains one direct-child ownership guard around live claim/receipt checks,
+canonical Git/content/index observation and fresh bounded original-input/effect
+inspection. Any failed verification terminally fences that object, even after
+restoration. Two real SQLite/Git/subreaper/Node composition tests preserve dirty
+work, attempt identity and capacity and cover five failure dimensions. Final
+repository gates pass: 811 Rust harness tests plus seven supervised scenarios,
+one opt-in ignored; runner typecheck and 76 Node tests pass. The first workspace
+run hit the existing Herdr `ExecutableFileBusy` failure; its target and an unchanged
+default-parallel rerun passed, without a claimed fix. This read-only composition
+is not protected combined-proof persistence, a trusted grant handoff, daemon
+integration or writable resume. T10 remains pending; automatic recovery stays disabled.
+
+The preceding [read-only repository-progress verification](recovery-worktree.md)
 adds application-owned policy, a single-snapshot claimed store read and canonical
 Git/content/index observation with live post-I/O revalidation. Implementation
 progress stays distinct from accepted evidence; other Checks require exact clean

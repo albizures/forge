@@ -16,10 +16,18 @@ mod effect_admission;
 mod quiesced_inspection;
 #[path = "authorization_session/quiescence.rs"]
 mod quiescence;
+#[path = "authorization_session/recovery_crash.rs"]
+mod recovery_crash;
+#[path = "authorization_session/recovery_handoff.rs"]
+mod recovery_handoff;
 #[path = "authorization_session/recovery_inspection.rs"]
 mod recovery_inspection;
+#[path = "authorization_session/recovery_progress.rs"]
+mod recovery_progress;
 #[path = "authorization_session/recovery_receiver.rs"]
 mod recovery_receiver;
+#[path = "authorization_session/recovery_reconciliation.rs"]
+mod recovery_reconciliation;
 #[path = "authorization_session/retirement.rs"]
 mod retirement;
 #[path = "authorization_session/waiting_recovery_inspection.rs"]
@@ -100,7 +108,31 @@ impl Fixture {
         Self::with_component(mode, "controlled-component".into())
     }
 
+    fn create_assignment(store: &SqliteProjectRepository) -> (u64, u64) {
+        let task = store
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Task,
+                body: "controlled lease test".into(),
+                project_slugs: vec!["alpha".into()],
+                generated_by_ids: vec![],
+            })
+            .unwrap();
+        store
+            .create_agent_assignment(&NewAgentAssignment {
+                id: "assignment".into(),
+                record_id: task.id,
+                project_slug: "alpha".into(),
+                profile_revision: 2,
+            })
+            .unwrap();
+        (task.id, store.list_record_checks(task.id).unwrap()[0].id)
+    }
+
     fn with_component(mode: &str, component_hash: String) -> Self {
+        Self::with_repository(mode, component_hash, false)
+    }
+
+    fn with_repository(mode: &str, component_hash: String, git_repository: bool) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let root = std::env::temp_dir().join(format!(
             "forge-lease-session-{}-{}",
@@ -110,8 +142,7 @@ impl Fixture {
         fs::create_dir(&root).unwrap();
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
         let root = root.canonicalize().unwrap();
-        let worktree = root.join("worktree");
-        fs::create_dir(&worktree).unwrap();
+        let base = git_repository.then(|| recovery_progress::repository(&root));
         let database = root.join("forge.sqlite");
         let store = SqliteProjectRepository::open(&database).unwrap();
         store.create_workspace("test", "Test", &root).unwrap();
@@ -129,43 +160,45 @@ impl Fixture {
         // This is not profile registration or a production dispatch path.
         let c = rusqlite::Connection::open(&database).unwrap();
         c.execute("INSERT INTO agent_profiles(record_type, revision, provider, agent_kind, model, prompt_template, retry_limit, retry_backoff_millis, startup_timeout_millis, unknown_state_grace_millis) SELECT record_type, 2, 'pi-durable', agent_kind, model, prompt_template, retry_limit, retry_backoff_millis, startup_timeout_millis, unknown_state_grace_millis FROM agent_profiles WHERE record_type = 'task' AND revision = 1", []).unwrap();
-        let task = store
-            .open_typed_record(&NewTypedRecord {
-                record_type: RecordType::Task,
-                body: "controlled lease test".into(),
-                project_slugs: vec!["alpha".into()],
-                generated_by_ids: vec![],
-            })
-            .unwrap();
-        store
-            .create_agent_assignment(&NewAgentAssignment {
-                id: "assignment".into(),
-                record_id: task.id,
-                project_slug: "alpha".into(),
-                profile_revision: 2,
-            })
-            .unwrap();
-        let check = store.list_record_checks(task.id).unwrap().remove(0);
+        let (record, check) = Self::create_assignment(&store);
+        let worktree = if git_repository {
+            recovery_progress::worktree(&root, record)
+        } else {
+            let path = root.join("worktree");
+            fs::create_dir(&path).unwrap();
+            path
+        };
         let attempt = Attempt {
             id: "attempt".into(),
-            record_id: task.id,
-            check_id: check.id,
+            record_id: record,
+            check_id: check,
             generation: 1,
             evidence: forge_app::outcomes::Evidence::Repository {
-                repository: "https://example.test/repo.git".into(),
-                commit: "a".repeat(40),
+                repository: if git_repository {
+                    root.display().to_string()
+                } else {
+                    "https://example.test/repo.git".into()
+                },
+                commit: base.clone().unwrap_or_else(|| "a".repeat(40)),
             },
             actor: "assignment".into(),
             body: "controlled lease test".into(),
             continuation: None,
             recovery: None,
         };
-        c.execute("INSERT INTO record_attempts(id, record_id, check_id, attempt_json) VALUES ('attempt', ?1, ?2, ?3)", params![task.id.cast_signed(), check.id.cast_signed(), serde_json::to_string(&attempt).unwrap()]).unwrap();
+        c.execute("INSERT INTO record_attempts(id, record_id, check_id, attempt_json) VALUES ('attempt', ?1, ?2, ?3)", params![record.cast_signed(), check.cast_signed(), serde_json::to_string(&attempt).unwrap()]).unwrap();
         c.execute(
             "INSERT INTO assignment_check_attempts VALUES ('assignment', 'attempt')",
             [],
         )
         .unwrap();
+        if let Some(base) = base {
+            c.execute(
+                "INSERT INTO task_base_commits VALUES (?1, ?2)",
+                params![record.cast_signed(), base],
+            )
+            .unwrap();
+        }
         drop(c);
         let launch = Launch {
             assignment_id: "assignment".into(),
@@ -194,7 +227,7 @@ impl Fixture {
             database,
             store,
             launch,
-            record: task.id,
+            record,
             child,
             output,
             errors,

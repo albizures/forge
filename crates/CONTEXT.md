@@ -228,6 +228,10 @@ _Avoid_: agent token, agent credential
 A time-bounded grant permitting an Agent Assignment to continue authorized execution, subject to revocation and the Assignment's bound scope. Expiration withdraws that permission but does not prove that the Agent or its external actions have stopped.
 _Avoid_: Assignment Heartbeat, proof of exit, Assignment Capability
 
+**Assignment Execution Recovery**:
+Resumption of an interrupted Agent Assignment under its existing Check attempt and bound authority after Forge validates that continuation is safe. It is distinct from a deliberate Continuation and does not authorize a replacement Agent Assignment.
+_Avoid_: Continuation, replacement attempt, automatic retry
+
 **Assignment Capability Delivery**:
 The session-scoped endpoint, Assignment Identifier, and owner-only secret-file path through which Forge makes an Assignment Capability available to its bound Agent. The capability secret itself is not placed in the Agent's prompt or environment.
 _Avoid_: capability injection, agent token environment

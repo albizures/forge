@@ -2,6 +2,8 @@
 //! shared flock -> daemon grant driver -> Node bootstrap/Harness/Bash/CLI tracer.
 //! The custom harness re-execs the same supervisor library as the shipped binary;
 //! it needs no arbitrary PATH host, sibling artifact or nested Cargo build.
+#[path = "support/supervised_chain.rs"]
+mod supervised_chain;
 #[path = "support/supervised_dispatch.rs"]
 mod supervised_dispatch;
 use forge_app::{
@@ -243,11 +245,26 @@ async fn scenario(mode: &str) {
                 expected_version: 0,
                 actor: "operator".into(),
                 message: "Pin".into(),
-                criteria: vec![CheckCriterion {
-                    name: "Implementation".into(),
-                    description: "Implement".into(),
-                    profile_revision: Some(profile.revision),
-                }],
+                criteria: if mode == "continuation-chain" {
+                    vec![
+                        CheckCriterion {
+                            name: "Implementation".into(),
+                            description: "Implement".into(),
+                            profile_revision: Some(profile.revision),
+                        },
+                        CheckCriterion {
+                            name: "Review".into(),
+                            description: "Independently review the exact output".into(),
+                            profile_revision: Some(profile.revision),
+                        },
+                    ]
+                } else {
+                    vec![CheckCriterion {
+                        name: "Implementation".into(),
+                        description: "Implement".into(),
+                        profile_revision: Some(profile.revision),
+                    }]
+                },
             },
         )
         .unwrap();
@@ -364,7 +381,14 @@ async fn scenario(mode: &str) {
     let info = store.agent_assignment_info(&assignment.id).unwrap();
     assert!(info.capacity_reserved());
     assert_eq!(store.list_agent_assignments(record).unwrap().len(), 1);
-    if matches!(mode, "accepted" | "retired") {
+    if mode == "continuation-chain" {
+        supervised_chain::run(&adapter, &store, record, report).await;
+        daemon.abort();
+        let _ = daemon.await;
+        println!("T10 supervised continuation/review chain: passed");
+        return;
+    }
+    if matches!(mode, "accepted" | "retired" | "recovered") {
         assert_eq!(report.answer, Some(AnswerObservation::OutcomeAccepted));
         assert_eq!(
             store.show_record(record).unwrap().status,
@@ -446,7 +470,7 @@ async fn scenario(mode: &str) {
             );
         }
     }
-    if matches!(mode, "accepted" | "rejected" | "retired") {
+    if matches!(mode, "accepted" | "rejected" | "retired" | "recovered") {
         assert_eq!(
             fs::read_to_string(report.directory.join("controlled-effects")).unwrap(),
             "effect\n"
@@ -625,7 +649,7 @@ fn main() {
             std::process::exit(1);
         }
     } else if args.iter().any(|arg| arg == "--list") {
-        println!("T07/T09 supervised tracer (seven parallel controlled scenarios)");
+        println!("T07/T09/T10 supervised tracer (nine parallel controlled scenarios)");
     } else {
         // Parallel isolated scenarios are intentional, not a serial-test waiver.
         tokio::runtime::Builder::new_multi_thread()
@@ -637,6 +661,8 @@ fn main() {
                 let modes = [
                     "accepted",
                     "retired",
+                    "recovered",
+                    "continuation-chain",
                     "missing",
                     "rejected",
                     "bootstrap-denied",
@@ -655,6 +681,6 @@ fn main() {
                     "supervised tracer scenarios failed: {failures:?}"
                 );
             });
-        println!("T07/T09 supervised tracer: 7 scenarios passed");
+        println!("T07/T09/T10 supervised tracer: 9 scenarios passed");
     }
 }

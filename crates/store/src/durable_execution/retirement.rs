@@ -40,6 +40,33 @@ fn read(c: &Connection, assignment: &str) -> Result<Option<Retirement>, Registra
     .transpose()
 }
 impl Repository for SqliteProjectRepository {
+    fn revoked_lease(
+        &self,
+        workspace: &str,
+        launch: &Launch,
+    ) -> Result<Option<forge_app::authorization_lease::Lease>, RegistrationError> {
+        let mut c = self.connection.lock().map_err(|_| error("storage"))?;
+        let tx = c.transaction().map_err(storage_error)?;
+        revoked(&tx, workspace, launch)?;
+        let row: Option<(u32, String)> = tx.query_row("SELECT sequence, lease_json FROM assignment_authorization_leases WHERE assignment_id = ?1 ORDER BY sequence DESC LIMIT 1",
+            [&launch.assignment_id], |r| Ok((r.get(0)?, r.get(1)?))).optional().map_err(storage_error)?;
+        let lease = row
+            .map(|(sequence, json)| {
+                let lease: forge_app::authorization_lease::Lease =
+                    serde_json::from_str(&json).map_err(|_| error("durable-storage-invalid"))?;
+                if sequence == 0 || lease.sequence != sequence || lease.launch != *launch {
+                    return Err(error("durable-storage-invalid"));
+                }
+                let mut shape = lease.clone();
+                shape.sequence = 1;
+                shape.validate(None, shape.issued_boottime_millis)?;
+                Ok(lease)
+            })
+            .transpose()?;
+        tx.commit().map_err(storage_error)?;
+        Ok(lease)
+    }
+
     fn begin_retirement(
         &self,
         workspace: &str,

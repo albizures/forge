@@ -165,6 +165,15 @@ pub fn run(
             Err(error) => return Err(error.into()),
         }
     }
+    for entry in fs::read_dir(directory)? {
+        if entry?
+            .file_name()
+            .to_string_lossy()
+            .starts_with(crate::crash::RECEIPT_PREFIX)
+        {
+            retained_blocker = true;
+        }
+    }
     let state = Arc::new(Mutex::new(watchdog::State::new(
         supervised.owner().clone(),
         retained_blocker,

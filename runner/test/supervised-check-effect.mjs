@@ -14,15 +14,21 @@ const git = args => {
   assert.equal(result.status, 0, 'controlled Git operation failed');
   return result.stdout.trim();
 };
-writeFileSync('deliverable.txt', 'Supervised Implementation output\n');
-git(['add', 'deliverable.txt']);
-git(['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'Controlled output']);
+if (input.mode !== 'review') {
+  writeFileSync('deliverable.txt', `Supervised Implementation output ${input.bound.assignmentId}\n`);
+  git(['add', 'deliverable.txt']);
+  git(['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'Controlled output']);
+}
 appendFileSync(join(directory, 'controlled-effects'), 'effect\n');
 const outcome = {
   attempt_id: input.bound.checkAttempt.id,
   generation: input.generation + Number(input.mode === 'rejected'),
   evidence: { ...input.bound.checkAttempt.evidence, commit: git(['rev-parse', 'HEAD']) },
-  verdict: 'pass', actor: 'spoofed-actor', message: 'Supervised output', disposition: 'complete', findings: [], verifications: [],
+  verdict: input.mode === 'continuation-chain' ? 'fail' : 'pass', actor: 'spoofed-actor', message: 'Supervised output',
+  disposition: input.mode === 'continuation-chain' ? { continuation: {
+    stopping_reason: 'Controlled finite execution-context boundary', completed_work: 'Committed the first controlled checkpoint',
+    verification: 'Controlled checkpoint commit only; successor checks remain unrun', remaining_work: 'accepted-continuation-handoff: finish implementation and independent review',
+  } } : 'complete', findings: [], verifications: [],
 };
 const outcomeFile = join(directory, 'controlled-outcome.json');
 writeFileSync(outcomeFile, JSON.stringify(outcome), { mode: 0o600 });

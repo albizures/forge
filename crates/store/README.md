@@ -52,6 +52,34 @@ is documented separately in [Records](../../docs/records.md),
   copy-and-upgrade targets revision 22 from revisions 7 through 22; unsupported
   stores are rejected without automatic conversion or reset.
 
+## Durable recovery episodes (existing revision 22 representation)
+
+Recovery uses the existing opaque Assignment resource ledger: `recovery-claim`
+retains a content-bound Candidate commitment, operation ID, fresh issuer epoch and
+original Launch; `recovery-grant` retains the exact committed fresh lease and
+protected external-proof digest. Neither contains Task bodies, capabilities,
+provider credentials or transcript/tool payloads. Runtime proof files remain in
+separate owner-only runtime storage, not this database.
+
+Immediate writer transactions enforce at most one active claim per Assignment,
+immutable operation identities, scope-before-replay and live original-binding
+revalidation. Grant insertion, audit acceptance and claim retirement commit
+atomically. Exact historical claim retries return their original fence only;
+retired/cancelled claims cannot issue authority. A subsequent recovery requires a
+changed current predecessor commitment and a different operation/epoch, preserving
+all earlier claims/grants. Readers reject malformed/duplicate histories and validate
+each historical grant against its actual retained predecessor before accepting a
+new episode. Ordinary grants cannot bypass an active recovery fence. No attempt,
+freshness, evidence or Continuation budget is changed by these operations.
+
+There is no new table/column, schema marker rewrite, backfill or automatic conversion.
+This extends policy over resource rows already representable in revision 22;
+earlier prototype binaries may conservatively refuse operations on multi-episode
+histories. Use matched components; this is not an installed-release compatibility
+or rollout claim. Original admission remains immutable. Accepted Check handoff
+uses known bound durable admission rather than requiring Herdr `agent-name`
+metadata, but that only permits revocation/cleanup to begin, never capacity release.
+
 ## Durable retirement reconciliation (revision 22)
 
 `durable_assignment_retirements` stores one immutable `operation_json` per
@@ -74,6 +102,13 @@ resource trigger requires a matching accepted retirement result and revoked
 Assignment before releasing its marker. External effects, unknown provisioning,
 unrecognized diagnostics and the operator Dispatch Hold are preserved. Generic
 retirement finalization still requires all other resources reconciled.
+
+A read-only revoked-grant snapshot also supports reconciliation from an original
+subreaper's exact-grant crash receipt. Scope, immutable runtime and revocation are
+checked in one snapshot; this lease is historical identity, not renewed permission.
+The trusted adapter must independently prove exclusive ownership and descendant
+absence, reject later host-fault markers and inspect committed effects before the
+same transactional reconciliation. It writes no synthetic host retirement receipt.
 
 Ordinary opening rejects revision 21 before initialization writes. Explicit
 offline 21 → 22 adds an empty retirement journal and replaces the runtime resource

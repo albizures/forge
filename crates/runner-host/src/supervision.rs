@@ -8,6 +8,10 @@ use std::{
     process::{Child, ExitStatus},
 };
 
+#[cfg(test)]
+#[path = "supervision_tests.rs"]
+mod tests;
+
 /// Fallible `CLOCK_BOOTTIME` in this host's verified time namespace.
 /// # Errors
 /// Rejects unavailable clocks and overflowing/invalid kernel readings.
@@ -78,13 +82,51 @@ impl<'a> Supervised<'a> {
         Ok(())
     }
 
+    /// One watchdog sample may race the directly owned child's death. If live
+    /// verification cannot finish, a positive Child reap plus unchanged captured
+    /// storage may classify this SAME sample as exited, never as a live owner.
+    /// A prior completed failure stays fenced; this cannot revive signalling.
+    /// Descendant ECHILD proof remains a separate mandatory crash-receipt gate.
+    pub(crate) fn verify_or_exited(&mut self) -> io::Result<bool> {
+        if self.fenced {
+            return Err(invalid());
+        }
+        match self.verify() {
+            Ok(()) => Ok(false),
+            Err(error) => {
+                self.captured_storage()?;
+                // A killed process can have lost /proc descriptors before it is
+                // waitable. Bound this same sample's positive-reap confirmation;
+                // never grant, signal or classify absence from failed lookups.
+                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
+                loop {
+                    if self.child.try_wait()?.is_some() {
+                        self.captured_storage()?;
+                        self.fenced = false;
+                        return Ok(true);
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        return Err(error);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }
+        }
+    }
+
     /// Protected storage must still match after all children are gone; this does
     /// not verify live execution or clear a previously observed identity fault.
     pub(crate) fn verify_storage(&self) -> io::Result<()> {
+        if self.fenced {
+            return Err(invalid());
+        }
+        self.captured_storage()
+    }
+
+    fn captured_storage(&self) -> io::Result<()> {
         let meta = directory(&self.path)?;
         let lock = protected_file(&self.path.join("owner.lock"))?.metadata()?;
-        if self.fenced
-            || meta.dev() != self.device
+        if meta.dev() != self.device
             || meta.ino() != self.inode
             || record(&self.path)? != self.record
             || lock.dev().to_string() != self.owner.lock_device

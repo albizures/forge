@@ -19,11 +19,29 @@ provider.setResponses([async () => {
 const models = createModels({ authContext: { env: async () => undefined, fileExists: async () => false } });
 models.setProvider(provider.provider);
 persistIntent(directory, launch);
-const harness = await Harness.open(await openNodeSqliteStorage(databasePath(directory)), { models, registry: createRegistry(), env: () => undefined }, context);
-const root = await harness.root(context, { agent: { model: { provider: 'faux', modelId: 'faux-1' } } });
+const storage = await openNodeSqliteStorage(databasePath(directory));
+let rootId;
+const safe = process.argv[4] === 'safe';
+const controlled = new Proxy(storage, {
+  get(target, key) {
+    if (key === 'commit' && safe) return async (batches, ...args) => {
+      if (batches.flat().some(row => row.type === 'task' && row.value.kind === 'pi.generation' && row.value.state.status === 'running')) {
+        const submission = await storage.submissionByRequest(rootId, launch.operation_id, context);
+        process.stdout.write(`${JSON.stringify({ root: rootId, admission_id: String(submission.id) })}\nmodel-entered\n`);
+        await new Promise(() => {}); // fault barrier BEFORE any model admission
+      }
+      return target.commit(batches, ...args);
+    };
+    const value = Reflect.get(target, key, target);
+    return typeof value === 'function' ? value.bind(target) : value;
+  },
+});
+const harness = await Harness.open(controlled, { models, registry: createRegistry(), env: () => undefined }, context);
+const root = await harness.root(context, { agent: { model: { provider: 'faux', modelId: 'faux-1' }, ...(process.argv[3] ? { cwd: process.argv[3] } : {}) } });
+rootId = root.id;
 persistRoot(directory, root.id);
 const submission = await root.submit({ type: 'input', requestId: launch.operation_id, content: 'Controlled pending input' }, context);
-process.stdout.write(`${JSON.stringify({ root: root.id, admission_id: String(submission.id) })}\n`);
+if (!safe) process.stdout.write(`${JSON.stringify({ root: root.id, admission_id: String(submission.id) })}\n`);
 // Keep the fixture alive until the parent explicitly kills it, not process-idle.
 setInterval(() => {}, 60_000);
 await submission.wait(context);

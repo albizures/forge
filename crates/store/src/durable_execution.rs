@@ -92,6 +92,34 @@ fn load(c: &Connection, assignment: &str) -> Result<Option<Runtime>, Registratio
     .transpose()
 }
 
+// Backend-specific admission evidence for accepted Check handoff. This only
+// permits revocation/cleanup to begin; it never proves process absence or frees
+// capacity. Missing Herdr agent-name metadata is not durable launch uncertainty.
+pub(super) fn handoff_admitted(
+    c: &Connection,
+    assignment: &str,
+    attempt: &forge_app::outcomes::Attempt,
+) -> Result<bool, RegistrationError> {
+    let Some(runtime) = load(c, assignment)? else {
+        return Ok(false);
+    };
+    runtime.launch.validate()?;
+    let (revision, record): (u32, i64) = c
+        .query_row(
+            "SELECT profile_revision, record_id FROM agent_assignments WHERE id = ?1",
+            [assignment],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(storage_error)?;
+    let record = u64::try_from(record).map_err(|_| error("durable-storage-invalid"))?;
+    Ok(runtime.launch.assignment_id == assignment
+        && runtime.launch.attempt_id == attempt.id
+        && runtime.launch.profile_revision == revision
+        && attempt.actor == assignment
+        && attempt.record_id == record
+        && matches!(runtime.admission, Admission::Accepted { ref admission_id } if !admission_id.trim().is_empty()))
+}
+
 fn exact(runtime: &Runtime, launch: &Launch) -> Result<(), RegistrationError> {
     if &runtime.launch == launch {
         Ok(())

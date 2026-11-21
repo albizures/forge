@@ -3232,6 +3232,7 @@ impl Application {
             );
         })?;
         if scan.acquired_lease {
+            self.reconcile_durable_check_execution()?;
             self.continue_task_check_acceptance()?;
             self.schedule_agent_dispatch().inspect_err(|error| {
                 tracing::warn!(

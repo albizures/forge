@@ -2,9 +2,11 @@
 //! adopt retained processes, release resources or authorize work. Supervision
 //! can signal only its own directly spawned, still-verified process group.
 pub mod control;
+pub mod crash;
 pub mod inspection;
 pub mod model_auth;
 pub mod quiescence;
+pub mod recovery_proof;
 pub mod retirement;
 pub mod storage;
 pub mod supervision;

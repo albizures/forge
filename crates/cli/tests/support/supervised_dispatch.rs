@@ -37,6 +37,9 @@ use std::{
     time::Duration,
 };
 
+#[path = "supervised_recovery.rs"]
+mod recovery;
+
 pub struct Report {
     pub launch: Launch,
     pub directory: PathBuf,
@@ -231,6 +234,20 @@ impl SupervisedDispatch {
                 .close_agent_assignment(id, forge_app::AgentAssignmentClosureReason::Retired)
                 .unwrap();
         }
+        if self.mode == "recovered" {
+            self.execute_recovery(
+                context,
+                &store,
+                recovery::Trace {
+                    launch,
+                    request,
+                    directory,
+                    process,
+                    owned,
+                },
+            );
+            return;
+        }
         let mut service = tokio::runtime::Handle::current()
             .block_on(self.authority.bind_inspected(
                 &store,
@@ -334,7 +351,10 @@ impl SupervisedDispatch {
                 .unwrap();
         }
         let secret = fs::read_to_string(&delivery.secret_file).unwrap();
-        let retained_process = if self.mode == "retired" {
+        let retained_process = if matches!(
+            self.mode.as_str(),
+            "retired" | "continuation-chain" | "chain-complete" | "review"
+        ) {
             let mut placeholder = Command::new("/bin/true").spawn().unwrap();
             placeholder.wait().unwrap();
             let host = std::mem::replace(&mut process.child, placeholder);

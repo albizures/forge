@@ -57,6 +57,16 @@ pub struct Retirement {
 /// Every operation authorizes retained Workspace/binding and revoked authority
 /// before replay. External host calls stay outside these transactions.
 pub trait Repository: Send + Sync {
+    /// Read the last original grant only after revocation, for exact protected
+    /// crash-proof reconciliation. This historical value grants no execution.
+    /// # Errors
+    /// Rejects foreign scope/runtime, live authority and malformed grant history.
+    fn revoked_lease(
+        &self,
+        workspace: &str,
+        launch: &Launch,
+    ) -> Result<Option<crate::authorization_lease::Lease>, RegistrationError>;
+
     /// # Errors
     /// Rejects wrong scope, conflicting identity, live authority or unknown launch.
     fn begin_retirement(

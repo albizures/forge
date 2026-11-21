@@ -7,7 +7,7 @@ use forge_app::{
     authorization_lease::{AuthorityHost, Owner},
     durable_execution::{
         Launch, Repository as _,
-        retirement::{Operation, Repository as _},
+        retirement::{Operation, Receipt, Repository as _},
     },
 };
 use forge_runner_host::{SpawnedOwner, control::ControlPipe, inspection::ExclusiveInspection};
@@ -85,6 +85,52 @@ impl Controller {
         Ok(())
     }
 
+    fn reconcile_crash(
+        &self,
+        repository: &SqliteProjectRepository,
+        workspace: &str,
+        directory: &std::path::Path,
+        operation: &Operation,
+        lease: &forge_app::authorization_lease::Lease,
+    ) -> Result<bool, RegistrationError> {
+        if lease.owner != operation.owner {
+            return Err(uncertain());
+        }
+        let Ok(guard) = ExclusiveInspection::acquire(directory) else {
+            return Ok(false);
+        };
+        for marker in ["watchdog.json", "retirement-intent.json"] {
+            match std::fs::symlink_metadata(directory.join(marker)) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                _ => return Ok(false),
+            }
+        }
+        if forge_runner_host::crash::receipt(directory, lease).is_err() {
+            return Ok(false);
+        }
+        let components = self.inspection.as_ref().ok_or_else(uncertain)?;
+        super::effects::inspect_retirement(
+            repository,
+            workspace,
+            &operation.launch,
+            components,
+            directory,
+            &guard,
+        )?;
+        guard.verify().map_err(|_| uncertain())?;
+        // This is the trusted app reconciliation result of the original crash
+        // proof, not a repaired/manufactured host retirement receipt on disk.
+        repository.reconcile_retirement(
+            workspace,
+            &Receipt {
+                version: 1,
+                operation: operation.clone(),
+                children_absent: true,
+            },
+        )?;
+        Ok(true)
+    }
+
     /// Called only after application's durable revocation. Retained receipt
     /// reconciliation after restart performs no process adoption or signalling.
     /// # Errors
@@ -110,22 +156,32 @@ impl Controller {
             .map_err(|_| uncertain())?
             .get(&launch.assignment_id)
             .cloned();
+        let last = repository.revoked_lease(workspace, launch)?;
         let operation = if let Some(existing) = existing {
             existing.operation
         } else {
-            let owned = owned.as_ref().ok_or_else(uncertain)?;
-            let owned = owned.lock().map_err(|_| uncertain())?;
-            if owned.fenced || owned.launch != *launch {
-                return Err(uncertain());
-            }
+            let identity = if let Some(owned) = &owned {
+                let owned = owned.lock().map_err(|_| uncertain())?;
+                if owned.fenced || owned.launch != *launch {
+                    return Err(uncertain());
+                }
+                owned.owner.clone()
+            } else {
+                last.as_ref().ok_or_else(uncertain)?.owner.clone()
+            };
             let operation = Operation {
                 operation_id: format!("{}-retire", launch.operation_id),
                 launch: launch.clone(),
-                owner: owned.owner.clone(),
+                owner: identity,
             };
             repository.begin_retirement(workspace, &operation)?;
             operation
         };
+        if let Some(last) = last
+            && self.reconcile_crash(repository, workspace, &directory, &operation, &last)?
+        {
+            return Ok(());
+        }
         if let Some(owned) = &owned {
             let mut owned = owned.lock().map_err(|_| uncertain())?;
             if owned.fenced || owned.launch != *launch || owned.owner != operation.owner {
@@ -179,6 +235,8 @@ impl Controller {
 pub struct Factory {
     pub database: PathBuf,
     pub controller: Arc<Controller>,
+    /// Explicit controlled recovery wiring; production composition leaves None.
+    pub recovery: Option<Arc<super::recovery::Controller>>,
     pub original: Box<dyn AgentDispatchAdapterFactory>,
 }
 impl AgentDispatchAdapterFactory for Factory {
@@ -205,6 +263,7 @@ impl AgentDispatchAdapterFactory for Factory {
             return Ok(Box::new(Adapter {
                 database: self.database.clone(),
                 controller: self.controller.clone(),
+                recovery: self.recovery.clone(),
             }));
         }
         self.original.adapter_for(profile)
@@ -213,6 +272,7 @@ impl AgentDispatchAdapterFactory for Factory {
 struct Adapter {
     database: PathBuf,
     controller: Arc<Controller>,
+    recovery: Option<Arc<super::recovery::Controller>>,
 }
 fn disabled() -> AgentAdapterError {
     AgentAdapterError::InvalidRequest(
@@ -233,8 +293,24 @@ impl AgentDispatchAdapter for Adapter {
     fn observe(&self, _: &AgentDispatchContext) -> Result<AgentObservation, AgentAdapterError> {
         Err(disabled())
     }
-    fn recover(&self, _: &AgentDispatchContext) -> Result<AgentObservation, AgentAdapterError> {
-        Err(disabled())
+    fn recover(
+        &self,
+        context: &AgentDispatchContext,
+    ) -> Result<AgentObservation, AgentAdapterError> {
+        let controller = self.recovery.as_ref().ok_or_else(disabled)?;
+        let run = || {
+            let repository = SqliteProjectRepository::open(&self.database)?;
+            let workspace = repository.record_workspace(context.assignment.record_id)?;
+            let runtime = repository
+                .runtime(&workspace, &context.assignment.id)?
+                .ok_or_else(uncertain)?;
+            controller.recover(&workspace, &runtime.launch)
+        };
+        run().map_err(|_: RegistrationError| {
+            AgentAdapterError::Transient(
+                "durable recovery unavailable; retain original resources".into(),
+            )
+        })
     }
     fn retire(
         &self,
@@ -247,6 +323,9 @@ impl AgentDispatchAdapter for Adapter {
             let runtime = repository
                 .runtime(&workspace, &context.assignment.id)?
                 .ok_or_else(uncertain)?;
+            if let Some(recovery) = &self.recovery {
+                recovery.stop_for_retirement(&workspace, &runtime.launch)?;
+            }
             self.controller
                 .retire(&repository, &workspace, &runtime.launch)
         };

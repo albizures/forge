@@ -325,6 +325,45 @@ fn retain(
     }
 }
 
+// A direct Child wait and original subreaper proof, never a /proc absence guess.
+fn reaped_crash(
+    worker: &mut Supervised<'_>,
+    directory: &Path,
+    state: &Mutex<State>,
+) -> io::Result<bool> {
+    if worker.try_wait()?.is_none() {
+        return Ok(false);
+    }
+    let lease = state
+        .lock()
+        .ok()
+        .and_then(|state| {
+            (state.fault.is_none()
+                && (!state.retained_blocker || state.recovery.is_some())
+                && state.shutdown.is_none())
+            .then(|| state.policy.last_lease().cloned())
+            .flatten()
+        })
+        .ok_or_else(|| io::Error::other("unverified crash authority"))?;
+    crate::crash::record(worker, directory, &lease)?;
+    eprintln!("runner-crash-verified");
+    Ok(true)
+}
+
+fn sample_worker(
+    worker: &mut Supervised<'_>,
+    directory: &Path,
+    state: &Mutex<State>,
+) -> io::Result<bool> {
+    if reaped_crash(worker, directory, state)? {
+        return Ok(true);
+    }
+    if worker.verify_or_exited()? {
+        return reaped_crash(worker, directory, state);
+    }
+    Ok(false)
+}
+
 pub fn supervise(mut worker: Supervised<'_>, directory: &Path, state: &Mutex<State>) {
     let owner = worker.owner().clone();
     let identity = worker.directory_identity();
@@ -361,7 +400,21 @@ pub fn supervise(mut worker: Supervised<'_>, directory: &Path, state: &Mutex<Sta
             std::thread::sleep(Duration::from_millis(50));
             continue;
         }
-        let observation = if exited { Ok(()) } else { worker.verify() };
+        let observation = if exited {
+            Ok(())
+        } else {
+            match sample_worker(&mut worker, directory, state) {
+                Ok(true) => return,
+                Ok(false) => Ok(()),
+                Err(error) => {
+                    exited = true;
+                    eprintln!(
+                        "runner-worker-exited-or-unverified; ownership retained pending reconciliation"
+                    );
+                    Err(error)
+                }
+            }
+        };
         let (fault, lease, now) = match state.lock() {
             Ok(mut state) => {
                 // Input may have requested shutdown after the loop's first
@@ -417,18 +470,6 @@ pub fn supervise(mut worker: Supervised<'_>, directory: &Path, state: &Mutex<Sta
                 };
                 record(code, lease.as_ref(), false);
                 eprintln!("runner-watchdog-{code}; cleanup unverified");
-            }
-        }
-        if !exited {
-            match worker.try_wait() {
-                Ok(Some(status)) => {
-                    exited = true;
-                    eprintln!(
-                        "runner-worker-exited: {status}; ownership retained pending reconciliation"
-                    );
-                }
-                Ok(None) => {}
-                Err(_) => eprintln!("runner-worker-wait-unavailable; ownership retained"),
             }
         }
         // Retain ownership indefinitely. Neither process exit nor successful

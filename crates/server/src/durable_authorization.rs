@@ -6,6 +6,7 @@ pub mod effects;
 mod inspection_process;
 pub mod operator;
 pub mod quiesced_inspection;
+pub mod recovery;
 pub mod recovery_inspection;
 pub mod recovery_worktree;
 pub mod retirement;
