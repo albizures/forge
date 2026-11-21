@@ -25,9 +25,16 @@ The controlled path:
    (`runner-host/src/recovery_proof.rs`) and prepares the unarmed consumer. It
    rechecks runtime/effects, commits a fresh owner-bound recovery lease and
    delivers the exact private envelope. The lease is committed before delivery.
-4. The writable Check runner (`runner/src/check-recovery.ts`,
-   `runner/src/resume-runtime.ts`) bootstraps again through the original
-   capability. It revalidates cwd and the original admission and resumes **that
+4. The writable recovery (`runner/src/resume-runtime.ts`, driven by
+   `runner/src/recovery-consumer.ts`) bootstraps again through the original
+   capability. **Correction (T22):** this evidence previously named
+   `runner/src/check-recovery.ts` as the writable Check runner. That file was
+   never executed and nothing wrote its `check-runtime.json` input; T10's
+   recovery tests ran test-only compositions. T22 removed it. The shipped
+   recovery entry is now `runner/src/check-runner.ts` (packaged as
+   `check-entry.ts`), reading the protected input written by
+   `forge_runner_host::check_runtime::write`; see the
+   [T22 evidence](../pi-durable-t22/README.md). It revalidates cwd and the original admission and resumes **that
    submission**. It creates no new root, input, `continue`, Check attempt or
    Continuation. Model retries stay disabled, so an in-flight model request may
    settle unanswered. Arbitrary commands are never replayed.

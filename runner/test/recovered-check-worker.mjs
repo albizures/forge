@@ -1,4 +1,5 @@
 // Controlled fake model/configuration port; actual private receiver and reopen.
+// Its stdout carries only typed protocol-1 events (the daemon rejects others).
 import { existsSync, unlinkSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { serveRecovery } from '../src/recovery-consumer.ts';
@@ -20,7 +21,6 @@ try {
       appendFileSync(join(directory, 'controlled-recovery-models'), 'model\n');
       // Keep the first answer in flight so the daemon can send recorded input.
       if (existsSync(join(directory, 'controlled-slow-model'))) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1500);
-      console.log(JSON.stringify({ event: 'recovered-model' }));
       return fauxAssistantMessage('Recovered the original bound input; not an accepted Forge Outcome.');
     };
     provider.setResponses([model, model]);

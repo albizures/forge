@@ -1,6 +1,7 @@
 //! Trusted Linux evidence for a directly spawned runner supervisor. This does not
 //! adopt retained processes, release resources or authorize work. Supervision
 //! can signal only its own directly spawned, still-verified process group.
+pub mod check_runtime;
 pub mod control;
 pub mod crash;
 pub mod inspection;

@@ -21,7 +21,9 @@ pub const BUNDLE_MANIFEST: &str = "forge-runner-bundle.json";
 pub const SUPPORTED_RUNNER_PROTOCOL: u32 = 1;
 /// Fixed, not manifest-selected, component locations inside a bundle.
 pub const NODE_RELATIVE: &str = "node/node";
-pub const ENTRY_RELATIVE: &str = "runner/src/main.ts";
+/// The shipped production Check runner entry (`runCheckRunner`, no substitution).
+/// The synthetic T04 runner is a test fixture under `runner/test/`, never bundled.
+pub const ENTRY_RELATIVE: &str = "runner/src/check-entry.ts";
 pub const INSPECTOR_RELATIVE: &str = "runner/src/inspect-effects.ts";
 pub const LOCK_RELATIVE: &str = "runner/package-lock.json";
 const SUPPORTED_SCHEMA: u32 = 1;
@@ -566,5 +568,16 @@ mod tests {
             std::fs::read_to_string(runner.root.join(NODE_RELATIVE)).unwrap(),
             "#!/bin/sh\necho v24.18.0\n"
         );
+    }
+
+    #[test]
+    fn packaged_entry_is_the_production_check_runner_not_the_synthetic_fixture() {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let entry = fs::read_to_string(repository.join(ENTRY_RELATIVE)).unwrap();
+        assert!(entry.contains("runCheckRunner(directory, worktree)"));
+        assert!(!entry.contains("fauxProvider"));
+        // Only `runner/src` is bundled; the synthetic runner lives outside it.
+        assert!(!repository.join("runner/src/main.ts").exists());
+        assert!(repository.join("runner/test/synthetic-runner.ts").exists());
     }
 }

@@ -135,6 +135,21 @@ impl ControlPipe {
         input.send(&control, 1_048_576)
     }
 
+    /// Send one runner protocol-1 admission or observation request. Success is
+    /// transport only: the runner's correlated `RunnerResponse` is the result, and
+    /// an admission is idempotent by its operation ID. The caller must persist
+    /// send intent first; uncertain delivery fences every control on this pipe.
+    /// # Errors
+    /// Rejects an invalid request before writing; uncertain delivery fences all controls.
+    pub fn request(
+        &mut self,
+        request: &forge_rpc::durable_execution::RunnerRequest,
+    ) -> Result<(), RegistrationError> {
+        request.validate(&request.compatibility.component_hash)?;
+        let mut input = self.input.lock().map_err(|_| uncertain())?;
+        input.send(request, 1_048_576)
+    }
+
     /// Send only an already persisted, revoked retirement operation. Partial or
     /// blocked delivery remains uncertain; this does not acknowledge cancellation.
     /// # Errors

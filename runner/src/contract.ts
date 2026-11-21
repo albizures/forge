@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 
 export class Denied extends Error {
   readonly code: string;
@@ -10,7 +10,9 @@ export function requireCondition(condition: unknown, code: string): asserts cond
 }
 export function componentHash(): string {
   const hash = createHash('sha256');
-  for (const path of ['package-lock.json', 'prepare-reader.mjs', 'src/contract.ts', 'src/storage.ts', 'src/main.ts', 'src/authorization.ts', 'src/profiles.ts', 'src/bootstrap.ts', 'src/check-runtime.ts', 'src/interrupted-effects.ts', 'src/inspect-effects.ts', 'src/recovery.ts', 'src/resume-runtime.ts', 'src/recovery-consumer.ts', 'src/check-recovery.ts', 'src/inspect-answer.ts', 'src/inspect-transcript.ts', 'src/inspect-recovery.ts', 'src/owner.ts', 'src/followup.ts']) {
+  // Every shipped source module, so a new module can never escape attestation.
+  const sources = readdirSync(new URL('../src/', import.meta.url)).filter(name => name.endsWith('.ts')).sort().map(name => 'src/' + name);
+  for (const path of ['package-lock.json', 'prepare-reader.mjs', ...sources]) {
     hash.update(path).update(readFileSync(new URL('../' + path, import.meta.url)));
   }
   return hash.digest('hex');
@@ -52,6 +54,8 @@ export function validateRequest(request: unknown): asserts request is Record<str
     exactKeys(operation, ['kind', 'admission_operation_id']);
     requireCondition(typeof operation.admission_operation_id === 'string' && operation.admission_operation_id.trim(), 'runner-identity-conflict');
   } else {
-    throw new Denied('runner-operation-unavailable');
+    // Protocol 1 defines only admit/observe requests; recovery, follow-up and
+    // retirement are typed supervisor controls. Anything else is malformed.
+    throw new Denied('runner-request-invalid');
   }
 }

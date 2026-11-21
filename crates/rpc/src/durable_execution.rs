@@ -1,5 +1,19 @@
-//! Internal runner wire v1. Separate from operator JSON-RPC and management protocol.
+//! Internal runner protocol 1. Separate from operator JSON-RPC and management protocol.
 //! Defining operations does not enable their execution or issue authorization leases.
+//!
+//! One versioned contract between the daemon, `forge-runner-host` and the shipped
+//! Check runner (`runner/src/check-runner.ts`):
+//! - input binding: [`CheckRuntimeInput`] (`check-runtime.json`, written before spawn);
+//! - admission and observation: [`RunnerRequest`] → [`RunnerResponse`] / [`RunnerRefusal`];
+//! - grant and renewal: [`SupervisorControl`];
+//! - same-attempt recovery: [`SupervisorRecoveryPreparation`], [`SupervisorRecovery`];
+//! - recorded follow-up: [`SupervisorFollowUp`];
+//! - retirement and quiescence: [`SupervisorRetirement`], [`SupervisorQuiescence`]
+//!   (consumed by the host; the runner only receives cancellation);
+//! - runner progress: [`RunnerEvent`], parsed strictly at the Rust boundary.
+//!
+//! Read-only transcript, answer and recovery inspection use their own bounded
+//! subprocess wires in the submodules. Every defined operation has a real path.
 use forge_app::{
     RegistrationError,
     durable_execution::{Admission, Launch},
@@ -133,29 +147,172 @@ pub struct RunnerRequest {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum RunnerOperation {
-    Admit {
-        launch: Launch,
+    Admit { launch: Launch },
+    Observe { admission_operation_id: String },
+}
+
+/// A request that could not be correlated or parsed. It carries a stable code
+/// only: never input, paths, credentials or upstream diagnostics.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunnerRefusal {
+    pub error: RunnerRefusalCode,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunnerRefusalCode {
+    pub code: String,
+}
+
+/// Kernel ownership evidence the host persisted and the worker re-verified.
+/// Descriptive only: never a grant, adoption permission or cleanup proof.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunnerOwnerEvidence {
+    pub owner: RunnerHostOwner,
+    pub worker_pid: u32,
+    pub worker_start: String,
+    pub process_group: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunnerHostOwner {
+    pub host_pid: u32,
+    pub host_start: String,
+    pub boot_id: String,
+    pub lock_device: String,
+    pub lock_inode: String,
+    pub lock_fd: i32,
+}
+
+/// Runner progress on stdout. Events are observations, never Forge Outcomes,
+/// authority or cleanup evidence. Unknown events or fields are protocol errors.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "event", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum RunnerEvent {
+    Owned {
+        identity: RunnerOwnerEvidence,
+        compatibility: RunnerCompatibility,
     },
-    Observe {
-        admission_operation_id: String,
+    Authorized {
+        sequence: u64,
     },
-    Transcript {
-        conversation_id: String,
-        cursor: Option<String>,
-        limit: u16,
+    RecoveryPrepared {},
+    Bootstrapped {},
+    Resumed {
+        root: u64,
+        admission_id: String,
     },
-    Recover {
-        incarnation_id: String,
-        authorization_id: String,
+    Settled {
+        status: String,
     },
-    FollowUp {
-        input_id: String,
-        content: String,
-        authorization_id: String,
+    RuntimeFailed {},
+    FollowupAccepted {
+        operation_id: String,
+        admission_id: String,
+        replayed: bool,
     },
-    Retire {
-        revocation_id: String,
+    FollowupFailed {
+        operation_id: Option<String>,
     },
+}
+
+/// Exactly one JSON value per runner stdout line.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum RunnerOutput {
+    Event(RunnerEvent),
+    Response(RunnerResponse),
+    Refusal(RunnerRefusal),
+}
+
+impl RunnerOutput {
+    /// Parse one bounded stdout line strictly.
+    /// # Errors
+    /// Rejects anything that is not exactly one defined protocol-1 value.
+    pub fn parse(line: &[u8]) -> Result<Self, RegistrationError> {
+        serde_json::from_slice(line).map_err(|_| {
+            RegistrationError::new(
+                "runner-output-invalid",
+                "runner output is not a protocol 1 value",
+            )
+        })
+    }
+}
+
+pub const CHECK_RUNTIME_VERSION: u32 = 1;
+pub const CHECK_RUNTIME_FILE: &str = "check-runtime.json";
+
+/// Delivered capability metadata and the protected secret-file PATH only.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckCapability {
+    #[serde(rename = "FORGE_ASSIGNMENT_ID")]
+    pub assignment_id: String,
+    #[serde(rename = "FORGE_ASSIGNMENT_DAEMON_URL")]
+    pub daemon_url: String,
+    #[serde(rename = "FORGE_ASSIGNMENT_CAPABILITY_SECRET_FILE")]
+    pub secret_file: std::path::PathBuf,
+    #[serde(rename = "FORGE_ASSIGNMENT_FORGE_CLI")]
+    pub forge_cli: std::path::PathBuf,
+}
+
+/// Original Check binding of one durable runtime, used for first admission and
+/// for any later same-attempt recovery. It contains no key or capability bytes,
+/// behavior or lease, and grants nothing: execution still needs a current lease
+/// and successful authenticated bootstrap.
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckRuntimeInput {
+    pub version: u32,
+    pub launch: Launch,
+    pub generation: u64,
+    pub bound: forge_app::assignment::BoundIdentity,
+    pub configuration: forge_app::durable_profiles::ExecutionConfiguration,
+    pub credential_file: std::path::PathBuf,
+    pub capability: CheckCapability,
+}
+
+impl std::fmt::Debug for CheckRuntimeInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CheckRuntimeInput")
+            .field("version", &self.version)
+            .field("launch", &self.launch)
+            .field("generation", &self.generation)
+            .finish_non_exhaustive()
+    }
+}
+
+impl CheckRuntimeInput {
+    /// Structural consistency the runner also enforces. Bootstrap and profile
+    /// preflight remain the authority for binding, resources and authentication.
+    /// # Errors
+    /// Rejects mismatched identity, generation, cwd or credential separation.
+    pub fn validate(&self) -> Result<(), RegistrationError> {
+        self.launch.validate()?;
+        let attempt = self.bound.check_attempt.as_ref();
+        let consistent = self.version == CHECK_RUNTIME_VERSION
+            && self.generation > 0
+            && self.bound.assignment_id == self.launch.assignment_id
+            && self.bound.profile_revision == self.launch.profile_revision
+            && attempt.is_some_and(|attempt| {
+                attempt.id == self.launch.attempt_id && attempt.generation == self.generation
+            })
+            && self.bound.execution_directory == self.configuration.cwd
+            && self.capability.assignment_id == self.launch.assignment_id
+            && self.credential_file.is_absolute()
+            && self.credential_file != self.capability.secret_file;
+        if consistent {
+            Ok(())
+        } else {
+            Err(RegistrationError::new(
+                "runner-check-input-invalid",
+                "durable Check runtime input is inconsistent",
+            ))
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -338,6 +495,81 @@ mod tests {
             let mut wrong = value.clone();
             wrong.pointer_mut(path).unwrap()["unknown"] = true.into();
             assert!(serde_json::from_value::<SupervisorQuiescence>(wrong).is_err());
+        }
+    }
+
+    #[test]
+    fn runner_events_are_typed_strict_and_cover_every_runner_emission() {
+        let compatibility =
+            serde_json::json!({"protocol": 1, "runtime_schema": 2, "component_hash": "pinned"});
+        let identity = serde_json::json!({"owner": {"host_pid": 1, "host_start": "10", "boot_id": "boot",
+            "lock_device": "1", "lock_inode": "2", "lock_fd": 3}, "worker_pid": 2, "worker_start": "11", "process_group": 2});
+        let lines = [
+            serde_json::json!({"event": "owned", "identity": identity, "compatibility": compatibility}),
+            serde_json::json!({"event": "authorized", "sequence": 1}),
+            serde_json::json!({"event": "recovery-prepared"}),
+            serde_json::json!({"event": "bootstrapped"}),
+            serde_json::json!({"event": "resumed", "root": 1, "admission_id": "2"}),
+            serde_json::json!({"event": "settled", "status": "done"}),
+            serde_json::json!({"event": "runtime-failed"}),
+            serde_json::json!({"event": "followup-accepted", "operation_id": "f", "admission_id": "3", "replayed": false}),
+            serde_json::json!({"event": "followup-failed", "operation_id": null}),
+        ];
+        for line in lines {
+            let bytes = serde_json::to_vec(&line).unwrap();
+            let RunnerOutput::Event(event) = RunnerOutput::parse(&bytes).unwrap() else {
+                panic!("not an event: {line}");
+            };
+            assert_eq!(serde_json::to_value(event).unwrap(), line);
+            let mut extra = line.clone();
+            extra["unexpected"] = true.into();
+            assert!(RunnerOutput::parse(&serde_json::to_vec(&extra).unwrap()).is_err());
+        }
+        for invalid in [
+            serde_json::json!({"event": "recovered-model"}),
+            serde_json::json!({"event": "admission", "response": {}}),
+            serde_json::json!({"settled": true}),
+        ] {
+            assert_eq!(
+                RunnerOutput::parse(&serde_json::to_vec(&invalid).unwrap())
+                    .unwrap_err()
+                    .code,
+                "runner-output-invalid"
+            );
+        }
+        let refusal = serde_json::json!({"error": {"code": "assignment-lease-denied"}});
+        assert!(matches!(
+            RunnerOutput::parse(&serde_json::to_vec(&refusal).unwrap()).unwrap(),
+            RunnerOutput::Refusal(_)
+        ));
+        let response = serde_json::json!({"compatibility": compatibility, "assignment_id": "a",
+            "runtime_id": "r", "operation_id": "op", "admission": {"state": "rejected", "code": "assignment-runtime-failed"}});
+        let RunnerOutput::Response(response) =
+            RunnerOutput::parse(&serde_json::to_vec(&response).unwrap()).unwrap()
+        else {
+            panic!("not a response");
+        };
+        assert_eq!(
+            response.admission,
+            Admission::Rejected {
+                code: "assignment-runtime-failed".into()
+            }
+        );
+    }
+
+    #[test]
+    fn protocol_one_defines_no_rejected_request_operations() {
+        let base = serde_json::json!({"compatibility": {"protocol": 1, "runtime_schema": 2,
+            "component_hash": "pinned"}, "assignment_id": "a", "runtime_id": "r", "operation_id": "op"});
+        for operation in [
+            serde_json::json!({"kind": "transcript", "conversation_id": "c", "cursor": null, "limit": 1}),
+            serde_json::json!({"kind": "recover", "incarnation_id": "i", "authorization_id": "x"}),
+            serde_json::json!({"kind": "follow-up", "input_id": "i", "content": "c", "authorization_id": "x"}),
+            serde_json::json!({"kind": "retire", "revocation_id": "r"}),
+        ] {
+            let mut request = base.clone();
+            request["operation"] = operation;
+            assert!(serde_json::from_value::<RunnerRequest>(request).is_err());
         }
     }
 

@@ -47,11 +47,21 @@ impl Trace {
             ))
             .unwrap();
         service.tick(store).unwrap();
-        let pipe = service.retirement_control();
+        let mut pipe = service.retirement_control();
+        pipe.request(&request).unwrap();
         let mut events = vec![owned];
         let original = loop {
             let event = receive(&process.output);
-            match event["event"].as_str().unwrap() {
+            let Some(kind) = event["event"].as_str() else {
+                let response: RunnerResponse = serde_json::from_value(event.clone()).unwrap();
+                response.validate(&request).unwrap();
+                store
+                    .record_result("test", &launch, &response.admission)
+                    .unwrap();
+                events.push(event);
+                continue;
+            };
+            match kind {
                 "authorized" => assert_eq!(event["sequence"], 1),
                 "bootstrapped" => {
                     let pid = events[0]["identity"]["worker_pid"].as_u64().unwrap();
@@ -62,17 +72,7 @@ impl Trace {
                         .write_all(b"start\n")
                         .unwrap();
                 }
-                "admission" => {
-                    let response: RunnerResponse =
-                        serde_json::from_value(event["response"].clone()).unwrap();
-                    response.validate(&request).unwrap();
-                    store
-                        .record_result("test", &launch, &response.admission)
-                        .unwrap();
-                }
                 "recovery-boundary" => {
-                    assert_eq!(event["calls"], 0);
-                    assert_eq!(event["tools"], 0);
                     store
                         .record_result(
                             "test",
@@ -138,6 +138,9 @@ impl SupervisedDispatch {
         )
         .unwrap();
         store.claim_recovery("test", &claim).unwrap();
+        // The recovered process reads the SAME protected input file the first
+        // admission wrote; nothing is rewritten for recovery.
+        assert!(directory.join("check-runtime.json").exists());
         let mut recovered_adapter = self.clone();
         recovered_adapter.runner = self
             .runner

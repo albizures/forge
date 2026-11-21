@@ -142,8 +142,12 @@ fn recovery_after_owned_worker_death_and_store_restart_resumes_original_attempt(
         event(&f.output, "resumed")["admission_id"],
         original["admission_id"]
     );
-    event(&f.output, "recovered-model");
     assert_eq!(event(&f.output, "settled")["status"], "done");
+    // The recovered model ran exactly once (recorded off the protocol stdout).
+    assert_eq!(
+        fs::read_to_string(f.directory.join("controlled-recovery-models")).unwrap(),
+        "model\n"
+    );
     assert_eq!(
         f.store
             .assignment_check_attempt("assignment")

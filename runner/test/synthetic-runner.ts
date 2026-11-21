@@ -1,4 +1,5 @@
-// T04 controlled synthetic runner. No real providers, tools or production launch.
+// T04 controlled synthetic runner TEST FIXTURE. Never packaged (src/ only is shipped):
+// no real provider, bootstrap, profile or tools. The production entry is src/check-entry.ts.
 import { createInterface } from 'node:readline';
 import { readlinkSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
@@ -6,11 +7,11 @@ import { BACKGROUND_CONTEXT as context, withAbortSignal } from '@earendil-works/
 import { createModels, fauxProvider, fauxAssistantMessage, fauxText } from '@earendil-works/pi-ai';
 import { Harness, createRegistry } from '@earendil-works/pi-durable';
 import { openNodeSqliteStorage } from '@earendil-works/pi-durable/storage/sqlite/node';
-import { canonical, compatibility, Denied, exactKeys, requireCondition, validateRequest, type Launch } from './contract.ts';
-import { Authorization, guardProvider, type Owner } from './authorization.ts';
-import { ownerIdentity } from './owner.ts';
-import { inspectRecoveryCandidate } from './recovery.ts';
-import { databasePath, journal, observe, persistIntent, persistRoot, validateDirectory } from './storage.ts';
+import { canonical, compatibility, Denied, exactKeys, requireCondition, validateRequest, type Launch } from '../src/contract.ts';
+import { Authorization, guardProvider, type Owner } from '../src/authorization.ts';
+import { ownerIdentity } from '../src/owner.ts';
+import { inspectRecoveryCandidate } from '../src/recovery.ts';
+import { databasePath, journal, observe, persistIntent, persistRoot, validateDirectory } from '../src/storage.ts';
 
 process.umask(0o077);
 const [directory, worktree] = process.argv.slice(2);

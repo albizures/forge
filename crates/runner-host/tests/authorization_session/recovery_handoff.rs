@@ -6,7 +6,7 @@ use forge_server::durable_authorization::waiting_recovery_inspection::inspect;
 #[test]
 fn trusted_handoff_persists_proof_and_commits_before_executable_delivery() {
     let runner = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../runner/src/main.ts")
+        .join("../../runner/test/synthetic-runner.ts")
         .canonicalize()
         .unwrap();
     let (mut f, claim, path) = recovery_progress::waiting_with_runner(Some(&runner));
@@ -88,7 +88,7 @@ fn trusted_handoff_persists_proof_and_commits_before_executable_delivery() {
 #[test]
 fn trusted_handoff_denies_changed_protected_proof_or_revocation_before_delivery() {
     let runner = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../runner/src/main.ts")
+        .join("../../runner/test/synthetic-runner.ts")
         .canonicalize()
         .unwrap();
     for fault in 0..3 {

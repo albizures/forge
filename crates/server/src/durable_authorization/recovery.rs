@@ -13,6 +13,7 @@ use forge_app::{
         recovery::{Claim, Repository as _},
     },
 };
+use forge_rpc::durable_execution::{RunnerEvent, RunnerOutput};
 use forge_runner_host::control::ControlPipe;
 use forge_store::SqliteProjectRepository;
 use std::{
@@ -296,9 +297,12 @@ impl Worker {
         let owned = output
             .recv_timeout(Duration::from_secs(30))
             .map_err(|_| denied())?;
-        if owned.get("event").and_then(serde_json::Value::as_str) != Some("owned") {
+        let Ok(RunnerEvent::Owned { compatibility, .. }) = owned else {
             return Err(denied());
-        }
+        };
+        compatibility
+            .validate(&self.claim.launch.component_hash)
+            .map_err(|_| denied())?;
         let mut pipe = ControlPipe::take(&mut child)?;
         let handoff = waiting_recovery_inspection::inspect(
             repository,
@@ -419,31 +423,18 @@ impl Worker {
     fn record_followup_event(
         &self,
         repository: &SqliteProjectRepository,
-        event: &serde_json::Value,
-        accepted: bool,
+        operation: &str,
+        admission: &str,
     ) {
         use forge_app::durable_execution::followup::{Delivery, Repository as _};
-        let (Some(operation), true) = (
-            event
-                .get("operation_id")
-                .and_then(serde_json::Value::as_str),
-            accepted,
-        ) else {
-            return; // Failure stays `unknown`; nothing is fabricated or replayed.
-        };
-        if let Some(admission) = event
-            .get("admission_id")
-            .and_then(serde_json::Value::as_str)
-        {
-            let _ = repository.mark_followup(
-                &self.workspace,
-                &self.claim.launch.assignment_id,
-                operation,
-                &Delivery::Delivered {
-                    admission_id: admission.into(),
-                },
-            );
-        }
+        let _ = repository.mark_followup(
+            &self.workspace,
+            &self.claim.launch.assignment_id,
+            operation,
+            &Delivery::Delivered {
+                admission_id: admission.into(),
+            },
+        );
     }
 
     async fn run_active(
@@ -451,7 +442,7 @@ impl Worker {
         repository: &SqliteProjectRepository,
         active: &mut waiting_recovery_inspection::progress::handoff::Active<'_>,
         pipe: &mut ControlPipe,
-        output: &Receiver<serde_json::Value>,
+        output: &Receiver<Result<RunnerEvent, ()>>,
         admission: &str,
         mut next: u64,
     ) -> Result<Exit, RegistrationError> {
@@ -478,29 +469,18 @@ impl Worker {
                 Err(mpsc::TryRecvError::Empty) => {}
             }
             match output.recv_timeout(Duration::from_millis(50)) {
-                Ok(value)
-                    if value.get("event").and_then(serde_json::Value::as_str)
-                        == Some("resumed") =>
-                {
+                Ok(Ok(RunnerEvent::Resumed { .. })) => {
                     resumed = true;
                     last_poll = last_poll.checked_sub(FOLLOWUP_POLL).unwrap_or(last_poll);
                 }
-                Ok(value)
-                    if value.get("event").and_then(serde_json::Value::as_str)
-                        == Some("followup-accepted") =>
-                {
-                    self.record_followup_event(repository, &value, true);
+                Ok(Ok(RunnerEvent::FollowupAccepted {
+                    operation_id,
+                    admission_id,
+                    ..
+                })) => {
+                    self.record_followup_event(repository, &operation_id, &admission_id);
                 }
-                Ok(value)
-                    if value.get("event").and_then(serde_json::Value::as_str)
-                        == Some("followup-failed") =>
-                {
-                    self.record_followup_event(repository, &value, false);
-                }
-                Ok(value)
-                    if value.get("event").and_then(serde_json::Value::as_str)
-                        == Some("settled") =>
-                {
+                Ok(Ok(RunnerEvent::Settled { .. })) => {
                     let result = inspect_answer(
                         repository,
                         &self.workspace,
@@ -517,15 +497,15 @@ impl Worker {
                         self.set(AgentObservation::Blocked);
                     }
                 }
-                Ok(value)
-                    if value.get("event").and_then(serde_json::Value::as_str)
-                        == Some("runtime-failed") =>
-                {
+                // A runtime failure or any output outside protocol 1 is terminal
+                // for renewal. Nothing is inferred, replayed or released.
+                Ok(Ok(RunnerEvent::RuntimeFailed {}) | Err(())) => {
                     active.stop(repository)?;
                     renew = false;
                     self.set(AgentObservation::Blocked);
                 }
-                Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+                // A failed follow-up stays `unknown`; nothing is fabricated.
+                Ok(Ok(_)) | Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     if !renew {
                         return Err(denied());
@@ -550,7 +530,9 @@ impl Worker {
 
 const FOLLOWUP_POLL: Duration = Duration::from_millis(500);
 
-fn events(source: impl Read + Send + 'static) -> Receiver<serde_json::Value> {
+/// Strictly typed runner events. A line outside protocol 1 is reported once as
+/// `Err(())` and ends the stream: it is never skipped or guessed at.
+fn events(source: impl Read + Send + 'static) -> Receiver<Result<RunnerEvent, ()>> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let mut reader = BufReader::new(source);
@@ -563,10 +545,12 @@ fn events(source: impl Read + Send + 'static) -> Receiver<serde_json::Value> {
             {
                 break;
             }
-            let Ok(value) = serde_json::from_slice(&line) else {
-                break;
+            let event = match RunnerOutput::parse(&line) {
+                Ok(RunnerOutput::Event(event)) => Ok(event),
+                _ => Err(()),
             };
-            if tx.send(value).is_err() {
+            let malformed = event.is_err();
+            if tx.send(event).is_err() || malformed {
                 break;
             }
         }

@@ -13,7 +13,7 @@ import { snapshot, readStorage } from '../src/storage.ts';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const host = resolve(root, 'target/debug/forge-runner-host');
-const main = fileURLToPath(new URL('../src/main.ts', import.meta.url));
+const main = fileURLToPath(new URL('./synthetic-runner.ts', import.meta.url));
 const inspect = fileURLToPath(new URL('../src/inspect.ts', import.meta.url));
 async function fixture(t) {
   const base = await mkdtemp(join(tmpdir(), 'forge-runner-'));
@@ -343,9 +343,10 @@ test('unknown protocol, wrong identities and conflicting IDs reject before openi
   assert.equal((await response(p)).error.code, 'runner-operation-conflict');
   p.send(request(launch('other'), 'observe'));
   assert.equal((await response(p)).error.code, 'runner-identity-conflict');
-  const unimplemented = request(id); unimplemented.operation = { kind: 'recover', incarnation_id: id.incarnation_id, authorization_id: 'not-authorized' };
-  p.send(unimplemented);
-  assert.equal((await response(p)).error.code, 'runner-operation-unavailable');
+  // Protocol 1 defines no request-level recover/transcript/follow-up/retire kinds.
+  const undefinedKind = request(id); undefinedKind.operation = { kind: 'recover', incarnation_id: id.incarnation_id, authorization_id: 'not-authorized' };
+  p.send(undefinedKind);
+  assert.equal((await response(p)).error.code, 'runner-request-invalid');
 });
 
 test('SIGKILL retains supervisor ownership; restart only observes same accepted identity/content', async t => {

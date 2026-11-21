@@ -11,8 +11,29 @@ hand. New durable launches are withheld by the release gate in production Revisi
 Operator documentation is in [Durable Task execution](../docs/durable-execution.md).
 
 The sections below are the implementation history and evidence of each increment
-(T04–T15). Statements there such as "synthetic-only" or "remains a later Task"
-describe that increment, not the current build.
+(T04–T22). Statements there such as "synthetic-only" or "remains a later Task"
+describe that increment, not the current build. Before T22, `main.ts` named the
+synthetic T04 runner; it is now the test fixture `test/synthetic-runner.ts`.
+
+## T22 production Check runner entry
+
+The packaged entry is `src/check-entry.ts` (Forgeup `ENTRY_RELATIVE`). It runs
+`src/check-runner.ts::runCheckRunner` with no substitution. One process handles
+first admission (`host_control`, then `RunnerRequest {admit}`), read-only
+observation, same-attempt recovery (`host_prepare_recovery`/`host_recovery` via
+`RecoveryConsumer`) and recorded follow-ups. Its input is the protected
+owner-only `check-runtime.json` (`CheckRuntimeInput` v1), written once before
+spawn by `forge_runner_host::check_runtime::write`. That immutable file is also
+the input of every later recovery, which must match its launch and attempt
+exactly.
+
+Effect inspection, bootstrap, the explicit profile, model-key loading and the
+guarded tools all precede the runtime intent and the writable store. A failure
+before intent is a `rejected` admission; after it, `unknown`. Tests substitute
+only the model provider (`ProviderSubstitution`); the test workers are thin
+wrappers. The protocol-1 contract, typed `RunnerEvent`s and the wire-compatibility
+assessment are in the [T22 evidence](../docs/research/pi-durable-t22/README.md).
+Production dispatch remains refused until the server adapter (T23).
 
 ## T10 recovery evidence increment — not automatic recovery
 

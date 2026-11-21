@@ -12,7 +12,8 @@ use forge_app::{
     },
 };
 use forge_rpc::durable_execution::{
-    RunnerCompatibility, RunnerOperation, RunnerRequest, RunnerResponse,
+    CHECK_RUNTIME_VERSION, CheckCapability, CheckRuntimeInput, RunnerCompatibility,
+    RunnerOperation, RunnerOutput, RunnerRequest, RunnerResponse,
 };
 use forge_server::{durable_authorization::DaemonAuthority, durable_profiles::prepare};
 use forge_store::SqliteProjectRepository;
@@ -203,8 +204,31 @@ impl SupervisedDispatch {
         } else {
             delivery.secret_file.clone()
         };
-        let input = json!({ "request": request, "bound": bound, "generation": attempt.generation,
-            "configuration": prepared.configuration, "credential_file": prepared.credential_file,
+        // The production writer creates the runner's protected original binding.
+        forge_runner_host::check_runtime::write(
+            &directory,
+            &CheckRuntimeInput {
+                version: CHECK_RUNTIME_VERSION,
+                launch: launch.clone(),
+                generation: attempt.generation,
+                bound: bound.clone(),
+                configuration: prepared.configuration.clone(),
+                credential_file: prepared.credential_file.clone(),
+                capability: CheckCapability {
+                    assignment_id: id.clone(),
+                    daemon_url: self
+                        .bootstrap_endpoint
+                        .clone()
+                        .unwrap_or_else(|| delivery.endpoint.clone()),
+                    secret_file: secret_file.clone(),
+                    forge_cli: delivery.cli_path.clone(),
+                },
+            },
+        )
+        .unwrap();
+        // Scripted data for the faux model and controlled effect only; the
+        // shipped runner never reads this file.
+        let input = json!({ "launch": launch, "bound": bound, "generation": attempt.generation,
             "capability": { "FORGE_ASSIGNMENT_ID": id, "FORGE_ASSIGNMENT_DAEMON_URL": self.bootstrap_endpoint.as_ref().unwrap_or(&delivery.endpoint),
                 "FORGE_ASSIGNMENT_CAPABILITY_SECRET_FILE": secret_file, "FORGE_ASSIGNMENT_FORGE_CLI": delivery.cli_path },
             "mode": self.mode, "git": self.git,
@@ -276,6 +300,8 @@ impl SupervisedDispatch {
                 service.tick(&store).unwrap(),
                 Tick::Delivered { .. }
             ));
+            // Admission travels on the same protected pipe as protocol-1 request.
+            service.retirement_control().request(&request).unwrap();
             let (stop, stopped) = mpsc::channel();
             std::thread::scope(|scope| {
                 let driver_store = &store;
@@ -283,7 +309,17 @@ impl SupervisedDispatch {
                 let driver = scope.spawn(move || driver_service.run(driver_store, &stopped));
                 loop {
                     let event = receive(&process.output);
-                    let kind = event["event"].as_str().unwrap();
+                    let Some(kind) = event["event"].as_str() else {
+                        let response: RunnerResponse =
+                            serde_json::from_value(event.clone()).unwrap();
+                        response.validate(&request).unwrap();
+                        assert!(matches!(response.admission, Admission::Accepted { .. }));
+                        store
+                            .record_result("test", &launch, &response.admission)
+                            .unwrap();
+                        events.push(event);
+                        continue;
+                    };
                     match kind {
                         "authorized" => {
                             let previous = events
@@ -296,8 +332,6 @@ impl SupervisedDispatch {
                             );
                         }
                         "bootstrapped" => {
-                            assert_eq!(event["calls"], 0);
-                            assert_eq!(event["tools"], 0);
                             assert!(store.assignment_context_read(id).unwrap());
                             let (existing, replay) = self
                                 .app()
@@ -315,19 +349,9 @@ impl SupervisedDispatch {
                                 .write_all(b"start\n")
                                 .unwrap();
                         }
-                        "admission" => {
-                            let response: RunnerResponse =
-                                serde_json::from_value(event["response"].clone()).unwrap();
-                            response.validate(&request).unwrap();
-                            assert!(matches!(response.admission, Admission::Accepted { .. }));
-                            store
-                                .record_result("test", &launch, &response.admission)
-                                .unwrap();
-                        }
                         "settled" => {
                             assert!(!self.mode.starts_with("bootstrap-"));
-                            assert_eq!(event["calls"], if self.mode == "missing" { 1 } else { 2 });
-                            assert_eq!(event["tools"], u64::from(self.mode != "missing"));
+                            assert_eq!(event["status"], "done");
                             let runtime = store.runtime("test", id).unwrap().unwrap();
                             let Admission::Accepted { ref admission_id } = runtime.admission else {
                                 panic!("missing committed admission")
@@ -339,8 +363,6 @@ impl SupervisedDispatch {
                         }
                         "runtime-failed" => {
                             assert!(self.mode.starts_with("bootstrap-"));
-                            assert_eq!(event["calls"], 0);
-                            assert_eq!(event["tools"], 0);
                             events.push(event);
                             break;
                         }
@@ -497,7 +519,13 @@ fn receive(output: &Receiver<String>) -> Value {
     let line = output
         .recv_timeout(Duration::from_secs(20))
         .expect("supervised worker event timed out");
-    serde_json::from_str(&line).expect("worker output must be bounded structured events")
+    let value: Value =
+        serde_json::from_str(&line).expect("worker output must be bounded structured events");
+    // Every line except the test-only fault boundary must be a typed protocol-1 value.
+    if value["event"] != "recovery-boundary" {
+        RunnerOutput::parse(line.as_bytes()).expect("runner output must be typed protocol 1");
+    }
+    value
 }
 struct Process {
     child: Child,
