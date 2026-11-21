@@ -346,6 +346,38 @@ async fn inspect_status_and_transcript(
     panic!("transcript pagination did not terminate");
 }
 
+/// Actual CLI -> JSON-RPC -> daemon follow-up recording. Returns raw output for assertions.
+async fn follow_up(endpoint: &str, assignment: &str, operation: &str, message: &str) -> Output {
+    let (endpoint, assignment, operation, message) = (
+        format!("{endpoint}/rpc"),
+        assignment.to_owned(),
+        operation.to_owned(),
+        message.to_owned(),
+    );
+    tokio::task::spawn_blocking(move || {
+        Command::new(env!("CARGO_BIN_EXE_forge"))
+            .env_clear()
+            .args([
+                "dispatcher",
+                "assignment-followup",
+                &assignment,
+                "--workspace",
+                "test",
+                "--server-url",
+                &endpoint,
+                "--operation-id",
+                &operation,
+                "--message",
+                &message,
+                "--json",
+            ])
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap()
+}
+
 /// A separate read-only daemon with explicit matched inspection components, as an
 /// operator would run after the original supervisor/daemon stopped. It shares only
 /// the retained Forge store and runtime directory; it never owns execution.
@@ -1080,6 +1112,53 @@ async fn check_execution(mode: &str) {
         assert_eq!(status.runtime.as_ref().unwrap().admission, "accepted");
         assert!(!entries.is_empty());
         assert_eq!(store.agent_assignment_info(assignment_id).unwrap(), info);
+        // Missing-Outcome intervention through the actual CLI/RPC: recorded once, exact retries
+        // replay, conflicting reuse fails, original binding and capacity are unchanged, and
+        // nothing is synthesized as completion or delivery.
+        let sent = follow_up(
+            &reader_endpoint,
+            assignment_id,
+            "intervene-1",
+            "state the result with the Outcome tool",
+        )
+        .await;
+        assert!(
+            sent.status.success(),
+            "{}",
+            String::from_utf8_lossy(&sent.stderr)
+        );
+        let first: forge_rpc::FollowUpReceipt = serde_json::from_slice(&sent.stdout).unwrap();
+        assert!(!first.replayed && first.sequence == 1 && first.binding.generation == 1);
+        let retry = follow_up(
+            &reader_endpoint,
+            assignment_id,
+            "intervene-1",
+            "state the result with the Outcome tool",
+        )
+        .await;
+        let replay: forge_rpc::FollowUpReceipt = serde_json::from_slice(&retry.stdout).unwrap();
+        assert!(replay.replayed && replay.recorded_at_millis == first.recorded_at_millis);
+        let conflict = follow_up(
+            &reader_endpoint,
+            assignment_id,
+            "intervene-1",
+            "something else",
+        )
+        .await;
+        assert!(
+            !conflict.status.success()
+                && String::from_utf8_lossy(&conflict.stderr)
+                    .contains("followup-operation-conflict")
+        );
+        let (after, after_entries) =
+            inspect_status_and_transcript(&reader_endpoint, assignment_id).await;
+        assert_eq!(after.followups, vec![first]);
+        assert!(after.missing_outcome && after.assignment.capacity_reserved);
+        assert_eq!(
+            after_entries, entries,
+            "recording input neither runs nor claims delivery"
+        );
+        assert_eq!(store.agent_assignment_info(assignment_id).unwrap(), info);
         // Closure and a new repository connection do not erase uncertainty or
         // release capacity. This is test-controlled closure, not safe retirement.
         store
@@ -1107,6 +1186,22 @@ async fn check_execution(mode: &str) {
         assert!(retired.assignment.closed_at_millis.is_some() && retired.missing_outcome);
         assert!(retired.assignment.capacity_reserved);
         assert_eq!(retired_entries, entries);
+        let revoked = follow_up(&reader_endpoint, assignment_id, "late", "too late").await;
+        assert!(
+            !revoked.status.success()
+                && String::from_utf8_lossy(&revoked.stderr).contains("followup-assignment-revoked")
+        );
+        let late = follow_up(
+            &reader_endpoint,
+            assignment_id,
+            "intervene-1",
+            "state the result with the Outcome tool",
+        )
+        .await;
+        assert!(
+            late.status.success(),
+            "a lost reply after revocation still finds the original record"
+        );
         assert_eq!(
             reopened.agent_assignment_info(assignment_id).unwrap(),
             retained

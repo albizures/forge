@@ -258,10 +258,11 @@ controlled recovery, blocked counterexamples and verification limits.
 ## Inspect durable status and committed transcripts (read-only)
 
 ```sh
-forge dispatcher assignment-status <assignment-id> --workspace <owner> [--json]
-forge dispatcher assignment-transcript <assignment-id> --workspace <owner> \
-  [--after <entry-id>] [--limit 1..100] [--json]
+forge dispatcher assignment-status <assignment-id> --workspace <owner>
+forge dispatcher assignment-transcript <assignment-id> --workspace <owner> --after <entry-id> --limit 50
 ```
+
+Omit `--after` for the first page; `--limit` accepts 1 to 100 and `--json` prints one JSON object.
 
 Both commands call trusted daemon RPC (`assignmentDurableStatus`, `assignmentTranscript`). They start no
 runner, scheduler, model call, tool call or lease, never acquire host ownership and never open runtime
@@ -583,3 +584,17 @@ investigation evidence.
 See [development verification](development.md#verification) for quality gates and
 known test/lint limitations. A deployment owner must decide whether current
 verification satisfies release policy; these instructions do not waive it.
+
+## Operator follow-ups
+
+```sh
+forge dispatcher assignment-followup <assignment-id> --operation-id fix-1 --message 'state the result with the Outcome tool' --json
+```
+
+A follow-up is durable operator input recorded in Forge (schema revision 23, immutable and retained), bound to the Assignment's original attempt, Check, profile revision, generation and runtime. The request carries only the Assignment, an operation ID and text, so it cannot rebind work; a request such as "use another commit" is stored as text and the reviewer's evidence is unchanged. Scope or evidence changes use Forge's existing invalidation and replacement rules.
+
+- **Retries:** reuse the same operation ID after a dropped reply. The original receipt returns with `replayed: true`, even after the Assignment later closed. Reusing an ID with different text fails with `followup-operation-conflict`.
+- **Rejections:** `followup-assignment-revoked` (closed), `durable-binding-stale` (attempt closed or generation invalidated), `followup-admission-unconfirmed`, and `followup-blocked-by-uncertainty` for retained interrupted-effect, authorization, recovery-claim, retirement or provisioning uncertainty. A message never resumes unsafe work.
+- **Missing Outcome:** allowed as explicit intervention. Recording does not create an Outcome, retire the diagnostic, release capacity or grant a lease.
+- **Visibility:** recorded follow-ups, with operation IDs, are listed by `assignment-status`.
+- **Not delivery:** a record is not proof the runtime received or acted on it. Delivering recorded input into the conversation, and listing it in the committed runtime transcript, needs a writable authorized runner and is not yet implemented.

@@ -3,6 +3,8 @@ use super::*;
 mod effect_resolution_tests;
 #[path = "durable_execution/effects_tests.rs"]
 mod effects_tests;
+#[path = "durable_execution/followup_tests.rs"]
+mod followup_tests;
 #[path = "durable_execution/recovery_tests.rs"]
 mod recovery_tests;
 #[path = "durable_execution/retirement_application_tests.rs"]

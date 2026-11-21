@@ -60,6 +60,43 @@ pub async fn request_assignment_transcript(
         })
 }
 
+/// # Errors
+/// Returns routing, validation, transport or daemon errors. Retry with the same
+/// operation ID after an uncertain reply; it never creates a second record.
+pub async fn request_assignment_follow_up(
+    endpoint: impl Into<RecordEndpoint>,
+    request: forge_rpc::FollowUpRequest,
+) -> Result<forge_rpc::FollowUpReceipt, String> {
+    let endpoint = endpoint.into();
+    client(&endpoint)?
+        .assignment_follow_up(SelectedRecordRequest {
+            selection: selection(&endpoint)?,
+            record: request,
+        })
+        .await
+        .map_err(|error| format!("could not record follow-up through Forge daemon: {error}"))
+}
+
+#[must_use]
+pub fn render_follow_up(receipt: &forge_rpc::FollowUpReceipt) -> String {
+    format!(
+        "Follow-up {} for Assignment {} {} (sequence {}, sha256 {}).\nBound to attempt {} generation {} profile revision {} runtime {}; unchanged by this request.\nRecorded input only: this does not prove the runtime received it, grant authority, or complete the Check. Retry with the same operation ID if unsure.",
+        receipt.operation_id,
+        receipt.assignment_id,
+        if receipt.replayed {
+            "was already recorded"
+        } else {
+            "recorded"
+        },
+        receipt.sequence,
+        receipt.message_sha256,
+        receipt.binding.attempt_id,
+        receipt.binding.generation,
+        receipt.binding.profile_revision,
+        receipt.binding.runtime_id,
+    )
+}
+
 fn list(values: &[String]) -> String {
     if values.is_empty() {
         "none".into()
@@ -121,6 +158,14 @@ pub fn render_durable_status(status: &AssignmentDurableStatusResponse) -> String
         list(&status.retirement_blockers),
     )
     .expect("writing to a string cannot fail");
+    for f in &status.followups {
+        writeln!(
+            out,
+            "Follow-up #{}: {} (sha256 {}, attempt {} generation {}; recorded input, delivery not proven)",
+            f.sequence, f.operation_id, f.message_sha256, f.binding.attempt_id, f.binding.generation
+        )
+        .expect("writing to a string cannot fail");
+    }
     for note in &status.notes {
         writeln!(out, "Note: {note}").expect("writing to a string cannot fail");
     }

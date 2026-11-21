@@ -5,7 +5,9 @@ another. It preserves the source database and upgrades a consistent copy. Ordina
 repository opening still rejects incompatible schemas before initialization writes;
 it never migrates, resets, or rewrites an older store's marker.
 
-Supported transfers target schema **22** from schemas **7** through **22**.
+Supported transfers target schema **23** from schemas **7** through **23**.
+The 22 → 23 step adds an empty, immutable operator follow-up history. It fabricates no
+follow-up for historical Assignments. Ordinary schema-22 opening rejects before writes.
 The 21 → 22 step adds an empty identity-bound retirement journal and replaces the
 runtime capacity guard to require revoked authority and accepted cleanup proof.
 It does not fabricate historical retirement receipts or allow transfer through

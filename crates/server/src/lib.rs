@@ -1235,9 +1235,29 @@ impl AgentDispatchApiServer for Daemon {
             .application
             .agent_assignment_info(&request.record.assignment_id)
             .map_err(rpc_error)?;
-        Ok(forge_rpc::AssignmentDurableStatusResponse::compose(
-            info, status,
-        ))
+        let followups = service
+            .followups(&workspace, &request.record.assignment_id)
+            .map_err(rpc_error)?;
+        Ok(
+            forge_rpc::AssignmentDurableStatusResponse::compose(info, status)
+                .with_followups(followups),
+        )
+    }
+
+    async fn assignment_follow_up(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<forge_app::durable_execution::followup::Request>,
+    ) -> RpcResult<forge_app::durable_execution::followup::Receipt> {
+        let workspace = self.record_workspace(&request.selection, &mut [])?;
+        let service = self.durable_effect_resolution.as_ref().ok_or_else(|| {
+            rpc_error(RegistrationError::new(
+                "durable-followup-unconfigured",
+                "follow-ups require the daemon's retained store",
+            ))
+        })?;
+        service
+            .follow_up(&workspace, &request.record)
+            .map_err(rpc_error)
     }
 
     async fn assignment_transcript(

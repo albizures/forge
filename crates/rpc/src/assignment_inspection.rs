@@ -1,6 +1,9 @@
 //! Read-only operator inspection contracts. Never part of the Assignment capability
 //! API and never an execution, lease, scheduler or recovery operation.
 use crate::AgentAssignmentInfoResponse;
+pub use forge_app::durable_execution::followup::{
+    Receipt as FollowUpReceipt, Request as FollowUpRequest,
+};
 use forge_app::durable_execution::{
     Admission,
     status::{LeaseState, Status, View, view},
@@ -75,10 +78,23 @@ pub struct AssignmentDurableStatusResponse {
     pub missing_outcome: bool,
     pub uncertainty: Vec<String>,
     pub retirement_blockers: Vec<String>,
+    /// Recorded operator follow-ups in first-recorded order. A record is input
+    /// intent bound to the original attempt, not proof of runtime delivery.
+    #[serde(default)]
+    pub followups: Vec<forge_app::durable_execution::followup::Receipt>,
     pub notes: Vec<String>,
 }
 
 impl AssignmentDurableStatusResponse {
+    #[must_use]
+    pub fn with_followups(
+        mut self,
+        followups: Vec<forge_app::durable_execution::followup::Receipt>,
+    ) -> Self {
+        self.followups = followups;
+        self
+    }
+
     #[must_use]
     pub fn compose(info: forge_app::AgentAssignmentInfo, status: Option<Status>) -> Self {
         let View {
@@ -128,6 +144,7 @@ impl AssignmentDurableStatusResponse {
             missing_outcome,
             uncertainty: uncertainty.into_iter().map(String::from).collect(),
             retirement_blockers,
+            followups: Vec::new(),
             notes: vec![
                 "Persisted Forge facts only; this does not contact a runner or prove a process is running or absent.".into(),
                 "A missing Outcome or retained uncertainty keeps capacity reserved; inspection never recovers, retries or releases it.".into(),

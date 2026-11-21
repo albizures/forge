@@ -144,3 +144,36 @@ fn rendering_is_truthful_for_unavailable_unstarted_empty_and_paged_history() {
             && paged.contains("--after 9")
     );
 }
+
+#[test]
+fn followup_requires_one_message_source_and_rejects_rebinding_flags() {
+    let base = [
+        "forge",
+        "dispatcher",
+        "assignment-followup",
+        "a",
+        "--operation-id",
+        "op",
+    ];
+    let parse = |extra: &[&str]| Cli::try_parse_from(base.iter().chain(extra)).is_ok();
+    assert!(parse(&["--message", "m"]));
+    assert!(parse(&[
+        "--message-file",
+        "note.txt",
+        "--workspace",
+        "w",
+        "--json"
+    ]));
+    assert!(!parse(&[]), "a message is required");
+    assert!(!parse(&["--message", "m", "--message-file", "f"]));
+    for flag in [
+        "--profile",
+        "--check",
+        "--commit",
+        "--evidence",
+        "--generation",
+        "--attempt",
+    ] {
+        assert!(!parse(&["--message", "m", flag, "x"]), "{flag}");
+    }
+}

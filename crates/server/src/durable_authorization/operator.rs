@@ -93,6 +93,31 @@ impl OperatorService {
         )
     }
 
+    pub(crate) fn followups(
+        &self,
+        workspace: &str,
+        assignment: &str,
+    ) -> Result<Vec<forge_app::durable_execution::followup::Receipt>, RegistrationError> {
+        forge_app::durable_execution::followup::Repository::followups(
+            &self.repository,
+            workspace,
+            assignment,
+        )
+    }
+
+    /// Record only. No runner, model, tool call, lease or storage open occurs here.
+    pub(crate) fn follow_up(
+        &self,
+        workspace: &str,
+        request: &forge_app::durable_execution::followup::Request,
+    ) -> Result<forge_app::durable_execution::followup::Receipt, RegistrationError> {
+        forge_app::durable_execution::followup::Repository::record_followup(
+            &self.repository,
+            workspace,
+            request,
+        )
+    }
+
     /// Read one committed page. Needs trusted matched components but never the
     /// host lock, so it works beside a live writer and for stopped runners.
     pub(crate) async fn transcript(

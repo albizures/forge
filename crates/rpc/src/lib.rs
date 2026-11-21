@@ -195,6 +195,13 @@ pub trait AgentDispatchApi {
         &self,
         request: SelectedRecordRequest<AssignmentTranscriptRequest>,
     ) -> RpcResult<AssignmentTranscriptResponse>;
+    /// Durably record idempotent operator input bound to the original attempt. It
+    /// grants no lease, Outcome, recovery or rebinding and does not prove delivery.
+    #[method(name = "assignmentFollowUp")]
+    async fn assignment_follow_up(
+        &self,
+        request: SelectedRecordRequest<forge_app::durable_execution::followup::Request>,
+    ) -> RpcResult<forge_app::durable_execution::followup::Receipt>;
     #[method(name = "assignmentRetire")]
     async fn assignment_retire(&self, request: RetireAgentAssignmentRequest) -> RpcResult<()>;
     /// Evidence-based resolution after revocation and exclusive committed inspection.

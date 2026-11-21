@@ -415,6 +415,8 @@ enum AgentDispatchCommand {
     AssignmentStatus(assignment_inspection_command::StatusArgs),
     /// Read one paginated page of committed durable transcript entries; never starts or repairs a runner.
     AssignmentTranscript(assignment_inspection_command::TranscriptArgs),
+    /// Durably record idempotent operator input bound to the original attempt; never rebinds work or proves delivery.
+    AssignmentFollowup(assignment_inspection_command::FollowUpArgs),
     /// Revoke an Assignment and verify provider cleanup; retains unresolved capacity and hold.
     AssignmentRetire(AssignmentRetireArgs),
     /// Assert unknown resources are safe after retirement (risk of duplicate agents).
@@ -1458,6 +1460,9 @@ async fn agent_dispatch(command: AgentDispatchCommand, workspace: Option<String>
         }
         AgentDispatchCommand::AssignmentTranscript(args) => {
             return assignment_inspection_command::transcript(args, workspace).await;
+        }
+        AgentDispatchCommand::AssignmentFollowup(args) => {
+            return assignment_inspection_command::follow_up(args, workspace).await;
         }
         AgentDispatchCommand::AssignmentRetire(args) => return dispatcher_retire(args).await,
     };
