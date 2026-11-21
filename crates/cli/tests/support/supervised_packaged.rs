@@ -281,13 +281,22 @@ impl Packaged {
 
     /// Exactly the durable composition a managed daemon of `installation` gets:
     /// Forgeup's daemon-start arguments parsed by `DaemonConfig::managed`.
-    pub fn daemon_components(&self, installation: &Installation) -> (Execution, Vec<Execution>) {
+    pub fn daemon_components(
+        &self,
+        installation: &Installation,
+        model_key_file: &Path,
+    ) -> (Execution, Vec<Execution>, PathBuf) {
         let registry = forgeup::RegistryStore::open(self.paths.clone())
             .unwrap()
             .load()
             .unwrap();
-        let arguments =
-            forgeup::managed_durable_arguments(&self.paths, &registry, installation).unwrap();
+        let arguments = forgeup::managed_durable_arguments(
+            &self.paths,
+            &registry,
+            installation,
+            Some(model_key_file),
+        )
+        .unwrap();
         let mut inputs = ManagedLaunchInputs {
             bind_addr: "127.0.0.1:0".into(),
             store_path: "forge.sqlite3".into(),
@@ -299,6 +308,7 @@ impl Packaged {
             durable_inspector: None,
             durable_runner_bundle: None,
             durable_retained_runner_bundles: Vec::new(),
+            durable_model_key_file: None,
         };
         for pair in arguments.chunks(2) {
             let value = pair[1].to_str().unwrap().to_owned();
@@ -307,11 +317,18 @@ impl Packaged {
                 "--durable-retained-runner-bundle" => {
                     inputs.durable_retained_runner_bundles.push(value);
                 }
+                "--durable-openai-key-file" => inputs.durable_model_key_file = Some(value),
                 other => panic!("unexpected managed durable argument {other}"),
             }
         }
+        // T18 M4: the managed daemon's model credential comes only from the
+        // operator's explicit `daemon start --durable-openai-key-file`.
         let config = DaemonConfig::managed(inputs).unwrap();
-        (config.durable_execution.unwrap(), config.durable_retained)
+        (
+            config.durable_execution.unwrap(),
+            config.durable_retained,
+            config.durable_model_key_file.unwrap(),
+        )
     }
 
     /// The tracer's single entry substitution: the faux-model worker running
@@ -442,7 +459,7 @@ pub async fn switch(
         [original.as_slice(), b"// tampered"].concat(),
     )
     .unwrap();
-    let (current, retained) = packaged.daemon_components(&packaged.second);
+    let (current, retained, _) = packaged.daemon_components(&packaged.second, &adapter.credential);
     fs::write(&first.entry_path, &original).unwrap();
     assert!(retained.is_empty());
     let current = packaged.substitute(current);
@@ -496,7 +513,7 @@ pub async fn switch(
 
     // 2. Both Revisions verify: the second Revision's daemon is also offered the
     //    first Revision's bundle, used only for this retained Launch.
-    let (current, retained) = packaged.daemon_components(&packaged.second);
+    let (current, retained, _) = packaged.daemon_components(&packaged.second, &adapter.credential);
     assert_eq!(retained.len(), 1);
     assert_eq!(
         &retained[0].components.host,

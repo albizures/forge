@@ -107,7 +107,9 @@ Revision; `forgeup runner verify <selector>` re-attests the installed copy, and
 bundle tree. `forgeup daemon start` re-attests the bundle and passes its components to the
 managed daemon; a missing or modified component blocks startup. PATH and npm are never used.
 Removing a runner-bearing Revision while its state exists requires `--purge-state`.
-The managed daemon receives no model credential setting. See
+The managed daemon receives a model credential only when the operator passes
+`forgeup daemon start --durable-openai-key-file PATH` (an absolute key-file path, never
+read by Forgeup, requiring a schema 2 runner bundle); an implicit start passes none. See
 [matched runner packaging](../../docs/development.md#matched-runner-packaging) and
 [Durable Task execution](../../docs/durable-execution.md).
 

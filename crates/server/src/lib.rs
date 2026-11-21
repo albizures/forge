@@ -96,6 +96,10 @@ pub struct ManagedLaunchInputs {
     /// only for Assignments those Revisions launched (inspection, recovery and
     /// retirement with their original components). Requires a runner bundle.
     pub durable_retained_runner_bundles: Vec<String>,
+    /// Operator-selected owner-only `OpenAI` key file **path** for durable launch
+    /// (T18 M4). Forgeup passes it explicitly; never a key value. Validated by
+    /// durable profile preparation like the manual daemon's setting.
+    pub durable_model_key_file: Option<String>,
 }
 
 /// Managed-only configuration retained at the server composition boundary.
@@ -236,6 +240,18 @@ impl DaemonConfig {
         if let Some((name, _)) = required.iter().find(|(_, value)| value.trim().is_empty()) {
             return Err(format!("managed daemon {name} must not be empty"));
         }
+        // T18 M4: an explicit, absolute key-file path; it requires a runner
+        // bundle that composes launch, and its contents are validated later.
+        let managed_key_file = match &inputs.durable_model_key_file {
+            None => None,
+            Some(_) if inputs.durable_runner_bundle.is_none() => {
+                return Err(
+                    "a managed model key file requires this Revision's runner bundle".into(),
+                );
+            }
+            Some(path) if Path::new(path).is_absolute() => Some(PathBuf::from(path)),
+            Some(_) => return Err("the managed model key file must be an absolute path".into()),
+        };
         let bundle = |root: &String| {
             durable_authorization::launch::Execution::from_bundle(Path::new(root))
                 .map_err(|error| error.message)
@@ -270,8 +286,7 @@ impl DaemonConfig {
         Ok(Self {
             bind_addr,
             store_path: PathBuf::from(inputs.store_path),
-            // A managed daemon has no model-credential mechanism yet (T18 M4).
-            durable_model_key_file: None,
+            durable_model_key_file: managed_key_file,
             durable_inspection,
             durable_execution,
             durable_retained,
@@ -4755,6 +4770,37 @@ mod tests {
         );
     }
 
+    /// T18 M4: the managed daemon's model credential is an explicit absolute
+    /// key-file path from Forgeup, and only with a launch-capable runner bundle.
+    #[test]
+    fn managed_model_key_file_is_explicit_absolute_and_requires_a_runner_bundle() {
+        let inputs = ManagedLaunchInputs {
+            bind_addr: "127.0.0.1:45006".into(),
+            store_path: "managed.sqlite3".into(),
+            runtime_record_path: "runtime.json".into(),
+            lifecycle_control_endpoint: "control.sock".into(),
+            lifecycle_credential: "credential".into(),
+            daemon_instance_id: "instance-123".into(),
+            durable_node: None,
+            durable_inspector: None,
+            durable_runner_bundle: Some("/revision/b/runner-bundle".into()),
+            durable_retained_runner_bundles: Vec::new(),
+            durable_model_key_file: Some("/operator/keys/openai".into()),
+        };
+        assert_eq!(
+            DaemonConfig::managed(inputs.clone())
+                .unwrap()
+                .durable_model_key_file,
+            Some(PathBuf::from("/operator/keys/openai"))
+        );
+        let mut relative = inputs.clone();
+        relative.durable_model_key_file = Some("relative-key".into());
+        assert!(DaemonConfig::managed(relative).is_err());
+        let mut unbundled = inputs;
+        unbundled.durable_runner_bundle = None;
+        assert!(DaemonConfig::managed(unbundled).is_err());
+    }
+
     #[test]
     fn managed_configuration_is_explicit_and_rejects_invalid_inputs() {
         let inputs = ManagedLaunchInputs {
@@ -4768,6 +4814,7 @@ mod tests {
             durable_inspector: None,
             durable_runner_bundle: None,
             durable_retained_runner_bundles: Vec::new(),
+            durable_model_key_file: None,
         };
         let config =
             DaemonConfig::from_process(Some("127.0.0.1:45005"), Some(inputs.clone())).unwrap();
@@ -4788,6 +4835,7 @@ mod tests {
             durable_inspector: None,
             durable_runner_bundle: None,
             durable_retained_runner_bundles: Vec::new(),
+            durable_model_key_file: None,
         })
         .unwrap_err();
         assert!(error.contains("invalid managed daemon bind address"));
@@ -4827,7 +4875,7 @@ mod tests {
             config.durable_retained[0].components.node,
             PathBuf::from("/revision/a/runner-bundle/node/node")
         );
-        // Still no managed model credential (T18 M4); launch stays gate-withheld.
+        // T18 M4: no key file unless the operator selects one explicitly.
         assert!(config.durable_model_key_file.is_none());
         let mut both = bundled.clone();
         both.durable_node = Some("/revision/b/runner-bundle/node/node".into());
@@ -4852,6 +4900,7 @@ mod tests {
             durable_inspector: None,
             durable_runner_bundle: None,
             durable_retained_runner_bundles: Vec::new(),
+            durable_model_key_file: None,
         })
         .unwrap_err();
         assert_eq!(error, "managed daemon store path must not be empty");
@@ -4888,6 +4937,7 @@ mod tests {
             durable_inspector: None,
             durable_runner_bundle: None,
             durable_retained_runner_bundles: Vec::new(),
+            durable_model_key_file: None,
         })
         .unwrap();
         let mut server = tokio::spawn(serve(config));

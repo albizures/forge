@@ -382,7 +382,11 @@ async fn scenario(mode: &str) {
     let (production, launch_node, launch_runner, launch_hash) = if let Some(packaged) = &packaged {
         // Both Revisions are installed: the first's daemon is also offered the
         // second's bundle, but only for Launches with that component hash.
-        let (current, retained) = packaged.daemon_components(&packaged.first);
+        // T18 M4: the model credential reaches the managed daemon only through
+        // Forgeup's explicit `--durable-openai-key-file` argument.
+        let (current, retained, managed_key) =
+            packaged.daemon_components(&packaged.first, &model_key);
+        assert_eq!(managed_key, model_key);
         assert_eq!(retained.len(), 1);
         let retained: Vec<_> = retained
             .into_iter()
@@ -394,7 +398,7 @@ async fn scenario(mode: &str) {
             packaged.first_component()
         );
         (
-            supervised_packaged::Packaged::compose(&database, &current, &retained, &model_key),
+            supervised_packaged::Packaged::compose(&database, &current, &retained, &managed_key),
             current.components.node.clone(),
             packaged.worker.clone(),
             packaged.first_component(),

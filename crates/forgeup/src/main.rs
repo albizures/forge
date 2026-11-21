@@ -147,7 +147,12 @@ enum DaemonCommand {
         endpoint: Option<String>,
     },
     /// Start the active Revision's managed daemon.
-    Start,
+    Start {
+        /// Owner-only `OpenAI` API key file (a path; never the key) for durable
+        /// Task launches. Requires a schema 2 runner bundle. Forgeup never reads it.
+        #[arg(long)]
+        durable_openai_key_file: Option<std::path::PathBuf>,
+    },
     /// Gracefully stop the active Revision's proved-owned managed daemon.
     Stop,
 }
@@ -280,7 +285,9 @@ fn deactivate() -> i32 {
 fn daemon(command: DaemonCommand) -> i32 {
     let result = match command {
         DaemonCommand::Status { endpoint } => forgeup::daemon_status(endpoint.as_deref()),
-        DaemonCommand::Start => forgeup::daemon_start(),
+        DaemonCommand::Start {
+            durable_openai_key_file,
+        } => forgeup::daemon_start(durable_openai_key_file.as_deref()),
         DaemonCommand::Stop => forgeup::daemon_stop(),
     };
     match result {

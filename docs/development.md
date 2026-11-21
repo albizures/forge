@@ -198,8 +198,9 @@ inputs are optional, and Forgeup passes them only to a daemon built from the
 bundle's own commit. Runner wire protocol 1 and the storage schemas are
 unchanged.
 
-None of this enables durable dispatch or automatic recovery, and a managed
-daemon still has no model-credential mechanism (T18 M4).
+None of this enables durable dispatch. A managed daemon receives a model
+credential only from `forgeup daemon start --durable-openai-key-file PATH`
+(T18 M4), passed as the daemon's `--durable-openai-key-file`.
 
 ## Browser and RPC
 

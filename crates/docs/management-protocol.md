@@ -99,6 +99,11 @@ and it inherits none of the manual `FORGE_DURABLE_*` environment settings.
   combined with `--durable-node`/`--durable-effect-inspector`. New durable
   launches remain withheld by the release gate; these inputs grant no launch
   eligibility and no model credential.
+- `--durable-openai-key-file PATH` (T18 M4) is passed only when the operator
+  runs `forgeup daemon start --durable-openai-key-file PATH`. It requires
+  `--durable-runner-bundle` and an absolute path; the daemon validates the file
+  like a manual daemon's `FORGE_DURABLE_OPENAI_KEY_FILE`. Management protocol
+  revision 1 is unchanged: this is a launch argument, not a protocol message.
 - `--durable-retained-runner-bundle ROOT` requires `--durable-runner-bundle`.
   The daemon uses a retained bundle only for an existing Launch whose
   `component_hash` equals that bundle's attested runner component hash, so

@@ -120,8 +120,10 @@ printable ASCII token (1–4096 bytes) with an optional final LF. Missing, malfo
 redirected, hardlinked or permissive sources fail with redacted diagnostics.
 The library configuration equivalent is `DaemonConfig::durable_model_key_file`
 or `Daemon::with_durable_model_key_file`. A Forgeup-managed daemon does not
-inherit this environment setting and has no equivalent yet, so durable
-preview/registration there fails with `durable-model-auth-unavailable`. Do not copy a Pi configuration directory or put a key in
+inherit this environment setting; its equivalent is the explicit
+`forgeup daemon start --durable-openai-key-file PATH` (a path only, requiring a
+schema 2 runner bundle). Without it, durable preview/registration there fails
+with `durable-model-auth-unavailable`. Do not copy a Pi configuration directory or put a key in
 profile YAML, command arguments, prompts or environment values.
 
 Durable operator preview and registration validate this local authentication

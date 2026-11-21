@@ -42,11 +42,10 @@ configuring components never admits a launch.
 
 A Forgeup-managed daemon of a Revision with a schema 2 runner bundle composes this
 path from the Installation's packaged components (see
-[Install and run the matched runner](#install-and-run-the-matched-runner)). It still has
-no model-credential setting (see the known gap below), so it cannot validate a durable
-profile. The behavior described under
-[Assignment recovery](assignment-recovery.md#same-assignment-durable-recovery-composed-with-matched-components-launches-withheld)
-therefore remains a controlled-test capability, not an operational one.
+[Install and run the matched runner](#install-and-run-the-matched-runner)). Its model
+credential is selected explicitly at start with
+`forgeup daemon start --durable-openai-key-file PATH` (see
+[Supported configuration](#supported-configuration)). New launches stay withheld either way.
 
 ## Execution model
 
@@ -104,13 +103,17 @@ readiness check.
 | Thinking | `off` | Any other level |
 | Tools | Unique subset of `read`, `write`, `edit`, `bash` | Other tools, extensions, MCP servers |
 | Context | Selected Skill/Markdown resources as data, re-verified by hash, 256 KiB total | Automatic `AGENTS.md`, Pi settings, executable Pi skills |
-| Model authentication | Raw OpenAI API key **file** named by `FORGE_DURABLE_OPENAI_KEY_FILE` on a manual daemon | OAuth, Pi `auth.json`/settings, key values in environment/arguments/YAML, copied Pi configuration |
-| Daemon launch | Manual `forge-server`; Forgeup-managed daemon with the Revision's packaged components (schema 2 bundle) | Model credentials for a Forgeup-managed daemon (see below) |
+| Model authentication | Raw OpenAI API key **file**: `FORGE_DURABLE_OPENAI_KEY_FILE` on a manual daemon, or `forgeup daemon start --durable-openai-key-file PATH` for a managed daemon | OAuth, Pi `auth.json`/settings, key values in environment/arguments/YAML, copied Pi configuration |
+| Daemon launch | Manual `forge-server`; Forgeup-managed daemon with the Revision's packaged components (schema 2 bundle) | A managed key file without a schema 2 runner bundle |
 
-**Known gap:** a Forgeup-managed daemon receives the Revision's matched runner components,
-including the packaged host, but has no model-credential setting; it inherits none of the
-`FORGE_DURABLE_*` environment values. Durable profile preview/registration there fails with
-`durable-model-auth-unavailable`. Closing this gap is release work, not an operator workaround.
+**Managed daemon credential (T18 M4).** A Forgeup-managed daemon inherits none of the
+`FORGE_DURABLE_*` environment values. Its model credential is only the key-file **path** the
+operator passes explicitly: `forgeup daemon start --durable-openai-key-file /abs/path`.
+Forgeup requires an absolute path and a schema 2 runner bundle, never reads the file, and
+passes the path as `--durable-openai-key-file`; the daemon validates the file exactly as for a
+manual daemon. A daemon started implicitly (for example by a CLI command that ensures the
+active daemon is running) gets no key, so durable preview/registration there fails with
+`durable-model-auth-unavailable` until the operator restarts it explicitly with the option.
 
 The key file must be an absolute canonical path to a regular, single-link, owner-owned
 `0600` file in an owner-owned `0700` directory, containing one printable ASCII token

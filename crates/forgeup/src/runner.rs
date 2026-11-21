@@ -927,6 +927,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One ordered registry journey across Revisions.
     fn launch_component_hash_resolves_its_installation_and_the_daemon_gets_matched_bundles() {
         let root = scratch("retained");
         let paths = layout(&root);
@@ -979,7 +980,8 @@ mod tests {
         // As in `daemon start`: computed while the registry lock is held.
         let locked = crate::RegistryStore::open(paths.clone()).unwrap();
         let arguments =
-            crate::managed_durable_arguments(&paths, &locked.load().unwrap(), &second).unwrap();
+            crate::managed_durable_arguments(&paths, &locked.load().unwrap(), &second, None)
+                .unwrap();
         drop(locked);
         assert_eq!(
             arguments,
@@ -990,10 +992,35 @@ mod tests {
                 first_runner.root.clone().into(),
             ]
         );
+        // T18 M4: an explicit absolute key-file path is passed after the
+        // components; a relative path or an inspection-only Revision refuses.
+        let key = std::path::Path::new("/operator/keys/openai");
+        let keyed = crate::managed_durable_arguments(&paths, &registry(&paths), &second, Some(key))
+            .unwrap();
+        assert_eq!(
+            keyed[keyed.len() - 2..],
+            [
+                std::ffi::OsString::from("--durable-openai-key-file"),
+                key.into()
+            ]
+        );
+        assert!(
+            crate::managed_durable_arguments(
+                &paths,
+                &registry(&paths),
+                &second,
+                Some(std::path::Path::new("relative"))
+            )
+            .is_err()
+        );
+        assert!(
+            crate::managed_durable_arguments(&paths, &registry(&paths), &legacy, Some(key))
+                .is_err()
+        );
         // A schema 1 Revision keeps the T15 inspection-only inputs.
         let legacy_runner = legacy.runner.clone().unwrap();
         assert_eq!(
-            crate::managed_durable_arguments(&paths, &registry(&paths), &legacy).unwrap(),
+            crate::managed_durable_arguments(&paths, &registry(&paths), &legacy, None).unwrap(),
             vec![
                 std::ffi::OsString::from("--durable-node"),
                 legacy_runner.node_path.into(),
@@ -1005,7 +1032,7 @@ mod tests {
         // so its Assignments refuse explicitly instead of running other code.
         fs::write(&first_runner.entry_path, "// tampered").unwrap();
         assert_eq!(
-            crate::managed_durable_arguments(&paths, &registry(&paths), &second).unwrap(),
+            crate::managed_durable_arguments(&paths, &registry(&paths), &second, None).unwrap(),
             vec![
                 std::ffi::OsString::from("--durable-runner-bundle"),
                 second_runner.root.into(),

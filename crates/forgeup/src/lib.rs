@@ -532,7 +532,9 @@ pub fn active_installation() -> Result<Installation, ForgeupError> {
 /// persisted Installation facts.
 pub fn ensure_active_daemon() -> Result<Installation, ForgeupError> {
     let installation = active_installation()?;
-    daemon_start()?;
+    // An implicit start never selects a model credential (T18 M4): durable
+    // launch needs an explicit `forgeup daemon start --durable-openai-key-file`.
+    daemon_start(None)?;
     Ok(installation)
 }
 
@@ -754,6 +756,11 @@ pub fn runner_for_component_at(
 ///   `--durable-effect-inspector`.
 /// - No runner: no durable inputs.
 ///
+/// `model_key_file` is the operator's explicit `OpenAI` key file **path** for
+/// durable launch (T18 M4), passed as `--durable-openai-key-file`. Forgeup never
+/// reads it; the daemon validates it (owner-only, canonical) before any launch.
+/// It requires an absolute path and a launch-capable (schema 2) runner.
+///
 /// The selected Installation's own runner must already be verified. `registry`
 /// is the caller's already loaded (and, for `daemon start`, locked) registry;
 /// this function never reopens it.
@@ -763,7 +770,24 @@ pub fn managed_durable_arguments(
     paths: &ForgeupPaths,
     registry: &Registry,
     installation: &Installation,
+    model_key_file: Option<&Path>,
 ) -> Result<Vec<std::ffi::OsString>, ForgeupError> {
+    if let Some(path) = model_key_file {
+        if !path.is_absolute() {
+            return Err(ForgeupError::RunnerBundle(
+                "--durable-openai-key-file must be an absolute path".into(),
+            ));
+        }
+        if !installation
+            .runner
+            .as_ref()
+            .is_some_and(runner::InstalledRunner::launchable)
+        {
+            return Err(ForgeupError::RunnerBundle(
+                "--durable-openai-key-file requires a Revision registered with a launch-capable (schema 2) runner bundle".into(),
+            ));
+        }
+    }
     let Some(runner) = &installation.runner else {
         return Ok(vec![]);
     };
@@ -798,6 +822,10 @@ pub fn managed_durable_arguments(
         seen.push(retained.component_sha256.clone());
         arguments.push("--durable-retained-runner-bundle".into());
         arguments.push(retained.root.clone().into());
+    }
+    if let Some(path) = model_key_file {
+        arguments.push("--durable-openai-key-file".into());
+        arguments.push(path.as_os_str().to_owned());
     }
     Ok(arguments)
 }
@@ -914,7 +942,7 @@ fn daemon_record_path(paths: &ForgeupPaths, selector: &str) -> PathBuf {
 
 /// Starts exactly one managed daemon for the active Revision.
 #[allow(clippy::too_many_lines)]
-pub fn daemon_start() -> Result<String, ForgeupError> {
+pub fn daemon_start(model_key_file: Option<&Path>) -> Result<String, ForgeupError> {
     let paths = ForgeupPaths::from_environment()?;
     let store = RegistryStore::open(paths.clone())?;
     let registry = store.load()?;
@@ -975,7 +1003,12 @@ pub fn daemon_start() -> Result<String, ForgeupError> {
     for (key, _) in env::vars_os().filter(|(key, _)| key.to_string_lossy().starts_with("FORGE_")) {
         command.env_remove(key);
     }
-    command.args(managed_durable_arguments(&paths, &registry, &installation)?);
+    command.args(managed_durable_arguments(
+        &paths,
+        &registry,
+        &installation,
+        model_key_file,
+    )?);
     let child = command
         .args([
             "--managed",
