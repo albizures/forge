@@ -358,6 +358,8 @@ host, and retirement reports a specific code:
 
 - `durable-runtime-owner-active`: the original host still holds ownership (its lease has not
   expired yet, or it is still killing its runner). Retry after a lease period.
+- `durable-runtime-proof-unmatched`: no host holds the runtime, but no host proof matches
+  its recorded owner and Launch. Investigate the receipts; do not delete them.
 - `durable-runtime-fence-unproven`: a fence exists without valid proof. Investigate the runtime
   directory's `watchdog-*` diagnostics. Look for an escaped descendant of the old host, using
   `ps` and the host PID in `owner.json`. Do not delete markers or receipts, and do not kill

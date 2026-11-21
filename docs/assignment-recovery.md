@@ -271,9 +271,12 @@ flock. It writes no receipt in these cases, keeping ownership and recording
 
 A fence before any accepted lease is the T26 ungranted case below.
 
-Forge accepts the receipt only under `ExclusiveInspection`, for the exact last
-lease and owner, with every fence marker in the directory settled by its own
-receipt:
+Forge accepts the receipt only under `ExclusiveInspection`, with every fence
+marker in the directory settled by its own receipt, for the owner of Forge's last
+lease: its proof for that exact lease or, because Forge commits a lease before
+delivering it, that same owner's crash, fence or ungranted proof for an earlier
+lease of the same Launch. The host's proof names the last lease it actually
+accepted, and a fenced host accepts nothing later (T18 third pass):
 
 - **Recovery.** The receipt stands in for the predecessor proof: a restarted
   daemon's ordinary scan claims and resumes the same attempt. Effect inspection
@@ -281,10 +284,12 @@ receipt:
 - **Retirement.** `assignment-retire` reconciles through the receipt, with the
   same effect checks and capacity rules as crash proof.
 
-A stale, foreign, other-lease or tampered receipt, a changed marker and an
-unsettled marker are all refused. Before proof exists, retirement reports
-`durable-runtime-owner-active` (the original host still holds the lock) or
-`durable-runtime-fence-unproven`. Status reports `runtime_fence`
+A foreign-owner or other-Launch receipt, a receipt for a later lease than Forge's,
+a tampered receipt, a changed marker and an unsettled marker are all refused.
+Before proof exists, retirement reports `durable-runtime-owner-active` (the
+original host still holds the lock), `durable-runtime-fence-unproven`, or
+`durable-runtime-proof-unmatched` (no owner holds it, but no proof matches the
+recorded owner and Launch). Status reports `runtime_fence`
 (`runtime-fence-unproven` or `runtime-fence-proven`) from the host files, without
 taking the lock. Unproven is also listed under uncertainty. Nothing adopts or
 signals the old host by PID, and lease expiry, process exit or a free lock are

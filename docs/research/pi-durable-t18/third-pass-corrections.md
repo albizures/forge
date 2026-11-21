@@ -34,7 +34,9 @@ unchanged.
 **Tests.** Two class (b) real-host tests in `authorization_session/retirement.rs`, each
 retiring through the application:
 - `committed_but_undelivered_renewal_retires_from_the_earlier_lease_fence`: lease 2 is
-  committed only in Forge, and the host proves lease 1;
+  committed only in Forge, and the host proves lease 1. Despite its name, this test
+  takes the *crash* path; fence-path proof for an earlier lease is covered by the unit
+  tests below;
 - `committed_but_undelivered_first_grant_retires_from_the_ungranted_receipt`: lease 1 is
   committed only in Forge, and the host loses its pipe and writes its ungranted receipt.
   Its exact retry is also checked.
@@ -47,6 +49,24 @@ inspect.
 
 **F4.** A Proven fence with a free lock but no matching proof now reports
 `durable-runtime-proof-unmatched` instead of the generic `durable-retirement-unverified`.
+
+**Delta re-review corrections (after `26dddfd`).**
+
+- **Ungranted lookup by owner.** The ungranted lookup is now keyed by the lease owner
+  (`fence::ungranted_receipt_for`): its name, owner and lock identity, then the marker
+  binding. It no longer goes through `owner.json`, which a later recovery host
+  overwrites. Before this, an automatic recovery after an undelivered recovery grant
+  could re-strand the Assignment.
+- **Negative unit tests.** `runner-host/src/quiescence.rs::predecessor_tests` (class (a),
+  real protected files) covers fence, crash and ungranted proof. Each case rejects:
+  - another owner or episode;
+  - another Launch;
+  - a lease earlier than the proof;
+  - a tampered receipt;
+  - changed marker bytes;
+  - a lease-naming marker for an ungranted receipt.
+
+  The ungranted case also tests the overwritten `owner.json` regression.
 
 ## F2: the recovery spawn path dropped live `Child`ren
 
@@ -140,6 +160,6 @@ runner's `replayed` flag and the equal admission IDs stand in for it.
 | Gate | Result |
 | --- | --- |
 | fmt, clippy (`-D warnings`), `git diff --check` | pass |
-| `cargo test --workspace --no-fail-fast` | 928 passed, 0 failed, 1 ignored (pre-existing opt-in) |
+| `cargo test --workspace --no-fail-fast` | 931 passed, 0 failed, 1 ignored (pre-existing opt-in), after the delta re-review corrections (928 before) |
 | `durable_supervised_tracer` | 25 scenarios pass |
 | runner `npm run check` / `npm test` | pass / 99 of 99 |

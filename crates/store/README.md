@@ -259,7 +259,8 @@ creation timestamp and original-result replay survive cancellation; effects,
 unknown resources and holds are not discharged. No public CLI/RPC path creates a
 claim. A daemon composed with matched runner components creates one through its
 automatic recovery controller (`server/src/durable_authorization/recovery.rs`,
-`claim_recovery`), only from exact host crash or fence proof.
+`claim_recovery`), only from the original host's own crash, fence or ungranted
+proof for the owner of the last lease.
 
 The internal `recovery::authorization::Repository::grant_recovery` transition
 accepts an opaque application-owned `Prepared` value constructed only after a
@@ -280,8 +281,9 @@ reject delivery replay without rewriting history. Generic resource operations
 cannot create/retire either recovery resource kind. Existing ordinary consumers
 reject a first grant above sequence one; recovery uses the specialized
 `host_prepare_recovery`/`host_recovery` handshake instead. Each recovery is a
-separate immutable claim/grant episode: a new episode begins only from new crash or
-fence proof for the current exact grant. See [T10 authorization evidence](../../docs/research/pi-durable-t10/recovery-authorization.md). No DDL/schema
+separate immutable claim/grant episode: a new episode begins only from the current
+grant owner's new crash, fence or ungranted proof (for that grant, or for an
+earlier lease that owner last accepted when a later commit was never delivered). See [T10 authorization evidence](../../docs/research/pi-durable-t10/recovery-authorization.md). No DDL/schema
 or public wire changes are required for this additive opaque resource kind; older
 grant/readiness checks already block unknown retained resources. See
 [T10 reservation evidence](../../docs/research/pi-durable-t10/recovery-reservation.md).

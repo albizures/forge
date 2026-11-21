@@ -216,6 +216,26 @@ pub fn ungranted_receipt(directory: &Path) -> io::Result<UngrantedReceipt> {
     Ok(receipt)
 }
 
+/// The ungranted receipt of exactly this owner, found by the owner's own name
+/// and lock identity, never through `owner.json` (a later host overwrites it).
+/// # Errors
+/// Missing, foreign-owner or tampered evidence, or another lock identity.
+pub fn ungranted_receipt_for(directory: &Path, owner: &Owner) -> io::Result<UngrantedReceipt> {
+    crate::directory(directory)?;
+    let lock = protected_file(&directory.join("owner.lock"))?.metadata()?;
+    if lock.dev().to_string() != owner.lock_device || lock.ino().to_string() != owner.lock_inode {
+        return Err(invalid());
+    }
+    let receipt: UngrantedReceipt =
+        serde_json::from_slice(&read(&directory.join(ungranted_name(owner)))?)
+            .map_err(|_| invalid())?;
+    if receipt.owner != *owner {
+        return Err(invalid());
+    }
+    bound_ungranted(directory, &receipt)?;
+    Ok(receipt)
+}
+
 /// Written only by the original supervisor, after `Supervised::fenced_quiescence`.
 pub(crate) fn record(directory: &Path, marker: &str, lease: &Lease) -> io::Result<()> {
     let contents = String::from_utf8(read(&directory.join(marker))?).map_err(|_| invalid())?;
