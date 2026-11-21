@@ -58,7 +58,14 @@ Mark a Task complete only after its acceptance checks and required verification 
   - **Gates:** all four repository gates pass (895 Rust tests plus 10 supervised scenarios; 1 pre-existing opt-in ignored), runner typecheck and 97 Node tests.
   - **T10 correction:** the T10 evidence statement about `check-recovery.ts` is corrected.
   - T23 may proceed. Production durable dispatch and automatic recovery remain disabled.
-- [ ] [T23 — Compose production durable adapter](23-compose-production-durable-adapter.md) — corrects T18 B1, server part.
+- [x] [T23 — Compose production durable adapter](23-compose-production-durable-adapter.md) — corrects T18 B1, server part. [Implementation and evidence](../../docs/research/pi-durable-t23/README.md):
+  - **Launcher:** new `durable_authorization::launch`. Non-blocking provision: atomic single-launch claim, minted identities with the real Forge Revision and attested component hash, `reserve` before any effect, protected directory and `check-runtime.json`, launch intent, then the matched host spawn. A daemon-owned driver binds through the effect gate, grants, admits through the idempotent `durable_execution::admit` over the new production `PipeTransport` (T22 protocol 1), renews, delivers follow-ups, inspects answers and hands the original Child and pipe to retirement.
+  - **Adapter and composition:** `observe`/`probe` report runtime facts, with unavailability as `Unknown`/`Transient`. `recover` reuses the existing recovery controller from crash proof. `launch::compose` is used by `application_from_config` behind the default-withheld `ReleaseGate`. A manual daemon selects components with `FORGE_DURABLE_RUNNER_HOST`/`ENTRY`; a managed daemon gets none until T24.
+  - **Policy alignment:** the `provision-intent` marker is reconciled after an accepted admission, per docs/dispatch.md. The lease is kept after a missing Outcome so recorded follow-ups can be delivered.
+  - **Tracer:** test-only orchestration removed. All 10 `durable_supervised_tracer` scenarios run production composition, with only a test-only gate setting, a faux-provider entry and two bootstrap fault injections. New checks: the withheld-gate refusal, a duplicate and fresh-composition provision, and follow-up delivery.
+  - **Gates:** all four repository gates pass (900 Rust tests plus 10 supervised scenarios; 1 pre-existing opt-in probe ignored), runner typecheck and 97 Node tests.
+  - **Not claimed:** a real daemon-process restart and a live dropped-reply fault are not exercised.
+  - T24 may proceed. Production durable dispatch stays withheld.
 - [ ] [T24 — Package runner host and preflight components](24-package-runner-host-and-preflight.md) — corrects T18 B1, packaging part, and the launch-relevant part of M3. Followed by the T18 re-review.
 - [ ] [T19 — Verify integration and recovery](19-verify-integration-and-recovery.md)
 - [ ] [T20 — Deliver release handoff](20-publish-release-handoff.md)

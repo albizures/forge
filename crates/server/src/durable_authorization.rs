@@ -1,9 +1,11 @@
-//! Trusted durable grant delivery/renewal service. No operator RPC, Assignment
-//! capability or production launch path exposes this service yet.
+//! Trusted durable grant delivery/renewal service. Only the daemon's production
+//! launcher (`launch`) and recovery controller drive it; no operator RPC or
+//! Assignment capability exposes it. New launches stay behind the release gate.
 //! One `DaemonAuthority` belongs to one daemon lifetime, never retained on disk.
 mod effect_admission;
 pub mod effects;
 mod inspection_process;
+pub mod launch;
 pub mod operator;
 pub mod purge;
 pub mod quiesced_inspection;
@@ -221,6 +223,24 @@ impl Authorization<'_> {
     #[must_use]
     pub fn retirement_control(&self) -> ControlPipe {
         self.pipe.clone()
+    }
+
+    /// Stop renewal and retain uncertainty. Not retirement or process absence.
+    /// # Errors
+    /// Returns a retention error if storage is unavailable.
+    pub fn stop(&mut self, repository: &SqliteProjectRepository) -> Result<(), RegistrationError> {
+        self.session.stop(repository)
+    }
+
+    /// Withdraw permission after an adapter or runner failure, keeping the first cause.
+    /// # Errors
+    /// Returns a retention error if storage is unavailable.
+    pub fn withdraw(
+        &mut self,
+        repository: &SqliteProjectRepository,
+        failure: Failure,
+    ) -> Result<(), RegistrationError> {
+        self.session.withdraw(repository, failure)
     }
 
     /// Commit current Forge authority before bounded pipe delivery, or wait until

@@ -1,5 +1,5 @@
-//! Original-backend operator retirement. Production launch stays disabled. The
-//! registry contains only directly spawned children/private pipes, never adopted PIDs.
+//! Original-backend durable routing and operator retirement. The registry
+//! contains only directly spawned children/private pipes, never adopted PIDs.
 use super::runtime_directory;
 use forge_app::{
     AgentAdapterError, AgentDispatchAdapter, AgentDispatchAdapterFactory, AgentDispatchContext,
@@ -229,28 +229,32 @@ impl Controller {
     }
 }
 
-/// Cleanup-only durable routing alongside the original Herdr/Grilling factory.
-/// No profile source/model credentials or matched writable runner are needed for
-/// retained receipt inspection. New durable launches remain explicitly disabled.
+/// Durable routing alongside the original Herdr/Grilling factory. New launches
+/// require an explicitly composed matched launcher; whether one is *admitted* is
+/// the release gate's decision, made before this factory is consulted. Historical
+/// observation, recovery and retirement need no profile source or credentials.
 pub struct Factory {
     pub database: PathBuf,
     pub controller: Arc<Controller>,
-    /// Explicit controlled recovery wiring; production composition leaves None.
+    /// Production launch composition; `None` keeps new durable launches refused.
+    pub launcher: Option<Arc<super::launch::Launcher>>,
+    /// Same-attempt recovery from exact crash proof; `None` refuses recovery.
     pub recovery: Option<Arc<super::recovery::Controller>>,
     pub original: Box<dyn AgentDispatchAdapterFactory>,
 }
 impl AgentDispatchAdapterFactory for Factory {
     fn validate_profile(&self, profile: &AgentProfile) -> Result<(), AgentAdapterError> {
         if profile.provider == "pi-durable" {
-            return Err(AgentAdapterError::InvalidRequest(
-                "durable production dispatch remains disabled".into(),
-            ));
+            let launcher = self.launcher.as_ref().ok_or_else(disabled)?;
+            return launcher
+                .validate_profile(profile)
+                .map_err(|error| super::launch::adapter_error(&error));
         }
         self.original.validate_profile(profile)
     }
     fn validate_preflight(&self, profile: &AgentProfile) -> Result<(), AgentAdapterError> {
         if profile.provider == "pi-durable" {
-            return Err(disabled());
+            return self.validate_profile(profile);
         }
         self.original.validate_preflight(profile)
     }
@@ -263,6 +267,7 @@ impl AgentDispatchAdapterFactory for Factory {
             return Ok(Box::new(Adapter {
                 database: self.database.clone(),
                 controller: self.controller.clone(),
+                launcher: self.launcher.clone(),
                 recovery: self.recovery.clone(),
             }));
         }
@@ -272,6 +277,7 @@ impl AgentDispatchAdapterFactory for Factory {
 struct Adapter {
     database: PathBuf,
     controller: Arc<Controller>,
+    launcher: Option<Arc<super::launch::Launcher>>,
     recovery: Option<Arc<super::recovery::Controller>>,
 }
 fn disabled() -> AgentAdapterError {
@@ -279,32 +285,87 @@ fn disabled() -> AgentAdapterError {
         "durable production dispatch and recovery remain disabled".into(),
     )
 }
+impl Adapter {
+    fn runtime(
+        &self,
+        context: &AgentDispatchContext,
+    ) -> Result<(SqliteProjectRepository, String, Launch), RegistrationError> {
+        let repository = SqliteProjectRepository::open(&self.database)?;
+        let workspace = repository.record_workspace(context.assignment.record_id)?;
+        let runtime = repository
+            .runtime(&workspace, &context.assignment.id)?
+            .ok_or_else(uncertain)?;
+        Ok((repository, workspace, runtime.launch))
+    }
+}
 impl AgentDispatchAdapter for Adapter {
+    /// Matched launch components are configured. This is not launch eligibility.
     fn probe(&self) -> Result<(), AgentAdapterError> {
-        Err(disabled())
+        self.launcher.as_ref().map(|_| ()).ok_or_else(disabled)
+    }
+    fn validate_provision(&self, context: &AgentDispatchContext) -> Result<(), AgentAdapterError> {
+        let launcher = self.launcher.as_ref().ok_or_else(disabled)?;
+        launcher
+            .validate_provision(context)
+            .map_err(|error| super::launch::adapter_error(&error))
     }
     fn provision(
         &self,
-        _: &AgentDispatchContext,
+        context: &AgentDispatchContext,
         _: &dyn AgentDispatchRepository,
     ) -> Result<(), AgentAdapterError> {
-        Err(disabled())
+        let launcher = self.launcher.as_ref().ok_or_else(disabled)?;
+        launcher
+            .provision(context)
+            .map_err(|error| super::launch::adapter_error(&error))
     }
-    fn observe(&self, _: &AgentDispatchContext) -> Result<AgentObservation, AgentAdapterError> {
-        Err(disabled())
+    /// Only this daemon's directly supervised driver can report progress. A
+    /// retained runtime without one is uncertainty, never absence or completion.
+    fn observe(
+        &self,
+        context: &AgentDispatchContext,
+    ) -> Result<AgentObservation, AgentAdapterError> {
+        if let Some(launcher) = &self.launcher
+            && let Some(state) = launcher.state(&context.assignment.id)
+        {
+            return Ok(match state {
+                super::launch::DriverState::Live(observation) => observation,
+                super::launch::DriverState::Crashed | super::launch::DriverState::Ended => {
+                    AgentObservation::Unknown
+                }
+            });
+        }
+        self.runtime(context)
+            .map(|_| AgentObservation::Unknown)
+            .map_err(|_| {
+                AgentAdapterError::Transient(
+                    "durable runtime facts unavailable; retain original resources".into(),
+                )
+            })
     }
     fn recover(
         &self,
         context: &AgentDispatchContext,
     ) -> Result<AgentObservation, AgentAdapterError> {
+        // A live first-launch driver owns its runtime; recovery never competes.
+        if let Some(launcher) = &self.launcher {
+            match launcher.state(&context.assignment.id) {
+                Some(super::launch::DriverState::Live(observation)) => return Ok(observation),
+                Some(super::launch::DriverState::Ended) => {
+                    return Err(AgentAdapterError::Transient(
+                        "durable launch fenced; retain original resources".into(),
+                    ));
+                }
+                Some(super::launch::DriverState::Crashed) => {
+                    launcher.release_crashed(&context.assignment.id);
+                }
+                None => {}
+            }
+        }
         let controller = self.recovery.as_ref().ok_or_else(disabled)?;
         let run = || {
-            let repository = SqliteProjectRepository::open(&self.database)?;
-            let workspace = repository.record_workspace(context.assignment.record_id)?;
-            let runtime = repository
-                .runtime(&workspace, &context.assignment.id)?
-                .ok_or_else(uncertain)?;
-            controller.recover(&workspace, &runtime.launch)
+            let (_, workspace, launch) = self.runtime(context)?;
+            controller.recover(&workspace, &launch)
         };
         run().map_err(|_: RegistrationError| {
             AgentAdapterError::Transient(
@@ -318,16 +379,14 @@ impl AgentDispatchAdapter for Adapter {
         _: &dyn AgentDispatchRepository,
     ) -> Result<(), AgentAdapterError> {
         let run = || {
-            let repository = SqliteProjectRepository::open(&self.database)?;
-            let workspace = repository.record_workspace(context.assignment.record_id)?;
-            let runtime = repository
-                .runtime(&workspace, &context.assignment.id)?
-                .ok_or_else(uncertain)?;
-            if let Some(recovery) = &self.recovery {
-                recovery.stop_for_retirement(&workspace, &runtime.launch)?;
+            let (repository, workspace, launch) = self.runtime(context)?;
+            if let Some(launcher) = &self.launcher {
+                launcher.stop_for_retirement(&workspace, &launch)?;
             }
-            self.controller
-                .retire(&repository, &workspace, &runtime.launch)
+            if let Some(recovery) = &self.recovery {
+                recovery.stop_for_retirement(&workspace, &launch)?;
+            }
+            self.controller.retire(&repository, &workspace, &launch)
         };
         run().map_err(|error| AgentAdapterError::InvalidRequest(error.code.into()))
     }

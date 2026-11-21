@@ -230,6 +230,7 @@ impl Fixture {
                 store_path: self.database.clone(),
                 durable_model_key_file: None,
                 durable_inspection: None,
+                durable_execution: None,
                 managed: None,
             },
             Some(std::env::current_exe().unwrap()),

@@ -243,6 +243,7 @@ async fn exercise_launch() {
         store_path: db.clone(),
         durable_model_key_file: None,
         durable_inspection: None,
+        durable_execution: None,
         managed: None,
     }));
     for _ in 0..100 {

@@ -1,4 +1,4 @@
-//! Linux single-owner supervision boundary. Not wired to production dispatch.
+//! Linux single-owner supervision boundary, spawned by the daemon's durable launcher.
 //! The lock deliberately outlives the worker: exit is not verified cleanup.
 use crate::{supervision::Supervised, watchdog};
 use fs2::FileExt;

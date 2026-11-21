@@ -403,6 +403,7 @@ async fn inspecting_daemon(
                         .unwrap(),
                 },
             ),
+            durable_execution: None,
             managed: None,
         }));
         let listening = tokio::time::timeout(std::time::Duration::from_secs(10), async {
@@ -658,6 +659,7 @@ async fn check_execution(mode: &str) {
         store_path: db.clone(),
         durable_model_key_file: None,
         durable_inspection: None,
+        durable_execution: None,
         managed: None,
     }));
     let endpoint = format!("http://{addr}");
@@ -870,6 +872,7 @@ async fn check_execution(mode: &str) {
                     inspector: inspector.clone(),
                 },
             ),
+            durable_execution: None,
             managed: None,
         }));
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
@@ -908,6 +911,7 @@ async fn check_execution(mode: &str) {
             store_path: db.clone(),
             durable_model_key_file: None,
             durable_inspection: None,
+            durable_execution: None,
             managed: None,
         }));
         tokio::time::timeout(std::time::Duration::from_secs(10), async {

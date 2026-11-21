@@ -30,6 +30,7 @@ pub(super) fn app(f: &Fixture, controller: Arc<Controller>) -> Application {
         Box::new(Factory {
             database: f.database.clone(),
             controller,
+            launcher: None,
             recovery: None,
             original: Box::new(NoHerdr),
         }),

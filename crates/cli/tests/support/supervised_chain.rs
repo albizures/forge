@@ -1,30 +1,9 @@
 //! Deliberate Continuation is a fresh successor, never same-attempt recovery.
 use super::{
-    AgentDispatchRepository, AnswerObservation, Arc, AtomicUsize, Command, Mutex, RecordRepository,
+    AgentDispatchRepository, AnswerObservation, Arc, AtomicUsize, RecordRepository,
     SqliteProjectRepository, SupervisedDispatch, fs, redacted_tree, supervised_dispatch,
 };
 
-fn resolve(adapter: &SupervisedDispatch, assignment: &str) {
-    let output = Command::new(&adapter.cli)
-        .env_clear()
-        .args([
-            "dispatcher",
-            "assignment-resolve-unknown",
-            assignment,
-            "--confirm-old-agent-cannot-act",
-            "--confirm-unknown-resources-safe",
-            "--json",
-            "--server-url",
-            &format!("{}/rpc", adapter.endpoint),
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
 async fn blocked_handoff(
     adapter: &SupervisedDispatch,
     store: &SqliteProjectRepository,
@@ -45,9 +24,14 @@ async fn blocked_handoff(
             .closed_at_millis
             .is_some()
     );
-    // Owned process cleanup is proven, but T07's separate provision-intent is
-    // intentionally retained until this explicit, audited operator confirmation.
-    resolve(adapter, &report.launch.assignment_id);
+    // Owned process cleanup is proven and the production launcher already
+    // reconciled its provisioning marker: no unknown-resource confirmation.
+    assert!(
+        !store
+            .agent_assignment_info(&report.launch.assignment_id)
+            .unwrap()
+            .capacity_reserved()
+    );
     let secret = fs::read_to_string(&report.capability_file).unwrap();
     report.finish_retired(&secret);
     // Explicit operator intervention for the controlled grant driver's retained
@@ -67,29 +51,33 @@ fn fresh(next: &supervised_dispatch::Report, previous: &supervised_dispatch::Rep
 /// Explicit acceptance for the Continuation; the independent Review is launched by
 /// normal automatic scheduling (T16), through the release gate, only after accepted
 /// evidence and retirement.
-async fn launch(next: &SupervisedDispatch, record: u64, mode: &str) -> forge_app::AgentAssignment {
+async fn launch(
+    next: &SupervisedDispatch,
+    record: u64,
+    mode: &str,
+) -> (forge_app::AgentAssignment, supervised_dispatch::Report) {
     let dispatch = next.clone();
-    if mode == "review" {
-        tokio::task::spawn_blocking(move || {
+    let review = mode == "review";
+    tokio::task::spawn_blocking(move || {
+        let assignment = if review {
             let app = dispatch.app();
             app.reconcile_agent_dispatch("t16-scheduler", 1).unwrap();
             let store = SqliteProjectRepository::open(&dispatch.database).unwrap();
             store.list_agent_assignments(record).unwrap().remove(0)
-        })
-        .await
-        .unwrap()
-    } else {
-        let (assignment, replay) = tokio::task::spawn_blocking(move || {
-            dispatch
+        } else {
+            let (assignment, replay) = dispatch
                 .app()
                 .execute_task_check_acceptance(record)
-                .unwrap()
-        })
-        .await
-        .unwrap();
-        assert!(!replay);
-        assignment
-    }
+                .unwrap();
+            assert!(!replay);
+            assignment
+        };
+        // Provision only spawned the host; observe the production driver.
+        let report = dispatch.drive(&assignment);
+        (assignment, report)
+    })
+    .await
+    .unwrap()
 }
 
 pub(super) async fn run(
@@ -112,10 +100,9 @@ pub(super) async fn run(
         let mut next = adapter.clone();
         next.mode = mode.into();
         next.provisions = Arc::new(AtomicUsize::new(0));
-        next.reports = Arc::new(Mutex::new(vec![]));
-        let assignment = launch(&next, record, mode).await;
+        next.write_fixture();
+        let (assignment, mut report) = launch(&next, record, mode).await;
         assert_eq!(next.provisions.load(std::sync::atomic::Ordering::SeqCst), 1);
-        let mut report = next.reports.lock().unwrap().pop().unwrap();
         assert_eq!(report.answer, Some(AnswerObservation::OutcomeAccepted));
         let attempt = store
             .assignment_check_attempt(&assignment.id)

@@ -133,6 +133,9 @@ pub struct DaemonConfig {
     pub durable_model_key_file: Option<PathBuf>,
     /// Explicit trusted components for operator interrupted-effect inspection/resolution.
     pub durable_inspection: Option<durable_authorization::operator::InspectionComponents>,
+    /// Explicit matched host/runner components for durable launch and recovery.
+    /// Composition only: the release gate still withholds new launches by default.
+    pub durable_execution: Option<durable_authorization::launch::Execution>,
     /// Present only when Forgeup explicitly owns this daemon launch.
     pub managed: Option<ManagedDaemonConfig>,
 }
@@ -150,6 +153,10 @@ impl std::fmt::Debug for DaemonConfig {
             .field(
                 "durable_inspection_configured",
                 &self.durable_inspection.is_some(),
+            )
+            .field(
+                "durable_execution_configured",
+                &self.durable_execution.is_some(),
             )
             .finish()
     }
@@ -178,6 +185,13 @@ impl DaemonConfig {
             durable_inspection: durable_authorization::operator::InspectionComponents::select(
                 env::var_os("FORGE_DURABLE_NODE").map(PathBuf::from),
                 env::var_os("FORGE_DURABLE_EFFECT_INSPECTOR").map(PathBuf::from),
+            )
+            .map_err(|error| error.message)?,
+            durable_execution: durable_authorization::launch::Execution::select(
+                env::var_os("FORGE_DURABLE_NODE").map(PathBuf::from),
+                env::var_os("FORGE_DURABLE_EFFECT_INSPECTOR").map(PathBuf::from),
+                env::var_os("FORGE_DURABLE_RUNNER_HOST").map(PathBuf::from),
+                env::var_os("FORGE_DURABLE_RUNNER_ENTRY").map(PathBuf::from),
             )
             .map_err(|error| error.message)?,
             managed: None,
@@ -219,6 +233,8 @@ impl DaemonConfig {
             store_path: PathBuf::from(inputs.store_path),
             durable_model_key_file: None,
             durable_inspection,
+            // Forgeup does not yet supply a packaged host (T24).
+            durable_execution: None,
             managed: Some(ManagedDaemonConfig {
                 runtime_record_path: PathBuf::from(inputs.runtime_record_path),
                 lifecycle_control_endpoint: PathBuf::from(inputs.lifecycle_control_endpoint),
@@ -931,21 +947,18 @@ fn application_from_config_with_cli(
                 // Default eligibility stays withheld until T19 evidence and T20 handoff.
                 control: durable_authorization::release_gate::LaunchControl::default(),
                 rollback_store: Some(config.store_path.clone()),
-                inner: Box::new(durable_authorization::retirement::Factory {
-                    database: config.store_path.clone(),
-                    controller: Arc::new(match &config.durable_inspection {
-                        Some(components) => {
-                            durable_authorization::retirement::Controller::default()
-                                .with_inspection(components.clone())
-                                .map_err(|error| error.code.to_owned())?
-                        }
-                        None => durable_authorization::retirement::Controller::default(),
-                    }),
-                    recovery: None,
-                    original: Box::new(HerdrAdapterFactory::from_configuration_store(
-                        config.store_path.clone(),
-                    )),
-                }),
+                inner: Box::new(
+                    durable_authorization::launch::compose(
+                        &config.store_path,
+                        config.durable_inspection.as_ref(),
+                        config.durable_execution.as_ref(),
+                        config.durable_model_key_file.clone(),
+                        Box::new(HerdrAdapterFactory::from_configuration_store(
+                            config.store_path.clone(),
+                        )),
+                    )
+                    .map_err(|error| error.code.to_owned())?,
+                ),
             }),
             daemon_url: format!("http://{}", config.bind_addr),
             capability_secret_root,
@@ -3175,6 +3188,7 @@ mod tests {
             store_path: database,
             durable_model_key_file: None,
             durable_inspection: None,
+            durable_execution: None,
             managed: None,
         })
         .unwrap();
@@ -4650,6 +4664,7 @@ mod tests {
             store_path: store_path.clone(),
             durable_model_key_file: None,
             durable_inspection: None,
+            durable_execution: None,
             managed: None,
         })
         .await

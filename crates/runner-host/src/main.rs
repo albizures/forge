@@ -1,4 +1,4 @@
-//! Linux single-owner supervisor executable. Production dispatch remains disabled.
+//! Linux single-owner supervisor executable, spawned by the daemon's durable launcher.
 use std::path::Path;
 
 fn main() {

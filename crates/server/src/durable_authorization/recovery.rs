@@ -1,4 +1,5 @@
-//! Controlled daemon recovery driver. New production dispatch stays disabled.
+//! Daemon same-attempt recovery driver, composed in production beside the
+//! launcher (`super::launch`). New launches stay behind the release gate.
 //! Registry entries contain directly spawned children, never adopted PIDs/grants.
 use super::{
     DaemonAuthority, inspection_process, quiesced_inspection, retirement, runtime_directory,
@@ -36,9 +37,12 @@ fn denied() -> RegistrationError {
 }
 
 /// Explicit trusted matched components, not an operator request or PATH lookup.
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Components {
     pub host: PathBuf,
+    /// Fixed leading host arguments. Empty for the packaged `forge-runner-host`;
+    /// a test composition may re-exec its own supervisor entry instead.
+    pub host_arguments: Vec<std::ffi::OsString>,
     pub node: PathBuf,
     pub runner: PathBuf,
     pub inspector: PathBuf,
@@ -285,6 +289,7 @@ impl Worker {
         let directory =
             runtime_directory::mapped(repository, &self.workspace, &self.claim.launch, false)?;
         let mut child = Command::new(&c.host)
+            .args(&c.host_arguments)
             .args([&directory, &path, &c.node, &c.runner])
             .env_clear()
             .current_dir(&path)
@@ -382,61 +387,6 @@ impl Worker {
         Ok(next)
     }
 
-    /// Send each recorded, undelivered follow-up once per supervised session. The
-    /// `unknown` state is committed before the write, so a crash or a lost event
-    /// never reads as delivered; the runtime deduplicates any later resend.
-    fn send_followups(
-        &self,
-        repository: &SqliteProjectRepository,
-        pipe: &mut ControlPipe,
-        sent: &mut std::collections::HashSet<String>,
-    ) {
-        use forge_app::durable_execution::followup::{Delivery, Repository as _};
-        let Ok(pending) =
-            repository.undelivered_followups(&self.workspace, &self.claim.launch.assignment_id)
-        else {
-            return;
-        };
-        for request in pending {
-            if sent.contains(&request.operation_id) {
-                continue;
-            }
-            let id = &self.claim.launch.assignment_id;
-            if repository
-                .mark_followup(
-                    &self.workspace,
-                    id,
-                    &request.operation_id,
-                    &Delivery::Unknown,
-                )
-                .is_err()
-            {
-                return;
-            }
-            sent.insert(request.operation_id.clone());
-            if pipe.deliver_followup(&request).is_err() {
-                return;
-            }
-        }
-    }
-
-    fn record_followup_event(
-        &self,
-        repository: &SqliteProjectRepository,
-        operation: &str,
-        admission: &str,
-    ) {
-        use forge_app::durable_execution::followup::{Delivery, Repository as _};
-        let _ = repository.mark_followup(
-            &self.workspace,
-            &self.claim.launch.assignment_id,
-            operation,
-            &Delivery::Delivered {
-                admission_id: admission.into(),
-            },
-        );
-    }
-
     async fn run_active(
         &self,
         repository: &SqliteProjectRepository,
@@ -455,7 +405,13 @@ impl Worker {
         loop {
             if renew && resumed && last_poll.elapsed() >= FOLLOWUP_POLL {
                 last_poll = std::time::Instant::now();
-                self.send_followups(repository, pipe, &mut sent);
+                send_followups(
+                    repository,
+                    &self.workspace,
+                    &self.claim.launch.assignment_id,
+                    pipe,
+                    &mut sent,
+                );
             }
             match self.stops.try_recv() {
                 Ok(done) => {
@@ -478,7 +434,13 @@ impl Worker {
                     admission_id,
                     ..
                 })) => {
-                    self.record_followup_event(repository, &operation_id, &admission_id);
+                    record_followup_event(
+                        repository,
+                        &self.workspace,
+                        &self.claim.launch.assignment_id,
+                        &operation_id,
+                        &admission_id,
+                    );
                 }
                 Ok(Ok(RunnerEvent::Settled { .. })) => {
                     let result = inspect_answer(
@@ -528,7 +490,62 @@ impl Worker {
     }
 }
 
-const FOLLOWUP_POLL: Duration = Duration::from_millis(500);
+/// Send each recorded, undelivered follow-up once per supervised session. The
+/// `unknown` state is committed before the write, so a crash or a lost event
+/// never reads as delivered; the runtime deduplicates any later resend.
+pub(super) fn send_followups(
+    repository: &SqliteProjectRepository,
+    workspace: &str,
+    assignment: &str,
+    pipe: &mut ControlPipe,
+    sent: &mut std::collections::HashSet<String>,
+) {
+    use forge_app::durable_execution::followup::{Delivery, Repository as _};
+    let Ok(pending) = repository.undelivered_followups(workspace, assignment) else {
+        return;
+    };
+    for request in pending {
+        if sent.contains(&request.operation_id) {
+            continue;
+        }
+        if repository
+            .mark_followup(
+                workspace,
+                assignment,
+                &request.operation_id,
+                &Delivery::Unknown,
+            )
+            .is_err()
+        {
+            return;
+        }
+        sent.insert(request.operation_id.clone());
+        if pipe.deliver_followup(&request).is_err() {
+            return;
+        }
+    }
+}
+
+/// Record the runner's typed acceptance; a failed write stays `unknown`.
+pub(super) fn record_followup_event(
+    repository: &SqliteProjectRepository,
+    workspace: &str,
+    assignment: &str,
+    operation: &str,
+    admission: &str,
+) {
+    use forge_app::durable_execution::followup::{Delivery, Repository as _};
+    let _ = repository.mark_followup(
+        workspace,
+        assignment,
+        operation,
+        &Delivery::Delivered {
+            admission_id: admission.into(),
+        },
+    );
+}
+
+pub(super) const FOLLOWUP_POLL: Duration = Duration::from_millis(500);
 
 /// Strictly typed runner events. A line outside protocol 1 is reported once as
 /// `Err(())` and ends the stream: it is never skipped or guessed at.
@@ -558,7 +575,7 @@ fn events(source: impl Read + Send + 'static) -> Receiver<Result<RunnerEvent, ()
     rx
 }
 
-async fn inspect_answer(
+pub(super) async fn inspect_answer(
     repository: &SqliteProjectRepository,
     workspace: &str,
     launch: &Launch,

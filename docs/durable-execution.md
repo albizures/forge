@@ -31,10 +31,18 @@ Profile preview and registration are still accepted, so revisions can be prepare
 advance. Everything that inspects or cleans up existing work (status, transcripts,
 follow-ups, effect resolution, retirement, purge) does not consult the gate.
 
-Automatic recovery of crashed durable Assignments is not configured in the default
-daemon composition either. The behavior described under
+The daemon's production composition contains the complete durable launch path: an
+admitted dispatch commits the runtime identity and launch intent, prepares protected
+storage and the runner's input, spawns the matched `forge-runner-host` and returns; a
+daemon-owned driver then delivers and renews the authorization lease and admits over the
+supervisor's private pipe. Same-attempt recovery from exact crash proof, follow-up
+delivery and retirement use that same composition. It is assembled only when matched
+runner components are configured (see below), and it is still behind the gate above:
+configuring components never admits a launch. Forgeup does not yet package the host or
+pass these components to a managed daemon (T24), so a managed daemon composes neither
+launch nor automatic recovery. The behavior described under
 [Assignment recovery](assignment-recovery.md#same-assignment-durable-recovery-controlled-rollout-disabled)
-is implemented and covered by controlled tests, not enabled operationally.
+therefore remains a controlled-test capability, not an operational one.
 
 ## Execution model
 
@@ -141,6 +149,19 @@ FORGE_DURABLE_NODE=/abs/path/bundle/node/bin/node
 FORGE_DURABLE_EFFECT_INSPECTOR=/abs/path/bundle/runner/src/inspect-effects.ts
 FORGE_DURABLE_OPENAI_KEY_FILE=/abs/owner-only-dir/openai.key
 ```
+
+A manual daemon composes durable launch and recovery only when it is also given the matched
+host and runner entry, both or neither, together with the Node and effect inspector above.
+The recovery and answer inspectors are the entry's siblings in the same `runner/src`
+directory, and the component hash recorded on each Launch is attested from that directory
+at startup:
+
+```text
+FORGE_DURABLE_RUNNER_HOST=/abs/path/forge-runner-host
+FORGE_DURABLE_RUNNER_ENTRY=/abs/path/bundle/runner/src/check-entry.ts
+```
+
+This selects components only; new launches stay withheld.
 
 A partial or relative component selection stops the daemon at startup. Without components,
 status still works from the store, but transcripts fail with

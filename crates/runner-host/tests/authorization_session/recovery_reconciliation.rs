@@ -29,6 +29,7 @@ fn controlled_components() -> recovery::Components {
         host: PathBuf::from(env!("CARGO_BIN_EXE_forge-runner-host"))
             .canonicalize()
             .unwrap(),
+        host_arguments: vec![],
         node: components.node,
         inspector: components.inspector.with_file_name("inspect-recovery.ts"),
         answer_inspector: components.inspector.with_file_name("inspect-answer.ts"),
@@ -61,6 +62,7 @@ fn crash_receipt_retirement_requires_revocation_and_never_repairs_a_host_receipt
         Box::new(retirement::Factory {
             database: f.database.clone(),
             controller,
+            launcher: None,
             recovery: None,
             original: Box::new(NoHerdr),
         }),
@@ -96,6 +98,7 @@ fn historical_crash_proof_cannot_waive_a_later_host_fault_during_retirement() {
         Box::new(retirement::Factory {
             database: f.database.clone(),
             controller,
+            launcher: None,
             recovery: None,
             original: Box::new(NoHerdr),
         }),
@@ -206,6 +209,7 @@ pub(super) fn reconcile(crash_once: bool) -> Fixture {
         Box::new(retirement::Factory {
             database: f.database.clone(),
             controller: retirement,
+            launcher: None,
             recovery: Some(recovery.clone()),
             original: Box::new(NoHerdr),
         }),
@@ -311,6 +315,7 @@ fn daemon_delivers_a_recorded_follow_up_once_to_the_resumed_original_conversatio
         Box::new(retirement::Factory {
             database: f.database.clone(),
             controller: retirement,
+            launcher: None,
             recovery: Some(recovery),
             original: Box::new(NoHerdr),
         }),

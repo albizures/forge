@@ -1,7 +1,10 @@
-//! Deterministic T07 app-dispatch -> protected delivery -> actual Linux host /
-//! shared flock -> daemon grant driver -> Node bootstrap/Harness/Bash/CLI tracer.
-//! The custom harness re-execs the same supervisor library as the shipped binary;
-//! it needs no arbitrary PATH host, sibling artifact or nested Cargo build.
+//! Deterministic app-dispatch -> production durable composition (T23 launcher,
+//! protected delivery, actual Linux host / shared flock, daemon-owned lease
+//! driver and pipe admission transport, production recovery and retirement) ->
+//! Node bootstrap/Harness/Bash/CLI tracer. Test-only substitutions: controlled
+//! launch eligibility and a faux model provider in the runner entry. The custom
+//! harness re-execs the same supervisor library as the shipped host binary; it
+//! needs no arbitrary PATH host, sibling artifact or nested Cargo build.
 #[path = "support/supervised_chain.rs"]
 mod supervised_chain;
 #[path = "support/supervised_dispatch.rs"]
@@ -18,7 +21,7 @@ use forge_app::{
     check_templates::{CheckCriterion, TemplateReplacement},
     durable_execution::{Admission, Repository as _, completion::AnswerObservation},
 };
-use forge_server::{Daemon, durable_authorization::DaemonAuthority, router};
+use forge_server::{Daemon, router};
 use forge_store::SqliteProjectRepository;
 use jsonrpsee::{
     core::{client::ClientT, params::ArrayParams},
@@ -159,6 +162,80 @@ fn redacted_tree(path: &Path, capability: &str) {
     }
 }
 
+/// The same production composition behind the default (withheld) gate: explicit
+/// and automatic dispatch refuse with no Assignment, worktree, capability, spawn
+/// or Herdr fallback (the original-backend stand-in panics on any call).
+async fn withheld_refuses(
+    adapter: &SupervisedDispatch,
+    store: &SqliteProjectRepository,
+    record: u64,
+) {
+    let mut withheld = adapter.clone();
+    withheld.launch = forge_server::durable_authorization::release_gate::LaunchControl::default();
+    let checks = store.list_record_checks(record).unwrap();
+    let refused = withheld.clone();
+    tokio::task::spawn_blocking(move || {
+        let app = refused.app();
+        let error = app.dispatch_record(record).unwrap_err();
+        assert_eq!(error.code, "invalid-check-profile", "{error:?}");
+        app.reconcile_agent_dispatch("withheld-scheduler", 1)
+            .unwrap();
+    })
+    .await
+    .unwrap();
+    assert!(store.list_agent_assignments(record).unwrap().is_empty());
+    assert!(store.worktree_claim(record).unwrap().is_none());
+    assert!(!adapter.root.join("assignment-capabilities").exists());
+    assert_eq!(adapter.provisions.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        store.list_record_checks(record).unwrap(),
+        checks,
+        "no pin rewrite"
+    );
+}
+
+/// Actual CLI -> RPC follow-up recording, then delivery by the production launch
+/// driver into the same conversation and the runner's committed acceptance.
+fn follow_up_delivered(adapter: &SupervisedDispatch, store: &SqliteProjectRepository, id: &str) {
+    use forge_app::durable_execution::followup::Repository as _;
+    let output = Command::new(&adapter.cli)
+        .env_clear()
+        .args([
+            "dispatcher",
+            "assignment-followup",
+            id,
+            "--workspace",
+            "test",
+            "--server-url",
+            &format!("{}/rpc", adapter.endpoint),
+            "--operation-id",
+            "t23-followup-1",
+            "--message",
+            "T23-FOLLOWUP: state the result with the Outcome tool",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let receipt = supervised_dispatch::wait(|| {
+        store
+            .followups("test", id)
+            .unwrap()
+            .into_iter()
+            .find(|r| r.operation_id == "t23-followup-1" && r.delivery == "delivered")
+    });
+    assert!(receipt.admission_id.is_some());
+    let runtime = store.runtime("test", id).unwrap().unwrap();
+    assert!(
+        !matches!(runtime.admission, Admission::Accepted { ref admission_id } if Some(admission_id) == receipt.admission_id.as_ref()),
+        "a follow-up is a separate committed input, never the original admission"
+    );
+}
+
 // Commit the actual authenticated bootstrap, then withhold its reply. The worker
 // sees transport failure, never trusted behavior, despite durable server effects.
 async fn withhold_bootstrap(
@@ -295,39 +372,21 @@ async fn scenario(mode: &str) {
         root: root.clone(),
         database: database.clone(),
         component_hash: component_hash(&node, &runner),
+        production: Arc::new(supervised_dispatch::compose(
+            &database, &node, &runner, &model_key,
+        )),
         node: node.clone(),
         git: git_program.clone(),
-        runner: runner.join("test/supervised-check-worker.mjs"),
+        runner: runner.clone(),
         cli: Path::new(env!("CARGO_BIN_EXE_forge"))
             .canonicalize()
             .unwrap(),
         endpoint: format!("http://{addr}"),
         bootstrap_endpoint: proxy.as_ref().map(|(endpoint, _)| endpoint.clone()),
         credential: model_key.clone(),
-        authority: Arc::new(
-            DaemonAuthority::new()
-                .unwrap()
-                .with_inspection(
-                    forge_server::durable_authorization::operator::InspectionComponents {
-                        node: node.clone(),
-                        inspector: runner.join("src/inspect-effects.ts"),
-                    },
-                )
-                .unwrap(),
-        ),
         mode: mode.into(),
         provisions: Arc::new(AtomicUsize::new(0)),
-        reports: Arc::new(Mutex::new(vec![])),
-        retirement: Arc::new(
-            forge_server::durable_authorization::retirement::Controller::default()
-                .with_inspection(
-                    forge_server::durable_authorization::operator::InspectionComponents {
-                        node: node.clone(),
-                        inspector: runner.join("src/inspect-effects.ts"),
-                    },
-                )
-                .unwrap(),
-        ),
+        deliveries: Arc::new(Mutex::new(std::collections::HashMap::new())),
         launch: {
             let launch =
                 forge_server::durable_authorization::release_gate::LaunchControl::default();
@@ -335,7 +394,8 @@ async fn scenario(mode: &str) {
             launch
         },
     };
-    // Embed the actual server with the explicitly injected controlled adapter.
+    adapter.write_fixture();
+    // Embed the actual server with the production composition behind the gate.
     // Only this test drives scheduling: a second default Herdr reconciler must
     // not concurrently administer the controlled durable Assignment.
     let server = Daemon::new(adapter.app())
@@ -360,14 +420,20 @@ async fn scenario(mode: &str) {
     assert!(!root.join("assignment-capabilities").exists());
     fs::write(&model_key, "T07-SUPERVISED-MODEL-KEY").unwrap();
     fs::set_permissions(&model_key, fs::Permissions::from_mode(0o600)).unwrap();
+    if mode == "accepted" {
+        withheld_refuses(&adapter, &store, record).await;
+    }
     let dispatch = adapter.clone();
-    let (assignment, existing) =
-        tokio::task::spawn_blocking(move || dispatch.app().dispatch_record(record).unwrap())
-            .await
-            .unwrap();
+    let (assignment, existing, mut report) = tokio::task::spawn_blocking(move || {
+        // Provision only spawns the host; the daemon-owned driver runs on.
+        let (assignment, existing) = dispatch.app().dispatch_record(record).unwrap();
+        let report = dispatch.drive(&assignment);
+        (assignment, existing, report)
+    })
+    .await
+    .unwrap();
     assert!(!existing);
     assert_eq!(adapter.provisions.load(Ordering::SeqCst), 1);
-    let mut report = adapter.reports.lock().unwrap().pop().unwrap();
     assert_eq!(report.launch.assignment_id, assignment.id);
     assert_eq!(assignment.profile.revision, profile.revision);
     let attempt = store
@@ -464,7 +530,19 @@ async fn scenario(mode: &str) {
             );
         } else {
             assert!(report.answer.is_none());
-            assert_eq!(runtime.admission, Admission::Unknown);
+            // The runner's typed reply is committed: failure before intent is a
+            // rejection. Revocation right after the spawn fences the first grant, so
+            // no admission request is sent (Pending). Should the grant win that
+            // race, the revoked capability still denies bootstrap (Rejected).
+            assert!(
+                match &runtime.admission {
+                    Admission::Rejected { code } => code == "assignment-runtime-failed",
+                    Admission::Pending => mode == "revoked",
+                    _ => false,
+                },
+                "{:?}",
+                runtime.admission
+            );
             assert!(!report.directory.join("runtime.sqlite").exists());
             assert_eq!(
                 store.assignment_context_read(&assignment.id).unwrap(),
@@ -473,12 +551,6 @@ async fn scenario(mode: &str) {
             assert_eq!(
                 proxy_calls.load(Ordering::SeqCst),
                 usize::from(mode == "bootstrap-uncertain")
-            );
-            assert!(
-                !report
-                    .events
-                    .iter()
-                    .any(|event| event["event"] == "bootstrapped")
             );
         }
     }
@@ -492,6 +564,9 @@ async fn scenario(mode: &str) {
         );
     } else {
         assert!(!report.directory.join("controlled-effects").exists());
+    }
+    if mode == "missing" {
+        follow_up_delivered(&adapter, &store, &assignment.id);
     }
     let replacement = task(&store, "Capacity must remain reserved");
     store.set_task_base_commit(replacement, &base).unwrap();
@@ -548,17 +623,15 @@ async fn scenario(mode: &str) {
                 );
             }
         };
-        // The pre-launch provision-intent remains a separate unknown-resource
-        // confirmation, even after the owned process receipt is committed.
-        retire(false);
-        let pending = store.agent_assignment_info(&assignment.id).unwrap();
-        assert!(pending.assignment.closed_at_millis.is_some());
-        assert!(pending.capacity_reserved());
+        // The production launcher reconciled its one-shot provisioning marker once
+        // the runner's admission was committed Accepted (no unknown resource), but
+        // the retained runtime identity still reserves capacity until retirement.
+        let live = store.agent_assignment_info(&assignment.id).unwrap();
+        assert!(live.capacity_reserved());
         assert!(
-            pending
-                .resources
+            live.resources
                 .iter()
-                .any(|r| r.resource_kind == "provision-intent" && r.retired_at_millis.is_none())
+                .any(|r| r.resource_kind == "provision-intent" && r.retired_at_millis.is_some())
         );
         assert!(adapter.app().dispatch_record(replacement).is_err());
         assert!(
@@ -566,31 +639,6 @@ async fn scenario(mode: &str) {
                 .list_agent_assignments(replacement)
                 .unwrap()
                 .is_empty()
-        );
-        let resolve = Command::new(&adapter.cli)
-            .env_clear()
-            .args([
-                "dispatcher",
-                "assignment-resolve-unknown",
-                &assignment.id,
-                "--confirm-old-agent-cannot-act",
-                "--confirm-unknown-resources-safe",
-                "--json",
-                "--server-url",
-                &format!("{}/rpc", adapter.endpoint),
-            ])
-            .output()
-            .unwrap();
-        assert!(
-            resolve.status.success(),
-            "{}",
-            String::from_utf8_lossy(&resolve.stderr)
-        );
-        assert!(
-            store
-                .agent_assignment_info(&assignment.id)
-                .unwrap()
-                .capacity_reserved()
         );
         retire(true);
         let retired = store.agent_assignment_info(&assignment.id).unwrap();
@@ -636,6 +684,9 @@ async fn scenario(mode: &str) {
             supervised_rollback::refused_after_retirement(&adapter, &store, replacement);
         }
     } else {
+        if mode != "continuation-chain" {
+            supervised_dispatch::terminate(&report.directory);
+        }
         // Explicit fixture closure is not retirement proof. Reopening retains all
         // resources/capacity/diagnostics and never rewrites the accepted admission.
         if assignment.closed_at_millis.is_none() {
