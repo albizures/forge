@@ -7,6 +7,24 @@ import { createRegistry } from '@earendil-works/pi-durable';
 import { createModels, fauxProvider, fauxAssistantMessage } from '@earendil-works/pi-ai';
 import { guardProvider } from '../src/authorization.ts';
 const [directory, worktree] = process.argv.slice(2);
+// Test-owned fault (M6): record every follow-up acceptance, and once drop the
+// event after the runner committed the input, then crash. The daemon is left
+// with an `unknown` delivery that it must re-send to the next session.
+const print = console.log;
+console.log = (line) => {
+  try {
+    if (JSON.parse(line)?.event === 'followup-accepted') {
+      appendFileSync(join(directory, 'controlled-followup-events'), line + '\n');
+      const drop = join(directory, 'controlled-drop-followup-once');
+      if (existsSync(drop)) {
+        unlinkSync(drop);
+        process.kill(process.pid, 'SIGKILL');
+        return;
+      }
+    }
+  } catch { /* not an event line */ }
+  print(line);
+};
 try {
   await serveRecovery(directory, worktree, async (_, authorization) => {
     appendFileSync(join(directory, 'controlled-recovery-preparations'), 'prepare\n');
@@ -21,7 +39,10 @@ try {
       appendFileSync(join(directory, 'controlled-recovery-models'), 'model\n');
       // Keep the first answer in flight so the daemon can send recorded input.
       if (existsSync(join(directory, 'controlled-slow-model'))) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1500);
-      return fauxAssistantMessage('Recovered the original bound input; not an accepted Forge Outcome.');
+      const answer = fauxAssistantMessage('Recovered the original bound input; not an accepted Forge Outcome.');
+      // Non-blocking: recorded input is committed while this answer is in flight.
+      if (existsSync(join(directory, 'controlled-async-model'))) return new Promise(resolve => setTimeout(() => resolve(answer), 4000));
+      return answer;
     };
     provider.setResponses([model, model]);
     const models = createModels({ authContext: { env: async () => undefined, fileExists: async () => false } });

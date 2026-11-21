@@ -131,8 +131,10 @@ credentials, tool payloads or prompts in them.
 Do not use `assignment-resolve-unknown`, retained-work salvage, generic cleanup,
 runtime SQLite edits or `resume` as an interrupted-effect waiver. Preserve the
 runtime/worktree and externally investigate publication/push outcomes without
-replaying the command. Production durable dispatch and automatic recovery remain
-disabled; current integration evidence is controlled, not a release-readiness
+replaying the command. New durable launches remain withheld by the
+[release gate](durable-execution.md#current-release-state); automatic recovery of
+existing durable Assignments is composed whenever matched runner components are
+configured. Current integration evidence is controlled, not a release-readiness
 claim. See [T08 evidence](research/pi-durable-t08/README.md).
 
 The trusted daemon grant controller inspects retained runtime storage before its
@@ -146,7 +148,7 @@ still require the ordinary transactional authority/freshness/hold/resource check
 This supplies the interrupted-effect precondition for same-attempt recovery (next
 section); it is not itself recovery. Production durable launch remains withheld.
 
-## Same-Assignment durable recovery (controlled; rollout disabled)
+## Same-Assignment durable recovery (composed with matched components; launches withheld)
 
 The internal controlled recovery port can reserve an original candidate and,
 following a trusted external-verification boundary, atomically commit a first
@@ -336,8 +338,13 @@ still needs the launch reconciled. Without proof, retirement reports
 `durable-launch-ungranted-unproven`. A reconciled never-sent runtime is
 purge-eligible. See [T26 evidence](research/pi-durable-t26/README.md).
 
-Default production composition still leaves recovery unconfigured and new durable
-launches withheld by the [release gate](durable-execution.md#current-release-state).
+The production composition configures this recovery whenever matched runner
+components are configured: a Forgeup schema 2 runner bundle, or a manual daemon's
+`FORGE_DURABLE_RUNNER_HOST`/`FORGE_DURABLE_RUNNER_ENTRY`. The app's ordinary
+reconciliation scan then calls it automatically for `unknown` durable Assignments.
+New durable launches stay withheld by the
+[release gate](durable-execution.md#current-release-state), which does not apply to
+existing work.
 There is no operator CLI/RPC recovery-authorization operation. Matched packaging and
 the rollback control exist; real-provider release verification and enabling rollout
 remain release work.
@@ -368,8 +375,10 @@ storage writable. They work for running, crashed, retired and missing-Outcome As
   duplicated. `more=false` is not end of history for a live Assignment: poll `next_after`.
   `history` is `available`, `not-started` or `unavailable` (with a fixed non-secret reason code). Corrupt,
   foreign or unreadable storage is `unavailable`, never an empty transcript, and is not repaired.
-- The daemon needs the same explicitly configured matched components as effect inspection
-  (`FORGE_DURABLE_NODE`, `FORGE_DURABLE_EFFECT_INSPECTOR`); the transcript reader is the sibling
+- The daemon needs the same matched components as effect inspection: a Forgeup-managed
+  daemon derives them from its `--durable-runner-bundle` (and, per Launch component hash,
+  `--durable-retained-runner-bundle`); a manual daemon sets `FORGE_DURABLE_NODE` and
+  `FORGE_DURABLE_EFFECT_INSPECTOR`. The transcript reader is the sibling
   `inspect-transcript.ts` of that inspector, verified against the component hash retained in the Launch.
   Without them the command fails with `durable-transcript-unconfigured`; status still needs only the store.
 - Entry content is bounded (8 KiB per entry, `truncated` flagged) runtime data. Tool output can contain
@@ -408,7 +417,7 @@ finalization retries preserve its original retirement timestamp.
 
 The same `assignment-retire` command routes an existing durable Assignment through
 its retained backend, without profile-source preflight, model credentials or Herdr.
-Production durable dispatch remains disabled. A directly spawned supervisor must
+New durable launches remain withheld by the release gate. A directly spawned supervisor must
 have been retained by the trusted controller; a missing live controller cannot
 adopt a PID or infer that its work stopped.
 

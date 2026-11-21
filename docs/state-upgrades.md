@@ -5,7 +5,16 @@ another. It preserves the source database and upgrades a consistent copy. Ordina
 repository opening still rejects incompatible schemas before initialization writes;
 it never migrates, resets, or rewrites an older store's marker.
 
-Supported transfers target schema **23** from schemas **7** through **23**.
+Supported transfers target schema **25** from schemas **7** through **25**.
+The 24 → 25 step adds an empty, immutable journal of never-granted durable launch
+reconciliations and replaces the runtime capacity guard so that, for a closed
+Assignment, either a reconciled host retirement or such a journaled proof releases
+`durable-runtime`. It reconciles nothing historical. Ordinary schema-24 opening rejects
+before writes. See the
+[store contract](../crates/store/README.md#never-granted-launch-reconciliation-schema-revision-25).
+The 23 → 24 step adds an empty purge-removal history; purges completed under 23 read
+as unrecorded, never as a fabricated deletion. Ordinary schema-23 opening rejects
+before writes.
 The 22 → 23 step adds an empty, immutable operator follow-up history. It fabricates no
 follow-up for historical Assignments. Ordinary schema-22 opening rejects before writes.
 The 21 → 22 step adds an empty identity-bound retirement journal and replaces the
@@ -15,8 +24,8 @@ unresolved execution blockers. Ordinary schema-21 opening rejects before writes.
 See the [retirement storage contract](../crates/store/README.md#durable-retirement-reconciliation-revision-22).
 The 20 → 21 step adds empty Assignment authorization grant history and immutable
 history guards, without creating execution permission. Ordinary schema-20 opening
-rejects before writes. Controlled runner enforcement is implemented; production
-durable dispatch remains disabled. See the
+rejects before writes. Controlled runner enforcement is implemented; new durable
+launches are withheld by the release gate. See the
 [grant storage contract](../crates/store/README.md#assignment-authorization-grant-history-revision-21).
 The 19 → 20 step adds empty durable runtime admission identity/results and resource
 retention guards. It does not backfill runtime identities, reinterpret historical

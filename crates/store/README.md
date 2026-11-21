@@ -150,8 +150,9 @@ Revision 21 rejects older stores before ordinary initialization writes. Explicit
 offline 20 → 21 conversion adds only an empty grant table and its history guards;
 it creates no historical permissions. The T05 controlled runtime now includes
 verified host ownership, a commit-before-delivery renewal service, consumer guards
-and an independent watchdog. Production Check-bound dispatch remains disabled;
+and an independent watchdog. (At T05 Check-bound dispatch did not exist yet;
 profile/authentication mapping and the dispatch/bootstrap tracer are T06/T07.
+Today new durable launches are withheld by the release gate.)
 
 Authorization uncertainty uses the existing generic resource representation, not
 new DDL or invented grant history. The trusted `SessionRepository::retain_failure`
@@ -255,8 +256,10 @@ retirement may cancel a validated claim matching the exact Launch, atomically
 with its original-owner cleanup receipt and runtime reconciliation. Malformed or
 foreign claims fail closed and roll back the entire reconciliation. Claim identity,
 creation timestamp and original-result replay survive cancellation; effects,
-unknown resources and holds are not discharged. No production daemon or public
-CLI/RPC path creates a claim. Automatic recovery remains disabled.
+unknown resources and holds are not discharged. No public CLI/RPC path creates a
+claim. A daemon composed with matched runner components creates one through its
+automatic recovery controller (`server/src/durable_authorization/recovery.rs`,
+`claim_recovery`), only from exact host crash or fence proof.
 
 The internal `recovery::authorization::Repository::grant_recovery` transition
 accepts an opaque application-owned `Prepared` value constructed only after a
@@ -321,8 +324,9 @@ Revision 20 is a breaking storage contract. Ordinary open rejects incompatible
 stores before initialization writes. The separately requested offline 19 → 20
 upgrade adds only empty runtime tables/guards, preserving all historical rows and
 inventing no backend/runtime identities. Older explicit upgrade paths compose this
-expansion. Durable dispatch remains disabled; protocol definitions and fake
-transport tests do not establish production runner or recovery readiness.
+expansion. Protocol definitions and fake transport tests do not establish
+production runner or recovery readiness; new durable launches are withheld by the
+release gate.
 
 ## Retained-work salvage authorization (revision 17)
 

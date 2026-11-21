@@ -349,3 +349,93 @@ fn daemon_delivers_a_recorded_follow_up_once_to_the_resumed_original_conversatio
             .is_empty()
     );
 }
+
+/// M6 (T12/T23 correction): the runner commits a follow-up but its acceptance
+/// is lost with the crashed session, so the daemon retains `unknown`. The next
+/// recovered session re-sends the same operation; the runner recognizes its
+/// committed request and replays the original admission. Exactly one input.
+#[test]
+fn unknown_follow_up_is_resent_to_the_next_session_with_exactly_one_admission() {
+    use forge_app::durable_execution::followup::{Repository as _, Request};
+    let (f, _, _) = recovery_crash::crashed();
+    fs::write(f.directory.join("controlled-async-model"), "async").unwrap();
+    fs::write(f.directory.join("controlled-drop-followup-once"), "drop").unwrap();
+    rusqlite::Connection::open(&f.database)
+        .unwrap()
+        .execute(
+            "UPDATE records SET status = 'in_progress' WHERE id = ?1",
+            [f.record.cast_signed()],
+        )
+        .unwrap();
+    let request = Request {
+        assignment_id: "assignment".into(),
+        operation_id: "operator:unknown".into(),
+        message: "use another commit".into(),
+    };
+    f.store.record_followup("test", &request).unwrap();
+    let retirement = Arc::new(
+        retirement::Controller::default()
+            .with_inspection(effect_admission::components())
+            .unwrap(),
+    );
+    let recovery = Arc::new(
+        recovery::Controller::new(
+            f.database.clone(),
+            controlled_components(),
+            retirement.clone(),
+        )
+        .unwrap(),
+    );
+    let app = Application::with_agent_dispatch(
+        Box::new(open(&f.database)),
+        Box::new(open(&f.database)),
+        Box::new(retirement::Factory {
+            database: f.database.clone(),
+            controller: retirement,
+            launcher: None,
+            recovery: Some(recovery),
+            original: Box::new(NoHerdr),
+        }),
+        Box::new(NoGit),
+    );
+    let attempt = f.store.assignment_check_attempt("assignment").unwrap();
+    let events = f.directory.join("controlled-followup-events");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut now = 1_000_000;
+    // Session 1 commits the input and crashes before its acceptance is read.
+    let delivered = loop {
+        app.reconcile_agent_dispatch("recovery-test-daemon", now)
+            .unwrap();
+        now += 40_000;
+        let current = f.store.followups("test", "assignment").unwrap()[0].clone();
+        if current.delivery == "delivered" {
+            break current;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "follow-up never confirmed: {} {:?}",
+            current.delivery,
+            fs::read_to_string(&events).ok()
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let lines: Vec<serde_json::Value> = fs::read_to_string(&events)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert_eq!(lines[0]["replayed"], false);
+    assert_eq!(lines[1]["replayed"], true);
+    assert_eq!(lines[0]["admission_id"], lines[1]["admission_id"]);
+    assert_eq!(
+        delivered.admission_id.as_deref(),
+        lines[0]["admission_id"].as_str()
+    );
+    assert_eq!(f.store.followups("test", "assignment").unwrap().len(), 1);
+    assert_eq!(
+        f.store.assignment_check_attempt("assignment").unwrap(),
+        attempt
+    );
+    assert!(!f.directory.join("controlled-drop-followup-once").exists());
+}

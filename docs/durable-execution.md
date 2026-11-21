@@ -45,7 +45,7 @@ path from the Installation's packaged components (see
 [Install and run the matched runner](#install-and-run-the-matched-runner)). It still has
 no model-credential setting (see the known gap below), so it cannot validate a durable
 profile. The behavior described under
-[Assignment recovery](assignment-recovery.md#same-assignment-durable-recovery-controlled-rollout-disabled)
+[Assignment recovery](assignment-recovery.md#same-assignment-durable-recovery-composed-with-matched-components-launches-withheld)
 therefore remains a controlled-test capability, not an operational one.
 
 ## Execution model
@@ -115,8 +115,11 @@ including the packaged host, but has no model-credential setting; it inherits no
 The key file must be an absolute canonical path to a regular, single-link, owner-owned
 `0600` file in an owner-owned `0700` directory, containing one printable ASCII token
 (1–4096 bytes) with an optional trailing newline. Diagnostics never include the key or its
-path. The key reaches only the runner's in-memory provider auth: never the shell
-environment, prompts, transcripts or Forge records. A model key grants no Forge authority,
+path. The key bytes reach only the runner's in-memory provider auth: never the shell
+environment, prompts, transcripts or Forge records. The key file *path* is in the
+manual daemon's own environment (`FORGE_DURABLE_OPENAI_KEY_FILE`), which processes the
+daemon starts with an inherited environment (hooks, `git`, `gh`) also see; the durable
+host is started with a cleared environment. A model key grants no Forge authority,
 and an Assignment Capability grants no model access.
 
 See [Agent Profile policy](agent-profile-policy.md#durable-profiles-and-authentication)

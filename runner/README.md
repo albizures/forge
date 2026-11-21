@@ -43,7 +43,7 @@ before intent is a `rejected` admission; after it, `unknown`. Tests substitute
 only the model provider (`ProviderSubstitution`); the test workers are thin
 wrappers. The protocol-1 contract, typed `RunnerEvent`s and the wire-compatibility
 assessment are in the [T22 evidence](../docs/research/pi-durable-t22/README.md).
-Production dispatch remains refused until the server adapter (T23).
+At T22, production dispatch was still refused; T23 composed the server adapter.
 
 ## T10 recovery evidence increment — not automatic recovery
 
@@ -80,8 +80,8 @@ Forge authority, freshness, profile/worktree bindings and exclusive ownership,
 then commit a new lease before any writable open or scheduling. Existing lease
 history still rejects a restarted issuer. Tests include an actual killed Node
 model process, not an owned-supervisor recovery or proof of process cleanup.
-T10 remains incomplete; [increment evidence and remaining work](../docs/research/pi-durable-t10/README.md).
-Production dispatch and automatic recovery remain disabled.
+At that increment T10 was incomplete; [increment evidence](../docs/research/pi-durable-t10/README.md).
+Production dispatch and automatic recovery were not yet composed then.
 
 ## T06 explicit profile/authentication construction
 
@@ -166,7 +166,7 @@ rejected-Outcome-then-prose cases verify the distinction, actual human/JSON CLI/
 diagnostics and retained capacity across fixture closure/reopen. This is component
 delivery with fixture authorization, not a supervised production caller.
 
-`main.ts` and production dispatch do not call the bootstrap/runtime helpers.
+At that increment, `main.ts` (now `test/synthetic-runner.ts`) and production dispatch did not call the bootstrap/runtime helpers.
 Actual supervised Check dispatch, capability issuance ordering and supervised
 host answer delivery remain outstanding T07 work; see the
 [T07 evidence/handoff](../docs/research/pi-durable-t07/README.md).
@@ -205,7 +205,7 @@ that boundary; this is not an automatic production observation driver.
 integration into a future recovery controller are not implemented. There is no resolution command, no
 permission to rerun an interrupted command, and no exactly-once guarantee. Do not
 edit runtime SQLite or clear an ordinary Dispatch Hold to bypass this fence.
-Production durable dispatch and automatic recovery remain disabled. See the
+Production durable dispatch and automatic recovery were not yet composed at T08. See the
 [T08 evidence and remaining work](../docs/research/pi-durable-t08/README.md).
 
 ## T09 controlled retirement boundary
@@ -213,7 +213,7 @@ Production durable dispatch and automatic recovery remain disabled. See the
 The original-backend operator retirement adapter journals the revoked operation
 and original owner before private control delivery. The dedicated Linux host now
 acts as a subreaper, fences new grants, verifies live ownership and persists host
-intent before group TERM. `main.ts` closes authorization and aborts guarded runtime
+intent before group TERM. The runner entry (then `main.ts`, now `src/check-entry.ts`) closes authorization and aborts guarded runtime
 work on TERM; after five seconds the independent host can attempt KILL only with
 still-verified group ownership. A protected synced receipt requires kernel ECHILD
 for the host's entire child set, not just leader exit or successful signals.
@@ -397,7 +397,7 @@ commit-before-delivery/renewal coordinator; neither is executable host recovery.
 Host verification/handoff, executable watchdog/private control support, daemon
 reconciliation and writable resume remain unimplemented. See
 [coordinator/watchdog evidence](../docs/research/pi-durable-t10/recovery-session.md).
-Production and automatic recovery remain disabled.
+Production and automatic recovery were not yet composed at that increment.
 
 Run the isolated fake-clock/wrapper tests with:
 
@@ -443,8 +443,8 @@ checks at actual execution rather than relying on a preflight hook. Both combine
 caller and lease cancellation and deny already-cancelled calls. Future registry
 composition must guard **every** provider/tool, including dynamic tools. These
 wrappers do not implement replay/recovery policy or prove child exit. `close()`
-terminally aborts instead of merely removing the cancellation timer. `main.ts`
-now gates before intent/writable opening, Harness opening, root creation and
+terminally aborts instead of merely removing the cancellation timer. At T05,
+`main.ts` (now `test/synthetic-runner.ts`) gated before intent/writable opening, Harness opening, root creation and
 submission, combines execution cancellation and wraps its sole synthetic provider.
 It accepts no tools; future profile mapping must apply the tested tool guard to
 every admitted tool. Existing runtime stores still cannot be reopened writable
@@ -457,7 +457,7 @@ in-flight model cancellation, explicit compaction, direct/nested tool preflight
 expiry and one cooperative long-running Node child. The shared
 `test/authorization-lease.json` fixture is also validated and round-tripped by the
 Rust app. These consumer tests are not production-daemon or real-provider release
-tests. Production durable launch remains disabled.
+tests. Production durable launch did not exist at T05; it is now withheld by the release gate.
 
 ## Independent supervisor watchdog
 

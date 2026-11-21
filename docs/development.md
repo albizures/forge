@@ -108,7 +108,11 @@ receives its own attested components, which `forgeup daemon start` passes explic
 (see [matched runner packaging](#matched-runner-packaging)). Missing
 components block new resolutions, but exact accepted-result audit reads still work.
 This configuration supplies no model key/capability and enables no durable dispatch
-or automatic recovery. See [effect investigation](assignment-recovery.md#interrupted-durable-effects-controlled-implementation).
+or automatic recovery. A manual daemon that also sets both
+`FORGE_DURABLE_RUNNER_HOST` and `FORGE_DURABLE_RUNNER_ENTRY` (absolute paths to the
+matched `forge-runner-host` and `check-entry.ts`) composes durable launch and
+automatic same-attempt recovery; new durable launches still stay withheld by the
+[release gate](durable-execution.md#current-release-state). See [effect investigation](assignment-recovery.md#interrupted-durable-effects-controlled-implementation).
 
 ### Matched runner packaging
 
