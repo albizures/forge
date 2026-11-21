@@ -914,18 +914,24 @@ fn application_from_config_with_cli(
         Box::new(GitWorktreeAdapter),
         Box::new(dispatch),
         Box::new(ServerAgentDispatchAdapterFactory {
-            provider: Box::new(durable_authorization::retirement::Factory {
-                database: config.store_path.clone(),
-                controller: Arc::new(match &config.durable_inspection {
-                    Some(components) => durable_authorization::retirement::Controller::default()
-                        .with_inspection(components.clone())
-                        .map_err(|error| error.code.to_owned())?,
-                    None => durable_authorization::retirement::Controller::default(),
+            provider: Box::new(durable_authorization::release_gate::ReleaseGate {
+                // Default eligibility stays withheld until T19 evidence and T20 handoff.
+                control: durable_authorization::release_gate::LaunchControl::default(),
+                inner: Box::new(durable_authorization::retirement::Factory {
+                    database: config.store_path.clone(),
+                    controller: Arc::new(match &config.durable_inspection {
+                        Some(components) => {
+                            durable_authorization::retirement::Controller::default()
+                                .with_inspection(components.clone())
+                                .map_err(|error| error.code.to_owned())?
+                        }
+                        None => durable_authorization::retirement::Controller::default(),
+                    }),
+                    recovery: None,
+                    original: Box::new(HerdrAdapterFactory::from_configuration_store(
+                        config.store_path.clone(),
+                    )),
                 }),
-                recovery: None,
-                original: Box::new(HerdrAdapterFactory::from_configuration_store(
-                    config.store_path.clone(),
-                )),
             }),
             daemon_url: format!("http://{}", config.bind_addr),
             capability_secret_root,

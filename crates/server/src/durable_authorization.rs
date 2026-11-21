@@ -10,6 +10,7 @@ pub mod quiesced_inspection;
 pub mod recovery;
 pub mod recovery_inspection;
 pub mod recovery_worktree;
+pub mod release_gate;
 pub mod retirement;
 mod runtime_directory;
 pub mod transcript;
