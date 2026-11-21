@@ -1,7 +1,141 @@
 # T18 — Independent implementation and coding-standards review
 
-This report has two passes. The **second pass** (below) is current. The
-[first pass](#first-pass--2026-11-20-snapshot-1fc65a5) is kept unchanged as history.
+This report has three passes. The **third pass** (below) is current. The
+[second pass](#second-pass--2026-11-21-snapshot-646abd9) and the
+[first pass](#first-pass--2026-11-20-snapshot-1fc65a5) are kept unchanged as history.
+
+## Third pass — 2026-11-21, final snapshot `2097267`
+
+- **Reviewed snapshots:**
+  - `943051c`: T25 `788ed26`, T26 `93b983c` and the M2′/M6 corrections `943051c`, diffed
+    against `646abd9`;
+  - the corrections to this pass: `26dddfd`, `7262396` and `2097267`. Each delta was
+    re-reviewed in turn.
+- **Final snapshot:** `2097267`. T19 consumes this snapshot.
+- **Inputs:**
+  - the Spec, T18 and T25/T26 Task bodies and `CODING_STANDARDS.md`;
+  - the T25/T26 evidence and the correction records, treated as claims to check:
+    [M2′/M6 corrections](m2-m6-corrections.md) and
+    [third-pass corrections](third-pass-corrections.md).
+- **Method:** `review-implementation` and `review-coding-standards`. Four read-only
+  reviewers each started from fresh context:
+  1. the T25/T26 host, launch and retirement code;
+  2. the documentation, M-items, minors and AC trace;
+  3. a re-review of the correction delta `943051c..26dddfd`;
+  4. a re-review of the follow-up delta `26dddfd..7262396`.
+
+  Each correction was made against the deliverable that owned the finding, then reviewed
+  again. No Task was added. No profile, dispatch or rollout state was changed.
+
+### Verdict (third pass)
+
+**No open BLOCKER. T19 may start on snapshot `2097267`.** This is not release readiness:
+- **M4 stays open, as an accepted scope limitation.** A Forgeup-managed daemon has no
+  model credential, so the handoff covers manual daemons only. T20 must state this.
+- **There is still no class (c) real-provider test.** The release gate still requires one.
+- **New durable launches stay withheld** by default.
+
+### Findings resolved in this pass
+
+| Finding | Resolution |
+| --- | --- |
+| **B3** | Resolved by T25: post-fence quiescence receipts, accepted for recovery and retirement. The F1 gap below was found and closed in this pass. |
+| **B4** | Resolved by T26: atomic claim, specific diagnostics, the ungranted receipt, seal, and journaled never-granted reconciliation (schema 25). The F1/F2 gaps below were found and closed in this pass. |
+| **F1** (new, MAJOR, arguably a blocker) | A lease committed in Forge but never accepted by the host stranded the Assignment. Fixed by the owner-bound `predecessor_proof`: the same owner's crash, fence or ungranted proof for an earlier lease of the same Launch. The delta re-review then found that the ungranted lookup went through an overwritable `owner.json` (MAJOR); it is now keyed by the lease owner. Real-host tests cover renewal and first grant; negative unit tests cover each rejection. |
+| **F2** (MAJOR) | The recovery spawn path dropped live Child processes. Now every exit reaps the host or hands it to retirement. |
+| **F3** | A same-daemon lease expiry blocked recovery. The new `Reaped` driver state hands over to proof-based recovery. **No production-driver test.** |
+| **F4–F7** | Specific `durable-runtime-proof-unmatched` code; poisoned registry reaps; `inject_fault` behind the `test-faults` feature; doc comments split. |
+| **M2′** | Every listed location, plus the residuals the reviewer found, corrected. This includes the qualified key-exposure claim and the follow-up delivery wording. The follow-up-after-settled limitation is now documented. |
+| **M6** | Daemon-level `unknown` follow-up re-sent in a later session with one admission. The test asserts that the store holds `unknown` between sessions and that two sessions ran. |
+| RUST-3 (second-pass minor 2; first-pass minor 4) | A renewal clock failure fences. Follow-up store failures log specific codes. |
+| Second-pass minor 3 (oversize output → `Crashed`) | Partly: the drop on a `Crashed` exit is gone, because every exit now waits for the host. The classification itself is unchanged. |
+
+### Gates on `2097267`
+
+`PATH` had a real Node 24.18.0 first.
+
+| Gate | Result |
+| --- | --- |
+| `cargo fmt --check` | pass |
+| `cargo clippy --workspace --all-targets -- -D warnings` | pass |
+| `cargo test --workspace --no-fail-fast` | pass, twice in a row: 931 passed, 0 failed, 1 ignored (pre-existing opt-in Herdr probe) |
+| `durable_supervised_tracer` | pass: 25 scenarios |
+| `git diff --check` | pass |
+| `runner`: `npm run check` / `npm test` | pass / 99 of 99 |
+
+**Intermittent failures during the pass:**
+- `committed_model_authority_expires_during_renewal_outage…` failed once under full load.
+  It is a real-30-second leased-expiry test on a path the corrections do not touch. It is
+  recorded in the T26 evidence and not claimed fixed.
+- Two pre-T26 host tests assumed a single path after pre-grant pipe loss. They were made
+  order-independent; see the [corrections](third-pass-corrections.md#final-delta-after-7262396).
+
+### Still open (non-blocking)
+
+- **MAJOR: M4.** A managed daemon has no model credential (`server/src/lib.rs:273`). It is
+  documented, and the T20 handoff must be limited to manual daemons.
+- **No class (c) test.** The real-provider Implementation → Review gate is unrun.
+- **Test gaps:**
+  - F3 has no production-driver test;
+  - T26's requested class (a) `launch_tests.rs` fault tests were not added (class (b)
+    tracer and host tests cover these points instead);
+  - `fence::receipt_for_owner` is exercised only by unit tests, not by a real fence in an
+    end-to-end test;
+  - M6 does not query the runtime store directly for a single `followup:` request;
+  - the M6 launch-session case is not covered.
+- **Limitation, documented:** a follow-up committed after the original answer settled,
+  then crashed, blocks recovery (fail-closed). Retirement remains available.
+- **First-pass minors still open:** 1, 2, 3 (unknown launch admission not re-sent), 5, 6,
+  8, 10, 11, 12, 14, 15, 16 and 17. Their status and locations are in the third-pass
+  reviewer table summarized in the
+  [corrections record](third-pass-corrections.md).
+- **Second-pass minors still open:** 1 (stop timeout; mutex held during stop), 3
+  (oversize output classified as crash; see the table above), 4 (stringly-typed
+  classification), 5 (attestation gaps, including `package-bundle.mjs` being untested),
+  6 and 7 (purge edges and reporting) and 8 (test caveats).
+- **Small new items:**
+  - the stop/abandon race can fail one retirement attempt; a retry succeeds;
+  - ADR-0012 carries release-state and Task references that will go stale.
+
+### Acceptance-criteria trace at `2097267`
+
+Classes: **(a)** mock/fake or store-level; **(b)** real process with a faux model;
+**(c)** real provider. **No class (c) test exists.**
+
+| AC | Strongest coverage | Gap |
+| --- | --- | --- |
+| AC1 | (b) tracer, production composition | Withheld by default; M4; no (c) |
+| AC2 | (b) missing/rejected Outcome; (a) rollout | Minor 14 |
+| AC3 | (b) bootstrap and check-entry refusals | Real-provider path unrun |
+| AC4 | (b) `continuation-chain`, `process.test` | No (c) Implementation → Review |
+| AC5 | (b) typed protocol, M6 resend | Unknown launch admission is fenced, not resent |
+| AC6 | (b) flock, seal, authority tests | — |
+| AC7 | (b) recovery suites; real daemon-process kill | F3 untested end-to-end; follow-up-after-settled limitation |
+| AC8 | (b) real 30-second expiry, daemon-restart scenarios, committed-but-undelivered | No (c) |
+| AC9 | (b) real Bash, SIGKILL, daemon-restart-tool | — |
+| AC10 | (b) | — |
+| AC11 | (b) retirement suites, 10 launch-fault scenarios | Minor 1 |
+| AC12 | (a) capacity trigger and journal; (b) tracer | Minor 2 |
+| AC13 | (b) | Limitation above |
+| AC14 | (b) CLI → daemon → Node | Minor 12 |
+| AC15 | (b) M6 | Gaps above |
+| AC16 | (b) purge journeys, including failed launches | Second-pass minors 6 and 7 |
+| AC17 | (a)/(b) | — |
+| AC18 | (a) | **No (c)**; M4 |
+| AC19 | (b) `packaged` | `package-bundle.mjs` untested |
+| AC20 | (b) | First-pass gaps unchanged |
+| AC21 | (b) `rollback` | Defaults cannot change before AC22 |
+| AC22 | (a)/(b) per fault class | **Unrun:** real provider; managed-daemon launch (M4) |
+| AC23 | Docs corrected (M2′) | — |
+
+### Notes for T19/T20
+
+- T19 must use snapshot `2097267`. Its real-provider gate needs an operator-authorized,
+  isolated credential and environment; without one, the gate is **unrun** and readiness
+  stays withheld.
+- T20 must limit any handoff to manual daemons (M4) and list the open items above.
+
+**T18 status:** the third-pass review is complete. No blocker remains on the final snapshot.
 
 ## Second pass — 2026-11-21, snapshot `646abd9`
 
