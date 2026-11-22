@@ -386,7 +386,7 @@ supported way to create Assessments.
 
 ### Manual attempts and immutable evidence
 
-For a complete two-review handback walkthrough, see [Complete a Task manually](manual-release.md).
+For a complete two-review handback walkthrough, see [Complete a Task manually](manual-tasks.md).
 
 Start the Task explicitly, then inspect `record check work <record>`. Freshness starts
 at generation 1. No Managed Worktree, Agent Profile or provider launch is needed.

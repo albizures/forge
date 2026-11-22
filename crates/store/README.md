@@ -1496,5 +1496,5 @@ sqlite3 -readonly /path/to/forge.sqlite3 'PRAGMA index_list(record_relationships
 ```
 
 See [Development](../../docs/development.md) and
-[Forgeup locations](../docs/forgeup.md#locations-and-recovery) for database location
+[Forgeup locations](../../docs/forgeup.md#locations-and-recovery) for database location
 and revision-specific storage details.

@@ -4,7 +4,7 @@ use forge_app::{
 };
 use std::fs;
 
-const PROFILE: &str = include_str!("../../../docs/profiles/implementation-continuations.md");
+const PROFILE: &str = include_str!("../../../docs/profiles/implementation.md");
 
 #[test]
 fn implementation_continuations_profile_resolves_with_stopping_guidance() {

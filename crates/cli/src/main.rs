@@ -2540,8 +2540,8 @@ mod tests {
                 include_str!("../../../docs/profiles/publication.md"),
             ),
             (
-                "profiles/implementation-continuations.md",
-                include_str!("../../../docs/profiles/implementation-continuations.md"),
+                "profiles/implementation.md",
+                include_str!("../../../docs/profiles/implementation.md"),
             ),
             ("worktrees.md", include_str!("../../../docs/worktrees.md")),
             ("dispatch.md", include_str!("../../../docs/dispatch.md")),
@@ -2638,7 +2638,7 @@ mod tests {
 
     #[test]
     fn implementation_continuations_inline_commands_parse_without_execution() {
-        let profile = include_str!("../../../docs/profiles/implementation-continuations.md");
+        let profile = include_str!("../../../docs/profiles/implementation.md");
         let mut count = 0;
         for example in profile.split('`').filter(|part| part.starts_with("forge ")) {
             let args: Vec<String> = shlex::split(example)

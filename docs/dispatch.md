@@ -10,9 +10,8 @@ in [Durable Task execution](durable-execution.md).
 
 ## Verified Check-driven Task dispatch
 
-Normal explicit and automatic Task dispatch is enabled following Spec #644's
-retained deterministic verification (#660, renewed after provider fixes in #661)
-and six-attempt real-provider handback/remediation gate (#661 comment 2).
+Normal explicit and automatic Task dispatch is enabled after deterministic
+verification and a six-attempt real-provider handback/remediation gate.
 Before those gates, normal dispatch rejected with
 `task-dispatch-unsupported-contract` and automatic scheduling made no Task claims.
 The acceptance command did not enable dispatch or change Execution Mode. This is
@@ -117,7 +116,7 @@ A false output commit claim is rejected without publishing an Assessment.
 
 ### Deliberate Implementation Continuations
 
-Use the delivered [Implementation profile](profiles/implementation-continuations.md)
+Use the delivered [Implementation profile](profiles/implementation.md)
 for the complete submission shape and stopping instructions. Registering it is
 separate from immutable Check pins and live recovery.
 

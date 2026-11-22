@@ -31,7 +31,7 @@ forgeup use dev
 Put Forgeup's **managed bin directory before `target/release` on `PATH`** so
 `forge` resolves to the selected snapshot rather than a later local rebuild.
 Find the platform-specific location in
-[Forgeup locations](../crates/docs/forgeup.md#locations-and-recovery). For example,
+[Forgeup locations](forgeup.md#locations-and-recovery). For example,
 on Linux with default XDG locations:
 
 ```sh
@@ -48,7 +48,7 @@ no fallback to a default manual endpoint. Use `forgeup doctor` and `forgeup logs
 for diagnosis. `forge --build-info --json` works offline.
 
 Rebuilding does not update an existing immutable registration. See
-[Replacement Registration](../crates/docs/forgeup.md#register-a-revision) before
+[Replacement Registration](forgeup.md#register-a-revision) before
 replacing artifacts under the same selector; retained state is not disposable.
 
 ## Run a manual daemon

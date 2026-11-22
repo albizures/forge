@@ -168,7 +168,7 @@ work. Inspection adds a default-empty `sessions` collection. New clients supplyi
 
 ## Implementation profile delivery
 
-The tracked [Continuation profile source](profiles/implementation-continuations.md)
+The tracked [Continuation profile source](profiles/implementation.md)
 provides full outcome JSON and stopping guidance. This artifact is not a live
 registered revision and does not alter existing immutable Check pins.
 

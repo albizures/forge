@@ -8,7 +8,7 @@ candidate paths after registration.
 
 This document describes the supported Forgeup surface. The daemon-side
 Management Protocol is specified in
-[`management-protocol.md`](management-protocol.md).
+[`management-protocol.md`](../crates/docs/management-protocol.md).
 
 ## Register a Revision
 
@@ -92,7 +92,7 @@ alters a manually launched daemon.
 ## Carry state into a new Revision
 
 Revision selection does not transfer records. Use the explicit
-[Revision State upgrade workflow](../../docs/state-upgrades.md) to plan, snapshot,
+[Revision State upgrade workflow](state-upgrades.md) to plan, snapshot,
 migrate, validate, and publish a database copy before separately activating it.
 Schema 7 → 8 and same-schema transfers are supported initially. Both daemons must
 be stopped and agent/resource ownership resolved. Preparation upgrades the manager
@@ -111,8 +111,8 @@ Removing a runner-bearing Revision while its state exists requires `--purge-stat
 The managed daemon receives a model credential only when the operator passes
 `forgeup daemon start --durable-openai-key-file PATH` (an absolute key-file path, never
 read by Forgeup, requiring a schema 2 runner bundle); an implicit start passes none. See
-[matched runner packaging](../../docs/development.md#matched-runner-packaging) and
-[Durable Task execution](../../docs/durable-execution.md).
+[matched runner packaging](development.md#matched-runner-packaging) and
+[Durable Task execution](durable-execution.md).
 
 ## State and removal
 

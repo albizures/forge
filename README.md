@@ -30,7 +30,7 @@ forgeup daemon start
 forge status
 ```
 
-Ensure [Forgeup's managed bin directory](crates/docs/forgeup.md#locations-and-recovery)
+Ensure [Forgeup's managed bin directory](docs/forgeup.md#locations-and-recovery)
 is on `PATH`. Ordinary `forge` commands use the selected Revision and ensure its
 managed daemon is running; you do not need to start a separate server.
 
@@ -111,7 +111,7 @@ uses installed CLI help; no Forge source checkout or online manual is required.
 | [Dispatcher](docs/dispatch.md) | Configuration, explicit Record dispatch, launch, and ownership boundaries |
 | [Durable Task execution](docs/durable-execution.md) | Headless pi-durable backend: release state, setup, supported matrix, migration, rollout/rollback and operator controls |
 | [Assignment recovery](docs/assignment-recovery.md) | Investigation, retirement, unknown resources, and holds |
-| [Forgeup operations](crates/docs/forgeup.md) | Revision registration, selection, daemon lifecycle, and recovery |
+| [Forgeup operations](docs/forgeup.md) | Revision registration, selection, daemon lifecycle, and recovery |
 | [Revision State upgrades](docs/state-upgrades.md) | Explicit database copy-and-upgrade, activation, rollback, and crash recovery |
 | [Development](docs/development.md) | Source setup, manual daemon endpoints, browser/RPC, and verification |
 | [Database structure](crates/store/README.md) | SQLite tables, relationships, constraints, indexes, and initialization |

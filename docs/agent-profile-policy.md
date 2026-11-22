@@ -1,7 +1,6 @@
 # Agent Profile policy boundary
 
-Implementation contract for Spec #614, Tasks #615–621. Operator preview,
-registration and explicit selection are available. The Herdr adapter uses a
+Operator preview, registration and explicit selection are available. The Herdr adapter uses a
 flags-only Pi argument path and protected [Assignment bootstrap and context](assignment-context.md)
 for registered Task and Grilling policies. Task attempts use their immutable
 Check-pinned revisions; Grillings use the Workspace selection. Dispatch preflight
@@ -9,11 +8,8 @@ checks applicable direct inputs and the neighboring Forge CLI before preparing a
 worktree or allocating provider
 resources. Final input validation is repeated before launch.
 
-During #617 the human explicitly chose “use only flags for now”, superseding the
-custom-loader/runtime-attestation requirements for this implementation slice
-(recorded on #614). Flags configure Pi; they do not attest a closed runtime.
-See the [acceptance coverage handoff](agent-profile-acceptance.md) for test
-mapping and the guarantees superseded by that decision.
+Pi is configured with command-line flags only; there is no custom loader or runtime
+attestation. Flags configure Pi; they do not attest a closed runtime.
 
 ## Authoring and resolution
 
