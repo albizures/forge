@@ -28,5 +28,9 @@ form_urlencoded = "1.2.2"
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 time = { version = "0.3", features = ["formatting"] }
 
+[features]
+# Test seam only (T26): lets integration tests force durable launch failures.
+test-faults = []
+
 [lints]
 workspace = true

@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 forge-app = { path = "../app" }
+forge-build-info = { path = "../build-info" }
 forge-rpc = { path = "../rpc" }
 fs2.workspace = true
 serde = { version = "1", features = ["derive"] }
@@ -18,6 +19,7 @@ rustix = { version = "1", features = ["fs", "process", "time"] }
 forge-server = { path = "../server" }
 forge-store = { path = "../store" }
 rusqlite.workspace = true
+tempfile = "3"
 # Exercise the existing async daemon inspector with real owned host processes.
 # std has no executor/process reactor; reuse Tokio already selected by server.
 tokio = { version = "1", features = ["rt", "time", "process", "io-util", "net"] }

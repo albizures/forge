@@ -140,7 +140,7 @@ fn session_schema_expansion_preserves_history_and_stamp_failure_rolls_back() {
         .unwrap();
     assert_eq!(inspection(&c).unwrap(), before);
     let after = migrate_connection(&mut c).unwrap();
-    assert_eq!(after.schema, Some(22));
+    assert_eq!(after.schema, Some(25));
     for table in before.tables {
         assert!(after.tables.contains(&table));
     }
@@ -174,7 +174,7 @@ fn continuation_reset_schema_stamp_failure_rolls_back_rebuild_and_audit_table() 
     c.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
         .unwrap();
     assert_eq!(inspection(&c).unwrap(), before);
-    assert_eq!(migrate_connection(&mut c).unwrap().schema, Some(22));
+    assert_eq!(migrate_connection(&mut c).unwrap().schema, Some(25));
 }
 
 #[test]
@@ -196,7 +196,7 @@ fn continuation_expansion_is_empty_and_stamp_failure_rolls_back() {
         .unwrap();
     assert_eq!(inspection(&c).unwrap(), before);
     let after = migrate_connection(&mut c).unwrap();
-    assert_eq!(after.schema, Some(22));
+    assert_eq!(after.schema, Some(25));
     for table in before.tables {
         assert!(after.tables.contains(&table));
     }
@@ -240,7 +240,7 @@ fn verify_semantic_stamp_rollback(source: u32, denied: &'static str) {
         .unwrap();
     assert_eq!(inspection(&c).unwrap(), before);
     let after = migrate_connection(&mut c).unwrap();
-    assert_eq!(after.schema, Some(22));
+    assert_eq!(after.schema, Some(25));
     for table in before.tables {
         assert!(after.tables.contains(&table));
     }
@@ -274,7 +274,7 @@ fn retained_work_schema_stamp_failure_rolls_back_all_authority_ddl() {
         .unwrap();
     assert_eq!(inspection(&c).unwrap(), before);
     let after = migrate_connection(&mut c).unwrap();
-    assert_eq!(after.schema, Some(22));
+    assert_eq!(after.schema, Some(25));
     assert_eq!(
         after
             .tables
@@ -305,7 +305,7 @@ fn authorization_lease_expansion_is_empty_and_failed_stamp_rolls_back() {
         .unwrap();
     assert_eq!(inspection(&c).unwrap(), before);
     let after = migrate_connection(&mut c).unwrap();
-    assert_eq!(after.schema, Some(22));
+    assert_eq!(after.schema, Some(25));
     assert_eq!(
         after
             .tables
@@ -340,7 +340,7 @@ fn durable_admission_expansion_is_empty_and_failed_stamp_rolls_back() {
         .unwrap();
     assert_eq!(inspection(&c).unwrap(), before);
     let after = migrate_connection(&mut c).unwrap();
-    assert_eq!(after.schema, Some(22));
+    assert_eq!(after.schema, Some(25));
     for table in before.tables {
         assert!(after.tables.contains(&table));
     }
@@ -376,6 +376,90 @@ fn retirement_expansion_and_stamp_failure_preserve_schema_twenty_one() {
             .rows,
         0
     );
+}
+
+#[test]
+fn follow_up_expansion_is_empty_and_stamp_failure_preserves_schema_twenty_two() {
+    verify_semantic_stamp_rollback(22, "23");
+    let mut c = reference(22).unwrap();
+    c.pragma_update(None, "application_id", APPLICATION_ID)
+        .unwrap();
+    let before = inspection(&c).unwrap();
+    let after = migrate_connection(&mut c).unwrap();
+    for table in before.tables {
+        assert!(after.tables.contains(&table));
+    }
+    assert_eq!(
+        after
+            .tables
+            .iter()
+            .find(|t| t.name == "durable_assignment_followups")
+            .unwrap()
+            .rows,
+        0
+    );
+    // Historical Checks gain no fabricated migration history.
+    for table in [
+        "check_profile_migrations",
+        "check_profile_migration_changes",
+        "durable_runtime_purges",
+        "durable_launch_rollbacks",
+    ] {
+        assert_eq!(
+            after.tables.iter().find(|t| t.name == table).unwrap().rows,
+            0
+        );
+    }
+}
+
+#[test]
+fn purge_removal_expansion_is_empty_and_stamp_failure_preserves_schema_twenty_three() {
+    verify_semantic_stamp_rollback(23, "24");
+    let mut c = reference(23).unwrap();
+    c.pragma_update(None, "application_id", APPLICATION_ID)
+        .unwrap();
+    let before = inspection(&c).unwrap();
+    let after = migrate_connection(&mut c).unwrap();
+    assert_eq!(after.schema, Some(25));
+    // Existing purge journal rows stay byte-exact; no removal is fabricated.
+    for table in before.tables {
+        assert!(after.tables.contains(&table));
+    }
+    assert_eq!(
+        after
+            .tables
+            .iter()
+            .find(|t| t.name == "durable_runtime_purge_removals")
+            .unwrap()
+            .rows,
+        0
+    );
+    assert_eq!(migrate_connection(&mut c).unwrap(), after);
+}
+
+#[test]
+fn launch_reconciliation_expansion_is_empty_and_stamp_failure_preserves_schema_twenty_four() {
+    verify_semantic_stamp_rollback(24, "25");
+    let mut c = reference(24).unwrap();
+    c.pragma_update(None, "application_id", APPLICATION_ID)
+        .unwrap();
+    let before = inspection(&c).unwrap();
+    let after = migrate_connection(&mut c).unwrap();
+    assert_eq!(after.schema, Some(25));
+    for table in before.tables {
+        assert!(after.tables.contains(&table));
+    }
+    // No launch is reported as reconciled without a grant before revision 25.
+    assert_eq!(
+        after
+            .tables
+            .iter()
+            .find(|t| t.name == "durable_launch_reconciliations")
+            .unwrap()
+            .rows,
+        0
+    );
+    assert_eq!(migrate_connection(&mut c).unwrap(), after);
 }
 
 #[test]

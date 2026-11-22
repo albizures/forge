@@ -11,6 +11,40 @@ mod cancellation_tests;
 mod claimed_inspection_tests;
 mod worktree_tests;
 
+#[test]
+fn durable_check_handoff_requires_known_original_admission_without_herdr_metadata() {
+    let f = prepared();
+    let attempt = candidate(&f).unwrap().attempt;
+    let c = f.store.connection.lock().unwrap();
+    assert!(crate::durable_execution::handoff_admitted(&c, "assignment", &attempt).unwrap());
+    for field in ["id", "actor", "record"] {
+        let mut changed = attempt.clone();
+        match field {
+            "id" => changed.id.push_str("-foreign"),
+            "actor" => changed.actor.push_str("-foreign"),
+            _ => changed.record_id += 1,
+        }
+        assert!(!crate::durable_execution::handoff_admitted(&c, "assignment", &changed).unwrap());
+    }
+    for admission in [
+        Admission::Pending,
+        Admission::Unknown,
+        Admission::Rejected {
+            code: "denied".into(),
+        },
+        Admission::Accepted {
+            admission_id: String::new(),
+        },
+    ] {
+        c.execute(
+            "UPDATE durable_assignment_runtimes SET admission_json = ?1",
+            [serde_json::to_string(&admission).unwrap()],
+        )
+        .unwrap();
+        assert!(!crate::durable_execution::handoff_admitted(&c, "assignment", &attempt).unwrap());
+    }
+}
+
 fn prepared() -> Fixture {
     let f = prepared_without_grant();
     f.store.grant_lease("test", &lease(&f), 1_000).unwrap();

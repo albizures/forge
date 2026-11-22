@@ -20,6 +20,7 @@ use rusqlite::{Connection, ErrorCode, OptionalExtension, params};
 
 mod assignment_retirement;
 mod assignment_sessions;
+mod check_profile_migration;
 mod check_templates;
 mod checks;
 mod completion;
@@ -1434,6 +1435,20 @@ impl RecordRepository for SqliteProjectRepository {
         message: &str,
     ) -> Result<Record, RegistrationError> {
         self.change_execution_mode(id, expected, mode, actor, message)
+    }
+
+    fn migrate_check_profiles(
+        &self,
+        request: &forge_app::check_profile_migration::Request,
+    ) -> Result<forge_app::check_profile_migration::Receipt, RegistrationError> {
+        self.migrate_profiles(request)
+    }
+
+    fn check_profile_migrations(
+        &self,
+        task: u64,
+    ) -> Result<Vec<forge_app::check_profile_migration::Receipt>, RegistrationError> {
+        self.profile_migrations(task)
     }
 
     fn start_record(&self, id: u64) -> Result<Record, RegistrationError> {

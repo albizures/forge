@@ -63,21 +63,183 @@ mod tests;
 
 pub(crate) struct OperatorService {
     repository: SqliteProjectRepository,
-    components: Option<InspectionComponents>,
+    /// Matched components, selected per retained Launch by its component hash.
+    catalog: super::launch::ComponentCatalog,
 }
 
 impl OperatorService {
     pub(crate) fn new(
         store: &Path,
-        components: Option<InspectionComponents>,
+        catalog: super::launch::ComponentCatalog,
     ) -> Result<Self, RegistrationError> {
-        if let Some(components) = &components {
-            components.validate()?;
-        }
         Ok(Self {
             repository: SqliteProjectRepository::open(store)?,
-            components,
+            catalog,
         })
+    }
+
+    /// Persisted durable facts only; scope is authorized before any read.
+    pub(crate) fn status(
+        &self,
+        workspace: &str,
+        assignment: &str,
+    ) -> Result<Option<forge_app::durable_execution::status::Status>, RegistrationError> {
+        forge_app::durable_execution::status::Repository::durable_status(
+            &self.repository,
+            workspace,
+            assignment,
+        )
+    }
+
+    /// Descriptive watchdog-fence diagnosis of the mapped runtime directory:
+    /// `runtime-fence-proven`, `runtime-fence-unproven`, or `None` when unfenced
+    /// or absent. Reads files only; never takes the lock, grants or releases.
+    pub(crate) fn runtime_fence(
+        &self,
+        workspace: &str,
+        assignment: &str,
+    ) -> Result<Option<&'static str>, RegistrationError> {
+        use forge_runner_host::fence::Diagnosis;
+        let Some(runtime) = self.repository.runtime(workspace, assignment)? else {
+            return Ok(None);
+        };
+        let Ok(directory) =
+            super::runtime_directory::mapped(&self.repository, workspace, &runtime.launch, false)
+        else {
+            return Ok(None);
+        };
+        Ok(match Diagnosis::of(&directory) {
+            Diagnosis::Unfenced => None,
+            Diagnosis::Proven => Some("runtime-fence-proven"),
+            Diagnosis::Unproven => Some("runtime-fence-unproven"),
+        })
+    }
+
+    pub(crate) fn followups(
+        &self,
+        workspace: &str,
+        assignment: &str,
+    ) -> Result<Vec<forge_app::durable_execution::followup::Receipt>, RegistrationError> {
+        forge_app::durable_execution::followup::Repository::followups(
+            &self.repository,
+            workspace,
+            assignment,
+        )
+    }
+
+    /// Record only. No runner, model, tool call, lease or storage open occurs here.
+    pub(crate) fn follow_up(
+        &self,
+        workspace: &str,
+        request: &forge_app::durable_execution::followup::Request,
+    ) -> Result<forge_app::durable_execution::followup::Receipt, RegistrationError> {
+        forge_app::durable_execution::followup::Repository::record_followup(
+            &self.repository,
+            workspace,
+            request,
+        )
+    }
+
+    /// Persisted new-launch policy. Production composition never grants controlled
+    /// eligibility (T19/T20 own that), so admission is reported as not granted.
+    pub(crate) fn durable_launch_status(
+        &self,
+    ) -> Result<forge_app::durable_execution::launch_control::Status, RegistrationError> {
+        use forge_app::durable_execution::launch_control::{Repository, Status};
+        Ok(Status::compose(
+            self.repository.durable_launch_rollback()?,
+            false,
+        ))
+    }
+
+    /// Record the sticky rollback; existing Assignments and Herdr work are untouched.
+    pub(crate) fn disable_durable_launches(
+        &self,
+        request: &forge_app::durable_execution::launch_control::DisableRequest,
+    ) -> Result<forge_app::durable_execution::launch_control::Status, RegistrationError> {
+        use forge_app::durable_execution::launch_control::{Repository, Status};
+        request.validate()?;
+        let (rollback, replayed) = self.repository.disable_durable_launches(request)?;
+        let mut status = Status::compose(Some(rollback), false);
+        status.replayed = replayed;
+        Ok(status)
+    }
+
+    /// Delete retired runtime history after Forge authorizes it. Needs no runtime
+    /// components, profile or credential and never starts a runner.
+    pub(crate) fn purge_runtime(
+        &self,
+        workspace: &str,
+        request: &forge_app::durable_execution::purge::Request,
+    ) -> Result<forge_app::durable_execution::purge::Record, RegistrationError> {
+        request.validate()?;
+        // Scope is authorized by the repository before any binding is read.
+        forge_app::durable_execution::purge::Repository::purge_record(
+            &self.repository,
+            workspace,
+            &request.assignment_id,
+        )?;
+        let runtime = self
+            .repository
+            .runtime(workspace, &request.assignment_id)?
+            .ok_or_else(|| {
+                RegistrationError::new(
+                    "durable-intent-missing",
+                    "Assignment has no retained durable runtime",
+                )
+            })?;
+        super::purge::run(
+            &self.repository,
+            workspace,
+            &runtime.launch,
+            &request.operation_id,
+        )
+    }
+
+    pub(crate) fn purge_record(
+        &self,
+        workspace: &str,
+        assignment: &str,
+    ) -> Result<Option<forge_app::durable_execution::purge::Record>, RegistrationError> {
+        forge_app::durable_execution::purge::Repository::purge_record(
+            &self.repository,
+            workspace,
+            assignment,
+        )
+    }
+
+    /// Read one committed page. Needs trusted matched components but never the
+    /// host lock, so it works beside a live writer and for stopped runners.
+    pub(crate) async fn transcript(
+        &self,
+        workspace: &str,
+        request: &forge_rpc::AssignmentTranscriptRequest,
+    ) -> Result<forge_rpc::AssignmentTranscriptResponse, RegistrationError> {
+        request.validate()?;
+        let runtime = self
+            .repository
+            .runtime(workspace, &request.assignment_id)?
+            .ok_or_else(|| {
+                RegistrationError::new(
+                    "durable-intent-missing",
+                    "Assignment has no retained durable runtime",
+                )
+            })?;
+        let components = self.catalog.inspection_for(&runtime.launch)?.ok_or_else(|| {
+            RegistrationError::new(
+                "durable-transcript-unconfigured",
+                "configure trusted matched inspection components on the daemon to read transcripts",
+            )
+        })?;
+        super::transcript::page(
+            &self.repository,
+            workspace,
+            &runtime.launch,
+            &components.node,
+            &components.inspector,
+            request,
+        )
+        .await
     }
 
     pub(crate) async fn resolve(
@@ -106,7 +268,7 @@ impl OperatorService {
         )? {
             return Ok(receipt);
         }
-        let components = self.components.as_ref().ok_or_else(|| RegistrationError::new(
+        let components = self.catalog.inspection_for(&runtime.launch)?.ok_or_else(|| RegistrationError::new(
             "durable-effect-inspector-unconfigured", "configure trusted matched effect inspection components on the daemon; preserve uncertainty and do not replay",
         ))?;
         resolve_exclusive(

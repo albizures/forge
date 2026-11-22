@@ -1,7 +1,6 @@
 # Agent Profile policy boundary
 
-Implementation contract for Spec #614, Tasks #615–621. Operator preview,
-registration and explicit selection are available. The Herdr adapter uses a
+Operator preview, registration and explicit selection are available. The Herdr adapter uses a
 flags-only Pi argument path and protected [Assignment bootstrap and context](assignment-context.md)
 for registered Task and Grilling policies. Task attempts use their immutable
 Check-pinned revisions; Grillings use the Workspace selection. Dispatch preflight
@@ -9,11 +8,8 @@ checks applicable direct inputs and the neighboring Forge CLI before preparing a
 worktree or allocating provider
 resources. Final input validation is repeated before launch.
 
-During #617 the human explicitly chose “use only flags for now”, superseding the
-custom-loader/runtime-attestation requirements for this implementation slice
-(recorded on #614). Flags configure Pi; they do not attest a closed runtime.
-See the [acceptance coverage handoff](agent-profile-acceptance.md) for test
-mapping and the guarantees superseded by that decision.
+Pi is configured with command-line flags only. Flags configure Pi; they do not attest a
+closed runtime, and there is no custom loader.
 
 ## Authoring and resolution
 
@@ -90,7 +86,10 @@ but cannot grant membership. Skill paths may identify SKILL.md or its directory.
 MCP paths identify catalog configuration files; a file containing multiple server
 entries is ambiguous and must be selected by unique server name instead.
 
-## Durable profiles and authentication (controlled pre-dispatch boundary)
+## Durable profiles and authentication
+
+Operational setup, the supported matrix and rollout state are in
+[Durable Task execution](durable-execution.md).
 
 Task profiles may explicitly use `runtime: pi-durable` with version 1,
 `model: openai/gpt-4.1`, `thinkingLevel: off`, and a unique subset of
@@ -116,16 +115,18 @@ have a canonical owner-owned 0700 parent directory. The file contains one
 printable ASCII token (1–4096 bytes) with an optional final LF. Missing, malformed,
 redirected, hardlinked or permissive sources fail with redacted diagnostics.
 The library configuration equivalent is `DaemonConfig::durable_model_key_file`
-or `Daemon::with_durable_model_key_file`. Managed process configuration does not
-inherit this environment setting; packaged managed configuration remains later
-installation work. Do not copy a Pi configuration directory or put a key in
+or `Daemon::with_durable_model_key_file`. A Forgeup-managed daemon does not
+inherit this environment setting; its equivalent is the explicit
+`forgeup daemon start --durable-openai-key-file PATH` (a path only, requiring a
+schema 2 runner bundle). Without it, durable preview/registration there fails
+with `durable-model-auth-unavailable`. Do not copy a Pi configuration directory or put a key in
 profile YAML, command arguments, prompts or environment values.
 
 Durable operator preview and registration validate this local authentication
 configuration before accepting a new profile. Registration persists the exact
 policy that passed preflight rather than resolving the mutable source a second
 time. Local validation makes no provider request and does not certify account
-permissions; real-provider release verification remains T19. Herdr profiles do
+permissions; real-provider verification belongs to the release gate. Herdr profiles do
 not require the new credential setting. Historical profile reads and original
 backend inspection/retirement never invoke this new-launch source/auth check.
 
@@ -142,12 +143,13 @@ from provider events before Harness persistence. This is not a hostile-agent
 sandbox: same-user tools can access host files deliberately, and stored repository
 content remains sensitive.
 
-This is **not dispatch readiness**: production durable selection/launch remains
-unsupported. The Check-bound launch/bootstrap tracer is T07 and must invoke
-preflight before capability issuance, bind the actual worktree/configuration,
-and gate behavioral context behind successful authenticated bootstrap. The
-factory itself opens no store or scheduler and grants no authority. No live
-operator profiles need to be registered to test this component.
+This is **not dispatch readiness**. Check-bound launch invokes this preflight
+before capability issuance, binds the actual worktree/configuration and gates
+behavioral context behind successful authenticated bootstrap, but new durable
+launches are withheld by the release gate in production Revisions. Registering
+a durable revision also selects it as the Workspace Task profile; reselect a
+Herdr Task revision so Workspace readiness for Herdr Tasks and Grilling stays
+valid. The factory itself opens no store or scheduler and grants no authority.
 
 ## Operator preview, registration and selection
 
@@ -378,27 +380,3 @@ to the original MCP catalog do not replace a registered configuration.
 This freezes policy, not resource execution. There is no OS/same-user sandbox,
 recursive dependency pinning, external-service/model/credential freeze, or atomic
 validation-to-load filesystem snapshot. Selected extensions remain trusted code.
-
-## Bound versus live Assignment data
-
-Dependent context/runtime Tasks must use these existing durable ownership facts:
-
-- Assignment `id`, `record_id`, attempt number and bound `profile.record_type` /
-  `profile.revision`; profile loading follows that immutable key, never a current
-  Workspace selection or greatest revision.
-- Persisted Assignment Workspace/provider identity and exact provider resource
-  tuples. Execution cwd is the Task's bound Managed Worktree, or the Grilling's
-  Forge Workspace root; a first Project root is not an execution-root proxy.
-- Lifecycle policy remains part of the bound profile; `launch_policy` adds the
-  frozen model/resources/behavior, not authority to alter retries or holds.
-- Context envelopes keep bound identity separate from live Record,
-  relationships, comments/history and complete Project Scope, with freshness
-  metadata. Never expose the persisted MCP configuration as public context.
-- Missing profile sources/direct files must not prevent existing authenticated actions,
-  reconciliation or retirement. Direct-input validation belongs only to new
-  execution and supported reload. It must not erase ownership evidence, prove
-  process exit, release capacity, or replay one-shot launch.
-
-Assignment context uses schemaVersion 1. Runtime
-identity/closed-loader enforcement is not implemented under the approved
-flags-only scope; no persisted runtime-attestation fields are claimed.

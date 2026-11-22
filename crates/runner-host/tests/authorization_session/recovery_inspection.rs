@@ -32,6 +32,7 @@ pub(super) fn seed(f: &Fixture, mode: &str) -> Value {
         .write_all(
             &serde_json::to_vec(&serde_json::json!({
                 "directory": f.directory, "launch": f.launch, "mode": mode,
+                "worktree": forge_app::managed_worktree_path(&f.root, "alpha", f.record),
             }))
             .unwrap(),
         )

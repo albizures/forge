@@ -1,132 +1,136 @@
-// Controlled T07 process fixture: real owner/lease/bootstrap/Harness/coding tools,
-// deterministic model only. Never selected by production adapter wiring.
+// Controlled process fixture for the production-composed supervised tracer.
+// Runs the SHIPPED production Check runner (src/check-runner.ts, protected
+// check-runtime.json written by the daemon's production launcher, real owner,
+// lease, bootstrap, profile, model-key loading, guarded coding tools and
+// storage) with ONLY the model provider substituted by a deterministic faux
+// model. The daemon composes this file as its runner entry, so the same fixture
+// serves the first admission and a same-attempt recovery incarnation.
+//
+// Scripted test data: `<Workspace root>/controlled-tracer.json` (mode, Git and
+// effect script) is fixture-wide; this worker combines it with the protected
+// input into `controlled-launch.json` for the controlled effect script. The
+// shipped runner never reads either file.
 import assert from 'node:assert/strict';
-import { createInterface } from 'node:readline';
-import { readFileSync, existsSync } from 'node:fs';
-import { readlinkSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { createServer } from 'node:net';
 import { once } from 'node:events';
-import { BACKGROUND_CONTEXT as context, withAbortSignal } from '@earendil-works/chord/context';
-import { Harness } from '@earendil-works/pi-durable';
-import { openNodeSqliteStorage } from '@earendil-works/pi-durable/storage/sqlite/node';
-import { createModels, fauxProvider, fauxAssistantMessage, fauxToolCall } from '@earendil-works/pi-ai';
-import { Authorization, guardProvider } from '../src/authorization.ts';
-import { createCheckRuntime } from '../src/check-runtime.ts';
-import { compatibility, canonical, exactKeys, requireCondition, validateRequest } from '../src/contract.ts';
-import { ownerIdentity } from '../src/owner.ts';
-import { databasePath, journal, persistIntent, persistRoot, validateDirectory } from '../src/storage.ts';
+import { BACKGROUND_CONTEXT as context } from '@earendil-works/chord/context';
+import { SqliteStorage } from '@earendil-works/pi-durable/storage/sqlite';
+import { fauxProvider, fauxAssistantMessage, fauxToolCall } from '@earendil-works/pi-ai';
+import { runCheckRunner } from '../src/check-runner.ts';
+import { journal } from '../src/storage.ts';
 
-process.umask(0o077);
 const [directory, worktree] = process.argv.slice(2);
-validateDirectory(directory, worktree);
-const input = JSON.parse(readFileSync(join(directory, 'controlled-launch.json'), 'utf8'));
-validateRequest(input.request);
-const launch = input.request.operation.launch;
-requireCondition(input.request.operation.kind === 'admit', 'runner-request-invalid');
-requireCondition(!journal(directory), 'runner-recovery-unavailable');
-const emit = value => console.log(JSON.stringify(value));
-const lines = createInterface({ input: process.stdin });
-let authorization, evidence, harness, executing = false, calls = 0, tools = 0;
+// <root>/.forge/assignment-runtimes/<digest>
+const root = dirname(dirname(dirname(directory)));
+const fixture = JSON.parse(readFileSync(join(root, 'controlled-tracer.json'), 'utf8'));
+const input = JSON.parse(readFileSync(join(directory, 'check-runtime.json'), 'utf8'));
+const launchFile = join(directory, 'controlled-launch.json');
+const boundaryFile = join(directory, 'controlled-recovery-boundary.json');
+const recovering = existsSync(boundaryFile);
+const test = {
+  launch: input.launch, bound: input.bound, generation: input.generation,
+  capability: input.capability, mode: fixture.mode, git: fixture.git, effect_script: fixture.effect_script,
+};
+if (!existsSync(launchFile)) writeFileSync(launchFile, JSON.stringify(test), { mode: 0o600 });
+const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
+const effect = () => fauxAssistantMessage(fauxToolCall('bash', {
+  command: [process.execPath, test.effect_script, launchFile].map(quote).join(' '),
+}), { stopReason: 'toolUse' });
+
+// Test synchronization only: the first model response waits until the Rust
+// driver has inspected the bootstrapped state. It cannot create authority.
+// Linux abstract socket: canonical runtime paths may exceed sockaddr_un limits.
 const barrier = createServer();
 const released = new Promise(resolve => barrier.once('connection', socket => {
   socket.once('data', data => { assert.equal(String(data), 'start\n'); socket.end(); resolve(); });
 }));
-// Linux abstract socket: canonical runtime paths may exceed sockaddr_un limits.
-// This is only a test barrier, not an execution credential or production control.
 barrier.listen(`\0forge-t07-start-${process.pid}`);
 await once(barrier, 'listening');
 
-async function execute() {
-  try {
-    const runtime = await createCheckRuntime(launch, input.generation, input.bound, input.capability,
-      input.configuration, input.credential_file, authorization, directory);
-    emit({ event: 'bootstrapped', calls, tools });
-    // Test synchronization only; this cannot create/extend execution authority.
-    await released;
-    barrier.close();
-    authorization.admitFor(launch, input.generation);
-    const model = fauxProvider();
-    const models = createModels({ authContext: { env: async () => undefined, fileExists: async () => false } });
-    models.setProvider(guardProvider(model.provider, authorization));
-    const response = () => {
-      calls++;
-      return fauxAssistantMessage('Plausible completion prose is not an accepted Forge Outcome.');
-    };
-    const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
-    model.setResponses(input.mode === 'missing' ? [response] : [
-      transcript => {
-        calls++;
-        const text = JSON.stringify(transcript);
-        assert.ok(text.includes('T07-SUPERVISED-BEHAVIOR'));
-        assert.ok(text.includes(launch.attempt_id));
-        assert.ok(!text.includes(input.capability.FORGE_ASSIGNMENT_CAPABILITY_SECRET_FILE));
-        return fauxAssistantMessage(fauxToolCall('bash', {
-          command: [process.execPath, input.effect_script, join(directory, 'controlled-launch.json')].map(quote).join(' '),
-        }), { stopReason: 'toolUse' });
-      },
-      transcript => {
-        const results = transcript.messages.filter(message => message.role === 'toolResult');
-        assert.equal(results.length, 1);
-        assert.equal(Boolean(results[0].isError), input.mode === 'rejected');
-        const text = JSON.stringify(results[0]);
-        assert.ok(text.includes(input.mode === 'rejected' ? 'stale-generation' : launch.assignment_id));
-        tools++;
-        return response();
-      },
-    ]);
-    const executionContext = withAbortSignal(authorization.signal, context);
-    persistIntent(directory, launch);
-    harness = await Harness.open(await openNodeSqliteStorage(databasePath(directory)), { ...runtime.options, models }, executionContext);
-    authorization.admitFor(launch, input.generation);
-    const root = await harness.root(executionContext, { agent: { ...runtime.agent, model: { provider: 'faux', modelId: 'faux-1' } } });
-    persistRoot(directory, root.id);
-    authorization.admitFor(launch, input.generation);
-    const submission = await root.submit({ type: 'input', requestId: launch.operation_id, content: 'Execute the authenticated bound Check only.' }, executionContext);
-    emit({ event: 'admission', response: { compatibility: compatibility(), assignment_id: launch.assignment_id,
-      runtime_id: launch.runtime_id, operation_id: launch.operation_id,
-      admission: { state: 'accepted', admission_id: String(submission.id) } } });
-    assert.equal((await submission.wait(context)).status, 'done');
-    await harness.close(context);
-    harness = undefined;
-    assert.equal(model.state.callCount, calls);
-    assert.equal(model.getPendingResponseCount(), 0);
-    emit({ event: 'settled', calls, tools });
-  } catch {
-    authorization.close();
-    emit({ event: 'runtime-failed', calls, tools });
-  }
+// `packaged` (T24) crashes at the same boundary, then recovers after a Revision switch.
+// `daemon-restart*` (T25) stops at the same boundary while its daemon is killed.
+// T25 fault injection: after its daemon dies the shipped runner sees EOF, and
+// closing its Harness under a stuck generation leaves an unhandled rejection
+// that ends the process: the host then records ordinary crash proof
+// (`daemon-restart-exit`). These modes model a runner whose shutdown hangs
+// instead, so only the host watchdog's lease expiry, fence and group KILL end it.
+if (['daemon-restart', 'daemon-restart-retire', 'daemon-restart-tool'].includes(test.mode) && !recovering) {
+  process.stdout.on('error', () => {});
+  process.on('uncaughtException', () => {});
+  process.on('unhandledRejection', () => {});
+  setInterval(() => {}, 1000);
+}
+const boundaryModes = ['recovered', 'packaged', 'daemon-restart', 'daemon-restart-retire', 'daemon-restart-exit'];
+if (boundaryModes.includes(test.mode) && !recovering) {
+  // Fault injection at the pinned upstream storage class, in this test process
+  // only: stop forever BEFORE the first model generation is committed as running.
+  // The boundary is reported out of band; stdout stays strictly protocol 1.
+  const commit = SqliteStorage.prototype.commit;
+  SqliteStorage.prototype.commit = async function (batches, ...rest) {
+    if (batches.flat().some(row => row.type === 'task' && row.value.kind === 'pi.generation' && row.value.state.status === 'running')) {
+      const root = journal(directory).root;
+      const submission = await this.submissionByRequest(root, test.launch.operation_id, context);
+      writeFileSync(boundaryFile, JSON.stringify({ root, admission_id: String(submission.id) }), { mode: 0o600 });
+      await new Promise(() => {});
+    }
+    return commit.call(this, batches, ...rest);
+  };
+}
+
+function recovered() {
+  const model = fauxProvider();
+  model.setResponses([
+    transcript => {
+      const text = JSON.stringify(transcript);
+      assert.ok(text.includes('T07-SUPERVISED-BEHAVIOR'));
+      assert.ok(text.includes(test.launch.attempt_id));
+      return effect();
+    },
+    transcript => {
+      const results = transcript.messages.filter(m => m.role === 'toolResult');
+      assert.equal(results.length, 1); assert.ok(!results[0].isError);
+      return fauxAssistantMessage('Recovered original input; accepted Outcome remains Forge authority.');
+    },
+  ]);
+  return { provider: model.provider, model: { provider: 'faux', modelId: 'faux-1' } };
+}
+
+function substitute() {
+  if (recovering) return recovered();
+  const model = fauxProvider();
+  const answer = () => fauxAssistantMessage('Plausible completion prose is not an accepted Forge Outcome.');
+  // A recorded operator follow-up joins the same conversation; prose only.
+  const followUp = transcript => {
+    assert.ok(JSON.stringify(transcript).includes('T23-FOLLOWUP'));
+    return fauxAssistantMessage('Follow-up acknowledged; no Outcome change.');
+  };
+  model.setResponses(test.mode === 'missing' ? [async () => { await released; return answer(); }, followUp] : [
+    async transcript => {
+      await released;
+      const text = JSON.stringify(transcript);
+      assert.ok(text.includes('T07-SUPERVISED-BEHAVIOR'));
+      assert.ok(text.includes(test.launch.attempt_id));
+      if (test.mode === 'chain-complete') {
+        assert.ok(test.bound.checkAttempt.continuation);
+        assert.ok(text.includes('accepted-continuation-handoff'));
+      }
+      if (test.mode === 'review') assert.equal(test.bound.checkAttempt.continuation, null);
+      assert.ok(!text.includes(test.capability.FORGE_ASSIGNMENT_CAPABILITY_SECRET_FILE));
+      return effect();
+    },
+    transcript => {
+      const results = transcript.messages.filter(message => message.role === 'toolResult');
+      assert.equal(results.length, 1);
+      assert.equal(Boolean(results[0].isError), test.mode === 'rejected');
+      assert.ok(JSON.stringify(results[0]).includes(test.mode === 'rejected' ? 'stale-generation' : test.launch.assignment_id));
+      return answer();
+    },
+  ]);
+  return { provider: model.provider, model: { provider: 'faux', modelId: 'faux-1' } };
 }
 
 try {
-  for await (const line of lines) {
-    if (!evidence) {
-      assert.equal(line, '{"host_ready":true}');
-      evidence = ownerIdentity(directory);
-      emit({ event: 'owned', identity: evidence, compatibility: compatibility() });
-      continue;
-    }
-    const control = JSON.parse(line);
-    exactKeys(control, ['host_control', 'lease']);
-    requireCondition(control.host_control === 1 && !existsSync(join(directory, 'watchdog.json')), 'assignment-lease-denied');
-    const lease = control.lease;
-    requireCondition(canonical(lease.launch) === canonical(launch) && lease.generation === input.generation, 'assignment-lease-denied');
-    if (!authorization) authorization = new Authorization(launch, input.generation, {
-      boot_id: evidence.owner.boot_id, time_namespace: readlinkSync('/proc/self/ns/time'),
-      host_pid: evidence.owner.host_pid, host_start: evidence.owner.host_start,
-      worker_pid: process.pid, worker_start: evidence.worker_start,
-      lock_device: evidence.owner.lock_device, lock_inode: evidence.owner.lock_inode,
-    }, lease.daemon_epoch);
-    authorization.accept(lease);
-    emit({ event: 'authorized', sequence: lease.sequence });
-    if (!executing) { executing = true; void execute(); }
-  }
-} catch {
-  authorization?.close();
-  emit({ event: 'runtime-failed', calls, tools });
-} finally {
-  authorization?.close();
-  barrier.close();
-  if (harness) await harness.close(context);
-  lines.close();
-}
+  process.exitCode = await runCheckRunner(directory, worktree, substitute);
+} finally { barrier.close(); }

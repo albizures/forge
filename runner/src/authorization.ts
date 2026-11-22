@@ -40,6 +40,7 @@ export class Authorization {
   #payload: string | undefined;
   #recovery: { envelope: string; lease: string } | undefined;
   #lastNow: number | undefined;
+  #recoveryOpened = false;
   #clock: () => number;
   #timer: ReturnType<typeof setInterval>;
 
@@ -155,6 +156,15 @@ export class Authorization {
   admitFor(launch: Launch, generation: number): void {
     this.admit();
     if (canonical({ launch, generation }) !== this.#execution) this.#fence();
+  }
+
+  /** One writable reopen per freshly delivered recovery envelope. Ordinary
+   * leases, unarmed preparations and retained grant-shaped data cannot open it.
+   */
+  beginRecovery(launch: Launch, generation: number): void {
+    this.admitFor(launch, generation);
+    requireCondition(this.#recovery && this.#previous && !this.#recoveryOpened, 'assignment-lease-denied');
+    this.#recoveryOpened = true;
   }
 
   check(): void {

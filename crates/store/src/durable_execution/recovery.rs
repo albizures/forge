@@ -51,28 +51,19 @@ impl Repository for SqliteProjectRepository {
             load(&tx, &launch.assignment_id)?.ok_or_else(|| error("durable-intent-missing"))?;
         exact(&runtime, launch)?;
         claim.validate()?;
-        let mut statement = tx.prepare(
-            "SELECT resource_id FROM agent_assignment_resources WHERE assignment_id = ?1 AND resource_kind = 'recovery-claim' LIMIT 2",
-        ).map_err(storage_error)?;
-        // Include retired history: no implicit takeover/reuse after cleanup.
-        let known = statement
-            .query_map([&launch.assignment_id], |r| r.get::<_, String>(0))
-            .map_err(storage_error)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(storage_error)?;
-        drop(statement);
-        if let [stored] = known.as_slice() {
-            let stored: Claim =
-                serde_json::from_str(stored).map_err(|_| error("durable-storage-invalid"))?;
-            stored.validate()?;
-            if stored != *claim {
-                return Err(error("durable-recovery-claim-conflict"));
-            }
+        let known = claims(&tx, &launch.assignment_id)?;
+        // Historical exact replay remains evidence only, even across later
+        // recovery episodes. No active claim or unchanged predecessor transfers.
+        if known.iter().any(|(stored, _, _)| stored == claim) {
             tx.commit().map_err(storage_error)?;
-            return Ok(stored);
+            return Ok(claim.clone());
         }
-        if !known.is_empty() {
-            return Err(error("durable-storage-invalid"));
+        if known.iter().any(|(stored, retired, _)| {
+            !retired
+                || stored.operation_id == claim.operation_id
+                || stored.candidate_sha256 == claim.candidate_sha256
+        }) {
+            return Err(error("durable-recovery-claim-conflict"));
         }
         let current = candidate(&tx, workspace, launch, None)?;
         if Claim::for_candidate(
@@ -132,16 +123,12 @@ fn claimed_candidate(
 ) -> Result<Candidate, RegistrationError> {
     authorize(c, workspace, &claim.launch, false)?;
     claim.validate()?;
-    let claims = c.prepare(
-        "SELECT resource_id, retired_at_millis FROM agent_assignment_resources WHERE assignment_id = ?1 AND resource_kind = 'recovery-claim' LIMIT 2",
-    ).map_err(storage_error)?.query_map([&claim.launch.assignment_id], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?))
-    }).map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)?;
-    let [(json, None)] = claims.as_slice() else {
+    let claims = claims(c, &claim.launch.assignment_id)?;
+    let active: Vec<_> = claims.iter().filter(|(_, retired, _)| !retired).collect();
+    let [stored] = active.as_slice() else {
         return Err(error("durable-recovery-claim-missing"));
     };
-    let stored: Claim = serde_json::from_str(json).map_err(|_| error("durable-storage-invalid"))?;
-    if stored != *claim {
+    if stored.0 != *claim {
         return Err(error("durable-recovery-claim-conflict"));
     }
     let current = candidate(c, workspace, &claim.launch, Some(claim))?;
@@ -154,6 +141,34 @@ fn claimed_candidate(
         return Err(error("durable-recovery-candidate-stale"));
     }
     Ok(current)
+}
+
+// Existing resource-ledger representation, with immutable episodes and at most
+// one live claim. All readers validate semantic duplicates/foreign histories.
+pub(super) fn claims(
+    c: &Connection,
+    assignment: &str,
+) -> Result<Vec<(Claim, bool, String)>, RegistrationError> {
+    let rows = c.prepare("SELECT resource_id, retired_at_millis IS NOT NULL FROM agent_assignment_resources WHERE assignment_id = ?1 AND resource_kind = 'recovery-claim'")
+        .map_err(storage_error)?.query_map([assignment], |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?)))
+        .map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)?;
+    let mut seen = std::collections::HashSet::new();
+    let mut active = 0;
+    rows.into_iter()
+        .map(|(id, retired)| {
+            let claim: Claim =
+                serde_json::from_str(&id).map_err(|_| error("durable-storage-invalid"))?;
+            claim.validate()?;
+            active += usize::from(!retired);
+            if claim.launch.assignment_id != assignment
+                || !seen.insert(claim.operation_id.clone())
+                || active > 1
+            {
+                return Err(error("durable-storage-invalid"));
+            }
+            Ok((claim, retired, id))
+        })
+        .collect()
 }
 
 pub(super) fn candidate(

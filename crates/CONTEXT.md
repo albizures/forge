@@ -61,7 +61,7 @@ One launch of a Managed Daemon, identified by a Forgeup-generated random instanc
 _Avoid_: revision, daemon version
 
 **Forge Workspace**:
-A Forge-owned boundary with a fixed filesystem root that groups Projects and Records and owns their dispatch profile selections and Herdr Workspace binding.
+A Forge-owned boundary with a fixed filesystem root that groups Projects and Records and owns dispatch profile selections and applicable provider bindings. A provider's user-interface container is not the Forge Workspace's filesystem or execution identity.
 _Avoid_: Managed Worktree, Herdr Workspace, task workspace
 
 **Project**:
@@ -169,7 +169,7 @@ An operator-managed, Project-configured ordered set of completion criteria and o
 _Avoid_: live checklist, check runner configuration
 
 **Check**:
-An immutable named Task completion criterion with a stable identity, description, order and optional pinned Agent Profile revision, copied from a Check Template or provided as the mandatory baseline for a Projectless Task. Every Check is required for completion; its profile supplies agent configuration for every dispatched attempt, while Manual execution permits profile-less Checks, and Checks cannot be individually added, edited, or retired on a Task.
+A named Task completion criterion with immutable identity, description and order, initially copied with its optional pinned Agent Profile revision from a Check Template or provided as the mandatory baseline for a Projectless Task. Every Check is required for completion; its effective profile supplies agent configuration for every dispatched attempt, while Manual execution permits profile-less Checks, and Checks cannot be individually added, edited, or retired on a Task. An explicit validated profile migration records a replacement effective selection while preserving the original pin as history and invalidating prior evidence, rather than silently reinterpreting the original revision.
 _Avoid_: executable check, check runner
 
 **Implementation Check**:
@@ -209,7 +209,7 @@ A human-in-the-loop decision Record type that is a leaf child of one Wayfinder. 
 _Avoid_: question, approval
 
 **Agent Assignment**:
-A Forge-owned, durable association between one Record and an externally managed Agent for one work attempt, binding an Agent Profile revision and execution identity. A Task Assignment advances exactly one Check and binds an immutable attempt identity, starting freshness generation and input evidence; its profile revision is the revision pinned by that Check. Its Agent authenticates, acknowledges and starts its assigned Task or Grilling before working; the Assignment remains as history after the Agent is removed or replaced.
+A Forge-owned, durable association between one Record and an externally managed Agent for one work attempt, binding an Agent Profile revision and execution identity. A Task Assignment advances exactly one Check and binds an immutable attempt identity, starting freshness generation and input evidence; its profile revision is that Check's effective revision when the attempt was reserved and never changes afterwards. Its Agent authenticates, acknowledges and starts its assigned Task or Grilling before working; the Assignment remains as history after the Agent is removed or replaced.
 _Avoid_: record agent metadata, agent link
 
 **Dispatcher**:
@@ -228,6 +228,10 @@ _Avoid_: agent token, agent credential
 A time-bounded grant permitting an Agent Assignment to continue authorized execution, subject to revocation and the Assignment's bound scope. Expiration withdraws that permission but does not prove that the Agent or its external actions have stopped.
 _Avoid_: Assignment Heartbeat, proof of exit, Assignment Capability
 
+**Assignment Execution Recovery**:
+Resumption of an interrupted Agent Assignment under its existing Check attempt and bound authority after Forge validates that continuation is safe. It is distinct from a deliberate Continuation and does not authorize a replacement Agent Assignment.
+_Avoid_: Continuation, replacement attempt, automatic retry
+
 **Assignment Capability Delivery**:
 The session-scoped endpoint, Assignment Identifier, and owner-only secret-file path through which Forge makes an Assignment Capability available to its bound Agent. The capability secret itself is not placed in the Agent's prompt or environment.
 _Avoid_: capability injection, agent token environment
@@ -237,7 +241,7 @@ The bounded Forge information an Agent Assignment may read, combining its bound 
 _Avoid_: project visibility, record graph access, execution snapshot
 
 **Agent Profile**:
-An immutable, revisioned Forge-owned configuration for a Record Type containing agent launch policy and role-specific behavioral instructions, subordinate to Forge-owned execution and lifecycle rules. It may select zero or more reusable Skills but does not belong to a Skill. Task Checks pin their revisions through Check Templates, while Forge Workspaces select Grilling revisions; each Agent Assignment retains its bound revision, freezing configuration and behavior rather than the complete runtime or resource filesystem.
+An immutable, revisioned Forge-owned configuration for a Record Type containing agent launch policy and role-specific behavioral instructions, subordinate to Forge-owned execution and lifecycle rules. It may select zero or more reusable Skills but does not belong to a Skill. Task Checks select revisions initially copied from Check Templates and replaceable only through explicit validated migration, while Forge Workspaces select Grilling revisions; each Agent Assignment retains its originally bound revision, freezing configuration and behavior rather than the complete runtime or resource filesystem.
 _Avoid_: agent configuration, mutable profile, record profile
 
 **Agent Workspace**:
@@ -245,7 +249,7 @@ The filesystem folder in which an Agent works for an Agent Assignment. Task Assi
 _Avoid_: Herdr Workspace, agent project
 
 **Forge Dispatch Workspace**:
-An existing operator-selected Herdr Workspace bound exclusively to one Forge Workspace within a daemon/store. It contains dedicated Agent Assignment tabs but is neither a Forge-owned filesystem root nor a container Forge owns or deletes.
+An existing operator-selected Herdr Workspace bound exclusively to one Forge Workspace within a daemon/store for Herdr-backed dispatch. It contains dedicated Agent Assignment tabs but is neither a Forge-owned filesystem root, a container Forge owns or deletes, nor a prerequisite for other execution backends.
 _Avoid_: Forge Workspace, Project workspace, task workspace
 
 **Assignment Recovery Blocker**:

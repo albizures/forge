@@ -1,6 +1,7 @@
 mod agent_profiles;
 mod assignment_check_commands;
 mod assignment_finding_commands;
+mod assignment_inspection_command;
 mod check_templates;
 mod checks;
 mod effect_resolution_command;
@@ -406,10 +407,22 @@ enum AgentDispatchCommand {
     ResetContinuations(ResetContinuationsArgs),
     /// Authorize clean or content-bound dirty/staged/untracked salvage after verified retirement; retains holds.
     RecoverRetainedWork(RecoverRetainedWorkArgs),
+    /// Explicitly delete a retired Assignment's runtime history; Forge's own records are kept.
+    AssignmentPurgeRuntime(assignment_inspection_command::PurgeArgs),
+    /// Read whether this daemon admits NEW durable launches (withheld by default); starts nothing.
+    DurableLaunchStatus(assignment_inspection_command::LaunchStatusArgs),
+    /// Sticky rollback of NEW durable launches; existing Assignments keep their original backend.
+    DurableLaunchDisable(assignment_inspection_command::LaunchDisableArgs),
     /// Clear a Dispatch Hold and reset interrupted-Check retries (not remediation or recovery blockers).
     Resume(DispatchTaskArgs),
     /// Inspect persisted Assignment evidence without contacting the provider.
     AssignmentInfo(AssignmentRetireArgs),
+    /// Read-only durable runtime identity, lease history, missing Outcome, uncertainty and retirement blockers.
+    AssignmentStatus(assignment_inspection_command::StatusArgs),
+    /// Read one paginated page of committed durable transcript entries; never starts or repairs a runner.
+    AssignmentTranscript(assignment_inspection_command::TranscriptArgs),
+    /// Durably record idempotent operator input bound to the original attempt; never rebinds work or proves delivery.
+    AssignmentFollowup(assignment_inspection_command::FollowUpArgs),
     /// Revoke an Assignment and verify provider cleanup; retains unresolved capacity and hold.
     AssignmentRetire(AssignmentRetireArgs),
     /// Assert unknown resources are safe after retirement (risk of duplicate agents).
@@ -592,6 +605,10 @@ enum RecordCommand {
     Edit(EditRecordArgs),
     /// Explicitly change Execution Mode after safe ownership/resource handoff.
     ExecutionMode(ExecutionModeArgs),
+    /// Explicitly select durable-compatible effective profiles for a Task's existing Checks.
+    CheckProfileMigrate(CheckProfileMigrateArgs),
+    /// List a Task's Check profile migration history.
+    CheckProfileMigrations(RecordIdArgs),
     /// Advance an open Record to in-progress (Tasks require Manual mode).
     Start(RecordIdArgs),
     /// Complete an in-progress Record.
@@ -624,6 +641,42 @@ struct ExecutionModeArgs {
     server_url: Option<String>,
     #[arg(long)]
     json: bool,
+}
+#[derive(Args, Debug)]
+#[command(
+    after_long_help = "Examples:\n  forge record check-profile-migrate 12 --operation-id adopt-1 --expected-generation 1 --check 7=5 --check 8=5 --actor operator --message 'adopt pi-durable'\n\nSelects the effective Agent Profile revision for the named Checks (CHECK_ID=REVISION; revisions must be registered durable-compatible Task profiles). Historical pins, Assignments and Assessments are preserved; work freshness is invalidated once. Requires no active ownership and reconciled resources. Reuse --operation-id to retry safely; reuse with different content is rejected. Changing a template or Workspace default alone never migrates a Check. Live Herdr work finishes or retires through Herdr."
+)]
+struct CheckProfileMigrateArgs {
+    /// Task ID.
+    id: u64,
+    /// Stable identity for safe retries (letters, digits, - _ . :; up to 128 bytes).
+    #[arg(long, value_name = "ID")]
+    operation_id: String,
+    /// Work generation you inspected; a stale value is rejected.
+    #[arg(long, value_name = "N")]
+    expected_generation: u64,
+    /// `CHECK_ID=REVISION`; repeat for each Check.
+    #[arg(long = "check", value_name = "CHECK_ID=REVISION", required = true, value_parser = parse_check_selection)]
+    checks: Vec<forge_rpc::CheckProfileSelection>,
+    #[arg(long)]
+    actor: String,
+    #[arg(long)]
+    message: String,
+    #[arg(long)]
+    server_url: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+fn parse_check_selection(value: &str) -> Result<forge_rpc::CheckProfileSelection, String> {
+    let (check, revision) = value
+        .split_once('=')
+        .ok_or("use CHECK_ID=REVISION".to_owned())?;
+    Ok(forge_rpc::CheckProfileSelection {
+        check_id: check.parse().map_err(|_| "invalid Check ID".to_owned())?,
+        profile_revision: revision
+            .parse()
+            .map_err(|_| "invalid revision".to_owned())?,
+    })
 }
 #[derive(Args, Debug)]
 struct ListRecordsArgs {
@@ -905,6 +958,7 @@ async fn run(cli: Cli) -> i32 {
         Command::Assignment { command } => assignment(command).await,
     }
 }
+#[allow(clippy::too_many_lines)]
 async fn run_record(command: RecordCommand, workspace: Option<String>) -> i32 {
     match command {
         RecordCommand::Finding { command } => findings::run(command, workspace).await,
@@ -954,6 +1008,10 @@ async fn run_record(command: RecordCommand, workspace: Option<String>) -> i32 {
                 )
                 .await,
             )
+        }
+        RecordCommand::CheckProfileMigrate(args) => check_profile_migrate(args, workspace).await,
+        RecordCommand::CheckProfileMigrations(args) => {
+            check_profile_migrations(args, workspace).await
         }
         RecordCommand::Start(args) => record_result(
             "start",
@@ -1447,6 +1505,24 @@ async fn agent_dispatch(command: AgentDispatchCommand, workspace: Option<String>
         }
         AgentDispatchCommand::AssignmentResolveEffect(args) => {
             return effect_resolution_command::run(args, workspace).await;
+        }
+        AgentDispatchCommand::AssignmentStatus(args) => {
+            return assignment_inspection_command::status(args, workspace).await;
+        }
+        AgentDispatchCommand::AssignmentTranscript(args) => {
+            return assignment_inspection_command::transcript(args, workspace).await;
+        }
+        AgentDispatchCommand::AssignmentFollowup(args) => {
+            return assignment_inspection_command::follow_up(args, workspace).await;
+        }
+        AgentDispatchCommand::AssignmentPurgeRuntime(args) => {
+            return assignment_inspection_command::purge_runtime(args, workspace).await;
+        }
+        AgentDispatchCommand::DurableLaunchStatus(args) => {
+            return assignment_inspection_command::launch_status(args, workspace).await;
+        }
+        AgentDispatchCommand::DurableLaunchDisable(args) => {
+            return assignment_inspection_command::launch_disable(args, workspace).await;
         }
         AgentDispatchCommand::AssignmentRetire(args) => return dispatcher_retire(args).await,
     };
@@ -1952,6 +2028,72 @@ async fn record_updates(args: RecordIdArgs, workspace: Option<String>) -> i32 {
     }
 }
 
+async fn check_profile_migrate(args: CheckProfileMigrateArgs, workspace: Option<String>) -> i32 {
+    let request = forge_rpc::CheckProfileMigrationRequest {
+        task_id: args.id,
+        operation_id: args.operation_id,
+        expected_generation: args.expected_generation,
+        selections: args.checks,
+        actor: args.actor,
+        message: args.message,
+    };
+    if let Err(error) = request.validate() {
+        eprintln!("forge record check-profile-migrate: {}", error.message);
+        return 1;
+    }
+    match forge_cli::request_migrate_check_profiles(
+        selected_record_endpoint(args.server_url.as_deref(), workspace.as_deref()).await,
+        request,
+    )
+    .await
+    {
+        Ok(receipt) => {
+            println!(
+                "{}",
+                if args.json {
+                    serde_json::to_string(&receipt).expect("typed receipt serializes")
+                } else {
+                    forge_cli::render_check_profile_migration(&receipt)
+                }
+            );
+            0
+        }
+        Err(error) => {
+            eprintln!("forge record check-profile-migrate: {error}");
+            1
+        }
+    }
+}
+
+async fn check_profile_migrations(args: RecordIdArgs, workspace: Option<String>) -> i32 {
+    match forge_cli::request_check_profile_migrations(
+        selected_record_endpoint(args.server_url.as_deref(), workspace.as_deref()).await,
+        args.id,
+    )
+    .await
+    {
+        Ok(history) => {
+            if args.json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&history).expect("typed history serializes")
+                );
+            } else if history.is_empty() {
+                println!("No Check profile migrations recorded for Task {}.", args.id);
+            } else {
+                for receipt in &history {
+                    println!("{}", forge_cli::render_check_profile_migration(receipt));
+                }
+            }
+            0
+        }
+        Err(error) => {
+            eprintln!("forge record check-profile-migrations: {error}");
+            1
+        }
+    }
+}
+
 fn record_result(
     operation: &str,
     json: bool,
@@ -2392,14 +2534,15 @@ mod tests {
             ("workspaces.md", include_str!("../../../docs/workspaces.md")),
             ("projects.md", include_str!("../../../docs/projects.md")),
             ("records.md", include_str!("../../../docs/records.md")),
+            ("checks.md", include_str!("../../../docs/checks.md")),
             ("stacks.md", include_str!("../../../docs/stacks.md")),
             (
                 "profiles/publication.md",
                 include_str!("../../../docs/profiles/publication.md"),
             ),
             (
-                "profiles/implementation-continuations.md",
-                include_str!("../../../docs/profiles/implementation-continuations.md"),
+                "profiles/implementation.md",
+                include_str!("../../../docs/profiles/implementation.md"),
             ),
             ("worktrees.md", include_str!("../../../docs/worktrees.md")),
             ("dispatch.md", include_str!("../../../docs/dispatch.md")),
@@ -2414,6 +2557,10 @@ mod tests {
             (
                 "assignment-recovery.md",
                 include_str!("../../../docs/assignment-recovery.md"),
+            ),
+            (
+                "durable-execution.md",
+                include_str!("../../../docs/durable-execution.md"),
             ),
         ];
         for (name, document) in documents {
@@ -2463,8 +2610,36 @@ mod tests {
     }
 
     #[test]
+    fn durable_guide_shows_every_durable_operator_command() {
+        let guide = include_str!("../../../docs/durable-execution.md");
+        for command in [
+            "forge dispatcher durable-launch-status",
+            "forge dispatcher durable-launch-disable",
+            "forge dispatcher assignment-status",
+            "forge dispatcher assignment-transcript",
+            "forge dispatcher assignment-followup",
+            "forge dispatcher assignment-resolve-effect",
+            "forge dispatcher assignment-retire",
+            "forge dispatcher assignment-purge-runtime",
+            "forge record check-profile-migrate",
+            "forge record check-profile-migrations",
+            "forge agent-profile register",
+        ] {
+            assert!(guide.contains(command), "durable guide lacks {command}");
+        }
+        for limit in [
+            "is **not** verified absence",
+            "No exactly-once effects",
+            "Trusted local host",
+            "withheld",
+        ] {
+            assert!(guide.contains(limit), "durable guide lacks {limit}");
+        }
+    }
+
+    #[test]
     fn implementation_continuations_inline_commands_parse_without_execution() {
-        let profile = include_str!("../../../docs/profiles/implementation-continuations.md");
+        let profile = include_str!("../../../docs/profiles/implementation.md");
         let mut count = 0;
         for example in profile.split('`').filter(|part| part.starts_with("forge ")) {
             let args: Vec<String> = shlex::split(example)

@@ -5,12 +5,47 @@ use crate::{SqliteProjectRepository, now_millis, storage_error};
 use forge_app::{
     RegistrationError,
     authorization_lease::Lease,
-    durable_execution::recovery::{
-        Claim,
-        authorization::{Grant, Prepared, Repository},
-    },
+    durable_execution::recovery::authorization::{Grant, Prepared, Repository},
 };
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
+
+fn accepted_grant(
+    c: &rusqlite::Connection,
+    wanted: &Grant,
+    candidate: &forge_app::durable_execution::recovery::Candidate,
+) -> Result<Option<Grant>, RegistrationError> {
+    let known = c.prepare("SELECT resource_id FROM agent_assignment_resources WHERE assignment_id = ?1 AND resource_kind = 'recovery-grant'")
+        .map_err(storage_error)?.query_map([&wanted.claim.launch.assignment_id], |r| r.get::<_, String>(0))
+        .map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)?;
+    let mut seen = std::collections::HashSet::new();
+    let mut accepted = None;
+    for json in known {
+        let grant: Grant =
+            serde_json::from_str(&json).map_err(|_| error("durable-storage-invalid"))?;
+        grant.claim.validate()?;
+        if grant.claim.launch != wanted.claim.launch
+            || !seen.insert(grant.claim.operation_id.clone())
+        {
+            return Err(error("durable-storage-invalid"));
+        }
+        let predecessor = grant
+            .lease
+            .sequence
+            .checked_sub(1)
+            .filter(|seq| *seq > 0)
+            .ok_or_else(|| error("durable-storage-invalid"))?;
+        let json: String = c.query_row("SELECT lease_json FROM assignment_authorization_leases WHERE assignment_id = ?1 AND sequence = ?2",
+            params![wanted.claim.launch.assignment_id, predecessor], |r| r.get(0)).map_err(storage_error)?;
+        let mut historical = candidate.clone();
+        historical.last_lease =
+            serde_json::from_str(&json).map_err(|_| error("durable-storage-invalid"))?;
+        grant.validate_candidate(&historical, grant.lease.issued_boottime_millis)?;
+        if grant.claim.operation_id == wanted.claim.operation_id {
+            accepted = Some(grant);
+        }
+    }
+    Ok(accepted)
+}
 
 impl Repository for SqliteProjectRepository {
     fn grant_recovery(
@@ -29,35 +64,17 @@ impl Repository for SqliteProjectRepository {
         // never reconstructs Prepared or revives revoked/expired permission.
         authorize(&tx, workspace, launch, false)?;
         prepared.validate(now)?;
-        let claims = tx.prepare(
-            "SELECT resource_id, retired_at_millis FROM agent_assignment_resources WHERE assignment_id = ?1 AND resource_kind = 'recovery-claim' LIMIT 2",
-        ).map_err(storage_error)?.query_map([&launch.assignment_id], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?))
-        }).map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)?;
-        let [(id, retired)] = claims.as_slice() else {
-            return Err(error("durable-recovery-claim-missing"));
-        };
-        let claim: Claim =
-            serde_json::from_str(id).map_err(|_| error("durable-storage-invalid"))?;
-        if claim != grant.claim {
-            return Err(error("durable-recovery-claim-conflict"));
-        }
-        let known = tx.prepare(
-            "SELECT resource_id FROM agent_assignment_resources WHERE assignment_id = ?1 AND resource_kind = 'recovery-grant' LIMIT 2",
-        ).map_err(storage_error)?.query_map([&launch.assignment_id], |r| r.get::<_, String>(0))
-            .map_err(storage_error)?.collect::<Result<Vec<_>, _>>().map_err(storage_error)?;
-        if known.len() > 1 {
-            return Err(error("durable-storage-invalid"));
-        }
-        let accepted: Option<Grant> = known
-            .first()
-            .map(|json| serde_json::from_str(json).map_err(|_| error("durable-storage-invalid")))
-            .transpose()?;
+        let claims = super::recovery::claims(&tx, &launch.assignment_id)?;
+        let (claim, retired, id) = claims
+            .iter()
+            .find(|(claim, _, _)| *claim == grant.claim)
+            .ok_or_else(|| error("durable-recovery-claim-missing"))?;
+        let accepted = accepted_grant(&tx, grant, prepared.candidate())?;
         // Revalidate every live gate before considering delivery replay. Only
         // this exact claim is ignored; holds/effects/unknown resources still deny.
-        let mut current = candidate(&tx, workspace, launch, Some(&claim))?;
+        let mut current = candidate(&tx, workspace, launch, Some(claim))?;
         if let Some(accepted) = accepted {
-            if accepted != *grant || retired.is_none() || current.last_lease != grant.lease {
+            if accepted != *grant || !*retired || current.last_lease != grant.lease {
                 return Err(error("durable-recovery-grant-conflict"));
             }
             // Current history must still contain the exact predecessor committed
@@ -77,7 +94,7 @@ impl Repository for SqliteProjectRepository {
             return Ok(accepted);
         }
         // A cancelled reservation is historical only and can never grant work.
-        if retired.is_some() || current != *prepared.candidate() {
+        if *retired || current != *prepared.candidate() {
             return Err(error("durable-recovery-candidate-stale"));
         }
         let now_wall = now_millis()?;

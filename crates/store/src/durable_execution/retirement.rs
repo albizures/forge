@@ -14,7 +14,11 @@ use forge_app::{
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
-fn revoked(c: &Connection, workspace: &str, launch: &Launch) -> Result<(), RegistrationError> {
+fn revoked(
+    c: &Connection,
+    workspace: &str,
+    launch: &Launch,
+) -> Result<forge_app::durable_execution::Runtime, RegistrationError> {
     authorize(c, workspace, launch, false)?;
     let runtime = load(c, &launch.assignment_id)?.ok_or_else(|| error("durable-intent-missing"))?;
     exact(&runtime, launch)?;
@@ -25,7 +29,8 @@ fn revoked(c: &Connection, workspace: &str, launch: &Launch) -> Result<(), Regis
             |r| r.get(0),
         )
         .map_err(storage_error)?;
-    validate_begin(closed, &runtime.admission)
+    validate_begin(closed, &runtime.admission)?;
+    Ok(runtime)
 }
 fn read(c: &Connection, assignment: &str) -> Result<Option<Retirement>, RegistrationError> {
     let row: Option<(String, Option<i64>)> = c.query_row("SELECT operation_json, reconciled_at_millis FROM durable_assignment_retirements WHERE assignment_id = ?1", [assignment], |r| Ok((r.get(0)?, r.get(1)?))).optional().map_err(storage_error)?;
@@ -40,6 +45,33 @@ fn read(c: &Connection, assignment: &str) -> Result<Option<Retirement>, Registra
     .transpose()
 }
 impl Repository for SqliteProjectRepository {
+    fn revoked_lease(
+        &self,
+        workspace: &str,
+        launch: &Launch,
+    ) -> Result<Option<forge_app::authorization_lease::Lease>, RegistrationError> {
+        let mut c = self.connection.lock().map_err(|_| error("storage"))?;
+        let tx = c.transaction().map_err(storage_error)?;
+        revoked(&tx, workspace, launch)?;
+        let row: Option<(u32, String)> = tx.query_row("SELECT sequence, lease_json FROM assignment_authorization_leases WHERE assignment_id = ?1 ORDER BY sequence DESC LIMIT 1",
+            [&launch.assignment_id], |r| Ok((r.get(0)?, r.get(1)?))).optional().map_err(storage_error)?;
+        let lease = row
+            .map(|(sequence, json)| {
+                let lease: forge_app::authorization_lease::Lease =
+                    serde_json::from_str(&json).map_err(|_| error("durable-storage-invalid"))?;
+                if sequence == 0 || lease.sequence != sequence || lease.launch != *launch {
+                    return Err(error("durable-storage-invalid"));
+                }
+                let mut shape = lease.clone();
+                shape.sequence = 1;
+                shape.validate(None, shape.issued_boottime_millis)?;
+                Ok(lease)
+            })
+            .transpose()?;
+        tx.commit().map_err(storage_error)?;
+        Ok(lease)
+    }
+
     fn begin_retirement(
         &self,
         workspace: &str,
@@ -49,7 +81,7 @@ impl Repository for SqliteProjectRepository {
         let tx = c
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(storage_error)?;
-        revoked(&tx, workspace, &operation.launch)?;
+        let runtime = revoked(&tx, workspace, &operation.launch)?;
         if let Some(existing) = read(&tx, &operation.launch.assignment_id)? {
             if existing.operation != *operation {
                 return Err(error("durable-retirement-conflict"));
@@ -62,7 +94,15 @@ impl Repository for SqliteProjectRepository {
         let last: Option<forge_app::authorization_lease::Lease> = last
             .map(|json| serde_json::from_str(&json).map_err(|_| error("durable-storage-invalid")))
             .transpose()?;
-        validate_owner(last.as_ref().map(|lease| &lease.owner), &operation.owner)?;
+        // No committed grant and an unsent admission: only the directly
+        // spawned Child's owner, proven later by its exact host receipt (T26).
+        let ungranted =
+            last.is_none() && runtime.admission == forge_app::durable_execution::Admission::Pending;
+        validate_owner(
+            last.as_ref().map(|lease| &lease.owner),
+            &operation.owner,
+            ungranted,
+        )?;
         tx.execute("INSERT INTO durable_assignment_retirements(assignment_id, operation_json) VALUES (?1, ?2)", params![operation.launch.assignment_id, serde_json::to_string(operation).map_err(|_| error("durable-storage-invalid"))?]).map_err(storage_error)?;
         tx.commit().map_err(storage_error)?;
         Ok(Retirement {

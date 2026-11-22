@@ -234,6 +234,8 @@ async fn operator_preview_and_registration_require_explicit_auth_before_persisti
         store_path: database,
         durable_model_key_file: None,
         durable_inspection: None,
+        durable_execution: None,
+        durable_retained: Vec::new(),
         managed: None,
     };
     let daemon = crate::Daemon::new(crate::application_from_config(&config).unwrap())

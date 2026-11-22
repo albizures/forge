@@ -1,11 +1,18 @@
 //! Trusted Linux evidence for a directly spawned runner supervisor. This does not
 //! adopt retained processes, release resources or authorize work. Supervision
 //! can signal only its own directly spawned, still-verified process group.
+pub mod check_runtime;
 pub mod control;
+pub mod crash;
+pub mod entry;
+pub mod fence;
 pub mod inspection;
 pub mod model_auth;
+pub mod purge;
 pub mod quiescence;
+pub mod recovery_proof;
 pub mod retirement;
+pub mod seal;
 pub mod storage;
 pub mod supervision;
 pub mod supervisor;

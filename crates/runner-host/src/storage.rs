@@ -66,3 +66,15 @@ pub fn runtime_directory(root: &Path, store_digest: &str, create: bool) -> io::R
     }
     Ok(path)
 }
+
+/// Locate an EXISTING runtime directory without creating anything. `None` means the
+/// mapped path is absent; redirected or unsafe paths remain errors.
+/// # Errors
+/// Rejects redirected, foreign-owned or unprotected paths.
+pub fn existing_runtime_directory(root: &Path, store_digest: &str) -> io::Result<Option<PathBuf>> {
+    match runtime_directory(root, store_digest, false) {
+        Ok(path) => Ok(Some(path)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}

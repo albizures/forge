@@ -9,20 +9,34 @@ const file = process.argv[2];
 const input = JSON.parse(readFileSync(file, 'utf8'));
 assert.equal(process.cwd(), input.bound.executionDirectory);
 const directory = dirname(file);
+// T25 `daemon-restart-tool`: a long-running tool that ignores cancellation, so
+// only the host watchdog's group KILL ends it after the daemon is killed.
+if (input.mode === 'daemon-restart-tool') {
+  writeFileSync(join(directory, 'controlled-tool-started'), String(process.pid), { mode: 0o600 });
+  process.on('SIGTERM', () => {});
+  setInterval(() => {}, 1000);
+  await new Promise(() => {});
+}
 const git = args => {
   const result = spawnSync(input.git, args, { cwd: process.cwd(), env: {}, encoding: 'utf8' });
   assert.equal(result.status, 0, 'controlled Git operation failed');
   return result.stdout.trim();
 };
-writeFileSync('deliverable.txt', 'Supervised Implementation output\n');
-git(['add', 'deliverable.txt']);
-git(['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'Controlled output']);
+if (input.mode !== 'review') {
+  writeFileSync('deliverable.txt', `Supervised Implementation output ${input.bound.assignmentId}\n`);
+  git(['add', 'deliverable.txt']);
+  git(['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'Controlled output']);
+}
 appendFileSync(join(directory, 'controlled-effects'), 'effect\n');
 const outcome = {
   attempt_id: input.bound.checkAttempt.id,
   generation: input.generation + Number(input.mode === 'rejected'),
   evidence: { ...input.bound.checkAttempt.evidence, commit: git(['rev-parse', 'HEAD']) },
-  verdict: 'pass', actor: 'spoofed-actor', message: 'Supervised output', disposition: 'complete', findings: [], verifications: [],
+  verdict: input.mode === 'continuation-chain' ? 'fail' : 'pass', actor: 'spoofed-actor', message: 'Supervised output',
+  disposition: input.mode === 'continuation-chain' ? { continuation: {
+    stopping_reason: 'Controlled finite execution-context boundary', completed_work: 'Committed the first controlled checkpoint',
+    verification: 'Controlled checkpoint commit only; successor checks remain unrun', remaining_work: 'accepted-continuation-handoff: finish implementation and independent review',
+  } } : 'complete', findings: [], verifications: [],
 };
 const outcomeFile = join(directory, 'controlled-outcome.json');
 writeFileSync(outcomeFile, JSON.stringify(outcome), { mode: 0o600 });

@@ -23,13 +23,18 @@ impl RepositoryInspector for NoGit {
         panic!("retirement must preserve Git")
     }
 }
-fn app(f: &Fixture, controller: Arc<Controller>) -> Application {
+pub(super) fn app(f: &Fixture, controller: Arc<Controller>) -> Application {
+    app_at(&f.database, controller)
+}
+fn app_at(database: &Path, controller: Arc<Controller>) -> Application {
     Application::with_agent_dispatch(
-        Box::new(open(&f.database)),
-        Box::new(open(&f.database)),
+        Box::new(open(database)),
+        Box::new(open(database)),
         Box::new(Factory {
-            database: f.database.clone(),
+            database: database.to_path_buf(),
             controller,
+            launcher: None,
+            recovery: None,
             original: Box::new(NoHerdr),
         }),
         Box::new(NoGit),
@@ -38,7 +43,7 @@ fn app(f: &Fixture, controller: Arc<Controller>) -> Application {
 
 // Own test cleanup evidence independently of the product registry. A failed
 // retirement intentionally leaves its host/descendants running and fenced.
-struct Cleanup {
+pub(super) struct Cleanup {
     pid: u32,
     start: String,
 }
@@ -75,7 +80,7 @@ fn inspection_controller(f: &Fixture) -> Arc<Controller> {
             .unwrap(),
     )
 }
-fn handoff(f: &mut Fixture) -> (Arc<Controller>, Cleanup) {
+pub(super) fn handoff(f: &mut Fixture) -> (Arc<Controller>, Cleanup) {
     handoff_to(f, inspection_controller(f))
 }
 fn handoff_to(f: &mut Fixture, controller: Arc<Controller>) -> (Arc<Controller>, Cleanup) {
@@ -510,4 +515,279 @@ fn unknown_launch_and_missing_supervisor_keep_revocation_capacity_and_hold() {
     assert!(info.capacity_reserved());
     assert!(info.dispatch_hold.is_some());
     assert!(!f.directory.join("retirement-intent.json").exists());
+}
+
+/// T25: lease expiry while the issuing daemon is alive (renewal stops, the
+/// pipe stays open). The host fences, proves quiescence and exits. A controller
+/// that never owned the host reaches the same retirement reconciliation through
+/// the protected receipt: specific refusal before proof, capacity release after,
+/// exact retries unchanged, and a tampered receipt refused.
+#[test]
+fn lease_expiry_without_restart_reconciles_retirement_through_fence_receipt() {
+    use forge_app::authorization_lease::session::Tick;
+    let mut f = Fixture::new("model");
+    let controller = inspection_controller(&f);
+    let database = f.database.clone();
+    let retire = || app_at(&database, controller.clone()).retire_agent_assignment("assignment");
+    let authority = DaemonAuthority::new().unwrap();
+    let mut service = authority
+        .bind(&f.store, "test".into(), f.launch.clone(), 1, &mut f.child)
+        .unwrap();
+    let Tick::Delivered { lease, .. } = service.tick(&f.store).unwrap() else {
+        panic!("initial grant was not delivered")
+    };
+    let lease = forge_app::authorization_lease::Lease::clone(&lease);
+    event(&f.output, "authorized");
+    event(&f.output, "started");
+    f.store.begin_send("test", &f.launch).unwrap();
+    f.store
+        .record_result(
+            "test",
+            &f.launch,
+            &Admission::Accepted {
+                admission_id: "controlled".into(),
+            },
+        )
+        .unwrap();
+    // While the original host still owns the runtime, retirement is refused
+    // with a specific code and capacity stays reserved.
+    let early = retire().unwrap_err();
+    assert!(
+        early.message.contains("durable-runtime-owner-active"),
+        "{early:?}"
+    );
+    assert!(
+        open(&f.database)
+            .agent_assignment_info("assignment")
+            .unwrap()
+            .capacity_reserved()
+    );
+    diagnostic(&f.errors, "runner-lease-expired");
+    diagnostic(&f.errors, "runner-watchdog-quiescence-verified");
+    drop(service);
+    assert!(f.child.wait().unwrap().success());
+    forge_runner_host::fence::receipt(&f.directory, &lease).unwrap();
+    // Tampered proof is refused without releasing anything.
+    let name = f
+        .directory
+        .join(format!("watchdog-receipt-{}.json", lease.sequence));
+    let original = fs::read(&name).unwrap();
+    let mut tampered: Value = serde_json::from_slice(&original).unwrap();
+    tampered["lease"]["owner"]["worker_pid"] = 1.into();
+    fs::write(&name, serde_json::to_vec(&tampered).unwrap()).unwrap();
+    let refused = retire().unwrap_err();
+    assert!(
+        refused.message.contains("durable-runtime-fence-unproven"),
+        "{refused:?}"
+    );
+    assert!(
+        open(&f.database)
+            .agent_assignment_info("assignment")
+            .unwrap()
+            .capacity_reserved()
+    );
+    fs::write(&name, &original).unwrap();
+    let retired = retire().unwrap();
+    assert!(retired.closed_at_millis.is_some());
+    let info = open(&f.database)
+        .agent_assignment_info("assignment")
+        .unwrap();
+    assert!(!info.capacity_reserved());
+    let retirement = f.store.retirement("test", &f.launch).unwrap().unwrap();
+    assert!(retirement.reconciled_at_millis.is_some());
+    assert_eq!(retirement.operation.owner, lease.owner);
+    // No host retirement receipt is manufactured; the fence receipt is the proof.
+    assert!(!f.directory.join("retirement-receipt.json").exists());
+    assert_eq!(
+        app(&f, Arc::new(Controller::default()))
+            .retire_agent_assignment("assignment")
+            .unwrap(),
+        retired
+    );
+    assert_eq!(
+        open(&f.database)
+            .retirement("test", &f.launch)
+            .unwrap()
+            .unwrap(),
+        retirement
+    );
+}
+
+/// T26: a launch that never received a grant retires only with its original
+/// host's ungranted receipt. A killed host, or one whose worker still holds the
+/// lock, keeps capacity with a specific code; nothing is adopted or signalled.
+#[test]
+fn never_granted_launch_retires_only_with_the_hosts_ungranted_receipt() {
+    use forge_app::AgentDispatchRepository as _;
+    let refused = |f: &Fixture, code: &str| {
+        let error = app(f, Arc::new(Controller::default()))
+            .retire_agent_assignment("assignment")
+            .unwrap_err();
+        assert!(error.message.contains(code), "{code}: {error:?}");
+        assert!(
+            open(&f.database)
+                .agent_assignment_info("assignment")
+                .unwrap()
+                .capacity_reserved()
+        );
+    };
+    // The host is killed before any grant, so it never proves quiescence.
+    // (While its worker still holds the lock, the code is the T25
+    // `durable-runtime-owner-active`.) Once the worker is gone too, nobody
+    // proved it: still refused, with the specific T26 code.
+    let mut f = Fixture::new("model");
+    assert!(
+        open(&f.database)
+            .begin_agent_launch("assignment", 1)
+            .unwrap()
+    );
+    f.child.kill().unwrap();
+    f.child.wait().unwrap();
+    let worker = i32::try_from(f.evidence["worker_pid"].as_u64().unwrap()).unwrap();
+    let group = rustix::process::Pid::from_raw(worker).unwrap();
+    // The orphaned worker may already have exited on its own closed input.
+    let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+    while Path::new(&format!("/proc/{worker}")).exists() {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    refused(&f, "durable-launch-ungranted-unproven");
+
+    // The original host loses its pipe and proves its own quiescence.
+    let mut f = Fixture::new("model");
+    assert!(
+        open(&f.database)
+            .begin_agent_launch("assignment", 1)
+            .unwrap()
+    );
+    drop(f.child.stdin.take());
+    diagnostic(&f.errors, "runner-watchdog-quiescence-verified");
+    assert!(f.child.wait().unwrap().success());
+    app(&f, Arc::new(Controller::default()))
+        .retire_agent_assignment("assignment")
+        .unwrap();
+    let retired = open(&f.database)
+        .agent_assignment_info("assignment")
+        .unwrap();
+    assert!(!retired.capacity_reserved(), "{retired:?}");
+    app(&f, Arc::new(Controller::default()))
+        .retire_agent_assignment("assignment")
+        .unwrap();
+    assert_eq!(
+        open(&f.database)
+            .agent_assignment_info("assignment")
+            .unwrap(),
+        retired
+    );
+}
+
+/// T26: a pre-T26 launch claim without a reserved runtime is discharged once
+/// revoked, through the ordinary operator retirement.
+#[test]
+fn unreserved_launch_claim_is_retired_through_the_adapter() {
+    use forge_app::AgentDispatchRepository as _;
+    let f = Fixture::new("model");
+    // A second Assignment with only the legacy claim.
+    let store = open(&f.database);
+    store
+        .close_agent_assignment(
+            "assignment",
+            forge_app::AgentAssignmentClosureReason::Retired,
+        )
+        .unwrap();
+    let (record, _) = Fixture::create_second_assignment(&store);
+    assert!(store.begin_agent_provision("legacy").unwrap());
+    app(&f, Arc::new(Controller::default()))
+        .retire_agent_assignment("legacy")
+        .unwrap();
+    let info = open(&f.database).agent_assignment_info("legacy").unwrap();
+    assert!(!info.capacity_reserved(), "{info:?}");
+    assert!(info.resources.iter().all(|r| r.retired_at_millis.is_some()));
+    assert!(open(&f.database).dispatch_hold(record).unwrap().is_some());
+}
+
+/// T18 F1: Forge commits a renewal before delivering it. When that delivery
+/// never happens, the host expires on the earlier lease it accepted, fences and
+/// proves quiescence for that lease. Retirement accepts the same owner's proof
+/// for the earlier lease of the same Launch instead of stranding the Assignment.
+#[test]
+fn committed_but_undelivered_renewal_retires_from_the_earlier_lease_fence() {
+    use forge_app::authorization_lease::{Repository as _, session::Tick};
+    let mut f = Fixture::new("model");
+    let authority = DaemonAuthority::new().unwrap();
+    let mut service = authority
+        .bind(&f.store, "test".into(), f.launch.clone(), 1, &mut f.child)
+        .unwrap();
+    let Tick::Delivered { lease, .. } = service.tick(&f.store).unwrap() else {
+        panic!("initial grant was not delivered")
+    };
+    event(&f.output, "authorized");
+    // Commit the next lease in Forge only: the delivery is lost.
+    let mut undelivered = forge_app::authorization_lease::Lease::clone(&lease);
+    undelivered.sequence += 1;
+    undelivered.issued_boottime_millis += 10_000;
+    undelivered.expires_boottime_millis += 10_000;
+    open(&f.database)
+        .grant_lease("test", &undelivered, undelivered.issued_boottime_millis)
+        .unwrap();
+    // Losing the pipe ends the worker: the host proves the crash for the lease
+    // it accepted (or, if the worker hangs, fences on that lease at expiry).
+    drop(service);
+    assert!(f.child.wait().unwrap().success());
+    let earlier = forge_runner_host::crash::receipt(&f.directory, &lease).is_ok()
+        || forge_runner_host::fence::receipt(&f.directory, &lease).is_ok();
+    let later = forge_runner_host::crash::receipt(&f.directory, &undelivered).is_ok()
+        || forge_runner_host::fence::receipt(&f.directory, &undelivered).is_ok();
+    assert!(earlier && !later, "proof names the earlier lease only");
+    app(&f, Arc::new(Controller::default()))
+        .retire_agent_assignment("assignment")
+        .unwrap();
+    let retired = open(&f.database)
+        .agent_assignment_info("assignment")
+        .unwrap();
+    assert!(!retired.capacity_reserved(), "{retired:?}");
+}
+
+/// T18 F1: a first grant committed in Forge but never delivered. The host
+/// loses its pipe before accepting any grant and writes its ungranted receipt;
+/// retirement accepts it for the committed lease's owner.
+#[test]
+fn committed_but_undelivered_first_grant_retires_from_the_ungranted_receipt() {
+    use forge_app::authorization_lease::{AuthorityHost as _, Lease, Repository as _};
+    let mut f = Fixture::new("model");
+    let owner = forge_runner_host::SpawnedOwner::capture(&mut f.child, &f.directory)
+        .unwrap()
+        .observe()
+        .unwrap()
+        .owner;
+    let now = forge_runner_host::supervision::boottime_millis().unwrap();
+    let lease = Lease {
+        launch: f.launch.clone(),
+        generation: 1,
+        owner,
+        daemon_epoch: "lost-daemon".into(),
+        sequence: 1,
+        issued_boottime_millis: now,
+        expires_boottime_millis: now + 30_000,
+    };
+    open(&f.database).grant_lease("test", &lease, now).unwrap();
+    drop(f.child.stdin.take());
+    diagnostic(&f.errors, "runner-watchdog-quiescence-verified");
+    assert!(f.child.wait().unwrap().success());
+    app(&f, Arc::new(Controller::default()))
+        .retire_agent_assignment("assignment")
+        .unwrap();
+    let retired = open(&f.database)
+        .agent_assignment_info("assignment")
+        .unwrap();
+    assert!(!retired.capacity_reserved(), "{retired:?}");
+    // Exact retry.
+    app(&f, Arc::new(Controller::default()))
+        .retire_agent_assignment("assignment")
+        .unwrap();
+    assert_eq!(
+        open(&f.database)
+            .agent_assignment_info("assignment")
+            .unwrap(),
+        retired
+    );
 }

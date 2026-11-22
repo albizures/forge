@@ -32,7 +32,7 @@ fn waiting(
     forge_app::durable_execution::recovery::quiescence::Operation,
 ) {
     let runner = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../runner/src/main.ts")
+        .join("../../runner/test/synthetic-runner.ts")
         .canonicalize()
         .unwrap();
     waiting_recovery_inspection::waiting_runner(mode, Some(&runner))

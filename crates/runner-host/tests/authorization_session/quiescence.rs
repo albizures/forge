@@ -16,6 +16,15 @@ pub(super) fn prepare_admission(
     f: &mut Fixture,
     runtime_mode: Option<&str>,
 ) -> (ControlPipe, Operation, Value) {
+    let worktree = f.root.join("worktree");
+    prepare_admission_at(f, runtime_mode, &worktree)
+}
+
+pub(super) fn prepare_admission_at(
+    f: &mut Fixture,
+    runtime_mode: Option<&str>,
+    worktree: &Path,
+) -> (ControlPipe, Operation, Value) {
     let authority = DaemonAuthority::new().unwrap();
     let mut service = authority
         .bind(&f.store, "test".into(), f.launch.clone(), 1, &mut f.child)
@@ -40,7 +49,7 @@ pub(super) fn prepare_admission(
             .unwrap();
     }
     let c = rusqlite::Connection::open(&f.database).unwrap();
-    let worktree = f.root.join("worktree").to_str().unwrap().to_owned();
+    let worktree = worktree.to_str().unwrap().to_owned();
     c.execute(
         "INSERT INTO assignment_execution_bindings VALUES ('assignment', ?1)",
         [&worktree],

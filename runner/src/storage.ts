@@ -109,3 +109,37 @@ export async function snapshot(directory: string) {
     return { identity, entries: page.items, truncated: page.next !== undefined };
   } finally { await storage.close(context); }
 }
+
+export interface TranscriptEntry { id: string; kind: string; by_task_id: string | null; content: string; truncated: boolean }
+export interface TranscriptPage { history: 'available' | 'not-started'; entries: TranscriptEntry[]; next_after: string | null; more: boolean }
+export const TRANSCRIPT_ENTRY_BYTES = 8192;
+/** Committed history of the Assignment root only, ascending by immutable entry ID.
+ * `after` is the exclusive last entry ID the caller already holds; later appends
+ * always have larger IDs, so a live writer cannot reorder or duplicate a page.
+ * Never creates a Harness, repairs storage or opens it writable. A missing journal
+ * or root is not-started, never an empty successful transcript of an existing run.
+ */
+export async function observeTranscript(directory: string, launch: Launch, after: string | null, limit: number): Promise<TranscriptPage> {
+  requireCondition(Number.isInteger(limit) && limit >= 1 && limit <= 100, 'runner-request-invalid');
+  requireCondition(after === null || (typeof after === 'string' && /^[1-9][0-9]{0,15}$/.test(after)), 'runner-request-invalid');
+  const identity = journal(directory);
+  if (!identity || identity.root === null) return { history: 'not-started', entries: [], next_after: after, more: false };
+  requireCondition(canonical(identity.launch) === canonical(launch), 'runner-identity-conflict');
+  const storage = await readStorage(directory);
+  try {
+    const root = await storage.conversation(identity.root as ConversationId, context);
+    requireCondition(root !== undefined && root.id === identity.root && root.parent === undefined && root.owner === undefined, 'runner-recovery-required');
+    const query: { conversationId: ConversationId; order: 'ascending'; minEntryId?: any } = { conversationId: identity.root as ConversationId, order: 'ascending' };
+    if (after !== null) query.minEntryId = (Number(after) + 1) as any;
+    const page = await storage.scanEntries(query, limit, undefined, context);
+    const entries = page.items.map((entry: any): TranscriptEntry => {
+      const full = JSON.stringify({ model: entry.model ?? null, data: entry.data ?? null });
+      const truncated = Buffer.byteLength(full) > TRANSCRIPT_ENTRY_BYTES;
+      const content = truncated ? Buffer.from(full).subarray(0, TRANSCRIPT_ENTRY_BYTES).toString('utf8').replace(/\uFFFD+$/, '') : full;
+      return { id: String(entry.id), kind: String(entry.kind), by_task_id: entry.byTaskId === undefined ? null : String(entry.byTaskId), content, truncated };
+    });
+    for (let i = 1; i < entries.length; i++) requireCondition(Number(entries[i].id) > Number(entries[i - 1].id), 'runner-transcript-order-invalid');
+    if (after !== null && entries.length > 0) requireCondition(Number(entries[0].id) > Number(after), 'runner-transcript-order-invalid');
+    return { history: 'available', entries, next_after: entries.length ? entries[entries.length - 1].id : after, more: page.next !== undefined };
+  } finally { await storage.close(context); }
+}

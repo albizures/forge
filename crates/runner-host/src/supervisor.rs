@@ -1,4 +1,4 @@
-//! Linux single-owner supervision boundary. Not wired to production dispatch.
+//! Linux single-owner supervision boundary, spawned by the daemon's durable launcher.
 //! The lock deliberately outlives the worker: exit is not verified cleanup.
 use crate::{supervision::Supervised, watchdog};
 use fs2::FileExt;
@@ -107,6 +107,11 @@ pub fn run(
     }
     lock.try_lock_exclusive()
         .map_err(|_| io::Error::other("runner-owner-busy"))?;
+    // A directory sealed as never owned (a failed launch reconciled by Forge)
+    // is never owned afterwards: refuse before recording ownership or spawning.
+    if crate::seal::sealed(directory)? {
+        return Err("runner-runtime-sealed".into());
+    }
     // Never unlink a stale lock. Stale descriptive evidence cannot authorize
     // adoption, termination or writable recovery. The worker checks its journal.
     // Share this *same* flock open description with the worker. If the host
@@ -163,6 +168,15 @@ pub fn run(
             Ok(_) => retained_blocker = true,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
+        }
+    }
+    for entry in fs::read_dir(directory)? {
+        let name = entry?.file_name();
+        let name = name.to_string_lossy();
+        // Crash proof and (settled or not) fence markers of earlier episodes:
+        // only the exact recovery preparation may grant again.
+        if name.starts_with(crate::crash::RECEIPT_PREFIX) || crate::fence::is_marker(&name) {
+            retained_blocker = true;
         }
     }
     let state = Arc::new(Mutex::new(watchdog::State::new(

@@ -23,6 +23,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+pub mod runner;
 pub mod upgrade;
 
 const REGISTRY_SCHEMA_VERSION: u32 = 2;
@@ -150,6 +151,9 @@ pub struct Installation {
     pub cli_sha256: String,
     pub daemon_sha256: String,
     pub endpoint: String,
+    /// Matched durable-runner components shipped with this Revision, when attested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner: Option<runner::InstalledRunner>,
 }
 
 /// Isolated persistent locations for one Forge Revision.
@@ -305,6 +309,8 @@ pub struct RegistrationOptions<'a> {
     pub replace: Option<&'a str>,
     pub reuse_state: Option<&'a str>,
     pub purge_state: bool,
+    /// A packaged matched runner bundle to attest and install with this Revision.
+    pub runner_bundle: Option<&'a Path>,
 }
 
 /// Registers a verified executable pair as an immutable Revision Installation.
@@ -341,7 +347,11 @@ pub fn register_with_options(
     )
 }
 
-fn register_at(
+/// [`register_with_options`] against an explicit Forgeup layout instead of the
+/// environment's (for isolated callers and tests).
+/// # Errors
+/// Same as [`register_with_options`].
+pub fn register_at(
     paths: &ForgeupPaths,
     source_label: &str,
     cli: &Path,
@@ -351,6 +361,10 @@ fn register_at(
 ) -> Result<Installation, ForgeupError> {
     let (cli_identity, selector, cli_hash, daemon_hash) =
         attest_registration(source_label, cli, daemon, local_build_alias)?;
+    let bundle_identity = match options.runner_bundle {
+        Some(bundle) => Some((runner::attest(bundle, &cli_identity)?.tree_sha256, bundle)),
+        None => None,
+    };
     let store = RegistryStore::open(paths.clone())?;
     let mut registry = store.load()?;
     reconcile_active_path(paths, &registry)?;
@@ -381,7 +395,13 @@ fn register_at(
     }
     if let Some(index) = existing_index {
         let existing = &registry.installations[index];
-        if existing.cli_sha256 == cli_hash && existing.daemon_sha256 == daemon_hash && !replacing {
+        let same_runner = existing.runner.as_ref().map(|r| r.tree_sha256.as_str())
+            == bundle_identity.as_ref().map(|(tree, _)| tree.as_str());
+        if existing.cli_sha256 == cli_hash
+            && existing.daemon_sha256 == daemon_hash
+            && same_runner
+            && !replacing
+        {
             return Ok(existing.clone());
         }
         if !replacing {
@@ -419,7 +439,7 @@ fn register_at(
         local_build_alias,
         cli_identity,
         (cli_hash, daemon_hash),
-        (cli, daemon),
+        (cli, daemon, options.runner_bundle),
     )?;
     append_diagnostic(&state, "registered Revision Installation")?;
     if let Some(index) = existing_index {
@@ -438,10 +458,10 @@ fn snapshot_installation(
     local_build_alias: Option<&str>,
     identity: RevisionIdentity,
     hashes: (String, String),
-    executables: (&Path, &Path),
+    executables: (&Path, &Path, Option<&Path>),
 ) -> Result<Installation, ForgeupError> {
     let (cli_sha256, daemon_sha256) = hashes;
-    let (cli, daemon) = executables;
+    let (cli, daemon, bundle) = executables;
     let destination = paths.installations().join(&selector);
     if destination.exists() {
         fs::remove_dir_all(&destination).map_err(|source| ForgeupError::Io {
@@ -458,6 +478,18 @@ fn snapshot_installation(
     let daemon_path = destination.join("forge-server");
     copy_executable(cli, &cli_path)?;
     copy_executable(daemon, &daemon_path)?;
+    let runner = match bundle {
+        Some(bundle) => {
+            match runner::install(bundle, &destination.join("runner-bundle"), &identity) {
+                Ok(runner) => Some(runner),
+                Err(error) => {
+                    let _ = fs::remove_dir_all(&destination);
+                    return Err(error);
+                }
+            }
+        }
+        None => None,
+    };
     let installation = Installation {
         source_label: source_label.to_owned(),
         selector,
@@ -468,6 +500,7 @@ fn snapshot_installation(
         cli_sha256,
         daemon_sha256,
         endpoint: allocate_endpoint()?,
+        runner,
     };
     let manifest =
         toml::to_string_pretty(&installation).map_err(|source| ForgeupError::InvalidRegistry {
@@ -499,7 +532,9 @@ pub fn active_installation() -> Result<Installation, ForgeupError> {
 /// persisted Installation facts.
 pub fn ensure_active_daemon() -> Result<Installation, ForgeupError> {
     let installation = active_installation()?;
-    daemon_start()?;
+    // An implicit start never selects a model credential (T18 M4): durable
+    // launch needs an explicit `forgeup daemon start --durable-openai-key-file`.
+    daemon_start(None)?;
     Ok(installation)
 }
 
@@ -585,6 +620,12 @@ fn remove_at(paths: &ForgeupPaths, selector: &str, purge: bool) -> Result<(), Fo
         return Err(ForgeupError::ActiveRemoval(installation.selector));
     }
     upgrade::check_mutation(paths, &installation.selector)?;
+    if !purge
+        && installation.runner.is_some()
+        && paths.state(&installation.selector).database.exists()
+    {
+        return Err(ForgeupError::RunnerRetained(installation.selector));
+    }
     let destination = paths.installations().join(&installation.selector);
     if destination.exists() {
         fs::remove_dir_all(&destination).map_err(|source| ForgeupError::Io {
@@ -633,7 +674,178 @@ fn validate_installation(installation: &Installation) -> Result<(), ForgeupError
             installation.selector.clone(),
         ));
     }
+    if installation
+        .runner
+        .as_ref()
+        .is_some_and(|r| !runner::present(r))
+    {
+        return Err(ForgeupError::InvalidInstallation(
+            installation.selector.clone(),
+        ));
+    }
     Ok(())
+}
+
+/// Full matched-component attestation of one Installation; hashes the whole bundle.
+/// # Errors
+/// Fails when the Installation has no runner or any component is missing/modified.
+pub fn verify_runner(
+    installation: &Installation,
+) -> Result<&runner::InstalledRunner, ForgeupError> {
+    let runner = installation.runner.as_ref().ok_or_else(|| {
+        ForgeupError::RunnerBundle(format!(
+            "Revision `{}` has no matched runner bundle; register it with --runner-bundle",
+            installation.selector
+        ))
+    })?;
+    runner::verify_installed(runner, &installation.identity)?;
+    Ok(runner)
+}
+
+/// Finds the retained Installation whose verified runner has exactly this
+/// component identity: either its bundle tree hash or the runner component hash
+/// that a durable Launch records. Cleanup/recovery of a retained Assignment
+/// thereby uses its original compatible component, never whichever Revision is
+/// currently active or any PATH/npm runner.
+/// # Errors
+/// Fails closed when no registered Revision provides that exact verified component.
+pub fn runner_for_component(hash: &str) -> Result<Installation, ForgeupError> {
+    let paths = ForgeupPaths::from_environment()?;
+    runner_for_component_at(&paths, hash)
+}
+
+/// [`runner_for_component`] against an explicit Forgeup layout.
+/// # Errors
+/// Same as [`runner_for_component`].
+pub fn runner_for_component_at(
+    paths: &ForgeupPaths,
+    hash: &str,
+) -> Result<Installation, ForgeupError> {
+    let Some(store) = RegistryStore::open_read_only(paths.clone())? else {
+        return Err(ForgeupError::NoActiveRevision);
+    };
+    let registry = store.load_read_only()?;
+    for installation in registry.installations {
+        if installation
+            .runner
+            .as_ref()
+            .is_some_and(|r| r.tree_sha256 == hash || r.component_sha256.as_deref() == Some(hash))
+        {
+            verify_runner(&installation)?;
+            return Ok(installation);
+        }
+    }
+    Err(ForgeupError::RunnerBundle(
+        "no registered Revision provides the original matched runner component; \
+         retained Assignments are not redirected to another runner"
+            .into(),
+    ))
+}
+
+/// An explicit managed model key file must be an absolute path, for a Revision
+/// whose runner bundle can launch. Forgeup never opens it.
+fn validate_model_key_file(installation: &Installation, path: &Path) -> Result<(), ForgeupError> {
+    if !path.is_absolute() {
+        return Err(ForgeupError::ModelKeyFile(
+            "must be an absolute path".into(),
+        ));
+    }
+    if !installation
+        .runner
+        .as_ref()
+        .is_some_and(runner::InstalledRunner::launchable)
+    {
+        return Err(ForgeupError::ModelKeyFile(
+            "requires a Revision registered with a launch-capable (schema 2) runner bundle".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// A running daemon keeps the credential it started with: never report success
+/// while silently dropping an explicit key file (T18 M4).
+fn already_running(model_key_file: Option<&Path>) -> Result<String, ForgeupError> {
+    if model_key_file.is_some() {
+        return Err(ForgeupError::ModelKeyFile(
+            "the managed daemon is already running and keeps the model credential it started with; run `forgeup daemon stop`, then start it again with this option".into(),
+        ));
+    }
+    Ok("running".into())
+}
+
+/// Durable launch inputs Forgeup passes to the managed daemon of `installation`.
+///
+/// - A schema 2 runner (with a packaged host) is passed as
+///   `--durable-runner-bundle ROOT`, which composes durable launch. Every *other*
+///   registered Installation whose schema 2 runner verifies, with a distinct
+///   component hash, is passed as `--durable-retained-runner-bundle ROOT`, so the
+///   daemon can inspect, recover and retire Assignments launched by an earlier
+///   Revision with their original components. A retained bundle that fails
+///   verification is left out (and diagnosed), so its Assignments refuse
+///   explicitly instead of switching code.
+/// - A schema 1 runner keeps the T15 inspection-only inputs `--durable-node` and
+///   `--durable-effect-inspector`.
+/// - No runner: no durable inputs.
+///
+/// `model_key_file` is the operator's explicit `OpenAI` key file **path** for
+/// durable launch (T18 M4), passed as `--durable-openai-key-file`. Forgeup never
+/// reads it; the daemon validates it (owner-only, canonical) before any launch.
+/// It requires an absolute path and a launch-capable (schema 2) runner.
+///
+/// The selected Installation's own runner must already be verified. `registry`
+/// is the caller's already loaded (and, for `daemon start`, locked) registry;
+/// this function never reopens it.
+/// # Errors
+/// Fails when a diagnostic cannot be recorded.
+pub fn managed_durable_arguments(
+    paths: &ForgeupPaths,
+    registry: &Registry,
+    installation: &Installation,
+    model_key_file: Option<&Path>,
+) -> Result<Vec<std::ffi::OsString>, ForgeupError> {
+    if let Some(path) = model_key_file {
+        validate_model_key_file(installation, path)?;
+    }
+    let Some(runner) = &installation.runner else {
+        return Ok(vec![]);
+    };
+    if !runner.launchable() {
+        return Ok(vec![
+            "--durable-node".into(),
+            runner.node_path.clone().into(),
+            "--durable-effect-inspector".into(),
+            runner.inspector_path.clone().into(),
+        ]);
+    }
+    let mut arguments: Vec<std::ffi::OsString> =
+        vec!["--durable-runner-bundle".into(), runner.root.clone().into()];
+    let mut seen = vec![runner.component_sha256.clone()];
+    for other in &registry.installations {
+        let Some(retained) = other.runner.as_ref().filter(|r| r.launchable()) else {
+            continue;
+        };
+        if other.selector == installation.selector || seen.contains(&retained.component_sha256) {
+            continue;
+        }
+        if let Err(error) = verify_runner(other) {
+            append_diagnostic(
+                &paths.state(&installation.selector),
+                &format!(
+                    "retained runner of Revision `{}` not offered to the daemon: {error}",
+                    other.selector
+                ),
+            )?;
+            continue;
+        }
+        seen.push(retained.component_sha256.clone());
+        arguments.push("--durable-retained-runner-bundle".into());
+        arguments.push(retained.root.clone().into());
+    }
+    if let Some(path) = model_key_file {
+        arguments.push("--durable-openai-key-file".into());
+        arguments.push(path.as_os_str().to_owned());
+    }
+    Ok(arguments)
 }
 
 /// Makes the manager command path match the registry's authoritative desired state.
@@ -748,7 +960,7 @@ fn daemon_record_path(paths: &ForgeupPaths, selector: &str) -> PathBuf {
 
 /// Starts exactly one managed daemon for the active Revision.
 #[allow(clippy::too_many_lines)]
-pub fn daemon_start() -> Result<String, ForgeupError> {
+pub fn daemon_start(model_key_file: Option<&Path>) -> Result<String, ForgeupError> {
     let paths = ForgeupPaths::from_environment()?;
     let store = RegistryStore::open(paths.clone())?;
     let registry = store.load()?;
@@ -759,6 +971,13 @@ pub fn daemon_start() -> Result<String, ForgeupError> {
         .ok_or(ForgeupError::NoActiveRevision)?;
     let installation = resolve_in_registry(&registry, &selector)?;
     validate_installation(&installation)?;
+    if installation.runner.is_some() {
+        verify_runner(&installation)?;
+    }
+    // Validate the explicit option before anything else, so it is never ignored.
+    if let Some(path) = model_key_file {
+        validate_model_key_file(&installation, path)?;
+    }
     upgrade::check_start(&paths, &selector)?;
     let state = paths.state(&selector);
     ensure_state(&state)?;
@@ -766,7 +985,7 @@ pub fn daemon_start() -> Result<String, ForgeupError> {
     if record_path.exists() {
         let record = read_daemon_record(&record_path)?;
         match proved_owned(&record, &installation) {
-            Ownership::Owned => return Ok("running".into()),
+            Ownership::Owned => return already_running(model_key_file),
             Ownership::Stale => {
                 fs::remove_file(&record_path).map_err(|source| ForgeupError::Io {
                     path: record_path.clone(),
@@ -806,6 +1025,12 @@ pub fn daemon_start() -> Result<String, ForgeupError> {
     for (key, _) in env::vars_os().filter(|(key, _)| key.to_string_lossy().starts_with("FORGE_")) {
         command.env_remove(key);
     }
+    command.args(managed_durable_arguments(
+        &paths,
+        &registry,
+        &installation,
+        model_key_file,
+    )?);
     let child = command
         .args([
             "--managed",
@@ -1140,9 +1365,15 @@ pub fn doctor() -> Result<DoctorReport, ForgeupError> {
 #[derive(Debug)]
 pub enum ForgeupError {
     InvalidLocation(&'static str),
-    Io { path: PathBuf, source: io::Error },
+    Io {
+        path: PathBuf,
+        source: io::Error,
+    },
     UnsafePermissions(PathBuf),
-    InvalidRegistry { path: PathBuf, message: String },
+    InvalidRegistry {
+        path: PathBuf,
+        message: String,
+    },
     FutureSchema(u32),
     UnsupportedSchema(u32),
     InvalidLabel(String),
@@ -1154,9 +1385,15 @@ pub enum ForgeupError {
     AliasConflict(String),
     UnknownSelector(String),
     AmbiguousSelector(String),
-    ReplacementSelectorMismatch { replace: String, candidate: String },
+    ReplacementSelectorMismatch {
+        replace: String,
+        candidate: String,
+    },
     PurgeRequiresReplacement,
-    StateReuseMismatch { requested: String, selector: String },
+    StateReuseMismatch {
+        requested: String,
+        selector: String,
+    },
     StateUnavailable(String),
     ActiveRemoval(String),
     InvalidInstallation(String),
@@ -1167,11 +1404,22 @@ pub enum ForgeupError {
     DaemonNotReady(PathBuf),
     UnsupportedDaemonPlatform(PathBuf),
     UpgradeBlocked(String),
+    RunnerBundle(String),
+    RunnerRetained(String),
+    /// `daemon start --durable-openai-key-file` cannot be applied (T18 M4).
+    ModelKeyFile(String),
 }
 impl fmt::Display for ForgeupError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UpgradeBlocked(message) => write!(f, "state upgrade blocked: {message}"),
+            Self::RunnerBundle(message) => write!(f, "matched runner bundle: {message}"),
+            Self::ModelKeyFile(message) => write!(f, "--durable-openai-key-file: {message}"),
+            Self::RunnerRetained(selector) => write!(
+                f,
+                "Revision `{selector}` provides the matched runner for retained state; \
+                 purge state explicitly to remove it"
+            ),
             Self::InvalidLocation(m) => write!(f, "invalid Forgeup location: {m}"),
             Self::Io { path, source } => write!(f, "{}: {source}", path.display()),
             Self::UnsafePermissions(path) => {

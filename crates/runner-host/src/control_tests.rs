@@ -127,3 +127,42 @@ fn complete_recovery_and_renewal_are_separate_newline_records() {
         renewal
     );
 }
+
+#[test]
+fn followup_is_exact_strict_and_uncertain_send_fences_the_pipe() {
+    use forge_app::durable_execution::followup::Request;
+    use forge_rpc::durable_execution::SupervisorFollowUp;
+    let request = Request {
+        assignment_id: "a".into(),
+        operation_id: "op:1".into(),
+        message: "use another commit".into(),
+    };
+    let control = SupervisorFollowUp {
+        host_followup: 1,
+        followup: forge_rpc::durable_execution::FollowUpPayload {
+            operation_id: request.operation_id.clone(),
+            content: request.message.clone(),
+            content_sha256: request.digest(),
+        },
+    };
+    let mut pipe = Pipe {
+        writer: Vec::new(),
+        fenced: false,
+    };
+    pipe.send(&control, 1_048_576).unwrap();
+    let decoded: SupervisorFollowUp = serde_json::from_slice(&pipe.writer).unwrap();
+    assert_eq!(decoded, control);
+    let mut value = serde_json::to_value(&control).unwrap();
+    value["followup"]["commit"] = "abc".into();
+    assert!(serde_json::from_value::<SupervisorFollowUp>(value).is_err());
+    assert!(serde_json::from_slice::<SupervisorRecovery>(&pipe.writer).is_err());
+    for fault in 0..5 {
+        let mut pipe = Pipe {
+            writer: FaultWriter { calls: 0, fault },
+            fenced: false,
+        };
+        assert!(pipe.send(&control, 1_048_576).is_err());
+        assert!(pipe.send(&control, 1_048_576).is_err());
+        assert_eq!(pipe.writer.calls, 1);
+    }
+}

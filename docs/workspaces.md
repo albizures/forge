@@ -91,15 +91,19 @@ Workspace-local planning, not daemon-wide work.
 
 | Owner | Settings |
 | --- | --- |
-| Daemon/store | Herdr socket endpoint |
-| Forge Workspace | Task authoring/configuration profile selection, Grilling profile selection, existing Herdr binding |
+| Daemon/store | Herdr socket endpoint; sticky durable launch rollback |
+| Forge Workspace | Task authoring/configuration profile selection, Grilling profile selection, existing Herdr binding (Herdr backend only) |
 | Project | Check Template, concurrency limit and setup hook |
-| Immutable Task Check | Pinned Task profile revision used for every attempt/retry/remediation |
+| Task Check | Original pin (immutable) and, after an explicit audited migration, an effective Task profile revision used for every new attempt/retry/remediation |
 | Immutable profile revision | Acknowledgement timeout and other supported profile configuration |
 
 Use [dispatch setup](dispatch.md#configure-dispatch) after local planning.
-`dispatcher config get` labels ownership and effective values. Both supported
-profile selections and a binding are required, even for only one dispatch type.
+`dispatcher config get` labels ownership and effective values. For the Herdr
+backend, both supported profile selections and a binding are required, even for
+only one dispatch type. Task Checks pinned to `pi-durable` revisions do not need
+the Herdr binding or Workspace readiness; see
+[Durable Task execution](durable-execution.md). Durable runtime storage lives under
+`<workspace-root>/.forge/assignment-runtimes/`, beside but outside Managed Worktrees.
 `dispatcher status` distinguishes configuration completeness from current
 dispatchability: missing/invalid profiles, absent binding, unreachable provider,
 missing/unverifiable identity and stale verification have separate blockers.

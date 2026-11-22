@@ -13,7 +13,7 @@ import { snapshot, readStorage } from '../src/storage.ts';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const host = resolve(root, 'target/debug/forge-runner-host');
-const main = fileURLToPath(new URL('../src/main.ts', import.meta.url));
+const main = fileURLToPath(new URL('./synthetic-runner.ts', import.meta.url));
 const inspect = fileURLToPath(new URL('../src/inspect.ts', import.meta.url));
 async function fixture(t) {
   const base = await mkdtemp(join(tmpdir(), 'forge-runner-'));
@@ -200,6 +200,10 @@ test('independent watchdog expires with stopped JavaScript, escalates, and prese
   // Fill the worker pipe: blocked forwarding must not hold the watchdog mutex.
   p.send({ padding: 'x'.repeat(131072) });
   await p.diagnostic(/runner-lease-expired/);
+  // While the fenced host still owns the stopped worker, nothing else may start.
+  const contender = start(t, f);
+  assert.equal((await contender.exited)[0], 1);
+  assert.match(contender.stderr(), /runner-owner-busy/);
   const marker = await readFile(join(f.directory, 'watchdog.json'));
   assert.equal(JSON.parse(marker).cleanup, 'unverified');
   assert.equal((await stat(join(f.directory, 'watchdog.json'))).mode & 0o777, 0o600);
@@ -212,11 +216,16 @@ test('independent watchdog expires with stopped JavaScript, escalates, and prese
     assert.equal((await stat(path)).mode & 0o777, 0o600);
   }
   await p.diagnostic(/runner-worker-exited/);
-  const contender = start(t, f);
-  assert.equal((await contender.exited)[0], 1);
-  assert.match(contender.stderr(), /runner-owner-busy/);
+  // T25: the original subreaper proves descendant absence after its fence,
+  // writes the exact receipt bound to this marker and exits, freeing the lock.
+  await p.diagnostic(/runner-watchdog-quiescence-verified/);
+  assert.equal((await p.exited)[0], 0);
+  const receipt = JSON.parse(await readFile(join(f.directory, 'watchdog-receipt-1.json'), 'utf8'));
+  assert.equal(receipt.marker, 'watchdog.json');
+  assert.equal(receipt.marker_contents, marker.toString('utf8'));
+  assert.equal(receipt.children_absent, true);
   assert.deepEqual(await runInspect(f), before);
-  p.child.kill('SIGKILL'); await p.exited;
+  // A settled fence is history: an ordinary grant is still denied after restart.
   const restarted = start(t, f); await owned(restarted);
   restarted.send(request(id));
   assert.deepEqual((await response(restarted)).admission, accepted.admission);
@@ -343,9 +352,10 @@ test('unknown protocol, wrong identities and conflicting IDs reject before openi
   assert.equal((await response(p)).error.code, 'runner-operation-conflict');
   p.send(request(launch('other'), 'observe'));
   assert.equal((await response(p)).error.code, 'runner-identity-conflict');
-  const unimplemented = request(id); unimplemented.operation = { kind: 'recover', incarnation_id: id.incarnation_id, authorization_id: 'not-authorized' };
-  p.send(unimplemented);
-  assert.equal((await response(p)).error.code, 'runner-operation-unavailable');
+  // Protocol 1 defines no request-level recover/transcript/follow-up/retire kinds.
+  const undefinedKind = request(id); undefinedKind.operation = { kind: 'recover', incarnation_id: id.incarnation_id, authorization_id: 'not-authorized' };
+  p.send(undefinedKind);
+  assert.equal((await response(p)).error.code, 'runner-request-invalid');
 });
 
 test('SIGKILL retains supervisor ownership; restart only observes same accepted identity/content', async t => {

@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-10-25
 - **Decision scope:** Dispatcher lifecycle, Git worktree safety, and Herdr provider ownership
-- **Partially superseded by:** [ADR-008](0008-operator-selected-dispatch-workspaces.md) for provider-container ownership and conservative replacement. The Forge-created neutral-root container described below is historical, not current setup guidance; see [Workspaces](../../../docs/workspaces.md).
+- **Partially superseded by:** [ADR-008](0008-operator-selected-dispatch-workspaces.md) for provider-container ownership and conservative replacement. [ADR-0014](0014-headless-durable-task-execution.md) removes the Herdr provisioning requirement for durable Task Assignments; worktree, Base Commit and retained-evidence rules still apply. The Forge-created neutral-root container described below is historical, not current setup guidance; see [Workspaces](../../../docs/workspaces.md).
 
 ## Context
 
@@ -30,5 +30,4 @@ This decision does not add automated worktree or branch cleanup/repair, automati
 
 ## References
 
-- [Herdr adapter socket contract](../../../docs/research/herdr-adapter-socket-contract.md)
 - Spec #502, “Autonomous Task-agent dispatch with recoverable worktrees”

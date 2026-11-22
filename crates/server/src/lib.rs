@@ -85,6 +85,21 @@ pub struct ManagedLaunchInputs {
     pub lifecycle_control_endpoint: String,
     pub lifecycle_credential: String,
     pub daemon_instance_id: String,
+    /// Forgeup-attested matched Node and effect-inspector paths: both or neither.
+    /// A schema 1 (inspection-only) runner bundle; never with a runner bundle.
+    pub durable_node: Option<String>,
+    pub durable_inspector: Option<String>,
+    /// Forgeup-attested schema 2 runner bundle root of this Revision. Every
+    /// durable component is derived from its fixed layout; composes launch.
+    pub durable_runner_bundle: Option<String>,
+    /// Forgeup-attested runner bundle roots of other registered Revisions, used
+    /// only for Assignments those Revisions launched (inspection, recovery and
+    /// retirement with their original components). Requires a runner bundle.
+    pub durable_retained_runner_bundles: Vec<String>,
+    /// Operator-selected owner-only `OpenAI` key file **path** for durable launch
+    /// (T18 M4). Forgeup passes it explicitly; never a key value. Validated by
+    /// durable profile preparation like the manual daemon's setting.
+    pub durable_model_key_file: Option<String>,
 }
 
 /// Managed-only configuration retained at the server composition boundary.
@@ -130,6 +145,12 @@ pub struct DaemonConfig {
     pub durable_model_key_file: Option<PathBuf>,
     /// Explicit trusted components for operator interrupted-effect inspection/resolution.
     pub durable_inspection: Option<durable_authorization::operator::InspectionComponents>,
+    /// Explicit matched host/runner components for durable launch and recovery.
+    /// Composition only: the release gate still withholds new launches by default.
+    pub durable_execution: Option<durable_authorization::launch::Execution>,
+    /// Matched components of other installed Revisions, selected only by a
+    /// retained Launch's exact component hash; never used for new launches.
+    pub durable_retained: Vec<durable_authorization::launch::Execution>,
     /// Present only when Forgeup explicitly owns this daemon launch.
     pub managed: Option<ManagedDaemonConfig>,
 }
@@ -148,6 +169,11 @@ impl std::fmt::Debug for DaemonConfig {
                 "durable_inspection_configured",
                 &self.durable_inspection.is_some(),
             )
+            .field(
+                "durable_execution_configured",
+                &self.durable_execution.is_some(),
+            )
+            .field("durable_retained_components", &self.durable_retained.len())
             .finish()
     }
 }
@@ -177,6 +203,14 @@ impl DaemonConfig {
                 env::var_os("FORGE_DURABLE_EFFECT_INSPECTOR").map(PathBuf::from),
             )
             .map_err(|error| error.message)?,
+            durable_execution: durable_authorization::launch::Execution::select(
+                env::var_os("FORGE_DURABLE_NODE").map(PathBuf::from),
+                env::var_os("FORGE_DURABLE_EFFECT_INSPECTOR").map(PathBuf::from),
+                env::var_os("FORGE_DURABLE_RUNNER_HOST").map(PathBuf::from),
+                env::var_os("FORGE_DURABLE_RUNNER_ENTRY").map(PathBuf::from),
+            )
+            .map_err(|error| error.message)?,
+            durable_retained: Vec::new(),
             managed: None,
         })
     }
@@ -206,11 +240,56 @@ impl DaemonConfig {
         if let Some((name, _)) = required.iter().find(|(_, value)| value.trim().is_empty()) {
             return Err(format!("managed daemon {name} must not be empty"));
         }
+        // T18 M4: an explicit, absolute key-file path; it requires a runner
+        // bundle that composes launch, and its contents are validated later.
+        let managed_key_file = match &inputs.durable_model_key_file {
+            None => None,
+            Some(_) if inputs.durable_runner_bundle.is_none() => {
+                return Err(
+                    "a managed model key file requires this Revision's runner bundle".into(),
+                );
+            }
+            Some(path) if Path::new(path).is_absolute() => Some(PathBuf::from(path)),
+            Some(_) => return Err("the managed model key file must be an absolute path".into()),
+        };
+        let bundle = |root: &String| {
+            durable_authorization::launch::Execution::from_bundle(Path::new(root))
+                .map_err(|error| error.message)
+        };
+        let (durable_inspection, durable_execution, durable_retained) = if let Some(root) =
+            &inputs.durable_runner_bundle
+        {
+            if inputs.durable_node.is_some() || inputs.durable_inspector.is_some() {
+                return Err(
+                    "a managed runner bundle already selects the matched Node and effect inspector"
+                        .into(),
+                );
+            }
+            let execution = bundle(root)?;
+            let retained = inputs
+                .durable_retained_runner_bundles
+                .iter()
+                .map(bundle)
+                .collect::<Result<Vec<_>, _>>()?;
+            (Some(execution.inspection()), Some(execution), retained)
+        } else {
+            if !inputs.durable_retained_runner_bundles.is_empty() {
+                return Err("retained runner bundles require this Revision's runner bundle".into());
+            }
+            let inspection = durable_authorization::operator::InspectionComponents::select(
+                inputs.durable_node.map(PathBuf::from),
+                inputs.durable_inspector.map(PathBuf::from),
+            )
+            .map_err(|error| error.message)?;
+            (inspection, None, Vec::new())
+        };
         Ok(Self {
             bind_addr,
             store_path: PathBuf::from(inputs.store_path),
-            durable_model_key_file: None,
-            durable_inspection: None,
+            durable_model_key_file: managed_key_file,
+            durable_inspection,
+            durable_execution,
+            durable_retained,
             managed: Some(ManagedDaemonConfig {
                 runtime_record_path: PathBuf::from(inputs.runtime_record_path),
                 lifecycle_control_endpoint: PathBuf::from(inputs.lifecycle_control_endpoint),
@@ -275,6 +354,19 @@ impl Daemon {
                 daemon_instance_id,
             ),
         }
+    }
+}
+
+impl Daemon {
+    fn durable_launch_service(
+        &self,
+    ) -> RpcResult<&durable_authorization::operator::OperatorService> {
+        self.durable_effect_resolution.as_deref().ok_or_else(|| {
+            rpc_error(RegistrationError::new(
+                "durable-launch-policy-unconfigured",
+                "durable launch policy requires the daemon's retained store",
+            ))
+        })
     }
 }
 
@@ -906,17 +998,23 @@ fn application_from_config_with_cli(
         Box::new(GitWorktreeAdapter),
         Box::new(dispatch),
         Box::new(ServerAgentDispatchAdapterFactory {
-            provider: Box::new(durable_authorization::retirement::Factory {
-                database: config.store_path.clone(),
-                controller: Arc::new(match &config.durable_inspection {
-                    Some(components) => durable_authorization::retirement::Controller::default()
-                        .with_inspection(components.clone())
-                        .map_err(|error| error.code.to_owned())?,
-                    None => durable_authorization::retirement::Controller::default(),
-                }),
-                original: Box::new(HerdrAdapterFactory::from_configuration_store(
-                    config.store_path.clone(),
-                )),
+            provider: Box::new(durable_authorization::release_gate::ReleaseGate {
+                // Default eligibility stays withheld until T19 evidence and T20 handoff.
+                control: durable_authorization::release_gate::LaunchControl::default(),
+                rollback_store: Some(config.store_path.clone()),
+                inner: Box::new(
+                    durable_authorization::launch::compose(
+                        &config.store_path,
+                        config.durable_inspection.as_ref(),
+                        config.durable_execution.as_ref(),
+                        &config.durable_retained,
+                        config.durable_model_key_file.clone(),
+                        Box::new(HerdrAdapterFactory::from_configuration_store(
+                            config.store_path.clone(),
+                        )),
+                    )
+                    .map_err(|error| error.code.to_owned())?,
+                ),
             }),
             daemon_url: format!("http://{}", config.bind_addr),
             capability_secret_root,
@@ -1212,6 +1310,108 @@ impl AgentDispatchApiServer for Daemon {
         self.application
             .agent_assignment_info(&request.assignment_id)
             .map(Into::into)
+            .map_err(rpc_error)
+    }
+
+    async fn assignment_durable_status(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<forge_rpc::AssignmentInfoRequest>,
+    ) -> RpcResult<forge_rpc::AssignmentDurableStatusResponse> {
+        let workspace = self.record_workspace(&request.selection, &mut [])?;
+        let service = self.durable_effect_resolution.as_ref().ok_or_else(|| {
+            rpc_error(RegistrationError::new(
+                "durable-status-unconfigured",
+                "durable status requires the daemon's retained store",
+            ))
+        })?;
+        // Authorize Workspace scope first; only then read the unscoped Assignment info.
+        let status = service
+            .status(&workspace, &request.record.assignment_id)
+            .map_err(rpc_error)?;
+        let info = self
+            .application
+            .agent_assignment_info(&request.record.assignment_id)
+            .map_err(rpc_error)?;
+        let followups = service
+            .followups(&workspace, &request.record.assignment_id)
+            .map_err(rpc_error)?;
+        let purge = service
+            .purge_record(&workspace, &request.record.assignment_id)
+            .map_err(rpc_error)?;
+        let fence = service
+            .runtime_fence(&workspace, &request.record.assignment_id)
+            .map_err(rpc_error)?;
+        Ok(
+            forge_rpc::AssignmentDurableStatusResponse::compose(info, status)
+                .with_followups(followups)
+                .with_runtime_purge(purge)
+                .with_runtime_fence(fence),
+        )
+    }
+
+    async fn assignment_purge_runtime(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<forge_app::durable_execution::purge::Request>,
+    ) -> RpcResult<forge_app::durable_execution::purge::Record> {
+        let workspace = self.record_workspace(&request.selection, &mut [])?;
+        let service = self.durable_effect_resolution.as_ref().ok_or_else(|| {
+            rpc_error(RegistrationError::new(
+                "runtime-purge-unconfigured",
+                "runtime purge requires the daemon's retained store",
+            ))
+        })?;
+        service
+            .purge_runtime(&workspace, &request.record)
+            .map_err(rpc_error)
+    }
+
+    async fn durable_launch_status(
+        &self,
+    ) -> RpcResult<forge_app::durable_execution::launch_control::Status> {
+        self.durable_launch_service()?
+            .durable_launch_status()
+            .map_err(rpc_error)
+    }
+
+    async fn durable_launch_disable(
+        &self,
+        request: forge_app::durable_execution::launch_control::DisableRequest,
+    ) -> RpcResult<forge_app::durable_execution::launch_control::Status> {
+        self.durable_launch_service()?
+            .disable_durable_launches(&request)
+            .map_err(rpc_error)
+    }
+
+    async fn assignment_follow_up(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<forge_app::durable_execution::followup::Request>,
+    ) -> RpcResult<forge_app::durable_execution::followup::Receipt> {
+        let workspace = self.record_workspace(&request.selection, &mut [])?;
+        let service = self.durable_effect_resolution.as_ref().ok_or_else(|| {
+            rpc_error(RegistrationError::new(
+                "durable-followup-unconfigured",
+                "follow-ups require the daemon's retained store",
+            ))
+        })?;
+        service
+            .follow_up(&workspace, &request.record)
+            .map_err(rpc_error)
+    }
+
+    async fn assignment_transcript(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<forge_rpc::AssignmentTranscriptRequest>,
+    ) -> RpcResult<forge_rpc::AssignmentTranscriptResponse> {
+        let workspace = self.record_workspace(&request.selection, &mut [])?;
+        let service = self.durable_effect_resolution.as_ref().ok_or_else(|| {
+            rpc_error(RegistrationError::new(
+                "durable-transcript-unconfigured",
+                "transcripts require the daemon's retained store",
+            ))
+        })?;
+        service
+            .transcript(&workspace, &request.record)
+            .await
             .map_err(rpc_error)
     }
 
@@ -1881,6 +2081,39 @@ impl RecordApiServer for Daemon {
             .map_err(rpc_error)
     }
 
+    async fn check_profile_migrate(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<forge_app::check_profile_migration::Request>,
+    ) -> RpcResult<forge_app::check_profile_migration::Receipt> {
+        let forge_rpc::SelectedRecordRequest {
+            selection,
+            record: request,
+        } = request;
+        // Scope authorization precedes provider/profile access, as for execution mode.
+        self.record_application(&selection, &mut [])?
+            .show_record(request.task_id)
+            .map_err(rpc_error)?;
+        self.application
+            .migrate_check_profiles(&request)
+            .map_err(rpc_error)
+    }
+
+    async fn check_profile_migrations(
+        &self,
+        request: forge_rpc::SelectedRecordRequest<RecordIdRequest>,
+    ) -> RpcResult<Vec<forge_app::check_profile_migration::Receipt>> {
+        let forge_rpc::SelectedRecordRequest {
+            selection,
+            record: request,
+        } = request;
+        self.record_application(&selection, &mut [])?
+            .show_record(request.id)
+            .map_err(rpc_error)?;
+        self.application
+            .check_profile_migrations(request.id)
+            .map_err(rpc_error)
+    }
+
     async fn start(
         &self,
         request: forge_rpc::SelectedRecordRequest<RecordIdRequest>,
@@ -2277,7 +2510,11 @@ pub async fn serve(config: DaemonConfig) -> Result<(), std::io::Error> {
     daemon.durable_effect_resolution = Some(Arc::new(
         durable_authorization::operator::OperatorService::new(
             &config.store_path,
-            config.durable_inspection.clone(),
+            durable_authorization::launch::ComponentCatalog::new(
+                config.durable_inspection.as_ref(),
+                config.durable_execution.as_ref(),
+                &config.durable_retained,
+            ),
         )
         .map_err(|error| std::io::Error::other(error.message))?,
     ));
@@ -3015,6 +3252,8 @@ mod tests {
             store_path: database,
             durable_model_key_file: None,
             durable_inspection: None,
+            durable_execution: None,
+            durable_retained: Vec::new(),
             managed: None,
         })
         .unwrap();
@@ -4490,6 +4729,8 @@ mod tests {
             store_path: store_path.clone(),
             durable_model_key_file: None,
             durable_inspection: None,
+            durable_execution: None,
+            durable_retained: Vec::new(),
             managed: None,
         })
         .await
@@ -4529,6 +4770,37 @@ mod tests {
         );
     }
 
+    /// T18 M4: the managed daemon's model credential is an explicit absolute
+    /// key-file path from Forgeup, and only with a launch-capable runner bundle.
+    #[test]
+    fn managed_model_key_file_is_explicit_absolute_and_requires_a_runner_bundle() {
+        let inputs = ManagedLaunchInputs {
+            bind_addr: "127.0.0.1:45006".into(),
+            store_path: "managed.sqlite3".into(),
+            runtime_record_path: "runtime.json".into(),
+            lifecycle_control_endpoint: "control.sock".into(),
+            lifecycle_credential: "credential".into(),
+            daemon_instance_id: "instance-123".into(),
+            durable_node: None,
+            durable_inspector: None,
+            durable_runner_bundle: Some("/revision/b/runner-bundle".into()),
+            durable_retained_runner_bundles: Vec::new(),
+            durable_model_key_file: Some("/operator/keys/openai".into()),
+        };
+        assert_eq!(
+            DaemonConfig::managed(inputs.clone())
+                .unwrap()
+                .durable_model_key_file,
+            Some(PathBuf::from("/operator/keys/openai"))
+        );
+        let mut relative = inputs.clone();
+        relative.durable_model_key_file = Some("relative-key".into());
+        assert!(DaemonConfig::managed(relative).is_err());
+        let mut unbundled = inputs;
+        unbundled.durable_runner_bundle = None;
+        assert!(DaemonConfig::managed(unbundled).is_err());
+    }
+
     #[test]
     fn managed_configuration_is_explicit_and_rejects_invalid_inputs() {
         let inputs = ManagedLaunchInputs {
@@ -4538,6 +4810,11 @@ mod tests {
             lifecycle_control_endpoint: "control.sock".into(),
             lifecycle_credential: "credential".into(),
             daemon_instance_id: "instance-123".into(),
+            durable_node: None,
+            durable_inspector: None,
+            durable_runner_bundle: None,
+            durable_retained_runner_bundles: Vec::new(),
+            durable_model_key_file: None,
         };
         let config =
             DaemonConfig::from_process(Some("127.0.0.1:45005"), Some(inputs.clone())).unwrap();
@@ -4554,9 +4831,63 @@ mod tests {
             lifecycle_control_endpoint: "control.sock".into(),
             lifecycle_credential: "credential".into(),
             daemon_instance_id: "instance-123".into(),
+            durable_node: None,
+            durable_inspector: None,
+            durable_runner_bundle: None,
+            durable_retained_runner_bundles: Vec::new(),
+            durable_model_key_file: None,
         })
         .unwrap_err();
         assert!(error.contains("invalid managed daemon bind address"));
+
+        // Attested matched components are explicit, absolute and both-or-neither.
+        let mut matched = inputs.clone();
+        matched.durable_node = Some("/revision/runner-bundle/node/node".into());
+        matched.durable_inspector =
+            Some("/revision/runner-bundle/runner/src/inspect-effects.ts".into());
+        let components = DaemonConfig::managed(matched.clone())
+            .unwrap()
+            .durable_inspection
+            .unwrap();
+        assert_eq!(
+            components.node,
+            PathBuf::from("/revision/runner-bundle/node/node")
+        );
+        matched.durable_inspector = None;
+        assert!(DaemonConfig::managed(matched.clone()).is_err());
+        matched.durable_inspector = Some("relative.ts".into());
+        assert!(DaemonConfig::managed(matched).is_err());
+
+        // A schema 2 runner bundle composes launch from its fixed layout, and
+        // retained bundles serve only Launches of other installed Revisions.
+        let mut bundled = inputs.clone();
+        bundled.durable_runner_bundle = Some("/revision/b/runner-bundle".into());
+        bundled.durable_retained_runner_bundles = vec!["/revision/a/runner-bundle".into()];
+        let config = DaemonConfig::managed(bundled.clone()).unwrap();
+        let execution = config.durable_execution.clone().unwrap();
+        assert_eq!(
+            execution.components.host,
+            PathBuf::from("/revision/b/runner-bundle/host/forge-runner-host")
+        );
+        assert_eq!(config.durable_inspection, Some(execution.inspection()));
+        assert_eq!(config.durable_retained.len(), 1);
+        assert_eq!(
+            config.durable_retained[0].components.node,
+            PathBuf::from("/revision/a/runner-bundle/node/node")
+        );
+        // T18 M4: no key file unless the operator selects one explicitly.
+        assert!(config.durable_model_key_file.is_none());
+        let mut both = bundled.clone();
+        both.durable_node = Some("/revision/b/runner-bundle/node/node".into());
+        both.durable_inspector =
+            Some("/revision/b/runner-bundle/runner/src/inspect-effects.ts".into());
+        assert!(DaemonConfig::managed(both).is_err());
+        let mut orphan = inputs.clone();
+        orphan.durable_retained_runner_bundles = vec!["/revision/a/runner-bundle".into()];
+        assert!(DaemonConfig::managed(orphan).is_err());
+        let mut relative = bundled;
+        relative.durable_runner_bundle = Some("runner-bundle".into());
+        assert!(DaemonConfig::managed(relative).is_err());
 
         let error = DaemonConfig::managed(ManagedLaunchInputs {
             bind_addr: "127.0.0.1:45004".into(),
@@ -4565,6 +4896,11 @@ mod tests {
             lifecycle_control_endpoint: "control.sock".into(),
             lifecycle_credential: "credential".into(),
             daemon_instance_id: "instance-123".into(),
+            durable_node: None,
+            durable_inspector: None,
+            durable_runner_bundle: None,
+            durable_retained_runner_bundles: Vec::new(),
+            durable_model_key_file: None,
         })
         .unwrap_err();
         assert_eq!(error, "managed daemon store path must not be empty");
@@ -4597,6 +4933,11 @@ mod tests {
             lifecycle_control_endpoint: endpoint.to_string_lossy().into_owned(),
             lifecycle_credential: "expected-credential".into(),
             daemon_instance_id: "instance-123".into(),
+            durable_node: None,
+            durable_inspector: None,
+            durable_runner_bundle: None,
+            durable_retained_runner_bundles: Vec::new(),
+            durable_model_key_file: None,
         })
         .unwrap();
         let mut server = tokio::spawn(serve(config));

@@ -5,7 +5,7 @@ use forge_app::{
     authorization_lease::Owner,
     durable_execution::retirement::{Operation, Receipt, Repository as _},
 };
-fn operation(f: &Fixture) -> Operation {
+pub(super) fn operation(f: &Fixture) -> Operation {
     Operation {
         operation_id: "retire".into(),
         launch: f.launch.clone(),
@@ -21,7 +21,7 @@ fn operation(f: &Fixture) -> Operation {
         },
     }
 }
-fn revoke(f: &Fixture) {
+pub(super) fn revoke(f: &Fixture) {
     // Protocol-policy fixture: seed typed original grant ownership without
     // claiming real host authority. The composed host tests issue actual grants.
     let mut lease: forge_app::authorization_lease::Lease = serde_json::from_str(include_str!(

@@ -27,3 +27,8 @@ unsafe_code = "forbid"
 
 [workspace.lints.clippy]
 pedantic = "warn"
+
+# Bundle attestation hashes hundreds of MB (Node, host, dependency closure); keep
+# it fast in development and test builds too. No behavior change.
+[profile.dev.package.sha2]
+opt-level = 3

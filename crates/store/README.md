@@ -26,7 +26,12 @@ by migrations—not just the initial `CREATE TABLE` statements.
 - [`src/durable_execution.rs`](src/durable_execution.rs): durable runtime identity,
   admission intent/results and conservative capacity reservation (schema 20),
   append-only authorization grant history (schema 21), and identity-bound
-  revoked retirement reconciliation (`src/durable_execution/retirement.rs`, schema 22).
+  revoked retirement reconciliation (`src/durable_execution/retirement.rs`, schema 22),
+  plus follow-ups, runtime purge journal and sticky launch rollback (schema 23), and
+  recorded purge removal outcomes (schema 24), and proven never-granted launch
+  reconciliations (`src/durable_execution/launch_failure.rs`, schema 25).
+  Runtime conversations live in separate per-Assignment stores, not this database; see
+  [Durable Task execution](../../docs/durable-execution.md).
 
 Keep this reference in sync when those schema definitions change. Domain behavior
 is documented separately in [Records](../../docs/records.md),
@@ -52,6 +57,34 @@ is documented separately in [Records](../../docs/records.md),
   copy-and-upgrade targets revision 22 from revisions 7 through 22; unsupported
   stores are rejected without automatic conversion or reset.
 
+## Durable recovery episodes (existing revision 22 representation)
+
+Recovery uses the existing opaque Assignment resource ledger: `recovery-claim`
+retains a content-bound Candidate commitment, operation ID, fresh issuer epoch and
+original Launch; `recovery-grant` retains the exact committed fresh lease and
+protected external-proof digest. Neither contains Task bodies, capabilities,
+provider credentials or transcript/tool payloads. Runtime proof files remain in
+separate owner-only runtime storage, not this database.
+
+Immediate writer transactions enforce at most one active claim per Assignment,
+immutable operation identities, scope-before-replay and live original-binding
+revalidation. Grant insertion, audit acceptance and claim retirement commit
+atomically. Exact historical claim retries return their original fence only;
+retired/cancelled claims cannot issue authority. A subsequent recovery requires a
+changed current predecessor commitment and a different operation/epoch, preserving
+all earlier claims/grants. Readers reject malformed/duplicate histories and validate
+each historical grant against its actual retained predecessor before accepting a
+new episode. Ordinary grants cannot bypass an active recovery fence. No attempt,
+freshness, evidence or Continuation budget is changed by these operations.
+
+There is no new table/column, schema marker rewrite, backfill or automatic conversion.
+This extends policy over resource rows already representable in revision 22;
+earlier prototype binaries may conservatively refuse operations on multi-episode
+histories. Use matched components; this is not an installed-release compatibility
+or rollout claim. Original admission remains immutable. Accepted Check handoff
+uses known bound durable admission rather than requiring Herdr `agent-name`
+metadata, but that only permits revocation/cleanup to begin, never capacity release.
+
 ## Durable retirement reconciliation (revision 22)
 
 `durable_assignment_retirements` stores one immutable `operation_json` per
@@ -75,12 +108,19 @@ Assignment before releasing its marker. External effects, unknown provisioning,
 unrecognized diagnostics and the operator Dispatch Hold are preserved. Generic
 retirement finalization still requires all other resources reconciled.
 
+A read-only revoked-grant snapshot also supports reconciliation from an original
+subreaper's exact-grant crash receipt. Scope, immutable runtime and revocation are
+checked in one snapshot; this lease is historical identity, not renewed permission.
+The trusted adapter must independently prove exclusive ownership and descendant
+absence, reject later host-fault markers and inspect committed effects before the
+same transactional reconciliation. It writes no synthetic host retirement receipt.
+
 Ordinary opening rejects revision 21 before initialization writes. Explicit
 offline 21 → 22 adds an empty retirement journal and replaces the runtime resource
 retirement guard; it fabricates no historical ownership or cleanup proof and does
 not permit upgrading through unresolved execution blockers. Runtime schema and
 runner wire v1 are unchanged; the separate private retirement control is version 1.
-See [Assignment recovery](../../docs/assignment-recovery.md#durable-supervised-retirement-controlled-implementation).
+See [durable retirement](../../docs/durable-execution.md#retirement).
 
 ## Assignment authorization grant history (revision 21)
 
@@ -108,10 +148,9 @@ does not prove that execution stopped. No secrets belong in grant history.
 
 Revision 21 rejects older stores before ordinary initialization writes. Explicit
 offline 20 → 21 conversion adds only an empty grant table and its history guards;
-it creates no historical permissions. The T05 controlled runtime now includes
+it creates no historical permissions. The runtime around this table provides
 verified host ownership, a commit-before-delivery renewal service, consumer guards
-and an independent watchdog. Production Check-bound dispatch remains disabled;
-profile/authentication mapping and the dispatch/bootstrap tracer are T06/T07.
+and an independent watchdog. New durable launches are withheld by the release gate.
 
 Authorization uncertainty uses the existing generic resource representation, not
 new DDL or invented grant history. The trusted `SessionRepository::retain_failure`
@@ -179,9 +218,8 @@ external resolution preserves the attempt without permission to resume. The daem
 `bind_inspected` grant-controller boundary retains committed effects before any
 initial grant under verified directly spawned ownership. The synchronous `bind`
 is fresh-only and rejects existing SQLite storage/sidecars and missing accepted
-storage. Inspection failures retain authorization uncertainty/capacity. Safe writable
-recovery and automatic scheduling remain later deliverables. See
-[T08 evidence](../../docs/research/pi-durable-t08/README.md).
+storage. Inspection failures retain authorization uncertainty/capacity. Writable
+recovery is a separate claim/grant path (below).
 No schema, runner component or existing serialized field changes are required;
 these are additive opaque resource kinds, a new CLI/RPC operation and internal
 Rust service interfaces.
@@ -191,11 +229,9 @@ The server's preparation/binding path derives protected storage at
 retained runtime and immutable registered root, never an operator path. Missing
 or unsafe binding paths cannot silently create/adopt a runtime. Runtime watchdog
 files supplement these Forge diagnostics; neither file deletion nor process exit
-resolves persisted resources. See [T05 evidence](../../docs/research/pi-durable-t05/README.md)
-for fake-clock and real SQLite/daemon-service/host/Node outage tests and remaining
-production/release gates.
+resolves persisted resources.
 
-## Recovery reservations (controlled T10 increment)
+## Recovery reservations
 
 The internal `durable_execution::recovery::Repository::claim_recovery` port
 atomically revalidates a candidate and reserves one `recovery-claim` opaque
@@ -215,15 +251,19 @@ retirement may cancel a validated claim matching the exact Launch, atomically
 with its original-owner cleanup receipt and runtime reconciliation. Malformed or
 foreign claims fail closed and roll back the entire reconciliation. Claim identity,
 creation timestamp and original-result replay survive cancellation; effects,
-unknown resources and holds are not discharged. No production daemon or public
-CLI/RPC path creates a claim. Automatic recovery remains disabled.
+unknown resources and holds are not discharged. No public CLI/RPC path creates a
+claim. A daemon composed with matched runner components creates one through its
+automatic recovery controller (`server/src/durable_authorization/recovery.rs`,
+`claim_recovery`), only from the original host's own crash, fence or ungranted
+proof for the owner of the last lease.
 
 The internal `recovery::authorization::Repository::grant_recovery` transition
 accepts an opaque application-owned `Prepared` value constructed only after a
 trusted `RecoveryHost` verification boundary. That boundary must retain protected
 external safety evidence keyed by claim operation; a digest links the audit to
-that proof, not proof of death by itself. No concrete recovery verifier or delivery
-controller is implemented yet. The store revalidates the full claimed candidate
+that proof, not proof of death by itself. The server's recovery controller
+(`server/src/durable_authorization/recovery.rs`, with `quiesced_inspection.rs` and
+`waiting_recovery_inspection.rs`) is that verifier and delivery controller. The store revalidates the full claimed candidate
 and every live gate inside an immediate transaction. Only the exact recovery claim
 is exempted from resource blocking; holds, effects and unrelated resources remain.
 Acceptance commits the next Assignment-wide lease sequence, a retired
@@ -234,12 +274,15 @@ it is not renewal of the old owner's expired deadline. Exact live retries preser
 the original deadline/audit; expiry, revocation, binding drift or later renewal
 reject delivery replay without rewriting history. Generic resource operations
 cannot create/retire either recovery resource kind. Existing ordinary consumers
-reject a first grant above sequence one; the specialized handshake remains missing.
-The current single-claim history also conservatively blocks subsequent recovery
-operations. See [T10 authorization evidence](../../docs/research/pi-durable-t10/recovery-authorization.md). No DDL/schema
+reject a first grant above sequence one; recovery uses the specialized
+`host_prepare_recovery`/`host_recovery` handshake instead. Each recovery is a
+separate immutable claim/grant episode: a new episode begins only from the current
+grant owner's new crash, fence or ungranted proof (for that grant, or for an
+earlier lease that owner last accepted when a later commit was never delivered).
+Recovery deliberately does not reuse ordinary first-grant or watchdog validation, so
+no timeout, restart or watchdog reset can hand a fence to a new owner. No DDL/schema
 or public wire changes are required for this additive opaque resource kind; older
-grant/readiness checks already block unknown retained resources. See
-[T10 reservation evidence](../../docs/research/pi-durable-t10/recovery-reservation.md).
+grant/readiness checks already block unknown retained resources.
 
 ## Durable runtime admission (revision 20)
 
@@ -272,7 +315,8 @@ runtime response is not an Outcome or Check Assessment.
 The existing resource guards retain capacity, replacement/worktree blockers and
 historical backend identity even for closed Assignments. SQL guards prevent generic
 resource retirement/deletion from clearing the durable marker. No durable cleanup
-or safety override is implemented here: verified retirement is later work. A
+or safety override is implemented here; verified retirement is the revision 22
+journal, plus fence-receipt and never-granted reconciliation (revision 25). A
 rejected admission alone is not proof of host-process absence. All external calls
 are outside writer transactions. No credentials, prompts or model responses belong
 in launch identity or result diagnostics.
@@ -281,8 +325,9 @@ Revision 20 is a breaking storage contract. Ordinary open rejects incompatible
 stores before initialization writes. The separately requested offline 19 → 20
 upgrade adds only empty runtime tables/guards, preserving all historical rows and
 inventing no backend/runtime identities. Older explicit upgrade paths compose this
-expansion. Durable dispatch remains disabled; protocol definitions and fake
-transport tests do not establish production runner or recovery readiness.
+expansion. Protocol definitions and fake transport tests do not establish
+production runner or recovery readiness; new durable launches are withheld by the
+release gate.
 
 ## Retained-work salvage authorization (revision 17)
 
@@ -1303,6 +1348,83 @@ blocker. Holds use `INSERT OR IGNORE`, preserving prior safety diagnostics; reso
 never implicitly clears them. The serialized accepted result remains unchanged on
 replay, even when the live Findings or freshness later change.
 
+### Operator follow-ups (schema revision 23)
+
+`durable_assignment_followups(assignment_id, operation_id, sequence, message, message_sha256,
+binding_json, recorded_at_millis)` records operator input once per Assignment and operation ID
+(unique per-Assignment `sequence`), bound to the original attempt in `binding_json`. Triggers
+reject UPDATE and DELETE. `durable_assignment_followup_deliveries(assignment_id, operation_id,
+state unknown|delivered, admission_id, updated_at_millis)` tracks delivery: `unknown` is written
+before a pipe write, `delivered` (with the runtime admission ID) only after the runner accepts it,
+and a delivered row is final. Rows are never deleted, including by runtime purge.
+
+### Runtime purge journal (schema revision 23)
+
+`durable_runtime_purges(assignment_id PK, operation_id, state pending|purged|retained,
+diagnostic, requested_at_millis, completed_at_millis)` journals explicit deletion of
+retired runtime history. Identity is immutable, `purged` is final and rows are never
+deleted. `begin_purge` authorizes scope and eligibility (closed, retirement reconciled
+or admission rejected, no unretired resource, no Dispatch Hold) in one immediate
+transaction; an exact retry returns the original record. The filesystem step runs
+outside the transaction, and `finish_purge` records the result.
+
+### Runtime purge removal outcome (schema revision 24)
+
+`durable_runtime_purge_removals(assignment_id PK -> durable_runtime_purges, removal
+removed|already-absent)` records, in the same transaction that marks a purge `purged`,
+whether that operation removed the mapped runtime directory or found it already absent.
+An absent path is not proof that Forge deleted anything, so the two stay distinct.
+Triggers allow an insert only for a `purged` journal row and reject UPDATE and DELETE.
+Revision 24 is a separate table so revision 23 journal rows upgrade byte-exact: a purge
+completed before 24 has no removal row and reads as unrecorded (`removal: null`), never
+as a fabricated deletion. The explicit offline upgrade from 23 adds the empty table.
+
+### Never-granted launch reconciliation (schema revision 25)
+
+`claim` inserts the one-shot `provision-intent` marker, the `durable_assignment_runtimes`
+row and the `durable-runtime` resource in one immediate transaction, after the
+Assignment execution gate. A refused precondition rolls all of them back; an existing
+claim or a closed Assignment returns `None` and writes nothing.
+
+`durable_launch_reconciliations(assignment_id PK -> durable_assignment_runtimes, proof
+never-launched|never-owned|ungranted-quiescence, reconciled_at_millis)` journals a launch
+reconciled without any grant. Rows are immutable and retained. `reconcile_ungranted_launch`
+checks, in one immediate transaction, that the Assignment is closed, the admission is
+`Pending`, no grant was ever committed, no host retirement was begun and (for
+`never-launched`) no launch intent was committed. It then inserts the row (an exact
+retry keeps the original) and retires only `durable-runtime`, `provision-intent`, launch
+failure and authorization diagnostics. The `durable_runtime_capacity_retained` trigger now
+allows `durable-runtime` retirement with either a reconciled host retirement or this row,
+for a closed Assignment. `record_launch_failure` retains one `durable-launch-failure`
+resource per failure point. `reconcile_unreserved_claim` discharges an older claim that
+has no runtime, only after closure. Purge eligibility accepts a `Pending` admission once
+every resource is retired. The explicit offline upgrade from 24 adds the empty table and
+replaces the trigger.
+
+### Durable launch rollback (schema revision 23)
+
+`durable_launch_rollbacks(id = 1, operation_id, reason, disabled_at_millis)` holds at most
+one sticky operator rollback of NEW durable launches. Rows can be neither updated nor
+deleted. `disable_durable_launches` validates the request, then in one immediate
+transaction returns any existing row unchanged (`replayed`) or inserts the first one.
+The release gate reads it on every new durable admission and refuses when it exists or
+cannot be read. It never touches Assignments, Check pins or Workspace selections, and
+there is no stored "enabled" state: default eligibility is withheld in code.
+
+### Check profile migration tables (schema revision 23)
+
+`check_profile_migrations(id, record_id, operation_id, request_sha256, actor, message,
+generation_before, generation_after, created_at_millis)` is unique per Task and operation ID.
+`check_profile_migration_changes(migration_id, check_id, prior_revision, new_revision)` records
+one row per migrated Check (`new_revision <> prior_revision`). Both tables are append-only:
+triggers reject UPDATE and DELETE. `record_checks.profile_revision` is the original pin and is
+never modified; a Check's effective revision is its latest change row, else the original pin.
+Dispatch, Execution Mode and Stack validation, and `checks::load`, read the effective revision.
+The change commits in one immediate transaction with the Task's freshness invalidation. An
+exact retry returns the original rows; reuse with different content conflicts. Existing
+databases upgrade with empty history; no migration is fabricated. The tables were added to the
+unreleased revision 23 DDL, so there is no revision bump.
+
 ## Initialization and compatibility
 
 Opening a repository first checks SQLite's `application_id` and `user_version`
@@ -1374,5 +1496,5 @@ sqlite3 -readonly /path/to/forge.sqlite3 'PRAGMA index_list(record_relationships
 ```
 
 See [Development](../../docs/development.md) and
-[Forgeup locations](../docs/forgeup.md#locations-and-recovery) for database location
+[Forgeup locations](../../docs/forgeup.md#locations-and-recovery) for database location
 and revision-specific storage details.

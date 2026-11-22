@@ -253,10 +253,15 @@ impl SqliteProjectRepository {
         {
             return Ok(false);
         }
-        let uncertain_launch: bool = tx.query_row(
-            "SELECT launch_started_at_millis IS NOT NULL AND NOT EXISTS(SELECT 1 FROM agent_assignment_resources WHERE assignment_id = ?1 AND resource_kind = 'agent-name') FROM agent_assignments WHERE id = ?1",
-            [id], |r| r.get(0)).map_err(storage_error)?;
-        if uncertain_launch {
+        let (started, provider, herdr_known): (bool, String, bool) = tx.query_row(
+            "SELECT a.launch_started_at_millis IS NOT NULL, p.provider, EXISTS(SELECT 1 FROM agent_assignment_resources WHERE assignment_id = ?1 AND resource_kind = 'agent-name') FROM agent_assignments a JOIN agent_profiles p ON p.record_type = a.profile_record_type AND p.revision = a.profile_revision WHERE a.id = ?1",
+            [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).map_err(storage_error)?;
+        let known = if provider == "pi-durable" {
+            super::durable_execution::handoff_admitted(&tx, id, &attempt)?
+        } else {
+            herdr_known
+        };
+        if started && !known {
             return Ok(false);
         }
         // Only the first caller creates the blocker. Replays must not resurrect retired resources.

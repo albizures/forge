@@ -66,6 +66,8 @@ fn git(root: &Path, args: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap().trim().into()
 }
 
+// The first `node` on PATH must be a real binary: a Volta shim refuses to run
+// with the cleared environment the host uses (see docs/development.md).
 fn node() -> PathBuf {
     std::env::split_paths(&std::env::var_os("PATH").unwrap())
         .map(|path| path.join("node"))
@@ -157,27 +159,27 @@ async fn outcome(assignment_id: &str, endpoint: &str, secret: &Path, file: &Path
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn runner_gate_uses_real_authenticated_check_bootstrap_and_outcome() {
-    check_execution("accepted").await;
+    Box::pin(check_execution("accepted")).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn final_prose_without_outcome_retains_missing_outcome_from_actual_runtime_answer() {
-    check_execution("missing").await;
+    Box::pin(check_execution("missing")).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn rejected_outcome_then_final_prose_remains_missing_outcome() {
-    check_execution("rejected").await;
+    Box::pin(check_execution("rejected")).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn interrupted_external_mutation_retains_forge_blocker_across_daemon_restart() {
-    check_execution("effect-before-return").await;
+    Box::pin(check_execution("effect-before-return")).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn returned_tool_without_committed_receipt_retains_forge_blocker_across_daemon_restart() {
-    check_execution("effect-before-commit").await;
+    Box::pin(check_execution("effect-before-commit")).await;
 }
 
 async fn interrupted_effect_process(
@@ -242,6 +244,184 @@ async fn interrupted_effect_process(
         b"untracked bytes\n"
     );
     serde_json::from_value(report["effects"].clone()).unwrap()
+}
+
+/// Actual CLI -> JSON-RPC -> daemon -> matched read-only Node reader. Returns the
+/// ordered committed entry IDs. Inspection has no side effects (callers compare state).
+async fn inspect_status_and_transcript(
+    endpoint: &str,
+    assignment: &str,
+) -> (forge_rpc::AssignmentDurableStatusResponse, Vec<String>) {
+    let run = |args: Vec<String>| {
+        let endpoint = format!("{endpoint}/rpc");
+        let assignment = assignment.to_owned();
+        async move {
+            tokio::task::spawn_blocking(move || {
+                let mut command = Command::new(env!("CARGO_BIN_EXE_forge"));
+                command.env_clear().args([
+                    "dispatcher",
+                    &args[0],
+                    &assignment,
+                    "--workspace",
+                    "test",
+                    "--server-url",
+                    &endpoint,
+                ]);
+                command.args(&args[1..]);
+                command.output().unwrap()
+            })
+            .await
+            .unwrap()
+        }
+    };
+    let human = run(vec!["assignment-status".into()]).await;
+    assert!(
+        human.status.success(),
+        "{}",
+        String::from_utf8_lossy(&human.stderr)
+    );
+    let human = String::from_utf8(human.stdout).unwrap();
+    assert!(human.contains("Durable runtime: pi-durable") && human.contains("Missing Outcome:"));
+    let output = run(vec!["assignment-status".into(), "--json".into()]).await;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "structured output stays separate from diagnostics"
+    );
+    let status: forge_rpc::AssignmentDurableStatusResponse =
+        serde_json::from_slice(&output.stdout).unwrap();
+    let mut ids = Vec::new();
+    let mut after: Option<String> = None;
+    for _ in 0..200 {
+        let mut args = vec![
+            "assignment-transcript".to_owned(),
+            "--json".into(),
+            "--limit".into(),
+            "5".into(),
+        ];
+        if let Some(after) = &after {
+            args.extend(["--after".into(), after.clone()]);
+        }
+        let output = run(args).await;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let text = String::from_utf8(output.stdout).unwrap();
+        for canary in [
+            "T07-CAPABILITY-CANARY",
+            "T07-MODEL-KEY-CANARY",
+            "runtime.sqlite",
+            "owner.lock",
+        ] {
+            assert!(!text.contains(canary), "leaked {canary}");
+        }
+        let page: forge_rpc::AssignmentTranscriptResponse = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            page.history,
+            forge_rpc::TranscriptHistory::Available,
+            "{text}"
+        );
+        ids.extend(page.entries.iter().map(|entry| entry.id.clone()));
+        after = page.next_after;
+        if !page.more {
+            let numbers: Vec<u64> = ids.iter().map(|id| id.parse().unwrap()).collect();
+            assert!(
+                !numbers.is_empty() && numbers.windows(2).all(|w| w[0] < w[1]),
+                "{numbers:?}"
+            );
+            let human = run(vec!["assignment-transcript".into()]).await;
+            assert!(
+                human.status.success()
+                    && String::from_utf8(human.stdout)
+                        .unwrap()
+                        .contains("Continue: forge dispatcher assignment-transcript")
+            );
+            return (status, ids);
+        }
+    }
+    panic!("transcript pagination did not terminate");
+}
+
+/// Actual CLI -> JSON-RPC -> daemon follow-up recording. Returns raw output for assertions.
+async fn follow_up(endpoint: &str, assignment: &str, operation: &str, message: &str) -> Output {
+    let (endpoint, assignment, operation, message) = (
+        format!("{endpoint}/rpc"),
+        assignment.to_owned(),
+        operation.to_owned(),
+        message.to_owned(),
+    );
+    tokio::task::spawn_blocking(move || {
+        Command::new(env!("CARGO_BIN_EXE_forge"))
+            .env_clear()
+            .args([
+                "dispatcher",
+                "assignment-followup",
+                &assignment,
+                "--workspace",
+                "test",
+                "--server-url",
+                &endpoint,
+                "--operation-id",
+                &operation,
+                "--message",
+                &message,
+                "--json",
+            ])
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap()
+}
+
+/// A separate read-only daemon with explicit matched inspection components, as an
+/// operator would run after the original supervisor/daemon stopped. It shares only
+/// the retained Forge store and runtime directory; it never owns execution.
+async fn inspecting_daemon(
+    db: &Path,
+) -> (tokio::task::JoinHandle<Result<(), std::io::Error>>, String) {
+    // Ephemeral ports can be claimed between probe and bind; a bind failure finishes
+    // `serve` immediately, so retry instead of talking to another process.
+    for _ in 0..10 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let handle = tokio::spawn(serve(DaemonConfig {
+            bind_addr: addr,
+            store_path: db.to_owned(),
+            durable_model_key_file: None,
+            durable_inspection: Some(
+                forge_server::durable_authorization::operator::InspectionComponents {
+                    node: node(),
+                    inspector: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                        .join("../../runner/src/inspect-effects.ts")
+                        .canonicalize()
+                        .unwrap(),
+                },
+            ),
+            durable_execution: None,
+            durable_retained: Vec::new(),
+            managed: None,
+        }));
+        let listening = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while tokio::net::TcpStream::connect(addr).await.is_err() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        if listening.is_ok() && !handle.is_finished() {
+            return (handle, format!("http://{addr}"));
+        }
+        handle.abort();
+    }
+    panic!("reader daemon did not start");
 }
 
 async fn inspect_interrupted_effect(endpoint: &str, assignment: &str) {
@@ -482,6 +662,8 @@ async fn check_execution(mode: &str) {
         store_path: db.clone(),
         durable_model_key_file: None,
         durable_inspection: None,
+        durable_execution: None,
+        durable_retained: Vec::new(),
         managed: None,
     }));
     let endpoint = format!("http://{addr}");
@@ -694,6 +876,8 @@ async fn check_execution(mode: &str) {
                     inspector: inspector.clone(),
                 },
             ),
+            durable_execution: None,
+            durable_retained: Vec::new(),
             managed: None,
         }));
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
@@ -732,6 +916,8 @@ async fn check_execution(mode: &str) {
             store_path: db.clone(),
             durable_model_key_file: None,
             durable_inspection: None,
+            durable_execution: None,
+            durable_retained: Vec::new(),
             managed: None,
         }));
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
@@ -913,6 +1099,75 @@ async fn check_execution(mode: &str) {
                 );
             }
         }
+        // The store admits one daemon. Stop the execution daemon (the runner is already
+        // finished), then inspect through a fresh operator daemon with matched readers.
+        daemon.abort();
+        let _ = daemon.await;
+        // The tracer wrote its runtime under a test-owned directory. Present a byte-for-byte
+        // copy at the canonical protected mapping the operator reader derives from Forge identity.
+        let canonical = forge_server::durable_authorization::DaemonAuthority::new()
+            .unwrap()
+            .prepare_directory(&store, "test", &launch)
+            .unwrap();
+        for entry in std::fs::read_dir(&runtime).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_name() != "runtime.sqlite-shm" {
+                std::fs::copy(entry.path(), canonical.join(entry.file_name())).unwrap();
+            }
+        }
+        let (reader, reader_endpoint) = inspecting_daemon(&db).await;
+        let (status, entries) =
+            inspect_status_and_transcript(&reader_endpoint, assignment_id).await;
+        assert!(status.missing_outcome && status.assignment.capacity_reserved);
+        assert_eq!(status.runtime.as_ref().unwrap().admission, "accepted");
+        assert!(!entries.is_empty());
+        assert_eq!(store.agent_assignment_info(assignment_id).unwrap(), info);
+        // Missing-Outcome intervention through the actual CLI/RPC: recorded once, exact retries
+        // replay, conflicting reuse fails, original binding and capacity are unchanged, and
+        // nothing is synthesized as completion or delivery.
+        let sent = follow_up(
+            &reader_endpoint,
+            assignment_id,
+            "intervene-1",
+            "state the result with the Outcome tool",
+        )
+        .await;
+        assert!(
+            sent.status.success(),
+            "{}",
+            String::from_utf8_lossy(&sent.stderr)
+        );
+        let first: forge_rpc::FollowUpReceipt = serde_json::from_slice(&sent.stdout).unwrap();
+        assert!(!first.replayed && first.sequence == 1 && first.binding.generation == 1);
+        let retry = follow_up(
+            &reader_endpoint,
+            assignment_id,
+            "intervene-1",
+            "state the result with the Outcome tool",
+        )
+        .await;
+        let replay: forge_rpc::FollowUpReceipt = serde_json::from_slice(&retry.stdout).unwrap();
+        assert!(replay.replayed && replay.recorded_at_millis == first.recorded_at_millis);
+        let conflict = follow_up(
+            &reader_endpoint,
+            assignment_id,
+            "intervene-1",
+            "something else",
+        )
+        .await;
+        assert!(
+            !conflict.status.success()
+                && String::from_utf8_lossy(&conflict.stderr)
+                    .contains("followup-operation-conflict")
+        );
+        let (after, after_entries) =
+            inspect_status_and_transcript(&reader_endpoint, assignment_id).await;
+        assert_eq!(after.followups, vec![first]);
+        assert!(after.missing_outcome && after.assignment.capacity_reserved);
+        assert_eq!(
+            after_entries, entries,
+            "recording input neither runs nor claims delivery"
+        );
         assert_eq!(store.agent_assignment_info(assignment_id).unwrap(), info);
         // Closure and a new repository connection do not erase uncertainty or
         // release capacity. This is test-controlled closure, not safe retirement.
@@ -935,8 +1190,34 @@ async fn check_execution(mode: &str) {
                 .contains(&"missing-outcome".into())
         );
         assert_eq!(retained.resources, info.resources);
-        daemon.abort();
-        let _ = daemon.await;
+        // Retired but unreconciled: still inspectable, same committed history, capacity retained.
+        let (retired, retired_entries) =
+            inspect_status_and_transcript(&reader_endpoint, assignment_id).await;
+        assert!(retired.assignment.closed_at_millis.is_some() && retired.missing_outcome);
+        assert!(retired.assignment.capacity_reserved);
+        assert_eq!(retired_entries, entries);
+        let revoked = follow_up(&reader_endpoint, assignment_id, "late", "too late").await;
+        assert!(
+            !revoked.status.success()
+                && String::from_utf8_lossy(&revoked.stderr).contains("followup-assignment-revoked")
+        );
+        let late = follow_up(
+            &reader_endpoint,
+            assignment_id,
+            "intervene-1",
+            "state the result with the Outcome tool",
+        )
+        .await;
+        assert!(
+            late.status.success(),
+            "a lost reply after revocation still finds the original record"
+        );
+        assert_eq!(
+            reopened.agent_assignment_info(assignment_id).unwrap(),
+            retained
+        );
+        reader.abort();
+        let _ = reader.await;
         return;
     }
     assert_eq!(observation, AnswerObservation::OutcomeAccepted);

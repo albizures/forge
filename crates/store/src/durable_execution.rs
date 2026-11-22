@@ -9,9 +9,14 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 mod completion;
 mod effect_resolution;
 mod effects;
+mod followup;
+mod launch_control;
+mod launch_failure;
+mod purge;
 mod recovery;
 mod recovery_authorization;
 mod retirement;
+mod status;
 
 pub(super) fn schema(c: &Connection) -> Result<(), RegistrationError> {
     c.execute_batch(include_str!("upgrade/durable_execution.sql"))
@@ -19,6 +24,19 @@ pub(super) fn schema(c: &Connection) -> Result<(), RegistrationError> {
     c.execute_batch(include_str!("upgrade/authorization_leases.sql"))
         .map_err(storage_error)?;
     c.execute_batch(include_str!("upgrade/durable_retirement.sql"))
+        .map_err(storage_error)?;
+    c.execute_batch(include_str!("upgrade/durable_followups.sql"))
+        .map_err(storage_error)?;
+    c.execute_batch(include_str!("upgrade/check_profile_migrations.sql"))
+        .map_err(storage_error)?;
+    c.execute_batch(include_str!("upgrade/durable_purges.sql"))
+        .map_err(storage_error)?;
+    c.execute_batch(include_str!("upgrade/durable_launch_controls.sql"))
+        .map_err(storage_error)?;
+    c.execute_batch(include_str!("upgrade/durable_purge_removals.sql"))
+        .map_err(storage_error)?;
+    // Last: it replaces the capacity trigger `durable_retirement.sql` creates.
+    c.execute_batch(include_str!("upgrade/durable_launch_reconciliations.sql"))
         .map_err(storage_error)
 }
 
@@ -92,6 +110,34 @@ fn load(c: &Connection, assignment: &str) -> Result<Option<Runtime>, Registratio
     .transpose()
 }
 
+// Backend-specific admission evidence for accepted Check handoff. This only
+// permits revocation/cleanup to begin; it never proves process absence or frees
+// capacity. Missing Herdr agent-name metadata is not durable launch uncertainty.
+pub(super) fn handoff_admitted(
+    c: &Connection,
+    assignment: &str,
+    attempt: &forge_app::outcomes::Attempt,
+) -> Result<bool, RegistrationError> {
+    let Some(runtime) = load(c, assignment)? else {
+        return Ok(false);
+    };
+    runtime.launch.validate()?;
+    let (revision, record): (u32, i64) = c
+        .query_row(
+            "SELECT profile_revision, record_id FROM agent_assignments WHERE id = ?1",
+            [assignment],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(storage_error)?;
+    let record = u64::try_from(record).map_err(|_| error("durable-storage-invalid"))?;
+    Ok(runtime.launch.assignment_id == assignment
+        && runtime.launch.attempt_id == attempt.id
+        && runtime.launch.profile_revision == revision
+        && attempt.actor == assignment
+        && attempt.record_id == record
+        && matches!(runtime.admission, Admission::Accepted { ref admission_id } if !admission_id.trim().is_empty()))
+}
+
 fn exact(runtime: &Runtime, launch: &Launch) -> Result<(), RegistrationError> {
     if &runtime.launch == launch {
         Ok(())
@@ -138,6 +184,51 @@ impl Repository for SqliteProjectRepository {
             launch: launch.clone(),
             admission: Admission::Pending,
         })
+    }
+
+    fn claim(
+        &self,
+        workspace: &str,
+        launch: &Launch,
+    ) -> Result<Option<Runtime>, RegistrationError> {
+        let mut c = self.connection.lock().map_err(|_| error("storage"))?;
+        let tx = c
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage_error)?;
+        crate::spec_plans::assignment_execution(&tx, &launch.assignment_id)?;
+        let claimed = tx.execute(
+            "INSERT OR IGNORE INTO agent_assignment_resources (assignment_id, resource_kind, resource_id, created_at_millis) SELECT id, 'provision-intent', 'once', ?2 FROM agent_assignments WHERE id = ?1 AND closed_at_millis IS NULL",
+            params![launch.assignment_id, now_millis()?],
+        ).map_err(storage_error)?;
+        if claimed != 1 {
+            // Already claimed (any daemon lifetime) or closed: never respawn.
+            return Ok(None);
+        }
+        // Same transaction: a failed precondition rolls the claim back too.
+        authorize(&tx, workspace, launch, true)?;
+        if load(&tx, &launch.assignment_id)?.is_some() {
+            return Err(error("durable-operation-conflict"));
+        }
+        launch.validate()?;
+        let used: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM durable_assignment_runtimes WHERE operation_id = ?1 OR runtime_id = ?2 OR conversation_id = ?3 OR store_id = ?4)",
+            params![launch.operation_id, launch.runtime_id, launch.conversation_id, launch.store_id], |r| r.get(0),
+        ).map_err(storage_error)?;
+        if used {
+            return Err(error("durable-operation-conflict"));
+        }
+        tx.execute("INSERT INTO durable_assignment_runtimes VALUES (?1, 'pi-durable', ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![launch.assignment_id, launch.operation_id, launch.runtime_id, launch.conversation_id, launch.store_id, serde_json::to_string(launch).map_err(|_| error("durable-storage-invalid"))?, json(&Admission::Pending)?],
+        ).map_err(storage_error)?;
+        tx.execute("INSERT INTO agent_assignment_resources(assignment_id, resource_kind, resource_id, created_at_millis) VALUES (?1, 'durable-runtime', ?2, ?3)",
+            params![launch.assignment_id, launch.runtime_id, now_millis()?],
+        ).map_err(storage_error)?;
+        tx.commit().map_err(storage_error)?;
+        Ok(Some(Runtime {
+            backend: Backend::PiDurable,
+            launch: launch.clone(),
+            admission: Admission::Pending,
+        }))
     }
 
     fn begin_send(&self, workspace: &str, launch: &Launch) -> Result<bool, RegistrationError> {

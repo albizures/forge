@@ -77,7 +77,7 @@ pub(super) fn load(
         .project_slugs
         .into_iter()
         .next();
-    let mut check = connection.query_row("SELECT id, record_id, name, description, position, version, profile_revision FROM record_checks WHERE record_id = ?1 AND id = ?2",
+    let mut check = connection.query_row("SELECT c.id, c.record_id, c.name, c.description, c.position, c.version, COALESCE((SELECT m.new_revision FROM check_profile_migration_changes m WHERE m.check_id = c.id ORDER BY m.migration_id DESC LIMIT 1), c.profile_revision) FROM record_checks c WHERE c.record_id = ?1 AND c.id = ?2",
         params![task.cast_signed(), check.cast_signed()], |row| Ok(RecordCheck {
             id: row.get::<_, i64>(0)?.cast_unsigned(), record_id: row.get::<_, i64>(1)?.cast_unsigned(),
             name: row.get(2)?, description: row.get(3)?, position: row.get::<_, i64>(4)?.cast_unsigned(),

@@ -5,9 +5,11 @@ mod assignment;
 pub mod durable_execution;
 pub mod effect_resolution;
 pub use effect_resolution::ResolveInterruptedEffectRequest;
+mod assignment_inspection;
 mod task_inspection;
 pub use agent_profiles::*;
 pub use assignment::*;
+pub use assignment_inspection::*;
 pub use task_inspection::*;
 mod workspaces;
 pub use workspaces::*;
@@ -28,6 +30,10 @@ pub use forge_app::retained_work::{RecoveryInput, RetainedWorkRecovery};
 pub use record_selection::*;
 
 pub use forge_app::ExecutionMode;
+pub use forge_app::check_profile_migration::{
+    Receipt as CheckProfileMigrationReceipt, Request as CheckProfileMigrationRequest,
+    Selection as CheckProfileSelection,
+};
 pub use forge_app::stacks::{StackDestination, StackSource, TaskStack};
 use forge_app::{
     AgentDispatchProjectStatus, AgentDispatchReconcileResult, AgentDispatchStatus, AgentProfile,
@@ -181,6 +187,44 @@ pub trait AgentDispatchApi {
         &self,
         request: AssignmentInfoRequest,
     ) -> RpcResult<AgentAssignmentInfoResponse>;
+    /// Read-only persisted status; starts no runner, scheduler, model call or lease.
+    #[method(name = "assignmentDurableStatus")]
+    async fn assignment_durable_status(
+        &self,
+        request: SelectedRecordRequest<AssignmentInfoRequest>,
+    ) -> RpcResult<AssignmentDurableStatusResponse>;
+    /// Read-only committed transcript page; never acquires host ownership or opens storage writable.
+    #[method(name = "assignmentTranscript")]
+    async fn assignment_transcript(
+        &self,
+        request: SelectedRecordRequest<AssignmentTranscriptRequest>,
+    ) -> RpcResult<AssignmentTranscriptResponse>;
+    /// Durably record idempotent operator input bound to the original attempt. It
+    /// grants no lease, Outcome, recovery or rebinding and does not prove delivery.
+    /// Explicitly delete retired runtime history. Rejects open, unreconciled or
+    /// uncertain Assignments before deletion; never starts a runner or edits Forge records.
+    #[method(name = "assignmentPurgeRuntime")]
+    async fn assignment_purge_runtime(
+        &self,
+        request: SelectedRecordRequest<forge_app::durable_execution::purge::Request>,
+    ) -> RpcResult<forge_app::durable_execution::purge::Record>;
+    /// Read the persisted new-durable-launch policy. Starts nothing and contacts no provider.
+    #[method(name = "durableLaunchStatus")]
+    async fn durable_launch_status(
+        &self,
+    ) -> RpcResult<forge_app::durable_execution::launch_control::Status>;
+    /// Sticky rollback of NEW durable launches. Never moves, retires or rebinds existing
+    /// Assignments, rewrites Check pins or affects Herdr Tasks/Grilling.
+    #[method(name = "durableLaunchDisable")]
+    async fn durable_launch_disable(
+        &self,
+        request: forge_app::durable_execution::launch_control::DisableRequest,
+    ) -> RpcResult<forge_app::durable_execution::launch_control::Status>;
+    #[method(name = "assignmentFollowUp")]
+    async fn assignment_follow_up(
+        &self,
+        request: SelectedRecordRequest<forge_app::durable_execution::followup::Request>,
+    ) -> RpcResult<forge_app::durable_execution::followup::Receipt>;
     #[method(name = "assignmentRetire")]
     async fn assignment_retire(&self, request: RetireAgentAssignmentRequest) -> RpcResult<()>;
     /// Evidence-based resolution after revocation and exclusive committed inspection.
@@ -395,6 +439,18 @@ pub trait RecordApi {
         &self,
         request: SelectedRecordRequest<SetExecutionModeRequest>,
     ) -> RpcResult<RecordResponse>;
+    /// Explicit, auditable effective-profile migration for existing Checks; never
+    /// rewrites historical pins and invalidates freshness once per operation ID.
+    #[method(name = "checkProfileMigrate")]
+    async fn check_profile_migrate(
+        &self,
+        request: SelectedRecordRequest<forge_app::check_profile_migration::Request>,
+    ) -> RpcResult<forge_app::check_profile_migration::Receipt>;
+    #[method(name = "checkProfileMigrations")]
+    async fn check_profile_migrations(
+        &self,
+        request: SelectedRecordRequest<RecordIdRequest>,
+    ) -> RpcResult<Vec<forge_app::check_profile_migration::Receipt>>;
     #[method(name = "start")]
     async fn start(
         &self,

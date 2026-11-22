@@ -1,18 +1,17 @@
 // Test-only component driver. The lease is a protocol fixture, NOT a grant from
-// the supervisor. The optional execution branch composes a real Harness and
-// actual coding tool with a deterministic fake provider, NOT supervised dispatch.
+// the supervisor. The optional execution branch runs the shipped first-admission
+// composition (src/check-runner.ts::admitCheck) with only a deterministic fake
+// provider substituted. It is not supervised dispatch.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { BACKGROUND_CONTEXT as context, withAbortSignal } from '@earendil-works/chord/context';
-import { Harness } from '@earendil-works/pi-durable';
-import { openNodeSqliteStorage } from '@earendil-works/pi-durable/storage/sqlite/node';
-import { createModels, fauxProvider, fauxAssistantMessage, fauxToolCall } from '@earendil-works/pi-ai';
-import { Authorization, guardProvider } from '../src/authorization.ts';
-import { createCheckRuntime } from '../src/check-runtime.ts';
+import { BACKGROUND_CONTEXT as context } from '@earendil-works/chord/context';
+import { fauxProvider, fauxAssistantMessage, fauxToolCall } from '@earendil-works/pi-ai';
+import { Authorization } from '../src/authorization.ts';
+import { admitCheck, validateCheckRuntime } from '../src/check-runner.ts';
 import { bootstrapCheck } from '../src/bootstrap.ts';
 import { componentHash } from '../src/contract.ts';
-import { databasePath, observeAnswer, persistIntent, persistRoot, validateDirectory } from '../src/storage.ts';
+import { observeAnswer, validateDirectory } from '../src/storage.ts';
 
 const input = JSON.parse(readFileSync(0, 'utf8'));
 const fixture = JSON.parse(readFileSync(new URL('./authorization-lease.json', import.meta.url), 'utf8'));
@@ -29,12 +28,11 @@ try {
     const config = input.execution.configuration;
     assert.equal(config.cwd, input.bound.executionDirectory);
     assert.deepEqual(config.tools, ['read', 'write', 'edit', 'bash']);
-    const runtime = await createCheckRuntime(launch, generation, input.bound, input.capability, config, input.execution.key, authorization, directory);
-    // Only this test composition replaces the selected model. The real guarded
-    // coding tool, explicit environment/cwd and authenticated CLI are unchanged.
+    // The SHIPPED first-admission composition (bootstrap, profile, model-key
+    // loading, guarded coding tools, storage); only the model provider is swapped.
+    const check = validateCheckRuntime({ version: 1, launch, generation, bound: input.bound, configuration: config,
+      credential_file: input.execution.key, capability: input.capability }, input.bound.executionDirectory);
     const model = fauxProvider();
-    const models = createModels({ authContext: { env: async () => undefined, fileExists: async () => false } });
-    models.setProvider(guardProvider(model.provider, authorization));
     const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
     const submits = input.execution.mode !== 'missing';
     let verifiedToolResult = false;
@@ -59,22 +57,15 @@ try {
         return fauxAssistantMessage('Runtime prose is not a Forge Outcome.');
       },
     ] : [fauxAssistantMessage('Implementation complete. All work looks good. No Outcome was submitted.')]);
-    const executionContext = withAbortSignal(authorization.signal, context);
-    authorization.admitFor(launch, generation);
-    persistIntent(directory, launch);
-    const harness = await Harness.open(await openNodeSqliteStorage(databasePath(directory)), { ...runtime.options, models }, executionContext);
+    const admitted = await admitCheck(check, authorization, directory, () => {},
+      () => ({ provider: model.provider, model: { provider: 'faux', modelId: 'faux-1' } }));
     try {
-      authorization.admitFor(launch, generation);
-      const root = await harness.root(executionContext, { agent: { ...runtime.agent, model: { provider: 'faux', modelId: 'faux-1' } } });
-      persistRoot(directory, root.id);
-      authorization.admitFor(launch, generation);
-      const submission = await root.submit({ type: 'input', requestId: launch.operation_id, content: 'Execute only the bound Check.' }, executionContext);
-      assert.equal((await submission.wait(context)).status, 'done');
-      executionReport = { admission: { state: 'accepted', admission_id: String(submission.id) } };
+      assert.equal(await admitted.settled, 'done');
+      executionReport = { admission: { state: 'accepted', admission_id: admitted.admission_id } };
       assert.equal(verifiedToolResult, submits);
       assert.equal(model.state.callCount, submits ? 2 : 1);
       assert.equal(model.getPendingResponseCount(), 0);
-    } finally { await harness.close(context); }
+    } finally { await admitted.harness.close(context); }
     // Physical read-only inspection after the writer stops, not a settled-event
     // assertion or a model-supplied verdict. No scheduling is started here.
     executionReport.answer = await observeAnswer(directory, launch, executionReport.admission.admission_id);

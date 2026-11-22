@@ -21,6 +21,8 @@ fn denied() -> RegistrationError {
     )
 }
 
+pub mod progress;
+
 struct Ownership<'a> {
     host: SpawnedOwner<'a>,
     directory: PathBuf,
@@ -80,7 +82,7 @@ pub struct Inspection<'a> {
     input: PendingInput,
 }
 
-impl Inspection<'_> {
+impl<'a> Inspection<'a> {
     #[must_use]
     pub fn candidate(&self) -> &Candidate {
         &self.ownership.candidate
@@ -89,6 +91,20 @@ impl Inspection<'_> {
     #[must_use]
     pub fn input(&self) -> &PendingInput {
         &self.input
+    }
+
+    /// Combine this waiting owner with canonical original-worktree inspection.
+    /// No protected combined proof, grant or writable runtime is produced.
+    /// # Errors
+    /// Rejects changed ownership, runtime effects, bindings or repository state.
+    pub async fn inspect_progress(
+        self,
+        repository: &SqliteProjectRepository,
+        workspace: &str,
+        node: &Path,
+        inspector: &Path,
+    ) -> Result<progress::Inspection<'a>, RegistrationError> {
+        progress::inspect(self, repository, workspace, node, inspector).await
     }
 
     /// Reobserve the direct waiting owner, protected predecessor receipt and live

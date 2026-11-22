@@ -106,6 +106,22 @@ test('all four actual coding tools use explicit cwd/env, remain unsafe and deny 
   assert.equal(await readFile(join(f.cwd, 'example.txt'), 'utf8'), 'after');
 });
 
+test('production wiring meters tool effects: effect-free failures continue, started effects fence', async t => {
+  const f = await fixture(t);
+  const runtime = createProfileRuntime(f.config, f.key, f.authorization);
+  const env = runtime.options.env({ cwd: f.cwd }, context);
+  const tools = runtime.options.registry.snapshot().extension('forge-coding').tools;
+  const api = { env, agent: runtime.agent, models: runtime.options.models, output: () => {}, diagnostic: () => {}, retainedOutput: () => ({ text: '', truncated: false }) };
+  const execute = (name, args) => tools.find(tool => tool.name === name).execute(args, api, context);
+  const missing = await execute('read', { path: '.git/HEAD' });
+  assert.equal(missing.isError, true);
+  assert.equal(f.authorization.signal.aborted, false);
+  await mkdir(join(f.cwd, 'a-directory'));
+  // Without the metered env this would be misclassified as effect-free.
+  await assert.rejects(execute('write', { path: 'a-directory', content: 'x' }), { code: 'runner-interrupted-effect' });
+  assert.equal(f.authorization.signal.aborted, true);
+});
+
 test('actual OpenAI auth/request path disables retries and redacts provider errors', async t => {
   const f = await fixture(t);
   const runtime = createProfileRuntime(f.config, f.key, f.authorization);

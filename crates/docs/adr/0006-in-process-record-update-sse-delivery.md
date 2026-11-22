@@ -8,8 +8,11 @@
 
 Record Update Subscriptions and SSE delivery have been removed, with no replacement
 transport. The delivery rationale and replacement conditions below are historical.
-The exclusive per-store daemon ownership lock remains in force. See
-[Assignment context](../../../docs/assignment-context.md#subscription-removal).
+The exclusive per-store daemon ownership lock remains in force. The removal dropped the
+subscription RPCs, SSE endpoint, CLI commands and Pi extension without compatibility shims;
+database initialization drops subscription tables and subscription-specific authorization
+audits, keeping Records, Update Logs, Assignments and unrelated audits. Removed subscription
+state cannot be recovered by downgrading.
 
 ## Context
 
@@ -51,5 +54,4 @@ revocation semantics, and define failure recovery across daemon processes.
 
 ## References
 
-- [Subscription removal](../../../docs/assignment-context.md#subscription-removal)
 - Spec #510, “Make record-update SSE delivery lifecycle-safe”

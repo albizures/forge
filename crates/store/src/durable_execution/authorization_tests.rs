@@ -128,6 +128,81 @@ fn recovery_commits_fresh_owner_lease_audit_and_claim_consumption_without_new_at
 }
 
 #[test]
+fn successive_recoveries_keep_immutable_episodes_and_never_transfer_old_authority() {
+    let (f, original, claim) = reserved();
+    let first = proposal(&original, &claim);
+    f.store.grant_recovery("test", &first, 40_000).unwrap();
+    let before = snapshot_except(
+        &f,
+        &[
+            "assignment_authorization_leases",
+            "agent_assignment_resources",
+        ],
+    );
+    let current = candidate(&f).unwrap();
+    let next =
+        Claim::for_candidate(&current, "recover-second".into(), "next-daemon".into()).unwrap();
+    f.reopen().claim_recovery("test", &next).unwrap();
+    assert_eq!(
+        f.reopen()
+            .claimed_recovery_candidate("test", &next)
+            .unwrap(),
+        current
+    );
+    assert!(f.store.claimed_recovery_candidate("test", &claim).is_err());
+    assert!(f.store.grant_recovery("test", &first, 40_000).is_err());
+    assert_eq!(f.store.claim_recovery("test", &claim).unwrap(), claim);
+    let mut observed = host(&current);
+    observed.now = 80_000;
+    let second = Prepared::verify(current, next.clone(), &mut observed).unwrap();
+    let accepted = f.store.grant_recovery("test", &second, 80_000).unwrap();
+    assert_eq!(accepted.lease.sequence, 3);
+    assert_eq!(
+        f.reopen().grant_recovery("test", &second, 80_001).unwrap(),
+        accepted
+    );
+    assert_eq!(
+        snapshot_except(
+            &f,
+            &[
+                "assignment_authorization_leases",
+                "agent_assignment_resources"
+            ]
+        ),
+        before
+    );
+    let rows = f
+        .store
+        .list_agent_assignment_resources("assignment")
+        .unwrap();
+    assert_eq!(
+        rows.iter()
+            .filter(|r| r.resource_kind == "recovery-claim")
+            .count(),
+        2
+    );
+    assert_eq!(
+        rows.iter()
+            .filter(|r| r.resource_kind == "recovery-grant")
+            .count(),
+        2
+    );
+    assert!(
+        rows.iter()
+            .filter(|r| matches!(
+                r.resource_kind.as_str(),
+                "recovery-claim" | "recovery-grant"
+            ))
+            .all(|r| r.retired_at_millis.is_some())
+    );
+    let unchanged = snapshot(&f);
+    let stale =
+        Claim::for_candidate(&original, "no-takeover".into(), "foreign-epoch".into()).unwrap();
+    assert!(f.store.claim_recovery("test", &stale).is_err());
+    assert_eq!(snapshot(&f), unchanged);
+}
+
+#[test]
 fn external_verification_is_required_and_bad_commitments_do_not_call_the_host() {
     let (f, original, claim) = reserved();
     let before = snapshot(&f);

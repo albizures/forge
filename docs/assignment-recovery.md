@@ -2,7 +2,10 @@
 
 Use this ordered runbook to investigate uncertain launches, revoke Assignments,
 verify provider cleanup, and safely restore dispatch eligibility. For initial
-configuration and launch behavior, see [dispatch operations](dispatch.md).
+configuration and launch behavior, see [dispatch operations](dispatch.md). Durable
+(pi-durable) Assignments follow the same investigation, retirement, salvage and hold
+steps; their backend-specific operations are in
+[Durable Task execution](durable-execution.md#operate-durable-assignments).
 
 ## Trust and upgrade boundary
 
@@ -59,162 +62,21 @@ hold. Late acknowledgement can still make the existing Assignment Working and
 allow its Task to start without clearing that hold. Do not retire an otherwise
 healthy agent just because its acknowledgement was late.
 
-## Interrupted durable effects (controlled implementation)
+## Durable Assignments
 
-An `interrupted-effect` recovery blocker identifies committed runtime tool intent
-without a known accepted result. Its retained resource ID contains only the
-execution-task, conversation and call identities; commands, arguments and results
-remain in protected runtime storage. Inspection is read-only. A process exit,
-expired lease, later empty scan or cleared Dispatch Hold does not resolve it.
-These resources reserve capacity and block new authorization grants even for a
-closed Assignment. Provider resource retirement cannot waive them, and accepted
-Outcomes are not overwritten by their arrival.
+For a durable Assignment, also read its
+[status and transcript](durable-execution.md#status-and-transcripts-read-only), and handle
+its backend-specific state in Durable Task execution before the steps below:
 
-A controlled operator CLI/RPC records evidence-based resolutions under exclusive
-host inspection. For a **live Assignment**, resolution preserves its original
-Assignment/attempt and leaves the effect resource as an execution fence. This
-supports investigation without forcing revocation, but does not authorize renewed
-execution. For a **closed Assignment**, only the selected effect resource retires.
-Neither policy is safe writable recovery, supervised retirement or production
-scheduling. Investigate the actual external outcome and make old execution/external
-children safe first. If retiring, use `assignment-retire` to revoke before cleanup
-and inspect persisted closure: an incomplete cleanup error is not proof of absence.
-Controlled durable supervised retirement is described below; retain all other blockers.
-Never directly close an Assignment in SQLite to satisfy this command.
-
-For new resolutions, the daemon requires [explicit matched inspection components](development.md#run-a-manual-daemon),
-existing protected host-lock evidence, a fresh
-committed runtime scan and both safety assertions. A missing lock, live owner,
-unavailable/incompatible inspector or unknown external outcome blocks acceptance.
-Take `execution-task`, `conversation` and `call` from the selected retained
-`interrupted-effect` resource, not from a different Assignment or Forge Task ID:
-
-```sh
-forge dispatcher assignment-resolve-effect <assignment-id> --workspace <owner> \
-  --operation-id <stable-resolution-id> \
-  --execution-task <runtime-task-id> --conversation <conversation-id> --call <call-id> \
-  --outcome applied --actor <operator> --evidence <external-receipt-reference> \
-  --message <investigation-summary> \
-  --confirm-old-agent-cannot-act --confirm-external-work-safe --json
-```
-
-Use `not-applied` only with evidence of that conclusion; unknown stays unresolved.
-Assertions are trusted operator authority, not authenticated human identity or
-universal process-death proof. The RPC is
-`agentDispatch_assignmentResolveEffect`, with
-`{selection: {workspace, cwd?}, record: {assignment_id, resolution}}`.
-Resolution contains the operation ID, exact `effect` identities, conclusion,
-actor/evidence/message and both confirmation booleans. It accepts no capability,
-secret, runtime path or selected executable. Workspace selection routes scope;
-it does not authenticate an operator on this trusted unauthenticated interface.
-
-Exact retries use the **same operation ID and all original evidence** and return
-the original timestamp/receipt, even after daemon restart or loss of runtime
-components/storage. This replay is only an authorized read of an already accepted
-audit; it performs no new inspection or safety acceptance. Different evidence or
-another operation targeting the same resolved effect rejects. On transport failure,
-inspect Assignment info and retry the exact resolution, never the tool command.
-
-The `interrupted-effect-resolution` audit remains visible through Assignment info.
-Only a closed Assignment's targeted Forge effect is retired. A live resolution
-retains the effect resource as an execution fence, even after explicit hold clearance
-or later closure. An exact retry never changes that original disposition; consuming
-the fence requires a separate specialized recovery policy, not this command.
-Runtime intent remains unsettled; other resources, capacity blockers and holds remain. No command is rerun, runtime
-receipt repaired, dirty commit adopted or replay/recovery authorized. Audit evidence
-fields are ordinary output, not protected transcript storage: never include
-credentials, tool payloads or prompts in them.
-
-Do not use `assignment-resolve-unknown`, retained-work salvage, generic cleanup,
-runtime SQLite edits or `resume` as an interrupted-effect waiver. Preserve the
-runtime/worktree and externally investigate publication/push outcomes without
-replaying the command. Production durable dispatch and automatic recovery remain
-disabled; current integration evidence is controlled, not a release-readiness
-claim. See [T08 evidence](research/pi-durable-t08/README.md).
-
-The trusted daemon grant controller inspects retained runtime storage before its
-first grant, using the verified directly spawned supervisor's ownership and the
-explicit matched inspector. It retains observed effects in Forge before rejecting
-execution. Missing/corrupt initialization, incompatible/unavailable inspection and
-unsettled intent all deny permission with retained capacity. The synchronous
-fresh-launch binding cannot open existing runtime storage or orphaned SQLite
-sidecars; accepted admission with missing storage also rejects. Subsequent grants
-still require the ordinary transactional authority/freshness/hold/resource checks.
-This supplies the interrupted-effect recovery precondition, not the later writable
-same-attempt recovery feature. No scheduler or production durable rollout is enabled.
-
-## Durable recovery authorization foundation (not yet runnable)
-
-The internal controlled recovery port can reserve an original candidate and,
-following a trusted external-verification boundary, atomically commit a first
-fresh recovery lease, audit and claim retirement. Generic resource operations
-cannot forge or consume these records. A retained audit/lease is not permission
-to restart, and a cancelled claim cannot grant execution. Revocation, expiry,
-changed context/freshness and unrelated blockers reject grant delivery/replay.
-
-An internal application coordinator now consumes opaque fresh host verification,
-commits before initial recovery-envelope delivery, reobserves owner/time after
-commit and seeds ordinary renewal only from the identical live result. Failed
-commit/delivery results permanently fence it, even when the commit succeeded;
-only diagnostic retention may retry. Internal TypeScript and watchdog-policy
-handshakes require the exact expected claim/lease/evidence envelope and cannot
-initialize through ordinary lease controls. These are trusted composition ports,
-not agent/operator operations or proof of process safety.
-
-The private sender now supports the whole recovery envelope with a shared terminal
-pipe fence on uncertain writes. A separate claim-bound **predecessor quiescence**
-control can stop a still-verified original supervisor's worker without retiring
-or revoking the Assignment. It requires the host's exact last accepted grant,
-retains protected intent before signalling and writes an exact receipt only after
-the dedicated subreaper observes no remaining children. Escaped children,
-conflicting evidence, prior host uncertainty or unavailable proof leave ownership,
-claim and capacity retained, with no blind signal retry. This does not adopt a
-dead supervisor, resolve effects or prove universal same-user process absence.
-The intent remains a startup fence; the receipt does not authorize recovery or
-clear anything. No operator CLI/RPC or daemon reconciliation invokes this stop
-control yet. See [quiescence evidence](research/pi-durable-t10/recovery-quiescence.md).
-
-A new internal quiesced inspector connects the exact active candidate reservation,
-original-host protected receipt and original pending-input/effect scan under one
-retained exclusive lock. It revalidates live claim/context after external I/O and
-on guard verification. Historical claim replay, cancelled claims and a free flock
-cannot substitute for this proof. Inspection changes no Forge/worktree/runtime
-state and does not validate/adopt dirty progress as evidence. See
-[quiesced inspection evidence](research/pi-durable-t10/quiesced-inspection.md).
-
-A separate waiting-owner inspector freshly rechecks the original receipt, pending
-input/effects and live claim under a new directly spawned supervisor's verified
-kernel ownership. Earlier read-only observations are not carried across spawning.
-Its physical ownership/proof port stays usable after transactional claim consumption;
-live authorization is still enforced in the grant transaction, not by a retained
-receipt. Missing/restored proof or owner drift terminally fences that verifier.
-
-Matched supervisor/Node executables now support private **unarmed preparation**
-followed by a separate exact committed recovery envelope. Ordinary first controls,
-changed expectations, host faults and uncertain effects deny authority. Ownership
-faults fence even an unarmed host before its first grant; restoring files cannot
-revive that host or waive its retained marker. Preparation
-success is transport only until the matched worker confirms it; preparation itself
-opens no writable Harness and resumes no model/tool. The controlled receiver tracer
-uses an actual SQLite recovery commit but explicitly synthetic Git/protected-digest
-verification. See [waiting-owner/receiver evidence](research/pi-durable-t10/waiting-receiver.md).
-
-A separate read-only repository-progress verifier now checks the original claimed
-worktree/repository/branch and both Base Commit and attempt-input ancestry. It
-fingerprints retained bytes/index without adopting Implementation progress as a
-checkpoint; other Checks require exact clean bound input. Hidden index flags are
-not proof of clean review input. Fsmonitor execution is disabled for these reads;
-configured clean/process filters, submodules and unsafe filesystem observations
-block this component. It grants no authority and is not yet composed into the
-waiting-owner handoff. See [worktree verification evidence](research/pi-durable-t10/recovery-worktree.md).
-
-There is still no complete trusted recovery verifier/ownership handoff orchestration,
-daemon reconciliation or authorized writable reopen. Executables still reject a
-continued global sequence sent as an ordinary first grant. No CLI/RPC operation
-exposes recovery authorization, and production/automatic durable recovery remain disabled. Do not replay retained grant files, reset
-sequence/watchdogs, edit resource markers or repair the worktree to bypass this
-boundary. See [T10 authorization evidence](research/pi-durable-t10/recovery-authorization.md)
-and [coordinator/watchdog evidence](research/pi-durable-t10/recovery-session.md).
+- `interrupted-effect` blockers: [interrupted effects](durable-execution.md#interrupted-effects).
+  Nothing below waives them.
+- `durable-runtime-*` codes and fence proof:
+  [leases and outages](durable-execution.md#authorization-leases-and-outages). Recovery
+  after a proven crash or fence is automatic
+  ([same-attempt recovery](durable-execution.md#same-attempt-recovery)).
+- `durable-launch-*` codes: [failed launches](durable-execution.md#failed-launches).
+- Missing Outcome: [follow-ups](durable-execution.md#follow-ups) or retirement.
+- After retirement: [runtime history deletion](durable-execution.md#runtime-history-retention-and-deletion).
 
 ## Revoke and clean up known resources
 
@@ -245,62 +107,8 @@ provider cleanup succeeded. The marker, capacity reservation and Dispatch Hold
 remain. Generic provider resource cleanup cannot retire this marker. Exact
 finalization retries preserve its original retirement timestamp.
 
-### Durable supervised retirement (controlled implementation)
-
-The same `assignment-retire` command routes an existing durable Assignment through
-its retained backend, without profile-source preflight, model credentials or Herdr.
-Production durable dispatch remains disabled. A directly spawned supervisor must
-have been retained by the trusted controller; a missing live controller cannot
-adopt a PID or infer that its work stopped.
-
-After durable closure/revocation, Forge journals the original retirement operation,
-Launch and captured owner coordinates before control delivery. The owner must
-match the original retained authorization grant; a freshly spawned lookalike
-cannot replace the old execution's cleanup proof. The host fences
-new grants, verifies ownership and persists host intent before sending group TERM;
-the runner's TERM handler closes admission and aborts guarded runtime execution.
-After five seconds it attempts group KILL only while the original leader identity
-is still verified. The dedicated Linux subreaper reaps its descendants and writes
-an owner-only, synced receipt only when the kernel reports no remaining children.
-TERM/KILL admission, an abort acknowledgement and leader exit alone are not receipts.
-A surviving child, including one that escaped the process group, keeps cleanup
-uncertain and the host flock retained; Forge does not chase numeric orphan IDs.
-
-Forge reads the exact original receipt under exclusive host inspection, checks the
-original lock identity, and uses the explicitly configured matched read-only effect
-inspector to retain any unsettled committed intent before releasing execution
-resources. Missing/incompatible inspection components or runtime evidence retain
-the pending operation, even with a valid process receipt. It then transactionally
-records reconciliation and retires
-only the bound runtime, known execution-liveness diagnostics and any validated
-recovery reservation for that exact Launch. Cancelling a recovery reservation
-preserves its original identity, timestamps and retry history; it cannot transfer
-a claim or authorize recovery. Malformed or mismatched reservations block and
-roll back reconciliation rather than being treated as generic unknown resources.
-No production path creates these internal controlled reservations yet. The operator
-retirement marker finalizes only when every other resource is reconciled. Existing
-unknown provisioning resources still require the separate confirmations below;
-interrupted effects still require their specialized resolution. Neither missing
-Outcomes nor process cleanup synthesizes a passing Assessment. The Dispatch Hold
-requires separate review/resume; worktree, index, runtime history and audit are not
-cleaned, reset or deleted.
-
-On dropped delivery, unavailable ownership, identity drift or failed host proof,
-inspect and preserve capacity; a repeat cannot adopt lookalikes or blindly replay
-a partial pipe write. After a lost result/Forge commit failure, repeating the same
-command can reconcile a valid retained receipt after daemon/controller restart
-without starting an execution runner or requiring original model credentials;
-new reconciliation still requires matched read-only effect inspection. Missing,
-corrupt, unsafe or wrong-lock receipts remain blockers. Accepted retries preserve
-the original operation and reconciliation timestamp, even if components later
-become unavailable. Restarted hosts deny grants when retirement intent exists.
-
-The proof covers this dedicated host's descendant execution on supported Linux,
-not remote effects or work delegated to an unrelated daemon. This remains a
-trusted-local-host boundary, not hostile same-user containment. Never delete a
-lock/intent/receipt or edit SQLite to make cleanup appear verified. See
-[T09 evidence](research/pi-durable-t09/README.md); automatic recovery remains T10
-and production scheduling/packaging/release verification remain later Tasks.
+For a durable Assignment, the same command reconciles the original host's receipt instead
+of Herdr resources; see [durable retirement](durable-execution.md#retirement).
 
 ## Resolve unknown resources only after external safety checks
 
@@ -332,7 +140,7 @@ unknown provisioning resources, retry the same `assignment-retire` to reconcile
 and finalize its retained retirement marker. This does not clear the hold or
 waive any other blocker. The generic finalization gate itself supplies no
 process-death proof; durable cleanup additionally requires the exact protected
-supervisor receipt described below.
+supervisor receipt ([durable retirement](durable-execution.md#retirement)).
 
 ## Authorize retained Implementation work for salvage
 
@@ -449,31 +257,27 @@ can retain diagnostic holds. Forge never commits or discards changes to recover.
 Description edits and substantive handback invalidate current passes without
 removing Findings/history; both original reviews rerun after Implementation.
 
-Two automatic retries per interrupted Check and three remediation cycles per Task
-run bound progress across restart, redispatch and mode changes. No progress stops
-earlier. `resume` renews interrupted retries, but cannot bypass remediation
-exhaustion or no-progress state. Only a recorded operator
-`dispatcher reset-remediation <task> --actor <operator> --message <explanation>`
-after safe ownership/resource reconciliation resets remediation budget; it does
-not reset interruption counts or clear holds, Findings or other safety state.
-See [bounded progress](dispatch.md#bounded-progress-and-operator-intervention)
-for interrupted-Check recovery through explicit resume; Manual handoff is not required.
+Three separate budgets can stop progress. Each is renewed by its own explicit operator
+action, taken only after investigation and safe retirement/resource reconciliation. The
+two resets clear no hold, Finding or other budget; only `resume` clears the hold:
+
+- **Interrupted retries** (two per Check): `forge dispatcher resume <task>` renews them
+  and clears the hold; Manual handoff is not required. See
+  [bounded progress](dispatch.md#bounded-progress-and-operator-intervention).
+- **Remediation cycles** (three per Task run) and no-progress stops:
+  `dispatcher reset-remediation <task> --actor <operator> --message <explanation>`,
+  then `resume`. `resume` alone cannot bypass them.
+- **Continuations** (20 total or two consecutive unchanged checkpoints per Check):
+  `dispatcher reset-continuations <task> --check <check> --workspace <id> --actor <operator> --message <explanation>`,
+  then `resume`. Neither `resume` nor a remediation reset bypasses them. See
+  [continuation operations](dispatch.md#deliberate-implementation-continuations).
+
+`record check work <task> --json` shows every counter, stop reason and reset audit.
 
 A final pass is not Done. Reconciliation separately requires confirmed retirement,
 all resources reconciled, clean current evidence/freshness, all current passes,
 no blockers/holds and satisfied dependencies. Managed Worktrees/branches remain
 retained after completion; no automatic Git integration or cleanup occurs.
-
-Continuation accounting is independent: 20 total or two consecutive unchanged
-checkpoints exhaust a Check. `record check work <task> --workspace <id>` (or `--json`)
-shows counters, retained handoff and reset audit. Only
-`dispatcher reset-continuations <task> --check <check> --workspace <id> --actor <operator> --message <explanation>`
-renews that Check's total and consecutive-unchanged allowance. It retains holds,
-ownership/resources, evidence and all other budgets/history, and launches nothing.
-After investigating the limit and recording a justified reset, complete the separate
-retirement/resource checks above before explicit resume. Neither resume nor remediation
-reset bypasses exhausted continuation accounting. See
-[continuation operations](dispatch.md#deliberate-implementation-continuations).
 
 ## Spec parent and inheritance rejections
 
