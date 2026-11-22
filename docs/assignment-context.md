@@ -169,9 +169,7 @@ work. Inspection adds a default-empty `sessions` collection. New clients supplyi
 ## Implementation profile delivery
 
 The tracked [Continuation profile source](profiles/implementation-continuations.md)
-provides full outcome JSON and stopping guidance. Its
-[handoff](profiles/implementation-continuations-handoff.md) records provenance,
-isolated validation and separate rollout approvals. This artifact is not a live
+provides full outcome JSON and stopping guidance. This artifact is not a live
 registered revision and does not alter existing immutable Check pins.
 
 ## Agent CLI examples

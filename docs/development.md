@@ -243,8 +243,6 @@ one column on narrow screens; controls have visible labels and keyboard focus.
 Long code blocks scroll within the detail view. Browser access is read-only, but
 the shared unauthenticated listener also exposes mutating operator RPC: restrict
 it to trusted clients as described in [Security](../README.md#security).
-See [dashboard verification](records-dashboard-verification.md) for evidence and
-current limitations.
 
 CLI status calls `system.status` over JSON-RPC/HTTP and reports failures on
 stderr, with a request timeout of at most 10 seconds.

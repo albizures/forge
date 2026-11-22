@@ -118,9 +118,8 @@ A false output commit claim is rejected without publishing an Assessment.
 ### Deliberate Implementation Continuations
 
 Use the delivered [Implementation profile](profiles/implementation-continuations.md)
-for the complete submission shape and stopping instructions. Its
-[rollout handoff](profiles/implementation-continuations-handoff.md) is explicitly
-separate from registration, immutable Check pins and live recovery.
+for the complete submission shape and stopping instructions. Registering it is
+separate from immutable Check pins and live recovery.
 
 Only the authenticated Task Implementation agent may deliberately hand off unfinished
 work. Keep implementing and testing until complete or a concrete execution constraint;
