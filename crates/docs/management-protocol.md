@@ -99,7 +99,7 @@ and it inherits none of the manual `FORGE_DURABLE_*` environment settings.
   combined with `--durable-node`/`--durable-effect-inspector`. New durable
   launches remain withheld by the release gate; these inputs grant no launch
   eligibility and no model credential.
-- `--durable-openai-key-file PATH` (T18 M4) is passed only when the operator
+- `--durable-openai-key-file PATH` is passed only when the operator
   runs `forgeup daemon start --durable-openai-key-file PATH`. It requires
   `--durable-runner-bundle` and an absolute path; the daemon validates the file
   like a manual daemon's `FORGE_DURABLE_OPENAI_KEY_FILE`. Management protocol

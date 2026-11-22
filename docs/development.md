@@ -150,7 +150,7 @@ candidate Revision before it copies anything:
 - the recomputed runner component hash.
 
 It then copies the bundle into the immutable Installation and verifies the
-*installed copy* again. Schema 1 (T15) bundles still register. They have no host
+*installed copy* again. Schema 1 bundles still register. They have no host
 and serve only retained inspection, never a launch.
 
 `forgeup daemon start` re-attests the whole bundle and then passes the
@@ -199,8 +199,8 @@ bundle's own commit. Runner wire protocol 1 and the storage schemas are
 unchanged.
 
 None of this enables durable dispatch. A managed daemon receives a model
-credential only from `forgeup daemon start --durable-openai-key-file PATH`
-(T18 M4), passed as the daemon's `--durable-openai-key-file`.
+credential only from `forgeup daemon start --durable-openai-key-file PATH`,
+passed as the daemon's `--durable-openai-key-file`.
 
 ## Browser and RPC
 
