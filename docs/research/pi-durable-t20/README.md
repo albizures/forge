@@ -2,10 +2,14 @@
 
 ## Readiness decision
 
-**WITHHELD, pending one operator decision.** Every release gate has now passed on Forge Revision
-`6a2196a`. The only remaining prerequisite is step 3 below: the operator must fix or explicitly
-accept the open non-blocking review items. Until then, do not enable default durable Task
-dispatch from any Revision built from this source.
+**GRANTED for Forge Revision `6a2196a` only** (runner component `5d32b086…`). Every release gate
+passed on this Revision, and on 2026-11-21 the operator explicitly accepted every open
+non-blocking review item as a documented limitation (see
+[Accepted open items](#accepted-open-items-operator-decision-2026-11-21)).
+
+Readiness is a release decision, not enablement. Today no shipped command admits new durable
+launches; launch eligibility must still be implemented and reviewed as its own change (step 4).
+Readiness does not carry over to any other Revision.
 
 | Basis | Evidence |
 | --- | --- |
@@ -15,8 +19,7 @@ dispatch from any Revision built from this source.
 | Release gate (Spec AC22) | **Pass:** real `openai/gpt-4.1` Implementation → independent Review cycle passed in 2 of 3 runs on `6a2196a`; the third failed on a connection timeout before the model answered and was handled safely (Missing Outcome, capacity kept, no Review). Earlier runs found and drove the fix of a real defect. |
 | M4 (managed-daemon credential) | **Resolved:** `forgeup daemon start --durable-openai-key-file`. |
 
-A failed or unrun release gate is a withheld result. It is not a conditional success. The gates
-have passed; the withholding is now only the pending explicit operator decision.
+A failed or unrun release gate is a withheld result. It is not a conditional success.
 
 The source behaves accordingly:
 - `forge dispatcher durable-launch-status` reports `withheld` and
@@ -66,11 +69,48 @@ Everything else is rejected, fail-closed:
 3. **Decide the open review items.** Fix them or accept them explicitly: the
    [third-pass list](../pi-durable-t18/README.md#still-open-non-blocking) and the
    [effect-free fix addendum list](../pi-durable-t18/README.md#still-open-after-the-addendum-non-blocking).
-   **Pending: operator decision.** Any fix changes the implementation and requires renewed
-   review and verification, including the real-provider gate.
+   **Done: the operator accepted all of them on 2026-11-21**
+   ([record](#accepted-open-items-operator-decision-2026-11-21)). Any later fix changes the
+   implementation and requires renewed review and verification, including the real-provider
+   gate.
 4. **Implement eligibility.** Only after steps 1–3 pass on that Revision can launch
    eligibility be implemented and reviewed as its own change. Today no shipped command
    grants it, and it must not be added as a side effect of this handoff.
+
+## Accepted open items (operator decision, 2026-11-21)
+
+The operator accepted every item below as a known limitation of `6a2196a`, instead of fixing it
+before readiness. None is a blocker or major, and none was found to weaken a safety property.
+Each remains a candidate for later work; fixing any of them requires renewed review and
+verification on the new Revision.
+
+**From the review of the effect-free tool-failure fix** ([details](../pi-durable-t18/README.md#still-open-after-the-addendum-non-blocking)):
+- Stat-then-open race: a background process the agent started earlier can swap a link to a FIFO
+  between the check and the read, so an `edit` may consume pipe data uncounted.
+- The target check assumes absolute paths (every pinned tool passes them).
+- A synchronous `statSync` can stall the runner on a hung network filesystem (the lease still
+  fences afterwards).
+- The "concurrently started operation" test is not truly concurrent.
+- Nits: `error.name` evaluated outside the fail-closed try; whole-message copy before truncation;
+  no tests for a non-rendering error or non-absolute paths.
+
+**From the T18 third pass** ([details](../pi-durable-t18/README.md#still-open-non-blocking)):
+- Test gaps: F3 has no production-driver test; T26's class (a) `launch_tests.rs` fault tests
+  (covered by class (b) instead); `fence::receipt_for_owner` unit-tested only; M6 store query
+  and launch-session case.
+- Documented limitation: a follow-up committed after the answer settled, then a crash, blocks
+  recovery (retirement remains available).
+- First-pass minors 1, 2, 3, 5, 6, 8, 10, 11, 12, 14, 15, 16, 17 and second-pass minors 1, 3, 4,
+  5, 6, 7, 8 ([corrections record](../pi-durable-t18/third-pass-corrections.md)).
+- The stop/abandon race that can fail one retirement attempt (a retry succeeds); stale
+  release-state references in ADR-0012.
+
+**From the real-provider runs** ([T19](../pi-durable-t19/README.md#remaining-limitations-and-open-items)):
+- No provider retry: a transient provider or network error leaves the Assignment with Missing
+  Outcome until an operator follow-up or retirement.
+- Outcome submission depends on the profile's behavior text.
+- The once-observed intermittent `committed_model_authority_expires_during_renewal_outage…`
+  failure is recorded, not claimed fixed.
 
 ## Conditions that revoke readiness, or require renewed verification
 
@@ -88,7 +128,8 @@ Everything else is rejected, fail-closed:
 
 ## Operator checklist: deliberate adoption, once readiness is granted
 
-This is listed here for completeness. **Do not perform it while readiness is withheld.**
+**Do not perform it until launch eligibility exists (step 4)**, and only on `6a2196a`'s matched
+components.
 Every command below exists and is documented in the
 [operator guide](../../durable-execution.md).
 
