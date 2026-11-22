@@ -134,8 +134,7 @@ runtime/worktree and externally investigate publication/push outcomes without
 replaying the command. New durable launches remain withheld by the
 [release gate](durable-execution.md#current-release-state); automatic recovery of
 existing durable Assignments is composed whenever matched runner components are
-configured. Current integration evidence is controlled, not a release-readiness
-claim. See [T08 evidence](research/pi-durable-t08/README.md).
+configured.
 
 The trusted daemon grant controller inspects retained runtime storage before its
 first grant, using the verified directly spawned supervisor's ownership and the
@@ -150,109 +149,93 @@ section); it is not itself recovery. Production durable launch remains withheld.
 
 ## Same-Assignment durable recovery (composed with matched components; launches withheld)
 
-The internal controlled recovery port can reserve an original candidate and,
-following a trusted external-verification boundary, atomically commit a first
-fresh recovery lease, audit and claim retirement. Generic resource operations
-cannot forge or consume these records. A retained audit/lease is not permission
-to restart, and a cancelled claim cannot grant execution. Revocation, expiry,
-changed context/freshness and unrelated blockers reject grant delivery/replay.
+Assignment Execution Recovery resumes the **original** admission, conversation and
+Check attempt after a proven crash or fence. It never creates another root, input,
+`continue`, Check attempt or accepted Continuation, and it is not an operator
+command: there is no CLI/RPC recovery-authorization operation. The production
+composition configures it whenever matched runner components are configured (a
+Forgeup schema 2 runner bundle, or a manual daemon's
+`FORGE_DURABLE_RUNNER_HOST`/`FORGE_DURABLE_RUNNER_ENTRY`), and the app's ordinary
+reconciliation scan calls it automatically for `unknown` durable Assignments. New
+durable launches stay withheld by the
+[release gate](durable-execution.md#current-release-state), which does not apply to
+existing work.
 
-An internal application coordinator now consumes opaque fresh host verification,
-commits before initial recovery-envelope delivery, reobserves owner/time after
-commit and seeds ordinary renewal only from the identical live result. Failed
-commit/delivery results permanently fence it, even when the commit succeeded;
-only diagnostic retention may retry. Internal TypeScript and watchdog-policy
-handshakes require the exact expected claim/lease/evidence envelope and cannot
-initialize through ordinary lease controls. These are trusted composition ports,
-not agent/operator operations or proof of process safety.
+**Predecessor proof.** Recovery starts only from the original host's own protected
+proof for Forge's last lease: a **crash receipt** (the host directly reaped its
+worker and observed kernel ECHILD), a **fence receipt** (below) or, before any
+grant, an **ungranted receipt** (see failed launches). A single ownership sample
+racing exit may spend at most 100 ms awaiting a positive Child reap, with captured
+storage revalidated; a prior failed sample is never revived. Receipts are retained
+per lease sequence, never overwritten across recoveries. A dead PID, a newly free
+lock, controller loss, surviving descendants, identity drift, host faults and
+supervisor loss before proof never substitute for it. A still-verified original
+supervisor can also be asked, under a claim, to stop its worker without revoking
+the Assignment (**predecessor quiescence**): it requires the host's exact last
+accepted grant, retains protected intent before signalling and writes a receipt only
+after its subreaper observes no remaining children. Escaped children, conflicting
+evidence or unavailable proof leave ownership, claim and capacity retained, with no
+blind signal retry; the retained intent stays a startup fence.
 
-The private sender now supports the whole recovery envelope with a shared terminal
-pipe fence on uncertain writes. A separate claim-bound **predecessor quiescence**
-control can stop a still-verified original supervisor's worker without retiring
-or revoking the Assignment. It requires the host's exact last accepted grant,
-retains protected intent before signalling and writes an exact receipt only after
-the dedicated subreaper observes no remaining children. Escaped children,
-conflicting evidence, prior host uncertainty or unavailable proof leave ownership,
-claim and capacity retained, with no blind signal retry. This does not adopt a
-dead supervisor, resolve effects or prove universal same-user process absence.
-The intent remains a startup fence; the receipt does not authorize recovery or
-clear anything. No operator CLI/RPC or daemon reconciliation invokes this stop
-control yet. See [quiescence evidence](research/pi-durable-t10/recovery-quiescence.md).
+**Sequence.** With explicit trusted matched components, the daemon:
 
-A new internal quiesced inspector connects the exact active candidate reservation,
-original-host protected receipt and original pending-input/effect scan under one
-retained exclusive lock. It revalidates live claim/context after external I/O and
-on guard verification. Historical claim replay, cancelled claims and a free flock
-cannot substitute for this proof. Inspection changes no Forge/worktree/runtime
-state and does not validate/adopt dirty progress as evidence. See
-[quiesced inspection evidence](research/pi-durable-t10/quiesced-inspection.md).
+1. preflights the original proof **before** claiming or spawning, and reserves the
+   original candidate under an exclusive, content-bound claim that generic resource
+   operations cannot forge or consume;
+2. spawns a new directly owned host and, under that host's verified kernel
+   ownership, freshly rechecks the original receipt, the original pending input and
+   committed effects, and the claimed worktree. Earlier read-only observations are
+   not carried across spawning, historical claim replay and cancelled claims are
+   refused, and live claim/context is revalidated after every external I/O;
+3. persists bounded immutable claim-bound protected proof and prepares the matched
+   worker **unarmed** (it opens no writable Harness and resumes no model or tool);
+4. rechecks runtime and effects, then **commits a fresh owner-bound recovery lease
+   before delivering** the exact recovery envelope over the private pipe, and
+   re-observes owner and time after the commit. A failed commit or delivery
+   permanently fences that episode, even if the commit succeeded; only diagnostic
+   retention may retry. Ordinary renewal is seeded only from that identical live
+   result;
+5. the writable Check runner bootstraps again through the original capability,
+   revalidates cwd and the original pending input, opens the matched Harness and
+   resumes that submission. The waiting owner and lock are held throughout.
 
-A separate waiting-owner inspector freshly rechecks the original receipt, pending
-input/effects and live claim under a new directly spawned supervisor's verified
-kernel ownership. Earlier read-only observations are not carried across spawning.
-Its physical ownership/proof port stays usable after transactional claim consumption;
-live authorization is still enforced in the grant transaction, not by a retained
-receipt. Missing/restored proof or owner drift terminally fences that verifier.
+Watchdog and Node consumer expectations are prepared freshly from trusted
+verification, never from an audit record or an operator/agent payload; ordinary
+first-grant controls cannot initialize a recovery. All pipe clones share one
+terminal framing fence after an uncertain write. Revocation, expiry, changed
+context/freshness, unrelated blockers, ownership faults (even on an unarmed host)
+and uncertain effects deny authority; restoring files cannot revive a fenced host
+or waive its retained marker. A retained audit or lease is not permission to
+restart, and a cancelled claim cannot grant execution. Only another proven safe
+crash can start a new recovery episode with fresh issuer authority; pending claims
+and uncertain delivery are not taken over.
 
-Matched supervisor/Node executables now support private **unarmed preparation**
-followed by a separate exact committed recovery envelope. Ordinary first controls,
-changed expectations, host faults and uncertain effects deny authority. Ownership
-faults fence even an unarmed host before its first grant; restoring files cannot
-revive that host or waive its retained marker. Preparation
-success is transport only until the matched worker confirms it; preparation itself
-opens no writable Harness and resumes no model/tool. The controlled receiver tracer
-originally used an actual SQLite recovery commit but synthetic Git/protected-digest
-verification; the final T10 tracer now uses the real protected verifier and writable reopen. See [waiting-owner/receiver evidence](research/pi-durable-t10/waiting-receiver.md).
+**Worktree.** The read-only repository-progress verifier checks the original claimed
+worktree, repository and branch and both Base Commit and attempt-input ancestry. It
+fingerprints retained bytes and index without adopting Implementation progress as a
+checkpoint; dirty Implementation progress remains observed work, not completion
+evidence, while other Checks (including Reviews) require exact clean bound input.
+Hidden index flags are not proof of clean input. Fsmonitor execution is disabled for
+these reads; configured clean/process filters, submodules and unsafe filesystem
+observations block recovery. Disabling fsmonitor can change observed index flags
+relative to fingerprints retained before that change (historical fingerprints were
+not backfilled); such a mismatch blocks salvage revalidation and needs investigation,
+not automatic acceptance or a reset. Any failure terminally fences the combined
+verification even if files are restored.
 
-A separate read-only repository-progress verifier now checks the original claimed
-worktree/repository/branch and both Base Commit and attempt-input ancestry. It
-fingerprints retained bytes/index without adopting Implementation progress as a
-checkpoint; other Checks require exact clean bound input. Hidden index flags are
-not proof of clean review input. Fsmonitor execution is disabled for these reads;
-configured clean/process filters, submodules and unsafe filesystem observations
-block this component. It grants no authority. A new combined read-only guard
-retains directly spawned waiting ownership around this verifier and fresh bounded
-original-input/effect inspection, with live claim/receipt checks. Any failure
-terminally fences the combined object even if files are restored. This guard is
-pre-grant only: the separate protected handoff bridges claim consumption rather
-than treating a retained observation as post-commit authority. See
-[worktree verification evidence](research/pi-durable-t10/recovery-worktree.md) and
-[combined waiting-progress evidence](research/pi-durable-t10/waiting-progress.md).
-
-The final T10 path persists bounded immutable claim-bound protected proof, prepares
-the unarmed consumer, rechecks runtime/effects and commits a fresh owner-bound lease
-before exact private delivery. The waiting owner/lock is retained throughout.
-The writable Check runner bootstraps again through the original capability,
-revalidates cwd and original pending input, opens the matched Harness and resumes
-that submission. It never creates another root, input, `continue`, Check attempt
-or accepted Continuation. Dirty Implementation progress remains observed work,
-not adopted completion evidence; reviews still require exact clean input.
-
-An original supervisor can also write a protected **crash receipt** after directly
-reaping its worker and observing kernel ECHILD. A single ownership sample racing
-exit may spend at most 100 ms awaiting a positive Child reap, with captured storage
-revalidated; a prior failed sample is never revived. Surviving descendants,
-identity drift, host faults and supervisor loss before proof remain blocked.
-Neither a dead PID nor a newly free lock substitutes for this exact-grant proof.
-Receipts are retained per lease sequence, not overwritten across recoveries.
-
-The application daemon scan has a controlled recovery-adapter port. With explicit
-trusted matched components it preflights original proof before claiming/spawning,
-reinspects under a new waiting owner, drives committed grants/renewal and observes
-answers read-only. Only another proven safe crash can create a new recovery
-episode with fresh issuer authority; pending claims and uncertain delivery are
-not taken over. In-flight model requests remain governed by disabled retries and
-may settle unanswered; neither they nor arbitrary commands are silently replayed.
-Missing Outcomes retain a hold/capacity and cannot create a successor. A deliberate
-accepted Implementation Continuation and independent Review instead receive fresh
-conversations/stores and Forge-approved checkpoint/output context after retirement.
+**After resumption.** In-flight model requests remain governed by disabled retries
+and may settle unanswered; neither they nor arbitrary commands are silently
+replayed. Answers are observed read-only. A Missing Outcome retains a hold and
+capacity and cannot create a successor. A deliberate accepted Implementation
+Continuation and an independent Review instead receive fresh conversations and
+stores and Forge-approved checkpoint/output context after retirement.
 
 Operator retirement can reconcile an exact original crash receipt only **after
 revocation**, under exclusive inspection and committed-effect checks. It does not
 write or repair a host retirement receipt, erase other blockers or infer absence
 from controller loss. Unrelated later host-fault markers still block that path.
 
-**Watchdog fence and daemon loss (T25).** A lease that expires because the
+**Watchdog fence and daemon loss.** A lease that expires because the
 daemon stopped renewing makes the original host fence. This happens when the
 daemon process dies, restarts or is upgraded, and when renewal fails while it is
 alive. The fence writes `watchdog.json`, or for a later episode in a recovered
@@ -269,14 +252,14 @@ flock. It writes no receipt in these cases, keeping ownership and recording
 - a TERM or KILL it could not verify;
 - ownership drift.
 
-A fence before any accepted lease is the T26 ungranted case below.
+A fence before any accepted lease is the ungranted case below.
 
 Forge accepts the receipt only under `ExclusiveInspection`, with every fence
 marker in the directory settled by its own receipt, for the owner of Forge's last
 lease: its proof for that exact lease or, because Forge commits a lease before
 delivering it, that same owner's crash, fence or ungranted proof for an earlier
 lease of the same Launch. The host's proof names the last lease it actually
-accepted, and a fenced host accepts nothing later (T18 third pass):
+accepted, and a fenced host accepts nothing later:
 
 - **Recovery.** The receipt stands in for the predecessor proof: a restarted
   daemon's ordinary scan claims and resumes the same attempt. Effect inspection
@@ -298,11 +281,11 @@ never treated as proof. To investigate an unproven fence, read the
 `watchdog-*` diagnostics in the runtime directory and look for descendants of
 the host PID recorded in `owner.json`. Never delete markers or receipts. When
 the surviving descendant really ends, the host proves quiescence and exits, and
-the same commands then succeed. See [T25 evidence](research/pi-durable-t25/README.md).
+the same commands then succeed.
 
-**Failed launches (T26).** The launch claim and the reserved runtime commit in one
+**Failed launches.** The launch claim and the reserved runtime commit in one
 transaction (`Repository::claim`), so a refused precondition leaves no claim. A
-claim without a runtime written before T26 is discharged by retirement once the
+claim without a runtime, written by an older Revision, is discharged by retirement once the
 Assignment is closed: neither `claim` nor `reserve` can add a runtime to a closed
 Assignment. Every later failure retains a specific `durable-launch-failure`
 resource (`durable-launch-runtime-input-failed`, `-intent-refused`,
@@ -313,7 +296,7 @@ rejected retirement handoff does the same.
 
 A host whose pipe closes before any accepted grant fences with
 `runner-issuer-lost` and no last lease. After the same positive reap, ECHILD and
-unchanged-storage checks as T25, it writes
+unchanged-storage checks as a fence receipt, it writes
 `ungranted-receipt-<host pid>-<host start>.json`, bound to the marker's exact
 bytes (which must name no lease) and to the owner recorded in `owner.json`, then
 exits. `fence::settled` accepts either receipt kind for a marker.
@@ -342,22 +325,10 @@ admission (never sent, because `begin_send` commits `Unknown` first); `Unknown`
 still needs the launch reconciled. Without proof, retirement reports
 `durable-runtime-owner-active`, `durable-runtime-fence-unproven` or
 `durable-launch-ungranted-unproven`. A reconciled never-sent runtime is
-purge-eligible. See [T26 evidence](research/pi-durable-t26/README.md).
+purge-eligible.
 
-The production composition configures this recovery whenever matched runner
-components are configured: a Forgeup schema 2 runner bundle, or a manual daemon's
-`FORGE_DURABLE_RUNNER_HOST`/`FORGE_DURABLE_RUNNER_ENTRY`. The app's ordinary
-reconciliation scan then calls it automatically for `unknown` durable Assignments.
-New durable launches stay withheld by the
-[release gate](durable-execution.md#current-release-state), which does not apply to
-existing work.
-There is no operator CLI/RPC recovery-authorization operation. Matched packaging and
-the rollback control exist; real-provider release verification and enabling rollout
-remain release work.
-Do not replay retained grants, reset sequences/watchdogs, edit resource markers or
-repair the worktree to bypass these gates. See the
-[T10 completion evidence](research/pi-durable-t10/completion.md) for reproducible
-controlled recovery, blocked counterexamples and verification limits.
+Do not replay retained grants, reset sequences or watchdogs, edit resource markers or
+repair the worktree to bypass these gates.
 
 ## Inspect durable status and committed transcripts (read-only)
 
@@ -425,7 +396,7 @@ The same `assignment-retire` command routes an existing durable Assignment throu
 its retained backend, without profile-source preflight, model credentials or Herdr.
 New durable launches remain withheld by the release gate. Retirement either cancels a
 directly spawned supervisor this daemon still holds, or reconciles from the original
-host's own crash, fence or ungranted receipt (T25/T26). A missing live controller never
+host's own crash, fence or ungranted receipt. A missing live controller never
 adopts a PID or infers that work stopped from absence.
 
 After durable closure/revocation, Forge journals the original retirement operation,
@@ -474,8 +445,7 @@ become unavailable. Restarted hosts deny grants when retirement intent exists.
 The proof covers this dedicated host's descendant execution on supported Linux,
 not remote effects or work delegated to an unrelated daemon. This remains a
 trusted-local-host boundary, not hostile same-user containment. Never delete a
-lock/intent/receipt or edit SQLite to make cleanup appear verified. See
-[T09 evidence](research/pi-durable-t09/README.md). Retirement does not depend on the
+lock/intent/receipt or edit SQLite to make cleanup appear verified. Retirement does not depend on the
 launch gate: it works for live and closed durable Assignments after a rollback.
 
 ## Resolve unknown resources only after external safety checks

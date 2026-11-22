@@ -30,5 +30,4 @@ This decision does not add automated worktree or branch cleanup/repair, automati
 
 ## References
 
-- [Herdr adapter socket contract](../../../docs/research/herdr-adapter-socket-contract.md)
 - Spec #502, “Autonomous Task-agent dispatch with recoverable worktrees”

@@ -148,11 +148,9 @@ does not prove that execution stopped. No secrets belong in grant history.
 
 Revision 21 rejects older stores before ordinary initialization writes. Explicit
 offline 20 → 21 conversion adds only an empty grant table and its history guards;
-it creates no historical permissions. The T05 controlled runtime now includes
+it creates no historical permissions. The runtime around this table provides
 verified host ownership, a commit-before-delivery renewal service, consumer guards
-and an independent watchdog. (At T05 Check-bound dispatch did not exist yet;
-profile/authentication mapping and the dispatch/bootstrap tracer are T06/T07.
-Today new durable launches are withheld by the release gate.)
+and an independent watchdog. New durable launches are withheld by the release gate.
 
 Authorization uncertainty uses the existing generic resource representation, not
 new DDL or invented grant history. The trusted `SessionRepository::retain_failure`
@@ -220,9 +218,8 @@ external resolution preserves the attempt without permission to resume. The daem
 `bind_inspected` grant-controller boundary retains committed effects before any
 initial grant under verified directly spawned ownership. The synchronous `bind`
 is fresh-only and rejects existing SQLite storage/sidecars and missing accepted
-storage. Inspection failures retain authorization uncertainty/capacity. Safe writable
-recovery and automatic scheduling remain later deliverables. See
-[T08 evidence](../../docs/research/pi-durable-t08/README.md).
+storage. Inspection failures retain authorization uncertainty/capacity. Writable
+recovery is a separate claim/grant path (below).
 No schema, runner component or existing serialized field changes are required;
 these are additive opaque resource kinds, a new CLI/RPC operation and internal
 Rust service interfaces.
@@ -232,11 +229,9 @@ The server's preparation/binding path derives protected storage at
 retained runtime and immutable registered root, never an operator path. Missing
 or unsafe binding paths cannot silently create/adopt a runtime. Runtime watchdog
 files supplement these Forge diagnostics; neither file deletion nor process exit
-resolves persisted resources. See [T05 evidence](../../docs/research/pi-durable-t05/README.md)
-for fake-clock and real SQLite/daemon-service/host/Node outage tests and remaining
-production/release gates.
+resolves persisted resources.
 
-## Recovery reservations (controlled T10 increment)
+## Recovery reservations
 
 The internal `durable_execution::recovery::Repository::claim_recovery` port
 atomically revalidates a candidate and reserves one `recovery-claim` opaque
@@ -283,10 +278,11 @@ reject a first grant above sequence one; recovery uses the specialized
 `host_prepare_recovery`/`host_recovery` handshake instead. Each recovery is a
 separate immutable claim/grant episode: a new episode begins only from the current
 grant owner's new crash, fence or ungranted proof (for that grant, or for an
-earlier lease that owner last accepted when a later commit was never delivered). See [T10 authorization evidence](../../docs/research/pi-durable-t10/recovery-authorization.md). No DDL/schema
+earlier lease that owner last accepted when a later commit was never delivered).
+Recovery deliberately does not reuse ordinary first-grant or watchdog validation, so
+no timeout, restart or watchdog reset can hand a fence to a new owner. No DDL/schema
 or public wire changes are required for this additive opaque resource kind; older
-grant/readiness checks already block unknown retained resources. See
-[T10 reservation evidence](../../docs/research/pi-durable-t10/recovery-reservation.md).
+grant/readiness checks already block unknown retained resources.
 
 ## Durable runtime admission (revision 20)
 
@@ -320,7 +316,7 @@ The existing resource guards retain capacity, replacement/worktree blockers and
 historical backend identity even for closed Assignments. SQL guards prevent generic
 resource retirement/deletion from clearing the durable marker. No durable cleanup
 or safety override is implemented here; verified retirement is the revision 22
-journal (T09) with the T25 fence and T26 never-granted reconciliation. A
+journal, plus fence-receipt and never-granted reconciliation (revision 25). A
 rejected admission alone is not proof of host-process absence. All external calls
 are outside writer transactions. No credentials, prompts or model responses belong
 in launch identity or result diagnostics.
@@ -1400,7 +1396,7 @@ retry keeps the original) and retires only `durable-runtime`, `provision-intent`
 failure and authorization diagnostics. The `durable_runtime_capacity_retained` trigger now
 allows `durable-runtime` retirement with either a reconciled host retirement or this row,
 for a closed Assignment. `record_launch_failure` retains one `durable-launch-failure`
-resource per failure point. `reconcile_unreserved_claim` discharges a pre-T26 claim that
+resource per failure point. `reconcile_unreserved_claim` discharges an older claim that
 has no runtime, only after closure. Purge eligibility accepts a `Pending` admission once
 every resource is retired. The explicit offline upgrade from 24 adds the empty table and
 replaces the trigger.
