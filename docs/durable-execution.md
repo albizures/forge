@@ -253,8 +253,9 @@ a Task's Checks are allowed.
 
 ## Migrate existing Checks
 
-Existing Checks keep their original pins. Changing a template, a Workspace selection or
-the launch gate never moves them. The only way is an explicit audited migration:
+Existing Checks keep their original pins. Changing a template or a Workspace selection,
+registering a new profile or changing the launch gate never moves them. The only way is an
+explicit, audited migration that selects an *effective* revision per named Check:
 
 ```sh
 forge record check-profile-migrate <task-id> --operation-id adopt-1 --expected-generation <current-generation> \
@@ -262,13 +263,30 @@ forge record check-profile-migrate <task-id> --operation-id adopt-1 --expected-g
 forge record check-profile-migrations <task-id>
 ```
 
-It requires a non-Done Task with no open attempt or Assignment and all known and unknown
-resources reconciled. Live Herdr work finishes or retires through Herdr first. The original
-pin, Check identity, description, order and every Assignment and Assessment stay as history;
-freshness is invalidated once, so earlier passes are stale. Retry with the same operation ID
-after a dropped reply; different content under that ID is rejected. While launches are
-withheld or rolled back, migration to a durable revision refuses with `invalid-check-profile`.
-Details: [migration rules](assignment-recovery.md#migrate-existing-check-profiles-to-durable-execution).
+Nothing is registered, dispatched or launched. The original pin, the Check's identity,
+description and order, every Assignment's bound profile and backend, and all Assessments stay
+as append-only history (store schema 23). Mixed backends across a Task's Checks are
+supported, and a later migration may select another durable revision.
+
+- **Eligibility:** each selection is a registered Task profile revision whose provider and
+  launch runtime are `pi-durable`, and each Check belongs to the Task. The Task is not Done,
+  has no open attempt or Assignment (`attempt-active`), and all known and unknown resources are
+  reconciled (`execution-mode-unsafe-ownership`). Live Herdr work finishes or retires through
+  Herdr first. An unchanged revision (`check-profile-unchanged`), a Herdr or missing revision,
+  or a Check from another Task rejects the whole request.
+- **Freshness:** pass `--expected-generation` from the Task's work state; a stale value fails
+  with `stale-work-generation`. A Task with work or Assessments has its freshness invalidated
+  exactly once, so earlier passes and attempts are stale, and the receipt reports the
+  generation before and after. A pristine Task keeps its generation.
+- **Retries:** reuse the operation ID after a dropped reply. The original receipt returns with
+  `replayed: true` and never advances freshness again. The same ID with different content
+  fails with `check-profile-migration-conflict`.
+- **Next attempt:** the following dispatch uses the effective revision through the ordinary
+  gates (capacity, Dispatch Hold, preflight). A stale selection of the old pin is rejected as
+  `check-selection-stale`.
+- **Release gate:** the target revision is preflighted through the launch gate. While new
+  launches are withheld or rolled back, migration refuses with `invalid-check-profile` and
+  records nothing. [Rollback](#rollout-and-rollback) never rewrites pins.
 
 ## Rollout and rollback
 
@@ -291,7 +309,12 @@ then use an explicit compatible pin selection; switching backends is never autom
 ## Operate durable Assignments
 
 All examples accept `--workspace <id>` and `--json`. These operator routes are trusted and
-unauthenticated; restrict daemon access ([Security](../README.md#security)).
+unauthenticated; restrict daemon access ([Security](../README.md#security)). Confirmation flags
+such as `--confirm-old-agent-cannot-act` are trusted operator assertions, not authenticated
+identity or proof of process death. General investigation, unknown-resource resolution,
+retained-work salvage and hold clearance follow the
+[Assignment recovery runbook](assignment-recovery.md); this section covers what is specific to
+durable Assignments.
 
 ### Status and transcripts (read-only)
 
@@ -301,13 +324,30 @@ forge dispatcher assignment-transcript <assignment-id> --workspace personal --li
 forge dispatcher assignment-transcript <assignment-id> --workspace personal --after 42 --limit 100 --json
 ```
 
-Neither command starts a runner, scheduler, model call, tool call or lease, takes host
-ownership or opens storage writable. Both work for running, crashed, retired and
-missing-Outcome Assignments. Transcript pages are committed entries in ascending immutable ID
-order; pass the previous `next_after` as `--after`. An empty page for a live Assignment is not
-end of history. Unreadable or corrupt storage reports `unavailable` with a reason code, never
-an empty transcript, and is not repaired. Treat transcript content as sensitive repository data.
-See [status and transcripts](assignment-recovery.md#inspect-durable-status-and-committed-transcripts-read-only).
+Both commands call trusted daemon RPC (`assignmentDurableStatus`, `assignmentTranscript`).
+Neither starts a runner, scheduler, model call, tool call or lease, takes host ownership or
+opens storage writable. Both work for running, crashed, retired and missing-Outcome
+Assignments.
+
+- **Status** reports persisted Forge facts: backend, runtime and attempt identity, admission
+  result, retained lease history (`never-granted`, `granted-unverified`, `revoked`), missing
+  Outcome, retained uncertainty, capacity, retirement blockers and recorded follow-ups. Neither
+  lease state nor a missing runtime proves a process is running or absent, and
+  `granted-unverified` never means authority is live. Status needs only the store.
+- **Transcript** pages committed root-conversation entries in ascending immutable entry ID
+  order. Omit `--after` for the first page, then pass the previous `next_after`; `--limit`
+  accepts 1 to 100. Live appends only add larger IDs, so a page is never reordered or
+  duplicated, and `more=false` is not end of history for a live Assignment. `history` is
+  `available`, `not-started` or `unavailable` with a fixed non-secret reason code. Corrupt,
+  foreign or unreadable storage is `unavailable`, never an empty transcript, and is not
+  repaired.
+- The transcript reader is the `inspect-transcript.ts` beside the matched effect inspector,
+  verified against the component hash retained in the Launch
+  ([matched runner](#install-and-run-the-matched-runner)). Without those components the
+  command fails with `durable-transcript-unconfigured`.
+- Entries are bounded to 8 KiB (`truncated` is flagged). Tool output can contain repository
+  content, so treat transcripts as sensitive. Forge adds no capabilities, credentials or store
+  paths.
 
 ### Follow-ups
 
@@ -316,13 +356,33 @@ forge dispatcher assignment-followup <assignment-id> --workspace personal --oper
   --message 'submit the result with the Outcome command' --json
 ```
 
-A follow-up is recorded once in Forge, bound to the original attempt, Check, profile,
-freshness and evidence; it cannot rebind any of them. While the original runner runs under live
-authority (the launching session, including after a missing Outcome, or a recovered session),
-the daemon delivers it idempotently (`delivery`: `recorded`, `unknown`, then
-`delivered`). A record is not an Outcome, lease or proof that the agent acted. Revoked
-Assignments, stale bindings and retained uncertainty reject new input. See
-[operator follow-ups](assignment-recovery.md#operator-follow-ups).
+A follow-up is durable operator input (store schema 23, immutable and retained), bound to the
+Assignment's original attempt, Check, profile revision, generation and runtime. The request
+carries only the Assignment, an operation ID and text, so it cannot rebind work: a request such
+as "use another commit" is stored as text and the evidence is unchanged. Scope or evidence
+changes use Forge's existing invalidation and replacement rules.
+
+- **Delivery:** a record is not an Outcome, a lease or proof that the agent acted. While the
+  original runner runs under live authority, the daemon sends undelivered follow-ups: the
+  launch driver after an accepted admission (it keeps the lease after a missing Outcome so this
+  works), and the recovery driver after the runner reports `resumed`. It records `unknown`
+  before each write and `delivered` only after the runner accepts it. The runtime request ID
+  `followup:<operation-id>` deduplicates a re-send, so an `unknown` follow-up re-sent to a later
+  session replays its original admission. The receipt's `delivery` field reports `recorded`,
+  `unknown` or `delivered`; delivered input appears in the transcript.
+- **Retries:** reuse the same operation ID after a dropped reply. The original receipt returns
+  with `replayed: true`, even after the Assignment closed. Different text under that ID fails
+  with `followup-operation-conflict`.
+- **Rejections:** `followup-assignment-revoked` (closed), `durable-binding-stale` (attempt
+  closed or generation invalidated), `followup-admission-unconfirmed`, and
+  `followup-blocked-by-uncertainty` for retained interrupted-effect, authorization,
+  recovery-claim, retirement or provisioning uncertainty. A message never resumes unsafe work.
+- **Missing Outcome:** a follow-up is allowed as explicit intervention. It does not create an
+  Outcome, retire the diagnostic, release capacity or grant a lease.
+- **Limitation:** recovery resumes only an unsettled original submission. If a follow-up was
+  committed after the original answer settled and that session then crashes, recovery refuses
+  (`runner-recovery-intervention-required`) and the follow-up stays `unknown`. Retire the
+  Assignment; nothing is replayed.
 
 ### Missing Outcome
 
@@ -358,6 +418,15 @@ What happens next depends on the original host's own proof:
   `watchdog-<pid>-<start>-quiescence-unproven.json` diagnostic, and status reports
   `runtime_fence: runtime-fence-unproven` (also listed under uncertainty). If an escaped child
   later really exits, the kernel proof follows and the receipt is written then.
+
+A later fence in a recovered directory writes `watchdog-<pid>-<start>-fence.json` instead of
+`watchdog.json`. Forge accepts a receipt only under exclusive inspection, with every fence
+marker in the directory settled by its own receipt, and only for the owner of Forge's last
+lease. Because Forge commits a lease before delivering it, that owner's proof for an earlier
+lease of the same Launch also matches. A receipt from another owner, for another Launch or for a
+later lease than Forge's, a tampered receipt, and a changed or unsettled marker are refused.
+Status reads `runtime_fence` (`runtime-fence-unproven` or `runtime-fence-proven`) from the host
+files without taking the lock.
 
 With crash proof or a fence receipt that matches Forge's last committed lease, the restarted
 daemon continues on its own. Its ordinary reconciliation scan recovers the same attempt (same
@@ -399,13 +468,58 @@ be lost before expiry. Deadlines use
 denied slightly early). No measurement-based tuning has been done. Changing any of these is an
 implementation change that renews release verification.
 
+### Same-attempt recovery
+
+Assignment Execution Recovery resumes the **original** admission, conversation and Check
+attempt after a proven crash or fence. It is automatic and has no operator command: whenever
+matched runner components are configured (a Forgeup schema 2 runner bundle, or a manual
+daemon's `FORGE_DURABLE_RUNNER_HOST`/`FORGE_DURABLE_RUNNER_ENTRY`), the daemon's ordinary
+reconciliation scan attempts it for `unknown` durable Assignments. The launch gate does not
+restrict it. It never creates another conversation root, input, `continue`, Check attempt or
+Continuation.
+
+Recovery starts only from the original host's own protected proof for Forge's last lease: a
+crash receipt (the host reaped its worker and the kernel reported no remaining children), a
+fence receipt ([above](#authorization-leases-and-outages)) or, before any grant, an ungranted
+receipt ([failed launches](#failed-launches)). A still-verified original supervisor can also be
+asked to stop its worker without revoking the Assignment (predecessor quiescence), which ends in
+the same kind of receipt. A dead PID, a free lock, controller loss, surviving descendants,
+identity drift or a supervisor lost before proof never substitute for it. Escaped children,
+conflicting evidence or unavailable proof leave ownership, claim and capacity retained, and
+nothing is signalled again.
+
+With proof, the daemon claims the original candidate exclusively and spawns a new directly
+owned host. Under that host's ownership it rechecks the receipt, the original pending input,
+committed effects and the claimed worktree, commits a fresh recovery lease, and only then
+delivers the recovery envelope. The runner bootstraps again through the original capability
+and resumes that submission. A failed commit or delivery permanently fences that episode; only
+another proven crash starts a new one. Revocation, expiry, changed freshness, unrelated
+blockers, ownership faults and uncertain effects deny authority. The design is recorded in
+[ADR-0012](../crates/docs/adr/0012-authorized-durable-recovery-and-conservative-retirement.md).
+
+**Worktree checks.** Recovery verifies the original claimed worktree, repository and branch,
+and both Base Commit and attempt-input ancestry, and fingerprints the retained bytes and index.
+Dirty Implementation progress remains observed work, not a checkpoint or completion evidence;
+other Checks, including Reviews, require their exact clean input. Hidden index flags are not
+proof of clean input. Fsmonitor is disabled for these reads, and configured clean/process
+filters, submodules and unsafe filesystem observations block recovery. A fingerprint retained
+before fsmonitor was disabled can mismatch (historical fingerprints were not backfilled); that
+blocks salvage revalidation and needs investigation, not acceptance or a reset. Any failure
+fences the verification even if files are restored.
+
+**After resumption.** Model retries stay disabled, so an in-flight model request may settle
+unanswered; neither it nor any command is silently replayed. A Missing Outcome retains a hold
+and capacity and creates no successor. A deliberate accepted Continuation and an independent
+Review instead get a fresh conversation and store, with Forge-approved context, after
+retirement.
+
 ### Failed launches
 
 A durable launch that fails after its claim never strands the Assignment. The launch
 claim (`provision-intent`) and the reserved runtime identity commit in one transaction:
 either both exist or neither does, so a refused precondition (a stale binding, a closed
 Assignment) leaves nothing behind. A claimed Assignment is never respawned
-(`durable-launch-claimed`). Each later failure keeps a specific diagnostic, shown in
+(`durable-launch-claimed`). Each later failure keeps a specific `durable-launch-failure` resource, shown in
 `assignment-status` under `retirement_blockers` (and as `launch-failed` under uncertainty):
 
 | Code | Failure point |
@@ -423,22 +537,29 @@ private pipe and reaps it. The host treats the closed pipe as a lost issuer: it 
 as subreaper that no descendant remains, writes `ungranted-receipt-<pid>-<start>.json` and
 exits. The same happens when the launching daemon dies before the first grant.
 
-`assignment-retire` then reconciles with the strongest available proof and releases capacity:
+`assignment-retire` then reconciles with the strongest available proof, journals it
+immutably (store schema 25) and releases capacity:
 
-- **No launch intent was committed:** Forge's own records prove that no host was ever spawned.
-  Any prepared storage must also seal (`launch-sealed.json`) so no host can own it later; a
-  host that holds it anyway blocks this proof.
-- **The launch intent was committed but no host ever owned the directory** (for example, a
-  failed spawn): the directory is sealed under its exclusive lock, with no owner evidence.
-- **A host owned it but never received a grant:** its exact ungranted receipt.
-- **A grant was committed, or the host is still held by this daemon:** the ordinary paths above
-  (host retirement receipt, crash proof or fence receipt).
+- **`never-launched`:** no launch intent was committed, so Forge's own records prove that no
+  host was ever spawned. Any prepared storage must also seal (`launch-sealed.json`) so no host
+  can own it later; a host that holds it anyway blocks this proof.
+- **`never-owned`:** the launch intent was committed but no host ever owned the directory (for
+  example, a failed spawn). The directory is sealed under its exclusive lock, with no owner
+  evidence.
+- **`ungranted-quiescence`:** a host owned it but never received a grant; its exact ungranted
+  receipt, with every marker settled. This also applies when a retirement of that host was
+  lost with its daemon.
+- **A grant was committed, or the host is still held by this daemon:** the ordinary paths
+  ([fence proof](#authorization-leases-and-outages), [retirement](#retirement)).
 
-Exact retries return the original result. Until proof exists, retirement reports
-`durable-runtime-owner-active`, `durable-runtime-fence-unproven` or
-`durable-launch-ungranted-unproven` (a host owned the directory before any grant but did not
-prove quiescence, for example because it was killed). As above, investigate rather than delete
-evidence. A reconciled failed launch can then be purged with `assignment-purge-runtime`.
+Retirement accepts a `Pending` admission (never sent); an `Unknown` admission still needs the
+launch reconciled. A launch claim without a runtime, left by an older Revision, is discharged by
+retirement once the Assignment is closed. Exact retries return the original result. Until
+proof exists, retirement reports `durable-runtime-owner-active`,
+`durable-runtime-fence-unproven` or `durable-launch-ungranted-unproven` (a host owned the
+directory before any grant but did not prove quiescence, for example because it was killed). As
+above, investigate rather than delete evidence. A reconciled failed launch can then be purged
+with `assignment-purge-runtime`.
 
 Plan for an Assignment to need recovery or retirement after any daemon outage longer than a
 grant. Under the trusted-local-host boundary, both are available once the original host has
@@ -447,11 +568,23 @@ proven quiescence.
 ### Interrupted effects
 
 Shell and file tools are not replay-safe. If a tool call's intent was committed without a
-known result, Forge retains an `interrupted-effect` blocker that reserves capacity and blocks
-grants. A tool call that failed before it started any filesystem write or command (for
-example a `read` of a missing file, or an `edit` whose text was not found) had no effect: the
-agent sees an ordinary error result and continues, and no blocker is created. Arbitrary commands are never replayed. Investigate the real external outcome (push,
-publication, file changes) and record it with evidence:
+known accepted result, Forge retains an `interrupted-effect` blocker. Its resource ID holds only
+the execution-task, conversation and call identities; commands, arguments and results stay in
+protected runtime storage. A tool call that failed before it started any filesystem write or
+command (for example a `read` of a missing file, or an `edit` whose text was not found) had no
+effect: the agent sees an ordinary error result and continues, and no blocker is created.
+
+The blocker reserves capacity and blocks new grants, even for a closed Assignment. Before its
+first grant, the daemon inspects retained runtime storage through the matched inspector and
+retains any observed effect; missing or corrupt initialization, unavailable inspection and
+unsettled intent all deny permission. A process exit, expired lease, later empty scan, cleared
+Dispatch Hold or provider cleanup does not resolve the blocker, and its late arrival never
+overwrites an accepted Outcome.
+
+Investigate the real external outcome (push, publication, file changes) without replaying the
+command, make the old execution and its children safe, then record a resolution with
+evidence. Take `--execution-task`, `--conversation` and `--call` from the selected retained
+`interrupted-effect` resource, not from another Assignment or the Forge Task ID:
 
 ```sh
 forge dispatcher assignment-resolve-effect <assignment-id> --workspace personal \
@@ -460,8 +593,31 @@ forge dispatcher assignment-resolve-effect <assignment-id> --workspace personal 
   --message 'push observed on remote' --confirm-old-agent-cannot-act --confirm-external-work-safe --json
 ```
 
-`unknown` cannot be resolved. A resolution never reruns the command or authorizes recovery.
-See [interrupted durable effects](assignment-recovery.md#interrupted-durable-effects-controlled-implementation).
+- **Requirements:** matched inspection components
+  ([manual daemon](development.md#run-a-manual-daemon)), existing protected host-lock evidence,
+  a fresh committed runtime scan and both confirmations. A missing lock, a live owner, an
+  unavailable or incompatible inspector, or an unknown external outcome blocks acceptance. Use
+  `not-applied` only with evidence of that conclusion; `unknown` cannot be resolved.
+- **Effect:** for a **live** Assignment, the resolution keeps the original attempt and leaves
+  the effect resource as an execution fence, even after hold clearance or later closure. This
+  supports investigation without forcing revocation, but authorizes no renewed execution. For
+  a **closed** Assignment, only that effect resource retires. Runtime intent stays unsettled,
+  other resources, capacity blockers and holds remain, and no command is rerun, runtime receipt
+  repaired, dirty commit adopted or recovery authorized.
+- **Retries:** after a transport failure, inspect `assignment-info` and retry with the same
+  operation ID and all original evidence, never the tool command. The original timestamp and
+  receipt return, even after a daemon restart or loss of runtime components. Different
+  evidence, or another operation for the same effect, rejects.
+- **Audit:** the `interrupted-effect-resolution` audit stays visible through
+  `assignment-info`. Its evidence fields are ordinary output, not protected storage: never put
+  credentials, tool payloads or prompts in them.
+- **RPC:** `agentDispatch_assignmentResolveEffect` with
+  `{selection: {workspace, cwd?}, record: {assignment_id, resolution}}`. The resolution holds
+  the operation ID, the exact `effect` identities, the conclusion, actor, evidence, message and
+  both confirmation booleans. It accepts no capability, secret, runtime path or executable.
+
+Do not use `assignment-resolve-unknown`, retained-work salvage, generic cleanup, runtime SQLite
+edits or `resume` as a waiver. Never close an Assignment in SQLite to satisfy this command.
 
 ### Retirement
 
@@ -470,33 +626,92 @@ forge dispatcher assignment-retire <assignment-id> --workspace personal --json
 forge dispatcher assignment-info <assignment-id> --workspace personal --json
 ```
 
-Retirement revokes authority **before** cleanup, then asks the original supervisor to stop
-the runner's process group; its subreaper writes a receipt only when no children remain.
-Forge reconciles that receipt and committed effects before releasing capacity. A surviving or
-escaped child, missing proof, identity drift or unavailable components leave retirement
-unreconciled (`assignment-retirement-unreconciled` or a `durable-retirement-*` diagnostic), with
-capacity and hold retained; correct the cause and repeat the same command. Retirement needs no
-profile source, model key or Herdr. See
-[durable supervised retirement](assignment-recovery.md#durable-supervised-retirement-controlled-implementation).
+The same `assignment-retire` used for Herdr
+([runbook](assignment-recovery.md#revoke-and-clean-up-known-resources)) routes a durable
+Assignment through its retained backend. It needs no profile source, model key or Herdr, and
+does not depend on the launch gate: it works for live and closed Assignments after a rollback.
+
+Retirement revokes authority **before** cleanup and journals the operation, Launch and owner
+before contacting the host. The owner must match the original authorization grant, so a freshly
+spawned lookalike cannot stand in. If this daemon still holds the original supervisor, it asks
+it to stop: the host refuses new grants and sends TERM to the runner's process group (the
+runner closes admission and aborts guarded execution), then after five seconds KILL, only while
+the original leader identity is still verified. The dedicated subreaper writes an owner-only
+receipt only when the kernel reports no remaining children; signal delivery, an abort
+acknowledgement or leader exit alone is not a receipt. Otherwise retirement reconciles from the
+original host's crash, fence or ungranted receipt. A missing controller never adopts a PID or
+infers that work stopped.
+
+Forge reads the exact receipt under exclusive host inspection and uses the matched read-only
+effect inspector to retain any unsettled intent before releasing anything; missing inspection
+components keep the operation pending even with a valid receipt. It then retires only the bound
+runtime, its liveness diagnostics and any validated recovery reservation for that Launch. The
+operator retirement marker finalizes only when every other resource is reconciled: unknown
+provisioning resources and interrupted effects keep their own resolution paths. Missing
+Outcomes and process cleanup never synthesize a passing Assessment. The Dispatch Hold stays
+until a separate `resume`, and the worktree, index, runtime history and audit are kept.
+
+A surviving or escaped child, missing proof, identity drift, dropped delivery or unavailable
+components leave retirement unreconciled (`assignment-retirement-unreconciled` or a
+`durable-retirement-*` diagnostic), with capacity and hold retained; Forge does not chase
+orphan PIDs. Correct the cause and repeat the same command: it can reconcile a retained
+receipt after a daemon restart without starting a runner or needing model credentials, and
+accepted retries keep the original operation and timestamps. Restarted hosts deny grants once
+retirement intent exists. The proof covers this host's descendants on supported Linux, not
+remote effects or work delegated to an unrelated service. Never delete a lock, intent or
+receipt file, or edit SQLite, to make cleanup look verified.
 
 ### Runtime history retention and deletion
 
-Retirement keeps the owner-only runtime history. Deletion is a separate, irreversible step:
+Retiring or closing an Assignment never deletes its runtime history. The runtime directory
+(`<workspace>/.forge/assignment-runtimes/<digest>`, owner-only `0700`, files `0600`) holds the
+conversation, tool output and runtime evidence, which can contain sensitive repository content
+even with credentials redacted. It stays readable through `assignment-status` and
+`assignment-transcript` until an operator deletes it. Deletion is a separate, irreversible
+step; Forge keeps no copy:
 
 ```sh
 forge dispatcher assignment-purge-runtime <assignment-id> --workspace personal --operation-id purge-1 --json
 ```
 
-It deletes only the canonically mapped runtime directory of a closed, reconciled Assignment with
-no retained uncertainty, hold or live owner. Retirement places a Dispatch Hold, so deletion is
-refused (`runtime-purge-uncertainty-retained`) until the operator clears it with
-`forge dispatcher resume <task-id>`. The retirement, crash, watchdog-fence and recovery
-evidence files the host itself wrote are deleted with the runtime; anything else in the
-directory refuses deletion.
-The result records whether this operation `removed` the directory or found it `already-absent`.
-Forge's Assignment, Outcome, Assessment, migration, recovery and retirement records stay. Afterwards transcripts report `runtime-history-purged`,
-and nothing recreates or resumes the store. See
-[retained runtime history](assignment-recovery.md#retained-runtime-history-and-explicit-deletion).
+- **Eligibility:** the Assignment is closed; its retirement is reconciled (or its admission was
+  rejected); no resource is unretired, including unknown identities, interrupted effects,
+  recovery claims and missing-Outcome markers; and no Dispatch Hold exists. Retirement places a
+  hold, so clear it first with `forge dispatcher resume <task-id>`. Otherwise the purge is
+  rejected (`runtime-purge-assignment-open`, `runtime-purge-uncertainty-retained`,
+  `runtime-purge-retirement-unreconciled`, `runtime-purge-admission-unknown`) and nothing is
+  journaled or deleted.
+- **Deletion:** the directory comes only from the canonical mapping of the immutable store
+  identity, never a caller path. The host takes the same exclusive ownership lock the
+  supervisor and worker hold, so a live or still-held owner refuses
+  (`runtime-purge-owner-active`). Every entry must be a recognized, owner-only, single-link
+  regular file: the runtime database and its `-wal`/`-shm`/`-journal`, `check-runtime.json`,
+  and the files runner-host's own lifecycle writes (`owner.json`, an interrupted
+  `owner.<pid>.pending`, `watchdog.json`, `watchdog-<pid>-<start>-fence.json`,
+  `watchdog-<pid>-<start>-<term|kill>-<sent|unverified>.json`,
+  `watchdog-<pid>-<start>-quiescence-unproven.json`, `watchdog-receipt-<sequence>.json`,
+  `ungranted-receipt-<pid>-<start>.json`, `launch-sealed.json`, `retirement-intent.json`,
+  `retirement-receipt.json`, `recovery-crash-<sequence>.json`,
+  `recovery-quiescence-intent.json`, `recovery-quiescence-receipt.json` and
+  `recovery-proof-<64 lowercase hex>.json`). Numeric parts must be canonical decimals in range.
+  Redirected, foreign, linked or unrecognized content (`runtime-purge-storage-unsafe`,
+  `runtime-purge-boundary-invalid`) refuses before any file is removed. Data goes first, then
+  configuration, diagnostics, recovery evidence, fencing markers, the retirement receipt and
+  owner evidence, with `owner.lock` last, then the directory. No sibling runtime or worktree is
+  touched.
+- **Journal and retries:** intent is recorded first (store schema 23; append-only, final once
+  `purged`). A completed purge also records (schema 24) whether this operation `removed` the
+  directory or found it `already-absent`; an absent path is not proof that Forge deleted it, and
+  purges completed before schema 24 show the outcome as unrecorded. A failure is retained as a
+  diagnostic (`state: retained`) shown in status; retry with the same operation ID, which
+  revalidates eligibility and resumes a partial deletion. A different operation ID is
+  `runtime-purge-conflict`. A completed purge replays unchanged and never recreates storage.
+- **Kept:** the Assignment, Outcomes, Assessments, migration, recovery and retirement audit,
+  accepted operation facts, follow-up records and Managed Worktree contents.
+- **Afterwards:** `assignment-transcript` returns `unavailable` with reason
+  `runtime-history-purged` without starting a reader, and `assignment-status` shows the
+  deletion. Nothing synthesizes an empty store or makes recovery, resume or replay executable
+  again.
 
 ## What is not a safe shortcut
 

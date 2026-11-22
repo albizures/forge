@@ -112,7 +112,7 @@ or automatic recovery. A manual daemon that also sets both
 `FORGE_DURABLE_RUNNER_HOST` and `FORGE_DURABLE_RUNNER_ENTRY` (absolute paths to the
 matched `forge-runner-host` and `check-entry.ts`) composes durable launch and
 automatic same-attempt recovery; new durable launches still stay withheld by the
-[release gate](durable-execution.md#current-release-state). See [effect investigation](assignment-recovery.md#interrupted-durable-effects-controlled-implementation).
+[release gate](durable-execution.md#current-release-state). See [effect investigation](durable-execution.md#interrupted-effects).
 
 ### Matched runner packaging
 

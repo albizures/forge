@@ -120,7 +120,7 @@ offline 21 → 22 adds an empty retirement journal and replaces the runtime reso
 retirement guard; it fabricates no historical ownership or cleanup proof and does
 not permit upgrading through unresolved execution blockers. Runtime schema and
 runner wire v1 are unchanged; the separate private retirement control is version 1.
-See [Assignment recovery](../../docs/assignment-recovery.md#durable-supervised-retirement-controlled-implementation).
+See [durable retirement](../../docs/durable-execution.md#retirement).
 
 ## Assignment authorization grant history (revision 21)
 
