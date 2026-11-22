@@ -8,8 +8,8 @@ checks applicable direct inputs and the neighboring Forge CLI before preparing a
 worktree or allocating provider
 resources. Final input validation is repeated before launch.
 
-Pi is configured with command-line flags only; there is no custom loader or runtime
-attestation. Flags configure Pi; they do not attest a closed runtime.
+Pi is configured with command-line flags only. Flags configure Pi; they do not attest a
+closed runtime, and there is no custom loader.
 
 ## Authoring and resolution
 
@@ -380,27 +380,3 @@ to the original MCP catalog do not replace a registered configuration.
 This freezes policy, not resource execution. There is no OS/same-user sandbox,
 recursive dependency pinning, external-service/model/credential freeze, or atomic
 validation-to-load filesystem snapshot. Selected extensions remain trusted code.
-
-## Bound versus live Assignment data
-
-Dependent context/runtime Tasks must use these existing durable ownership facts:
-
-- Assignment `id`, `record_id`, attempt number and bound `profile.record_type` /
-  `profile.revision`; profile loading follows that immutable key, never a current
-  Workspace selection or greatest revision.
-- Persisted Assignment Workspace/provider identity and exact provider resource
-  tuples. Execution cwd is the Task's bound Managed Worktree, or the Grilling's
-  Forge Workspace root; a first Project root is not an execution-root proxy.
-- Lifecycle policy remains part of the bound profile; `launch_policy` adds the
-  frozen model/resources/behavior, not authority to alter retries or holds.
-- Context envelopes keep bound identity separate from live Record,
-  relationships, comments/history and complete Project Scope, with freshness
-  metadata. Never expose the persisted MCP configuration as public context.
-- Missing profile sources/direct files must not prevent existing authenticated actions,
-  reconciliation or retirement. Direct-input validation belongs only to new
-  execution and supported reload. It must not erase ownership evidence, prove
-  process exit, release capacity, or replay one-shot launch.
-
-Assignment context uses schemaVersion 1. Runtime
-identity/closed-loader enforcement is not implemented under the approved
-flags-only scope; no persisted runtime-attestation fields are claimed.
