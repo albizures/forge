@@ -6,7 +6,8 @@
   "scripts": {
     "prepare-reader": "node prepare-reader.mjs",
     "check": "tsc --noEmit",
-    "test": "node --test --test-timeout=20000 test/*.test.mjs"
+    "test": "node --test --test-timeout=20000 test/*.test.mjs",
+    "test:upstream": "node --test --test-timeout=20000 test/upstream/*.test.mjs"
   },
   "dependencies": {
     "@earendil-works/pi-durable": "1.5.2",
