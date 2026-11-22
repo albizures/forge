@@ -301,13 +301,13 @@ Durable-execution tests have environment prerequisites:
 
 Runner checks, from `runner/`: `npm run check && npm test`. After changing pi-durable, pi-ai,
 chord or Node, also run `npm run test:upstream`
-([upstream constraints](durable-execution.md#upstream-pi-durable-152-constraints)).
+([upstream constraints](release-verification/README.md#upstream-pi-durable-152-constraints)).
 
 ### Real-provider release gate
 
 Durable release verification also requires a real-provider Implementation → independent
 Review cycle on the exact Revision
-([requirements](durable-execution.md#release-verification-requirements)). It is opt-in and
+([requirements](release-verification/README.md#requirements)). It is opt-in and
 billed, so run it only with operator authorization:
 
 ```sh

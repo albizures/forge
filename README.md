@@ -109,8 +109,9 @@ uses installed CLI help; no Forge source checkout or online manual is required.
 | [Task stacks](docs/stacks.md) | Linear branch inheritance and verified non-draft PR publication |
 | [Managed worktrees](docs/worktrees.md) | Manual checkout creation, safety checks, and repair |
 | [Dispatcher](docs/dispatch.md) | Configuration, explicit Record dispatch, launch, and ownership boundaries |
-| [Durable Task execution](docs/durable-execution.md) | Headless pi-durable backend: release state, setup, supported matrix, migration, rollout/rollback and operator controls |
-| [Assignment recovery](docs/assignment-recovery.md) | Investigation, retirement, unknown resources, and holds |
+| [Durable Task execution](docs/durable-execution.md) | Headless pi-durable backend: release state, setup, supported matrix, migration, rollout/rollback, operation and recovery |
+| [Durable release verification](docs/release-verification/README.md) | What a Revision needs before durable launch, upstream pi-durable constraints, and per-Revision records |
+| [Assignment recovery](docs/assignment-recovery.md) | Investigation, retirement, unknown resources, salvage, and holds |
 | [Forgeup operations](docs/forgeup.md) | Revision registration, selection, daemon lifecycle, and recovery |
 | [Revision State upgrades](docs/state-upgrades.md) | Explicit database copy-and-upgrade, activation, rollback, and crash recovery |
 | [Development](docs/development.md) | Source setup, manual daemon endpoints, browser/RPC, and verification |
