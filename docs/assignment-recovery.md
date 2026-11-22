@@ -257,31 +257,27 @@ can retain diagnostic holds. Forge never commits or discards changes to recover.
 Description edits and substantive handback invalidate current passes without
 removing Findings/history; both original reviews rerun after Implementation.
 
-Two automatic retries per interrupted Check and three remediation cycles per Task
-run bound progress across restart, redispatch and mode changes. No progress stops
-earlier. `resume` renews interrupted retries, but cannot bypass remediation
-exhaustion or no-progress state. Only a recorded operator
-`dispatcher reset-remediation <task> --actor <operator> --message <explanation>`
-after safe ownership/resource reconciliation resets remediation budget; it does
-not reset interruption counts or clear holds, Findings or other safety state.
-See [bounded progress](dispatch.md#bounded-progress-and-operator-intervention)
-for interrupted-Check recovery through explicit resume; Manual handoff is not required.
+Three separate budgets can stop progress. Each is renewed by its own explicit operator
+action, taken only after investigation and safe retirement/resource reconciliation. The
+two resets clear no hold, Finding or other budget; only `resume` clears the hold:
+
+- **Interrupted retries** (two per Check): `forge dispatcher resume <task>` renews them
+  and clears the hold; Manual handoff is not required. See
+  [bounded progress](dispatch.md#bounded-progress-and-operator-intervention).
+- **Remediation cycles** (three per Task run) and no-progress stops:
+  `dispatcher reset-remediation <task> --actor <operator> --message <explanation>`,
+  then `resume`. `resume` alone cannot bypass them.
+- **Continuations** (20 total or two consecutive unchanged checkpoints per Check):
+  `dispatcher reset-continuations <task> --check <check> --workspace <id> --actor <operator> --message <explanation>`,
+  then `resume`. Neither `resume` nor a remediation reset bypasses them. See
+  [continuation operations](dispatch.md#deliberate-implementation-continuations).
+
+`record check work <task> --json` shows every counter, stop reason and reset audit.
 
 A final pass is not Done. Reconciliation separately requires confirmed retirement,
 all resources reconciled, clean current evidence/freshness, all current passes,
 no blockers/holds and satisfied dependencies. Managed Worktrees/branches remain
 retained after completion; no automatic Git integration or cleanup occurs.
-
-Continuation accounting is independent: 20 total or two consecutive unchanged
-checkpoints exhaust a Check. `record check work <task> --workspace <id>` (or `--json`)
-shows counters, retained handoff and reset audit. Only
-`dispatcher reset-continuations <task> --check <check> --workspace <id> --actor <operator> --message <explanation>`
-renews that Check's total and consecutive-unchanged allowance. It retains holds,
-ownership/resources, evidence and all other budgets/history, and launches nothing.
-After investigating the limit and recording a justified reset, complete the separate
-retirement/resource checks above before explicit resume. Neither resume nor remediation
-reset bypasses exhausted continuation accounting. See
-[continuation operations](dispatch.md#deliberate-implementation-continuations).
 
 ## Spec parent and inheritance rejections
 

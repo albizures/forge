@@ -597,29 +597,15 @@ not directly mutate Assignments.
 
 ## Investigation and recovery
 
-Start with retained evidence:
+Uncertain launches, holds, retirement, unknown resources and retained-work salvage follow
+the ordered [Assignment recovery runbook](assignment-recovery.md). Clearing a hold does not
+prove agent absence or authorize replacement, and closed Assignments can still reserve
+capacity.
 
-```sh
-forge dispatcher assignment-info <assignment-id>
-forge dispatcher status --project <slug>
-forge worktree info <task-id>
-forge worktree doctor
-```
-
-Follow the ordered [assignment recovery runbook](assignment-recovery.md) before
-retirement, unknown-resource resolution, or `resume`. Clearing a hold does not
-prove agent absence or authorize replacement. Revocation does not prove process
-death or undo external actions. Closed Assignments can still reserve capacity.
-
-Forge does not reset, rebase, delete, recreate, or automatically repair
-dispatcher-created branches/worktrees. Failed setup hooks, branch collisions,
-unavailable bases, invalid checkouts, and provider/workspace failures retain
-diagnostics for investigation. Repeated definite provisioning failures can create
-a hold; uncertain launches require the more conservative recovery runbook.
-
-Back up existing evidence before upgrades. Owned development schemas can evolve;
-pre-Workspace unowned data requires a new store, not legacy import or implicit
-adoption. Forge does not adopt legacy workspace/worktree state. Automated Git
-cleanup/repair, unknown-resource adoption/replacement, general cancellation beyond
-retirement, and automatic shared-workspace conflict resolution are not provided.
-Integration and release decisions remain explicit workflow actions.
+Forge does not reset, rebase, delete, recreate or automatically repair dispatcher-created
+branches or worktrees. Failed setup hooks, branch collisions, unavailable bases, invalid
+checkouts and provider or workspace failures retain diagnostics for investigation. Repeated
+definite provisioning failures can create a hold; uncertain launches follow the runbook.
+Automated Git cleanup or repair, adoption or replacement of unknown resources, general
+cancellation beyond retirement and automatic shared-workspace conflict resolution are not
+provided.
