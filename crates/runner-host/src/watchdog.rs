@@ -149,6 +149,9 @@ impl State {
 
 // A stalled worker may block this thread's pipe write, but it cannot block the
 // watchdog: never hold the policy mutex during reads, writes or process I/O.
+// Forward explicit bounded lines rather than `io::copy`: on Linux, copying a
+// socket into a pipe uses splice, which held the destination pipe while waiting
+// for more input and blocked worker readiness.
 pub fn forward_input(mut input: ChildStdin, state: &Mutex<State>, directory: &Path) {
     let result = (|| -> io::Result<()> {
         let mut source = io::stdin().lock();
@@ -163,7 +166,7 @@ pub fn forward_input(mut input: ChildStdin, state: &Mutex<State>, directory: &Pa
                 // absolute deadline even if a model/tool ignores EOF. Before
                 // any accepted grant, the private pipe was the only channel a
                 // grant could ever arrive on: the issuer is gone, so fence now
-                // and let the original subreaper prove quiescence (T26).
+                // and let the original subreaper prove quiescence.
                 if let Ok(mut state) = state.lock()
                     && state.shutdown.is_none()
                     && state.policy.last_lease().is_none()

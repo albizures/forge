@@ -18,9 +18,10 @@ and explicit pin migration in
 belongs to the release handoff, after the retained release verification gate
 (deterministic fault coverage plus a real-provider Implementation → Review cycle)
 has passed on the exact Forge Revision. A happy-path demonstration is not that gate.
-Revision `6a2196a` has passed it, with the
-[accepted limitations](#accepted-limitations-release-of-revision-6a2196a) below; eligibility
-itself is not implemented yet.
+Revision `6a2196a` has passed it ([verification record](release-verification/6a2196a.md)),
+with the [accepted limitations](#accepted-limitations-release-of-revision-6a2196a) below;
+eligibility itself is not implemented yet (see
+[Enabling durable launch](#enabling-durable-launch)).
 
 While launches are withheld or rolled back, every path that would start new durable
 work refuses with `invalid-check-profile`:
@@ -109,7 +110,7 @@ readiness check.
 | Model authentication | Raw OpenAI API key **file**: `FORGE_DURABLE_OPENAI_KEY_FILE` on a manual daemon, or `forgeup daemon start --durable-openai-key-file PATH` for a managed daemon | OAuth, Pi `auth.json`/settings, key values in environment/arguments/YAML, copied Pi configuration |
 | Daemon launch | Manual `forge-server`; Forgeup-managed daemon with the Revision's packaged components (schema 2 bundle) | A managed key file without a schema 2 runner bundle |
 
-**Managed daemon credential (T18 M4).** A Forgeup-managed daemon inherits none of the
+**Managed daemon credential.** A Forgeup-managed daemon inherits none of the
 `FORGE_DURABLE_*` environment values. Its model credential is only the key-file **path** the
 operator passes explicitly: `forgeup daemon start --durable-openai-key-file /abs/path`.
 Forgeup requires an absolute path and a schema 2 runner bundle, never reads the file, and
@@ -358,9 +359,12 @@ What happens next depends on the original host's own proof:
   `runtime_fence: runtime-fence-unproven` (also listed under uncertainty). If an escaped child
   later really exits, the kernel proof follows and the receipt is written then.
 
-With crash proof or a fence receipt, the restarted daemon continues on its own. Its ordinary
-reconciliation scan recovers the same attempt (same admission, conversation and attempt) when
-Forge authority and effect inspection allow it. Alternatively, `assignment-retire` reconciles the
+With crash proof or a fence receipt that matches Forge's last committed lease, the restarted
+daemon continues on its own. Its ordinary reconciliation scan recovers the same attempt (same
+admission, conversation and attempt) when Forge authority and effect inspection allow it. (If
+the daemon committed a renewal and died before delivering it, the host's proof names the
+previous lease and does not match; see
+[accepted limitations](#runtime-behavior).) Alternatively, `assignment-retire` reconciles the
 runtime from the same proof and releases capacity, even though this daemon never owned the host.
 A committed interrupted effect still blocks recovery, and blocks retirement finalization until
 it is resolved (see below). Until proof exists, recovery refuses to compete with the original
@@ -376,9 +380,28 @@ host, and retirement reports a specific code:
   processes by PID alone unless you have identified them. When the descendant ends, the host
   writes its receipt; then repeat the same command.
 
+#### Timing and bounds
+
+| Bound | Value | Defined in |
+| --- | --- | --- |
+| Lease grant / renewal / TERM-to-KILL grace | 30 s / every 10 s / 5 s | `crates/app/src/authorization_lease.rs` |
+| Host `owned` evidence / admission / stop wait | 30 s / 120 s / 10 s | `crates/server/src/durable_authorization/launch.rs` |
+| Live-host observation during retirement | 9 s | `crates/server/src/durable_authorization/retirement.rs` |
+| Effect, recovery and transcript inspectors | 30 s deadline, then one more second to kill and reap; 20 MiB effect-inspector response | `durable_authorization/effects.rs`, `recovery_inspection.rs`, `transcript.rs` |
+| Control frame on the supervisor pipe | 1 MiB | `crates/runner-host/src/control.rs` |
+| Follow-up message | 16 KiB | `crates/app/src/durable_execution/followup.rs` |
+| Approved profile context | 256 KiB | `crates/app/src/durable_profiles.rs` |
+
+The lease values were selected during the initial contract research; no further rationale or
+measurement was recorded. Renewing at a third of the grant means two consecutive renewals can
+be lost before expiry. Deadlines use
+`CLOCK_BOOTTIME` (via `/proc/uptime`, rounded **up** to the next centisecond so admission is
+denied slightly early). No measurement-based tuning has been done. Changing any of these is an
+implementation change that renews release verification.
+
 ### Failed launches
 
-A durable launch that fails after its claim never strands the Assignment (T26). The launch
+A durable launch that fails after its claim never strands the Assignment. The launch
 claim (`provision-intent`) and the reserved runtime identity commit in one transaction:
 either both exist or neither does, so a refused precondition (a stale binding, a closed
 Assignment) leaves nothing behind. A claimed Assignment is never respawned
@@ -499,6 +522,77 @@ tool command to make an Assignment look recoverable. Follow the
 - **Sensitive data.** Runtime stores and transcripts can contain repository content and tool
   output. Do not attach them or capability files to tickets.
 
+## Upstream pi-durable 1.5.2 constraints
+
+The runner depends on pi-durable behaviour that its documentation does not guarantee. These
+facts were established by probing the pinned 1.5.2 sources and shape the runner's design;
+the probes live in `runner/test/upstream/`.
+
+- **Hooks do not deny.** A throwing `beforeRequest` hook is caught and reported by the
+  scheduler, and the model request is still sent. Authorization is therefore enforced by
+  wrapping the actual provider and the actual tool `execute` (`guardProvider`, `guardTool`),
+  never by hooks.
+- **Compaction bypasses generation hooks.** Compaction calls `models.completeSimple`, which
+  skips `beforeRequest`; only the provider-level guard covers it. Automatic compaction stays
+  disabled until it has its own threshold and retry tests.
+- **Submission IDs do not detect changed content.** A `requestId` lookup rejects a different
+  submission *type* but returns the original submission for changed *content*. Forge persists
+  a canonical payload fingerprint per operation ID and rejects conflicts before calling the
+  runtime.
+- **Writable open recovers.** `Harness.open` immediately reconciles interrupted tasks
+  (`openTasks`), and resuming after an interrupted tool returns an "interrupted" result and
+  lets the model continue. All ownership, authority and interrupted-effect checks therefore
+  run *before* the writable open, not just before `resume`.
+- **Tool checkpoints.** `pi.tool` v3 commits a `call` checkpoint (no effect yet) and then an
+  `execute` checkpoint holding the arguments and replay policy *before* entering the tool;
+  the result is committed separately. Upstream replays only when both the recorded and the
+  current policy say safe. Forge treats an unsettled `execute` as an interrupted effect even
+  if it is labelled replay-safe.
+- **No physically read-only open.** The stock SQLite opener always runs migrations, and
+  chord's initializer performs an unconditional `INSERT OR IGNORE`, so a read-only connection
+  fails with SQLite error 8. `Harness` `readOnly: true` only blocks submit/resume; storage is
+  still opened writable. Forge therefore ships a derived read adapter
+  (`runner/prepare-reader.mjs`) that validates schema version 2 exactly, never migrates and
+  opens SQLite read-only. Patching upstream or filtering SQL was rejected.
+- **Durability.** The Node adapter uses WAL with `synchronous=NORMAL`: durable across process
+  crashes, not power loss.
+- **SDK retries.** With caller retry options set, the pinned OpenAI SDK still made exactly one
+  request on a 429; Forge disables provider retries anyway (`maxRetries: 0`).
+
+### Re-validating an upgrade
+
+Changing pi-durable, pi-ai, chord or Node changes the runner component hash and invalidates
+readiness. Before re-verifying the release, re-establish each constraint above with
+`cd runner && npm run test:upstream`, and additionally check: the five provider request paths
+(stream, simple, deferred fetch, image, classifier) all pass through the provider guard; the
+derived reader's upstream base still hashes as `prepare-reader.mjs` expects; the runtime
+schema version is still 2; a SIGKILL after an effect but before its result is still reported
+as interrupted and not re-run; and Node still satisfies pi-durable's engine floor
+(`>=22.19.0` for 1.5.2). `prepare-reader.mjs` refuses an upstream `storage.js` whose sha256
+differs from the inspected 1.5.2 file, so the derived reader must be re-derived and reviewed
+for any upgrade. A changed answer is a design question, not a test to update.
+
+## Enabling durable launch
+
+Readiness for a Revision is not enablement. Today only the test-only
+`LaunchControl::enable_controlled` admits launches; production composition always uses the
+withheld gate. Launch eligibility must be implemented and reviewed as its own change, and only
+for a Revision with a retained verification record. After that, adopt in this order:
+
+1. Install the Revision's matched components and keep every older Revision's bundle
+   registered while it still has retained durable Assignments
+   ([install](#install-and-run-the-matched-runner)).
+2. Supply the model key file to the daemon (manual environment or
+   `forgeup daemon start --durable-openai-key-file`; stop a running managed daemon first).
+3. Preview and register the durable profile, then select a Herdr Task revision again
+   ([prepare a profile](#prepare-a-durable-profile)).
+4. Pin it per Check: new Check Template pins, or `check-profile-migrate` for eligible
+   existing Checks ([migrate](#migrate-existing-checks)).
+5. Roll out on new Assignments only, watching `durable-launch-status`, `assignment-status`,
+   `assignment-transcript` and `assignment-info`. Never redirect live or uncertain work.
+
+Rollback is [`durable-launch-disable`](#rollout-and-rollback).
+
 ## Accepted limitations (release of Revision `6a2196a`)
 
 Forge Revision `6a2196a` (runner component
@@ -542,6 +636,13 @@ the new Revision.
   delivery and admission ID; durable status reads its sources outside a single snapshot.
 - **Key-file path inheritance.** The daemon does not strip `FORGE_DURABLE_OPENAI_KEY_FILE`
   from the environment of Project Setup Hooks, `git` and `gh` (the path only, never the key).
+- **Undelivered renewal at daemon death.** If the daemon commits renewal lease N+1 and dies
+  before delivering it, the host's last accepted lease is N, so its crash proof or fence
+  receipt does not match Forge's last lease and the Assignment stays held. This is
+  fail-closed; investigate, do not delete receipts.
+- **Runner EOF shutdown.** When the daemon dies, the runner sees stdin EOF and exits through an
+  unhandled `Harness is closed` rejection. Exit is safe because the host still proves it before
+  anything is released, but the shutdown is not clean.
 
 ### Effect classification of tool failures
 
@@ -565,6 +666,10 @@ as an ordinary error (see [Interrupted effects](#interrupted-effects)). Accepted
   and excludes `node_modules`; between daemon start and launch, only stat fingerprints of the
   host and Node detect tampering; recovery under retained components does not preflight the
   retained host. The bundle build runs `npm ci` from `PATH` (mitigated by lockfile integrity).
+- **Retained bundles assume protocol 1.** A retained bundle is selected by component hash and
+  verified at `daemon start`, but not launch-preflighted; its host must still speak runner
+  protocol 1. A future protocol change needs an explicit compatibility rule for retained
+  bundles.
 - **Purge edges.** Removal is path-based, not directory-descriptor based (a same-user rename
   mid-purge is outside the threat model); a file created mid-purge makes every later purge
   refuse until repaired by hand; recognized files are not checked for owner-only mode. A crash
@@ -594,9 +699,19 @@ as an ordinary error (see [Interrupted effects](#interrupted-effects)). Accepted
 - Overstated tests: the "dependency gate" rollout test is refused by the Spec gate instead; the
   "concurrent" effect-meter test is not concurrent; one recovery test polls recovery directly,
   so the reconciliation scan alone is not shown to recover; provision runs its preflight
-  subprocesses twice.
-- `committed_model_authority_expires_during_renewal_outage…` failed once under full load; it has
-  passed since and is not claimed fixed. Process-crash tests do not cover power loss.
+  subprocesses twice; the claim-versus-migration race test can fail its claim side on
+  unrelated Herdr preflight, so it does not reliably exercise the race.
+- Intermittent failures seen once each under full default-parallel load, then passing on
+  unchanged reruns, none diagnosed or claimed fixed:
+  `committed_model_authority_expires_during_renewal_outage…`;
+  `store_ownership_lock_rejects_a_second_owner_and_releases_for_a_later_one` (`WouldBlock` on
+  immediate reacquisition); `returned_tool_without_committed_receipt_retains_forge_blocker_across_daemon_restart`;
+  `hold_replacement` tests; the Node test "supervisor death cannot free ownership while its
+  worker survives" (20 s timeout); the Herdr protected-capability test (`ExecutableFileBusy`
+  spawning its copied executable); and inspection-lock reacquisition `WouldBlock` (an
+  explicit-unlock fix addressed one open-file-description mechanism, without proving it caused
+  every occurrence).
+- Process-crash tests do not cover power loss.
 
 ## Release verification requirements
 
@@ -607,4 +722,14 @@ must include a real-provider Implementation → Review cycle with authenticated 
 evidence, and deterministic coverage of duplicate admission, daemon and runner crashes, lease
 expiry, interrupted effects, revoked recovery, missing Outcomes, incompatible components and
 incomplete retirement. Upgrades renew it. An unrun or failed gate is a blocker. Repository gates
-are listed in [development verification](development.md#verification).
+and the real-provider procedure are in [development verification](development.md#verification);
+records live in [`release-verification/`](release-verification/6a2196a.md).
+
+Readiness for a Revision ends, and review plus verification must be renewed on the new exact
+Revision, after any of:
+
+- a change to the implementation, runner sources, lock file, pinned Node or pi-durable, runner
+  protocol, store schema or host (the Revision or runner component hash changes);
+- a platform, model or authentication mechanism outside the supported matrix;
+- an unexplained failing or intermittent release-gate scenario;
+- an operator rollback (`durable-launch-disable`), which is sticky for the store.

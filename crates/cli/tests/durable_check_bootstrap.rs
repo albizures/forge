@@ -66,6 +66,8 @@ fn git(root: &Path, args: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap().trim().into()
 }
 
+// The first `node` on PATH must be a real binary: a Volta shim refuses to run
+// with the cleared environment the host uses (see docs/development.md).
 fn node() -> PathBuf {
     std::env::split_paths(&std::env::var_os("PATH").unwrap())
         .map(|path| path.join("node"))

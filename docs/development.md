@@ -291,6 +291,41 @@ default-parallel gate:
 cargo test --workspace -- --test-threads=1
 ```
 
+Durable-execution tests have environment prerequisites:
+
+- **Real Node 24.18.0 first on `PATH`.** Several tests spawn `node` with a cleared
+  environment. A Volta shim refuses to run that way, so every `durable_check_bootstrap` test
+  fails. Prepend the real Node `bin` directory, for example
+  `PATH="$(dirname "$(volta which node)"):$PATH" cargo test --workspace`.
+- **Owner-only `.forge`.** Durable path validation correctly rejects a group-writable
+  ancestor. Under a `0002` umask, fixtures must create an owner-only `.forge` before anything
+  beneath it.
+
+Runner checks, from `runner/`: `npm run check && npm test`. After changing pi-durable, pi-ai,
+chord or Node, also run `npm run test:upstream`
+([upstream constraints](durable-execution.md#upstream-pi-durable-152-constraints)).
+
+### Real-provider release gate
+
+Durable release verification also requires a real-provider Implementation → independent
+Review cycle on the exact Revision
+([requirements](durable-execution.md#release-verification-requirements)). It is opt-in and
+billed, so run it only with operator authorization:
+
+```sh
+cargo build -p forge-runner-host   # must be built from the same Revision
+FORGE_REAL_PROVIDER_KEY_FILE=/abs/owner-only-dir/openai.key \
+  cargo test -p forge-cli --test durable_real_provider -- --nocapture
+```
+
+Without the variable the test prints a skip line and passes. It needs a clean tree (a dirty tree voids the run),
+an owner-only `0600` key file that is never printed, and network access to OpenAI. It composes
+the production durable path with the shipped runner entry, the real host and the real CLI and
+daemon in scratch Workspaces under `/tmp`; the only test-only substitution is launch
+eligibility (`LaunchControl::enable_controlled`). Each run writes an `evidence-summary.json`.
+Record the Revision, component identities, commands, every run (including failures and their
+cause) and any unrun gates in `docs/release-verification/<revision>.md`.
+
 Recheck these limitations against the current checkout; historical test results
 are not release sign-off. Passing local checks does not establish package/install
 verification, rollback readiness, or production migration/recovery safety. A
