@@ -97,7 +97,10 @@ supported way to create Assessments.
 
 ### Manual attempts and immutable evidence
 
-For a complete two-review handback walkthrough, see [Complete a Task manually](manual-tasks.md).
+Manual Execution Mode is always an explicit choice: normal Check-driven dispatch never falls
+back to Manual. Evidence is caller-attested, not fetched or independently certified by Forge.
+For an end-to-end example, see the
+[two-review handback walkthrough](#walkthrough-two-review-handback) below.
 
 Start the Task explicitly, then inspect `record check work <record>`. Freshness starts
 at generation 1. No Managed Worktree, Agent Profile or provider launch is needed.
@@ -195,6 +198,71 @@ The operator RPC methods are `record_recordWorkState` (`record`),
 `record_recordAttemptBegin` (`record`, `attempt`), `record_recordOutcomeSubmit`
 (`record`, `outcome`), and `record_recordWorkInvalidate` (`record`, `invalidation`),
 using the same strict flattened selection envelope and Task-only ownership rules.
+
+#### Walkthrough: two-review handback
+
+**Prepare.** Select the Workspace and register a Project ([Records](records.md),
+[Projects](projects.md)); Projectless Tasks already default to Manual and receive
+Implementation alone. Before opening a Project Task, replace its whole
+[Check Template](#project-check-templates) using the observed template version, for
+example:
+
+```json
+[
+  {"name":"Implementation","description":"Deliver the described work"},
+  {"name":"Review 1","description":"Review correctness"},
+  {"name":"Review 2","description":"Review acceptance and verify findings"}
+]
+```
+
+Profiles may be omitted for Manual work. Then open the Task, select Manual if it defaults to
+Dispatched, start it and inspect its Check IDs (replace the example IDs with returned
+values):
+
+```sh
+forge task open --body 'Deliver the report' --project personal/api --json
+forge record execution-mode 44 manual --expected dispatched \
+  --actor human --message 'Implement and verify manually' --workspace personal
+forge record start 44 --workspace personal
+forge record check list 44 --workspace personal --json
+forge record check work 44 --workspace personal --json
+```
+
+Mode selection cannot override active or uncertain ownership or retained resources: confirm
+retirement and reconciliation first. Silence and idle state are not retirement.
+
+**Review cycle.** Submit each step with `record check begin` and then `record check outcome`,
+using the `attempt.json` and `outcome.json` shapes above with
+`--input-file <file> --workspace personal --json`. Let A be the initial evidence and B the
+corrected deliverable:
+
+| Step | Bound input / outcome | Result |
+| --- | --- | --- |
+| Implementation | A / pass with A | Review 1 becomes eligible |
+| Review 1 | A / pass with A | Review 2 becomes eligible |
+| Review 2 | A / fail with A, `disposition: "handback"`, blocking Finding | Atomic failed Assessment + Finding; generation advances; every Check becomes pending |
+| Implementation rerun | A / pass with B | New output; old review passes cannot count |
+| Review 1 rerun | B / pass with B | Required even if its earlier review passed |
+| Review 2 rerun | B / pass with B and Finding verification | Owning Check verifies the correction |
+| Human | Explicit `record done` | Completes only if every gate passes |
+
+For an unlinked blocker, explicitly assign a review Check with
+`record finding assign-verification`; assigning ownership alone does not resolve it.
+
+**Complete.** Passing the last Check leaves the Task In Progress. Inspect Findings, then
+request completion:
+
+```sh
+forge record finding list 44 --workspace personal --json
+forge record done 44 --resolution 'Implemented and verified' --workspace personal
+```
+
+Completion rechecks Manual mode, all current ordered Checks, unresolved blockers,
+dependencies, children, open attempts and conservative ownership/resource safety. It neither
+fabricates Assessments nor clears retained safety state. Manual commands never upgrade a
+store implicitly ([Revision State upgrades](state-upgrades.md)). The deterministic scenario
+for this workflow, with repository and artifact evidence, same-evidence invalidation, restart
+and explicit Done, is `crates/store/tests/manual_release.rs`.
 
 ## Record Findings (Task review cycles)
 
