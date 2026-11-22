@@ -2534,6 +2534,7 @@ mod tests {
             ("workspaces.md", include_str!("../../../docs/workspaces.md")),
             ("projects.md", include_str!("../../../docs/projects.md")),
             ("records.md", include_str!("../../../docs/records.md")),
+            ("checks.md", include_str!("../../../docs/checks.md")),
             ("stacks.md", include_str!("../../../docs/stacks.md")),
             (
                 "profiles/publication.md",

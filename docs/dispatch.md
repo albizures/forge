@@ -475,7 +475,7 @@ new revision for that Workspace and Record Type.
 and Record Type; unknown revisions are rejected. Registration selects only the
 revision it creates; there is no ongoing latest-revision tracking. Workspace Task selection supplies authoring/lifecycle defaults and
 configuration readiness, **not live Task attempt routing**. Configure each Project's
-[Check Template](records.md#project-check-templates) with registered Task profile
+[Check Template](checks.md#project-check-templates) with registered Task profile
 revisions **before opening Tasks**. Every attempt, retry and remediation uses its
 Check's copied revision; template or Workspace changes never rebind existing
 Checks. The default profile-less baseline is usable for Manual work, not dispatch.

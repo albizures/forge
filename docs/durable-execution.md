@@ -248,7 +248,7 @@ select a Herdr Task revision again afterwards (revision `3` above stands for you
 revision).
 
 To use durable execution for **new** Tasks, pin the durable revision in the Project's
-[Check Template](records.md#project-check-templates) before opening them. Mixed backends across
+[Check Template](checks.md#project-check-templates) before opening them. Mixed backends across
 a Task's Checks are allowed.
 
 ## Migrate existing Checks

@@ -11,7 +11,7 @@ independently certified by Forge.
    [Records](records.md) and [Projects](projects.md). Projectless Tasks already
    default to Manual and receive Implementation alone.
 2. Before opening a Project Task, replace its whole
-   [Check Template](records.md#project-check-templates), using the observed
+   [Check Template](checks.md#project-check-templates), using the observed
    template version. For this example use:
 
    ```json
@@ -46,7 +46,7 @@ independently certified by Forge.
 ## Run the review cycle
 
 Use the strict `attempt.json` and `outcome.json` shapes in
-[Manual attempts and immutable evidence](records.md#manual-attempts-and-immutable-evidence).
+[Manual attempts and immutable evidence](checks.md#manual-attempts-and-immutable-evidence).
 Submit each with `record check begin` then `record check outcome`, using
 `--input-file <file> --workspace personal --json`. Use unique attempt IDs,
 actual Check IDs, the current generation, attribution and a nonblank explanation.

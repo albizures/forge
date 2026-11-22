@@ -106,6 +106,7 @@ uses installed CLI help; no Forge source checkout or online manual is required.
 | [Workspaces](docs/workspaces.md) | Registration, selection, filesystem boundaries, and configuration ownership |
 | [Projects](docs/projects.md) | Workspace-local identities, nested main checkouts, and canonical roots |
 | [Records](docs/records.md) | Scope, lifecycle, hierarchy, and provenance |
+| [Checks](docs/checks.md) | Checks, Assessments, Findings, Manual attempts, and Project Check Templates |
 | [Task stacks](docs/stacks.md) | Linear branch inheritance and verified non-draft PR publication |
 | [Managed worktrees](docs/worktrees.md) | Manual checkout creation, safety checks, and repair |
 | [Dispatcher](docs/dispatch.md) | Configuration, explicit Record dispatch, launch, and ownership boundaries |
