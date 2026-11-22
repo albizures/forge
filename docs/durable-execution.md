@@ -18,6 +18,9 @@ and explicit pin migration in
 belongs to the release handoff, after the retained release verification gate
 (deterministic fault coverage plus a real-provider Implementation → Review cycle)
 has passed on the exact Forge Revision. A happy-path demonstration is not that gate.
+Revision `6a2196a` has passed it, with the
+[accepted limitations](#accepted-limitations-release-of-revision-6a2196a) below; eligibility
+itself is not implemented yet.
 
 While launches are withheld or rolled back, every path that would start new durable
 work refuses with `invalid-check-profile`:
@@ -495,6 +498,105 @@ tool command to make an Assignment look recoverable. Follow the
 - **Storage durability.** Tests cover process crashes, not power loss.
 - **Sensitive data.** Runtime stores and transcripts can contain repository content and tool
   output. Do not attach them or capability files to tickets.
+
+## Accepted limitations (release of Revision `6a2196a`)
+
+Forge Revision `6a2196a` (runner component
+`5d32b0862d3082f5712d49fb36a55ddc9871d880ea7ba780c065efc1d9b1f70c`) passed the release
+verification gate, including a real-provider Implementation → independent Review cycle. On
+2026-11-21 the operator accepted every remaining non-blocking review item below as a known
+limitation, instead of fixing it before readiness. None was found to weaken a safety property.
+Readiness is not enablement: new durable launches stay withheld until launch eligibility is
+implemented and reviewed as its own change. Fixing any item changes the implementation, so the
+review and the full release verification, including the real-provider cycle, must be renewed on
+the new Revision.
+
+### Runtime behavior
+
+- **No provider retry.** Provider retries are disabled. A transient provider or network error
+  (for example a connection timeout) leaves the Assignment with Missing Outcome and reserved
+  capacity; recover with an operator follow-up or retire it.
+- **Outcome submission depends on the profile.** In real runs `gpt-4.1` sometimes ended with
+  prose, or claimed a submission it never made, when the behavior text was vague. Forge never
+  infers completion. Give the profile one exact submission command, and give reviewers only
+  `read` and `bash`.
+- **Revoked runner window.** Closing an Assignment does not immediately fence the runner's
+  local lease; admissions remain possible until the host is stopped (up to about 10 s in the
+  recovery path). Bounded by the lease.
+- **Unknown admission is never re-sent.** A dropped admission request, or a crash between
+  conversation creation and persisting its root, stays `unknown`; the only path is retirement.
+- **Late follow-up then crash.** A follow-up committed after the original answer settled,
+  followed by a crash, blocks recovery (fail-closed). Retirement remains available.
+- **Retirement during bootstrap.** The stop timeout (10 s) is shorter than the ownership and
+  admission timeouts, so retiring an Assignment that is still bootstrapping may need retries;
+  a stop/abandon race can likewise fail one retirement attempt (a retry succeeds). Stopping for
+  retirement holds the launcher's slot lock for the whole wait, blocking status and provision
+  of other Assignments meanwhile.
+- **Oversize runner output looks like a crash.** A runner stdout line over 64 KiB ends the
+  reader; the live host is then classified crashed. The host lock keeps this safe, but liveness
+  is lost.
+- **Registration selects the profile.** Registering a durable profile also selects it as the
+  Workspace Task profile, which blocks Herdr Grilling until the selection is changed back (see
+  [Prepare a durable profile](#prepare-a-durable-profile)).
+- **Status output.** Human status always prints "delivery not proven" and omits a Receipt's
+  delivery and admission ID; durable status reads its sources outside a single snapshot.
+- **Key-file path inheritance.** The daemon does not strip `FORGE_DURABLE_OPENAI_KEY_FILE`
+  from the environment of Project Setup Hooks, `git` and `gh` (the path only, never the key).
+
+### Effect classification of tool failures
+
+A tool call that fails before it starts any filesystem write or command is returned to the agent
+as an ordinary error (see [Interrupted effects](#interrupted-effects)). Accepted residuals:
+
+- **Stat-then-open race.** The runner checks that a file read targets a regular file before
+  opening it. A background process the agent started earlier can swap the path for a FIFO in
+  between, so an `edit` can consume pipe data without being counted as an effect. A complete fix
+  needs a non-blocking open plus `fstat` inside the execution environment.
+- **Absolute paths assumed.** That check resolves paths itself; every current tool passes
+  absolute paths, but relative, `~` or `file://` paths would be resolved differently.
+- **Blocking check.** The check is a synchronous `stat`; on a hung network filesystem it stalls
+  the whole runner (the lease still fences afterwards).
+- Minor: the error-name check runs outside the fail-closed guard; long error messages are copied
+  in full before truncation.
+
+### Storage, packaging and purge
+
+- **Attestation gaps.** The Launch component hash is computed by the runner sources it attests
+  and excludes `node_modules`; between daemon start and launch, only stat fingerprints of the
+  host and Node detect tampering; recovery under retained components does not preflight the
+  retained host. The bundle build runs `npm ci` from `PATH` (mitigated by lockfile integrity).
+- **Purge edges.** Removal is path-based, not directory-descriptor based (a same-user rename
+  mid-purge is outside the threat model); a file created mid-purge makes every later purge
+  refuse until repaired by hand; recognized files are not checked for owner-only mode. A crash
+  after removal but before the journal entry records `already-absent`, and an exact-retry replay
+  still prints "this operation removed".
+- **Read-only inspection.** A read-only WAL connection may create the `-shm` file before the
+  host lock is taken; transcript cursors assume monotonically committed entry IDs.
+
+### Code quality and documentation
+
+- Owner evidence (device/inode) and adapter error classification are compared as strings; one
+  supervisor error path returns before waiting on the killed child, and `owner.json` is
+  overwritten on restart.
+- `list_record_checks` `profile_revision` now reports the effective pin, a changed field meaning
+  without a compatibility note.
+- An RPC doc comment for `assignmentFollowUp` sits on `assignmentPurgeRuntime`; ADR-0012 carries
+  release-state and Task references that will go stale.
+
+### Test gaps
+
+- Untested paths: the `FORGE_DURABLE_OPENAI_KEY_FILE` environment route; the dispatch refusal
+  after a restart for every uncertainty kind (only effects are tested); the reaped-host driver
+  state (F3) in a production driver; the fence-receipt lookup by owner in an end-to-end fence;
+  the follow-up store query for a single request and the follow-up launch-session case;
+  launch-failure class (a) unit tests (covered by real-process scenarios instead); a
+  non-rendering tool error; non-absolute paths in the effect check.
+- Overstated tests: the "dependency gate" rollout test is refused by the Spec gate instead; the
+  "concurrent" effect-meter test is not concurrent; one recovery test polls recovery directly,
+  so the reconciliation scan alone is not shown to recover; provision runs its preflight
+  subprocesses twice.
+- `committed_model_authority_expires_during_renewal_outage…` failed once under full load; it has
+  passed since and is not claimed fixed. Process-crash tests do not cover power loss.
 
 ## Release verification requirements
 

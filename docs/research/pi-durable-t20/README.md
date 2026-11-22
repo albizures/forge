@@ -79,38 +79,9 @@ Everything else is rejected, fail-closed:
 
 ## Accepted open items (operator decision, 2026-11-21)
 
-The operator accepted every item below as a known limitation of `6a2196a`, instead of fixing it
-before readiness. None is a blocker or major, and none was found to weaken a safety property.
-Each remains a candidate for later work; fixing any of them requires renewed review and
-verification on the new Revision.
-
-**From the review of the effect-free tool-failure fix** ([details](../pi-durable-t18/README.md#still-open-after-the-addendum-non-blocking)):
-- Stat-then-open race: a background process the agent started earlier can swap a link to a FIFO
-  between the check and the read, so an `edit` may consume pipe data uncounted.
-- The target check assumes absolute paths (every pinned tool passes them).
-- A synchronous `statSync` can stall the runner on a hung network filesystem (the lease still
-  fences afterwards).
-- The "concurrently started operation" test is not truly concurrent.
-- Nits: `error.name` evaluated outside the fail-closed try; whole-message copy before truncation;
-  no tests for a non-rendering error or non-absolute paths.
-
-**From the T18 third pass** ([details](../pi-durable-t18/README.md#still-open-non-blocking)):
-- Test gaps: F3 has no production-driver test; T26's class (a) `launch_tests.rs` fault tests
-  (covered by class (b) instead); `fence::receipt_for_owner` unit-tested only; M6 store query
-  and launch-session case.
-- Documented limitation: a follow-up committed after the answer settled, then a crash, blocks
-  recovery (retirement remains available).
-- First-pass minors 1, 2, 3, 5, 6, 8, 10, 11, 12, 14, 15, 16, 17 and second-pass minors 1, 3, 4,
-  5, 6, 7, 8 ([corrections record](../pi-durable-t18/third-pass-corrections.md)).
-- The stop/abandon race that can fail one retirement attempt (a retry succeeds); stale
-  release-state references in ADR-0012.
-
-**From the real-provider runs** ([T19](../pi-durable-t19/README.md#remaining-limitations-and-open-items)):
-- No provider retry: a transient provider or network error leaves the Assignment with Missing
-  Outcome until an operator follow-up or retirement.
-- Outcome submission depends on the profile's behavior text.
-- The once-observed intermittent `committed_model_authority_expires_during_renewal_outage…`
-  failure is recorded, not claimed fixed.
+The operator accepted every open non-blocking review item as a known limitation. The permanent
+list is in the operator guide:
+[accepted limitations](../../durable-execution.md#accepted-limitations-release-of-revision-6a2196a).
 
 ## Conditions that revoke readiness, or require renewed verification
 
