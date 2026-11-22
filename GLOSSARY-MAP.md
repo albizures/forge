@@ -2,8 +2,8 @@
 
 ## Contexts
 
-- [Skills](./skills/CONTEXT.md) — defines reusable agent workflows
-- [Forge Runtime](./crates/CONTEXT.md) — provides Forge's cohesive product capabilities
+- [Skills](./skills/GLOSSARY.md) — defines reusable agent workflows
+- [Forge Runtime](./crates/GLOSSARY.md) — provides Forge's cohesive product capabilities
 
 ## Relationships
 

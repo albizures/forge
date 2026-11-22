@@ -133,5 +133,5 @@ fn implementation_continuations_documented_outcomes_validate_and_reject_invalid_
 #[test]
 fn implementation_continuations_glossary_matches_approved_block() {
     let block = "**Continuation**:\nA deliberate handoff of unfinished Implementation work for another Agent to continue without passing the bound Check.\n_Avoid_: interruption, implementation failure, Task completion";
-    assert!(include_str!("../../CONTEXT.md").contains(block));
+    assert!(include_str!("../../GLOSSARY.md").contains(block));
 }
