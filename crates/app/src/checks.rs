@@ -87,7 +87,8 @@ pub struct RecordCheck {
     pub name: String,
     pub description: String,
     pub position: u64,
-    /// Pinned Task Agent Profile revision, never resolved from Workspace selection.
+    /// Effective Agent Profile revision: the latest explicit profile migration's
+    /// revision, else the original pin. Never resolved from Workspace selection.
     pub profile_revision: Option<u32>,
     pub version: u64,
     pub latest_assessment: Option<Assessment>,
