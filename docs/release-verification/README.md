@@ -8,7 +8,8 @@ durable Assignments is covered in [Durable Task execution](../durable-execution.
 ## Requirements
 
 Before default durable dispatch can be enabled for a Revision, the release owner needs a
-retained verification report for **that exact Revision** that names the runner protocol and
+retained verification report on **an exact Revision**: that Revision itself, or an earlier one
+whose readiness has not ended under the rules below. The report names the runner protocol and
 dependency versions, the commands run, expected versus observed results and any unrun gates. It
 must include a real-provider Implementation → Review cycle with authenticated Outcomes and exact
 evidence, and deterministic coverage of duplicate admission, daemon and runner crashes, lease
@@ -21,7 +22,10 @@ Readiness for a Revision ends, and review plus verification must be renewed on t
 Revision, after any of:
 
 - a change to the implementation, runner sources, lock file, pinned Node or pi-durable, runner
-  protocol, store schema or host (the Revision or runner component hash changes);
+  protocol, store schema or host. Any byte under `runner/src`, comments included, changes the
+  runner component hash and ends readiness. Documentation and comment-only changes outside
+  `runner/src` do not end readiness by themselves: the record still names an exact Revision,
+  and such changes are covered at the next renewal;
 - a platform, model or authentication mechanism outside the supported matrix;
 - an unexplained failing or intermittent release-gate scenario;
 - an operator rollback (`durable-launch-disable`), which is sticky for the store.

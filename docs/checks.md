@@ -95,6 +95,16 @@ and an updated Check. Invalidation input contains `expected_version`, `assessmen
 `record_recordCheckAssess` method remains a rejecting diagnostic boundary, not a
 supported way to create Assessments.
 
+**Compatibility note: `profile_revision`.** In `record check list` and
+`record_recordCheckList` output, a Check's `profile_revision` reports its **effective**
+revision: the latest explicit
+[profile migration](durable-execution.md#migrate-existing-checks)'s revision, falling back
+to the original pin. It used to report the original pin only. The original pin stays
+recorded ([ADR-0013](../crates/docs/adr/0013-explicit-backend-and-check-profile-migration.md))
+and appears as the first migration's `prior_revision` in `record check-profile-migrations`.
+The [Check Template](#project-check-templates) `profile_revision` below is still a pin and
+does not change.
+
 ### Manual attempts and immutable evidence
 
 Manual Execution Mode is always an explicit choice: normal Check-driven dispatch never falls

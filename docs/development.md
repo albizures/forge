@@ -198,6 +198,13 @@ inputs are optional, and Forgeup passes them only to a daemon built from the
 bundle's own commit. Runner wire protocol 1 and the storage schemas are
 unchanged.
 
+**Retained bundles and protocol bumps.** A retained Launch is served only by a bundle
+whose runner component hash matches it (above), and every such bundle speaks runner
+protocol 1. Today Forgeup refuses non-1 manifest and host protocols at `daemon start`, so Assignments that
+need such a bundle refuse with `durable-components-unavailable`. Any protocol bump must
+define a compatibility rule for retained bundles (a supported set, or a per-bundle
+protocol), or it strands their Assignments. No bump is planned.
+
 None of this enables durable dispatch. A managed daemon receives a model
 credential only from `forgeup daemon start --durable-openai-key-file PATH`,
 passed as the daemon's `--durable-openai-key-file`.

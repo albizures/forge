@@ -156,8 +156,11 @@ pub fn run(
             return Err(error.into());
         }
     };
-    // Existing diagnostics are never converted into permission or removed by a
-    // restart. Read-only observation can still run without receiving any grant.
+    // Existing diagnostic markers and receipts are never converted into permission
+    // or removed by a restart. `owner.json` is different: it is descriptive only,
+    // replaced by each host start (`persist_owner` above), and never used to
+    // authorize anything. Read-only observation can still run without receiving
+    // any grant.
     let mut retained_blocker = false;
     for marker in [
         "watchdog.json",
