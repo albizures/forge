@@ -72,7 +72,7 @@ Forge stays authoritative. Dependency gates, Execution Mode, Spec authorization,
 Check order, freshness, evidence, Findings, Continuations and Stack inheritance all apply
 unchanged. Publication rules apply too, but a durable agent cannot meet all of them yet: its
 `bash` has no hosting credentials or Git identity, so it cannot push or open a pull request. A
-durable Publication agent can verify an unchanged result with
+durable Agent on a Publication Check can verify an unchanged result with
 `forge assignment stack --unchanged`
 ([Task stack reads and publication](assignment-context.md#task-stack-reads-and-publication)),
 because the daemon verifies it. Do not pin a durable profile to a Publication Check whose Task
@@ -398,23 +398,25 @@ changes use Forge's existing invalidation and replacement rules.
   recovery-claim, retirement or provisioning uncertainty. A message never resumes unsafe work.
 - **Missing Outcome:** a follow-up is allowed as explicit intervention. It does not create an
   Outcome, retire the diagnostic, release capacity or grant a lease.
-- **Limitation:** after any daemon, runner or host restart while the Assignment is in Missing
-  Outcome, recovery refuses on the Missing Outcome hold, so [retirement](#retirement) is the
-  only exit. Retirement releases capacity and keeps the Managed Worktree, which
-  `recover-retained-work` can
-  [salvage](assignment-recovery.md#authorize-retained-implementation-work-for-salvage) into a
-  fresh attempt. What is lost is continuing that conversation, plus one interrupted-retry
-  budget. Nothing is replayed.
+- **Limitation:** after any daemon, runner or host restart during Missing Outcome, a
+  follow-up no longer helps and retirement is the only exit; see
+  [Missing Outcome](#missing-outcome).
 
 ### Missing Outcome
 
 A conversation that ends without an accepted Outcome, including after a rejected Outcome,
 gets a retained `missing-outcome` diagnostic. It holds capacity and a Dispatch Hold. Forge does
 not synthesize an Assessment, Continuation, Task completion or successor. Intervene explicitly:
-inspect the transcript, send a follow-up, or retire the Assignment. After any daemon, runner
-or host restart during Missing Outcome, only retirement remains; see the
-[follow-up limitation](#follow-ups). Clearing the hold with `resume` does not create an
-Outcome.
+inspect the transcript, send a follow-up, or retire the Assignment. Clearing the hold with
+`resume` does not create an Outcome.
+
+After any daemon, runner or host restart while the Assignment is in Missing Outcome, recovery
+refuses on the Missing Outcome hold, so [retirement](#retirement) is the only exit; a
+[follow-up](#follow-ups) no longer helps. Retirement releases capacity and keeps the Managed
+Worktree, which `recover-retained-work` can
+[salvage](assignment-recovery.md#authorize-retained-implementation-work-for-salvage) into a
+fresh attempt. What is lost is continuing that conversation, plus one interrupted-retry budget.
+Nothing is replayed.
 
 ### Authorization leases and outages
 
