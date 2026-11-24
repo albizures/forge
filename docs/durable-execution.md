@@ -69,9 +69,15 @@ and runtime identity for its whole life: changing selections, templates, migrati
 launch gate never moves it to another backend. There is no Herdr fallback.
 
 Forge stays authoritative. Dependency gates, Execution Mode, Spec authorization, capacity,
-Check order, freshness, evidence, Findings, Continuations, Stack inheritance and publication
-rules all apply unchanged. The agent must run `forge assignment bootstrap` before working and
-submit its result through the existing authenticated Outcome commands
+Check order, freshness, evidence, Findings, Continuations and Stack inheritance all apply
+unchanged. Publication rules apply too, but a durable agent cannot meet all of them yet: its
+`bash` has no hosting credentials or Git identity, so it cannot push or open a pull request. A
+durable Agent on a Publication Check can verify an unchanged result with
+`forge assignment stack --unchanged`
+([Task stack reads and publication](assignment-context.md#task-stack-reads-and-publication)),
+because the daemon verifies it. Do not pin a durable profile to a Publication Check whose Task
+may change output. The agent must run `forge assignment bootstrap` before working and submit
+its result through the existing authenticated Outcome commands
 ([Assignment context](assignment-context.md)). A runtime that goes idle, says it is done or
 writes a plausible final answer never creates an Assessment, completes a Task or launches the
 next Check. pi-durable's own internal tasks are **execution tasks**: runner machinery, not Forge
@@ -247,6 +253,19 @@ Grilling in that Workspace. Durable Checks are reached through pins, not this se
 select a Herdr Task revision again afterwards (revision `3` above stands for your Herdr
 revision).
 
+Write the profile's behaviour text so the agent can finish:
+
+- Give the agent one exact Outcome submission command: Forge's authenticated Outcome command
+  for the Check, from the [Assignment context](assignment-context.md). Do not leave the
+  submission to the agent's judgement, and do not let it end in prose or claim a submission it
+  never ran.
+- Give a Review profile only `read` and `bash` (`tools: [read, bash]`), so the reviewer cannot
+  act as an implementer.
+
+Forge never infers completion from prose or an idle runtime. A conversation that ends without
+an accepted Outcome, which is what a vague profile tends to produce, ends in
+[Missing Outcome](#missing-outcome).
+
 To use durable execution for **new** Tasks, pin the durable revision in the Project's
 [Check Template](checks.md#project-check-templates) before opening them. Mixed backends across
 a Task's Checks are allowed.
@@ -379,10 +398,9 @@ changes use Forge's existing invalidation and replacement rules.
   recovery-claim, retirement or provisioning uncertainty. A message never resumes unsafe work.
 - **Missing Outcome:** a follow-up is allowed as explicit intervention. It does not create an
   Outcome, retire the diagnostic, release capacity or grant a lease.
-- **Limitation:** recovery resumes only an unsettled original submission. If a follow-up was
-  committed after the original answer settled and that session then crashes, recovery refuses
-  (`runner-recovery-intervention-required`) and the follow-up stays `unknown`. Retire the
-  Assignment; nothing is replayed.
+- **Limitation:** after any daemon, runner or host restart during Missing Outcome, a
+  follow-up no longer helps and retirement is the only exit; see
+  [Missing Outcome](#missing-outcome).
 
 ### Missing Outcome
 
@@ -391,6 +409,14 @@ gets a retained `missing-outcome` diagnostic. It holds capacity and a Dispatch H
 not synthesize an Assessment, Continuation, Task completion or successor. Intervene explicitly:
 inspect the transcript, send a follow-up, or retire the Assignment. Clearing the hold with
 `resume` does not create an Outcome.
+
+After any daemon, runner or host restart while the Assignment is in Missing Outcome, recovery
+refuses on the Missing Outcome hold, so [retirement](#retirement) is the only exit; a
+[follow-up](#follow-ups) no longer helps. Retirement releases capacity and keeps the Managed
+Worktree, which `recover-retained-work` can
+[salvage](assignment-recovery.md#authorize-retained-implementation-work-for-salvage) into a
+fresh attempt. What is lost is continuing that conversation, plus one interrupted-retry budget.
+Nothing is replayed.
 
 ### Authorization leases and outages
 
@@ -430,11 +456,9 @@ files without taking the lock.
 
 With crash proof or a fence receipt that matches Forge's last committed lease, the restarted
 daemon continues on its own. Its ordinary reconciliation scan recovers the same attempt (same
-admission, conversation and attempt) when Forge authority and effect inspection allow it. (If
-the daemon committed a renewal and died before delivering it, the host's proof names the
-previous lease and does not match; see
-[accepted limitations](release-verification/6a2196a.md#runtime-behavior).) Alternatively, `assignment-retire` reconciles the
-runtime from the same proof and releases capacity, even though this daemon never owned the host.
+admission, conversation and attempt) when Forge authority and effect inspection allow it.
+Alternatively, `assignment-retire` reconciles the runtime from the same proof and releases
+capacity, even though this daemon never owned the host.
 A committed interrupted effect still blocks recovery, and blocks retirement finalization until
 it is resolved (see below). Until proof exists, recovery refuses to compete with the original
 host, and retirement reports a specific code:
@@ -445,9 +469,11 @@ host, and retirement reports a specific code:
   its recorded owner and Launch. Investigate the receipts; do not delete them.
 - `durable-runtime-fence-unproven`: a fence exists without valid proof. Investigate the runtime
   directory's `watchdog-*` diagnostics. Look for an escaped descendant of the old host, using
-  `ps` and the host PID in `owner.json`. Do not delete markers or receipts, and do not kill
-  processes by PID alone unless you have identified them. When the descendant ends, the host
-  writes its receipt; then repeat the same command.
+  `ps` and the host PID in `owner.json`. `owner.json` names only the latest host: each
+  supervisor start overwrites it, so after a restart it may name a newer host, not the
+  original. Proof is looked up by owner, never through this file. Do not delete markers or
+  receipts, and do not kill processes by PID alone unless you have identified them. When the
+  descendant ends, the host writes its receipt; then repeat the same command.
 
 #### Timing and bounds
 
@@ -684,9 +710,9 @@ forge dispatcher assignment-purge-runtime <assignment-id> --workspace personal -
 - **Deletion:** the directory comes only from the canonical mapping of the immutable store
   identity, never a caller path. The host takes the same exclusive ownership lock the
   supervisor and worker hold, so a live or still-held owner refuses
-  (`runtime-purge-owner-active`). Every entry must be a recognized, owner-only, single-link
-  regular file: the runtime database and its `-wal`/`-shm`/`-journal`, `check-runtime.json`,
-  and the files runner-host's own lifecycle writes (`owner.json`, an interrupted
+  (`runtime-purge-owner-active`). Every entry must be a recognized, single-link regular file
+  owned by the host user: the runtime database and its `-wal`/`-shm`/`-journal`,
+  `check-runtime.json`, and the files runner-host's own lifecycle writes (`owner.json`, an interrupted
   `owner.<pid>.pending`, `watchdog.json`, `watchdog-<pid>-<start>-fence.json`,
   `watchdog-<pid>-<start>-<term|kill>-<sent|unverified>.json`,
   `watchdog-<pid>-<start>-quiescence-unproven.json`, `watchdog-receipt-<sequence>.json`,

@@ -75,7 +75,9 @@ its backend-specific state in Durable Task execution before the steps below:
   after a proven crash or fence is automatic
   ([same-attempt recovery](durable-execution.md#same-attempt-recovery)).
 - `durable-launch-*` codes: [failed launches](durable-execution.md#failed-launches).
-- Missing Outcome: [follow-ups](durable-execution.md#follow-ups) or retirement.
+- Missing Outcome: [follow-ups](durable-execution.md#follow-ups) or retirement. After any
+  daemon, runner or host restart during Missing Outcome, retirement is the only exit
+  ([Missing Outcome](durable-execution.md#missing-outcome)).
 - After retirement: [runtime history deletion](durable-execution.md#runtime-history-retention-and-deletion).
 
 ## Revoke and clean up known resources
