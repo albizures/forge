@@ -76,6 +76,43 @@ pub(super) fn provision(
     Ok(())
 }
 
+/// Planner guard for Task opening. The caller holds the Task-opening write
+/// transaction, so the checked template is exactly the one `provision` copies.
+pub(super) fn require_stack_ready(
+    connection: &Connection,
+    project: Option<&str>,
+    expected: u64,
+) -> Result<(), RegistrationError> {
+    // Specs carry exactly one Project today; stay closed if that ever changes.
+    let project = project.ok_or_else(|| {
+        RegistrationError::new(
+            "check-template-unavailable",
+            "a Projectless Spec has no Project Check Template to guard",
+        )
+    })?;
+    let template = current(connection, project)?;
+    if template.version != expected {
+        return Err(RegistrationError::new(
+            "stale-version",
+            format!(
+                "Check Template version is {}, expected {expected}; rerun preflight before opening Tasks",
+                template.version
+            ),
+        ));
+    }
+    let blockers = stack_preflight(connection, &template.criteria)?.blockers;
+    if !blockers.is_empty() {
+        return Err(RegistrationError::new(
+            "check-template-blocked",
+            format!(
+                "Check Template version {expected} is not Stack-ready: {}",
+                blockers.join("; ")
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn stack_preflight(
     connection: &Connection,
     criteria: &[CheckCriterion],

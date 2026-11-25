@@ -1201,19 +1201,21 @@ pub async fn request_open_task(
 ///
 /// # Errors
 ///
-/// Returns an endpoint or daemon validation error.
+/// Returns an endpoint or daemon validation error, including a failed
+/// `expected_template_version` guard.
 pub async fn request_open_task_under_spec(
     url: impl Into<RecordEndpoint>,
     body: &str,
     spec_id: u64,
     generated_by_ids: Vec<u64>,
+    expected_template_version: Option<u64>,
 ) -> Result<RecordResponse, String> {
     record_client(url)?
         .open_task_under_spec(OpenTaskUnderSpecRequest {
             body: body.into(),
             spec_id,
-
             generated_by_ids,
+            expected_template_version,
         })
         .await
         .map_err(record_error("open Task under Spec"))
@@ -2012,7 +2014,7 @@ mod tests {
             .unwrap();
         assert_eq!(standalone.record_type, "task");
         assert!(standalone.project_scope.project_slugs.is_empty());
-        let child = request_open_task_under_spec(&url, "Child Task", spec.id, vec![])
+        let child = request_open_task_under_spec(&url, "Child Task", spec.id, vec![], None)
             .await
             .unwrap();
         assert_eq!(child.record_type, "task");

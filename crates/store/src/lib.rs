@@ -1019,11 +1019,12 @@ impl RecordRepository for SqliteProjectRepository {
         Ok(opened)
     }
 
-    fn open_task_under_spec(
+    fn open_task_under_spec_at_template(
         &self,
         body: &str,
         spec_id: u64,
         generated_by_ids: Vec<u64>,
+        expected_template_version: Option<u64>,
     ) -> Result<Record, RegistrationError> {
         let mut connection = self
             .connection
@@ -1041,6 +1042,13 @@ impl RecordRepository for SqliteProjectRepository {
                 "invalid-parent-type",
                 "a Task may be opened under a Spec only",
             ));
+        }
+        if let Some(expected) = expected_template_version {
+            check_templates::require_stack_ready(
+                &transaction,
+                spec.project_slugs.first().map(String::as_str),
+                expected,
+            )?;
         }
         transaction
             .execute(

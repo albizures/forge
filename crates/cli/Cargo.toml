@@ -13,6 +13,8 @@ forge-rpc = { path = "../rpc" }
 clap = { version = "4.5.53", features = ["derive", "env"] }
 jsonrpsee = { version = "0.26.0", features = ["http-client"] }
 hyper = { version = "1", features = ["client", "http1"] }
+# Already in the workspace via forge-server; formats history timestamps as RFC 3339.
+time = { version = "0.3", features = ["formatting"] }
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["fs", "process"] }
 

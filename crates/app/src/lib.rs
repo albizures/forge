@@ -1008,6 +1008,24 @@ pub trait RecordRepository: ProjectRepository {
         body: &str,
         spec_id: u64,
         generated_by_ids: Vec<u64>,
+    ) -> Result<Record, RegistrationError> {
+        self.open_task_under_spec_at_template(body, spec_id, generated_by_ids, None)
+    }
+    /// Opens a Task beneath a Spec; with `expected_template_version`, the same
+    /// write transaction that snapshots Checks requires that Project Check
+    /// Template version and an empty Stack preflight blocker list.
+    ///
+    /// # Errors
+    ///
+    /// Returns `stale-version`, `check-template-blocked` or
+    /// `check-template-unavailable` for a failed guard, a user-facing error when
+    /// the parent is not a Spec, or a storage error.
+    fn open_task_under_spec_at_template(
+        &self,
+        body: &str,
+        spec_id: u64,
+        generated_by_ids: Vec<u64>,
+        expected_template_version: Option<u64>,
     ) -> Result<Record, RegistrationError>;
     /// Opens a Task beneath a Wayfinder, selecting one Project from its scope.
     ///
@@ -3717,12 +3735,32 @@ impl Application {
         spec_id: u64,
         generated_by_ids: Vec<u64>,
     ) -> Result<Record, RegistrationError> {
+        self.open_task_under_spec_at_template(body, spec_id, generated_by_ids, None)
+    }
+
+    /// Opens a Task under `spec_id`, optionally guarded by the Project Check
+    /// Template version a planner observed in a successful preflight.
+    ///
+    /// # Errors
+    ///
+    /// Returns a user-facing error for a blank body, invalid parent, failed
+    /// template guard, or storage failure.
+    pub fn open_task_under_spec_at_template(
+        &self,
+        body: &str,
+        spec_id: u64,
+        generated_by_ids: Vec<u64>,
+        expected_template_version: Option<u64>,
+    ) -> Result<Record, RegistrationError> {
         Self::require_body(body)?;
         let spec = self.records.show_record(spec_id)?;
         let base_commit = self.task_base_commit_for_scope(&spec.project_slugs)?;
-        let task = self
-            .records
-            .open_task_under_spec(body, spec_id, generated_by_ids)?;
+        let task = self.records.open_task_under_spec_at_template(
+            body,
+            spec_id,
+            generated_by_ids,
+            expected_template_version,
+        )?;
         if let Some(base_commit) = base_commit {
             self.records.set_task_base_commit(task.id, &base_commit)?;
         }
@@ -4214,12 +4252,12 @@ mod tests {
             Ok(Some("test-base".into()))
         }
 
-        fn open_task_under_spec(
+        fn open_task_under_spec_at_template(
             &self,
             body: &str,
             spec_id: u64,
-
             _generated_by_ids: Vec<u64>,
+            _expected_template_version: Option<u64>,
         ) -> Result<Record, RegistrationError> {
             let spec = self.show_record(spec_id)?;
             if spec.record_type != RecordType::Spec {

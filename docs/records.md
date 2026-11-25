@@ -708,11 +708,11 @@ individually added, edited, retired or rebound; Assessment version changes do no
 change their configuration.
 
 ```sh
-forge project check-template show personal/api --limit 50 --json
+forge project check-template show personal/api --json
 forge project check-template preflight personal/api --json
 forge project check-template set personal/api --file criteria.json \
   --actor operator --message 'Require review and tests' --expected-version 0 --json
-forge project check-template show personal/api --after 1 --limit 50 --json
+forge project check-template show personal/api --history --after 1 --limit 50 --json
 ```
 
 The file is an ordered JSON array of objects, for example:
@@ -746,14 +746,21 @@ selection is never a replacement for a missing Check pin.
 For sequential cumulative planning, run read-only `check-template preflight` before
 opening any Task. It requires Implementation first, Publication last, and a pinned
 registered Task profile with a launch policy for every future Dispatched Check.
-`show` adds optional `stack_preflight.blockers`; an empty list means compatible.
-Older servers omit the field; the preflight command fails closed on absence.
-This additive response leaves old responses decodable; strict clients that reject
-unknown fields need a matching revision. No schema or Management Protocol change
-is involved. The observation shares the template read transaction, does not mutate
-configuration or create Tasks, and does not certify hosting/provider readiness.
-Concurrent replacement can still change future pins: record/recheck the version
-and inspect actual created Checks before completing a plan.
+`preflight --json` prints only `{ok, version, checks: [{name, profile_revision}],
+blockers}` and exits 1 when `ok` is false; text output is a one-line verdict, any
+blockers and the ordered Check chain. `show` also reports
+`stack_preflight.blockers`; an empty list means compatible. Older servers omit the
+field; the preflight command fails closed on absence. The observation shares the
+template read transaction, does not mutate configuration or create Tasks, and does
+not certify hosting/provider readiness.
+
+Pass the observed version to every `task under-spec --expected-template-version
+<version>`. In the same write transaction that snapshots the Checks, the server
+rejects the Task with `stale-version` when the template was replaced, or
+`check-template-blocked` when it has Stack preflight blockers; no Task is created
+on rejection. Without the option, Task opening is unguarded (Projects without a
+configured template still receive Implementation alone). Older servers reject the
+option as an unknown field rather than ignoring it.
 
 Read the observed `version` before replacement. An unconfigured template reads as
 version **0**, the profile-less Implementation baseline and empty history; its first replacement requires
@@ -763,9 +770,11 @@ blank attribution/explanations return `invalid-check-template`. Failed replaceme
 leave the current template and history unchanged. Supply nonblank `--actor` and
 exactly one nonblank `--message` or `--message-file`; `--message-file -` reads stdin.
 
-Show returns current `version`, ordered `criteria`, a bounded ascending `history`
-page and `next_cursor`. Each immutable history entry has an opaque numeric `id`,
-`version`, the replacement `criteria`, `actor`, `message` and `created_at_millis`.
+Show returns current `version`, ordered `criteria` and `stack_preflight`; with
+`--history` it adds a bounded ascending `history` page and `next_cursor` (text
+output too). `--after` and `--limit` require `--history`. Each immutable history
+entry has an opaque numeric `id`, `version`, the replacement `criteria`, `actor`,
+`message` and `created_at_millis` (RFC 3339 UTC in text output).
 `--limit` accepts 1–100 (default 50); pass `next_cursor` to `--after` to continue.
 Current criteria/version may be newer than the history page. Template configuration
 has its own attributed history and never invents a Task Record Update.
@@ -775,7 +784,9 @@ normal Workspace selection. Typed operator RPC methods are
 `record_projectCheckTemplateShow` (`project`, `after`, `limit`) and
 `record_projectCheckTemplateSet` (`project`, `replacement`), using the flattened
 Workspace/cwd envelope. Replacement contains `expected_version`, ordered `criteria`,
-`actor` and `message`. Show returns `{version, criteria, history, next_cursor}`;
+`actor` and `message`. The RPC show method always returns
+`{version, criteria, history, next_cursor, stack_preflight}`; the CLI drops
+`history` and `next_cursor` unless `--history` is passed;
 set returns `{version, criteria}`. Project ownership is checked in the repository
 and selectors are qualified within the selected Workspace before application work.
 Assignment capabilities have no template mutation operation. Stores predating the

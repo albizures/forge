@@ -1,23 +1,40 @@
 use clap::{Args, Subcommand};
-use forge_rpc::{CheckTemplateSetRequest, CheckTemplateShowRequest, TemplateReplacement};
+use forge_rpc::{
+    CheckCriterion, CheckTemplateSetRequest, CheckTemplateShowRequest, TemplatePage,
+    TemplateReplacement,
+};
+use serde::Serialize;
 use std::{fmt::Write as _, io::Read};
 
 #[derive(Debug, Subcommand)]
 pub enum CheckTemplateCommand {
-    /// Show current criteria and a bounded ascending replacement history page.
+    /// Show current criteria and Stack readiness; add --history for replacements.
     Show(ShowArgs),
-    /// Read-only preflight for future Dispatched cumulative Stack Tasks; fails on blockers.
-    Preflight(ShowArgs),
+    /// Read-only preflight for future Dispatched cumulative Stack Tasks; exits 1 on blockers.
+    Preflight(PreflightArgs),
     /// Replace future Task criteria, starting with the mandatory Implementation entry.
     Set(SetArgs),
 }
 #[derive(Debug, Args)]
 pub struct ShowArgs {
     pub project: String,
+    /// Include the bounded ascending replacement history page.
     #[arg(long)]
+    history: bool,
+    /// History cursor: the `next_cursor` of the previous page.
+    #[arg(long, requires = "history")]
     after: Option<u64>,
-    #[arg(long, default_value_t = 50)]
+    /// History page size, 1–100.
+    #[arg(long, default_value_t = 50, requires = "history")]
     limit: u32,
+    #[arg(long)]
+    pub server_url: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Debug, Args)]
+pub struct PreflightArgs {
+    pub project: String,
     #[arg(long)]
     pub server_url: Option<String>,
     #[arg(long)]
@@ -43,6 +60,27 @@ pub struct SetArgs {
     json: bool,
 }
 
+/// Machine-readable planning verdict: only what a planner records or reports.
+#[derive(Debug, Serialize)]
+struct PreflightReport<'a> {
+    ok: bool,
+    version: u64,
+    checks: Vec<CheckSummary<'a>>,
+    blockers: &'a [String],
+}
+#[derive(Debug, Serialize)]
+struct CheckSummary<'a> {
+    name: &'a str,
+    profile_revision: Option<u32>,
+}
+
+/// Rendered command result; `ok == false` prints the report and exits 1.
+struct Rendered {
+    ok: bool,
+    value: serde_json::Value,
+    text: String,
+}
+
 fn read_message(message: Option<String>, file: Option<String>) -> Result<String, String> {
     match (message, file) {
         (Some(message), None) => Ok(message),
@@ -58,60 +96,66 @@ fn read_message(message: Option<String>, file: Option<String>) -> Result<String,
     }
 }
 
+fn to_value(value: &impl Serialize) -> Result<serde_json::Value, String> {
+    serde_json::to_value(value).map_err(|error| error.to_string())
+}
+
 pub async fn run(command: CheckTemplateCommand, workspace: Option<String>) -> i32 {
     let (url, json) = match &command {
-        CheckTemplateCommand::Show(a) | CheckTemplateCommand::Preflight(a) => {
-            (a.server_url.clone(), a.json)
-        }
+        CheckTemplateCommand::Show(a) => (a.server_url.clone(), a.json),
+        CheckTemplateCommand::Preflight(a) => (a.server_url.clone(), a.json),
         CheckTemplateCommand::Set(a) => (a.server_url.clone(), a.json),
     };
-    let result: Result<(serde_json::Value, String), String> = async {
+    let result: Result<Rendered, String> = async {
         let url = super::resolve_managed_endpoint(url.as_deref()).await?;
         let endpoint = (url.as_str(), workspace.as_deref());
-        let preflight = matches!(&command, CheckTemplateCommand::Preflight(_));
         match command {
-            CheckTemplateCommand::Show(a) | CheckTemplateCommand::Preflight(a) => {
+            CheckTemplateCommand::Show(a) => {
+                // The server always returns a history page; without --history
+                // request the smallest one and omit it from every output.
+                let (after, limit) = if a.history {
+                    (a.after, a.limit)
+                } else {
+                    (None, 1)
+                };
                 let page = forge_cli::request_project_check_template_show(
                     endpoint,
                     CheckTemplateShowRequest {
                         project: a.project,
-                        after: a.after,
-                        limit: a.limit,
+                        after,
+                        limit,
                     },
                 )
                 .await?;
-                if preflight {
-                    require_stack_preflight(&page)?;
+                let mut value = to_value(&page)?;
+                if !a.history
+                    && let Some(object) = value.as_object_mut()
+                {
+                    object.remove("history");
+                    object.remove("next_cursor");
                 }
-                let mut text = render_template(page.version, &page.criteria);
-                if let Some(preflight) = &page.stack_preflight {
-                    let _ = write!(text, "\nStack preflight blockers: {:?}", preflight.blockers);
-                }
-                for change in &page.history {
-                    let _ = write!(
-                        text,
-                        "\nChange {} version {} by {} at {}\n{}",
-                        change.id,
-                        change.version,
-                        change.actor,
-                        change.created_at_millis,
-                        change.message
-                    );
-                    for criterion in &change.criteria {
-                        let _ = write!(
-                            text,
-                            "\n  {}: {} (profile revision: {:?})",
-                            criterion.name, criterion.description, criterion.profile_revision
-                        );
-                    }
-                }
-                if let Some(cursor) = page.next_cursor {
-                    let _ = write!(text, "\nNext cursor: {cursor}");
-                }
-                Ok((
-                    serde_json::to_value(page).expect("serializable template page"),
-                    text,
-                ))
+                Ok(Rendered {
+                    ok: true,
+                    value,
+                    text: render_show(&page, a.history),
+                })
+            }
+            CheckTemplateCommand::Preflight(a) => {
+                let page = forge_cli::request_project_check_template_show(
+                    endpoint,
+                    CheckTemplateShowRequest {
+                        project: a.project,
+                        after: None,
+                        limit: 1,
+                    },
+                )
+                .await?;
+                let report = preflight_report(&page)?;
+                Ok(Rendered {
+                    ok: report.ok,
+                    value: to_value(&report)?,
+                    text: render_preflight(&report),
+                })
             }
             CheckTemplateCommand::Set(a) => {
                 let criteria = serde_json::from_str(
@@ -132,23 +176,23 @@ pub async fn run(command: CheckTemplateCommand, workspace: Option<String>) -> i3
                     },
                 )
                 .await?;
-                let text = render_template(template.version, &template.criteria);
-                Ok((
-                    serde_json::to_value(template).expect("serializable template"),
-                    text,
-                ))
+                Ok(Rendered {
+                    ok: true,
+                    value: to_value(&template)?,
+                    text: render_template(template.version, &template.criteria),
+                })
             }
         }
     }
     .await;
     match result {
-        Ok((value, text)) => {
+        Ok(rendered) => {
             if json {
-                println!("{value}");
+                println!("{}", rendered.value);
             } else {
-                println!("{text}");
+                println!("{}", rendered.text);
             }
-            0
+            i32::from(!rendered.ok)
         }
         Err(error) => {
             eprintln!("forge project check-template: {error}");
@@ -156,55 +200,204 @@ pub async fn run(command: CheckTemplateCommand, workspace: Option<String>) -> i3
         }
     }
 }
-fn require_stack_preflight(page: &forge_rpc::TemplatePage) -> Result<(), String> {
+
+/// Older servers omit `stack_preflight`; absence is never a passing preflight.
+fn preflight_report(page: &TemplatePage) -> Result<PreflightReport<'_>, String> {
     let preflight = page.stack_preflight.as_ref().ok_or_else(|| {
         "server does not expose Stack template preflight; update Forge before planning".to_string()
     })?;
-    if !preflight.blockers.is_empty() {
-        return Err(format!(
-            "Stack template preflight failed: {}",
-            preflight.blockers.join("; ")
-        ));
-    }
-    Ok(())
+    Ok(PreflightReport {
+        ok: preflight.blockers.is_empty(),
+        version: page.version,
+        checks: page
+            .criteria
+            .iter()
+            .map(|criterion| CheckSummary {
+                name: &criterion.name,
+                profile_revision: criterion.profile_revision,
+            })
+            .collect(),
+        blockers: &preflight.blockers,
+    })
 }
 
-fn render_template(version: u64, criteria: &[forge_rpc::CheckCriterion]) -> String {
-    let mut text = format!("Check Template version {version} (Implementation is always required)");
-    for criterion in criteria {
+fn profile(revision: Option<u32>) -> String {
+    revision.map_or_else(
+        || "no profile".into(),
+        |revision| format!("profile r{revision}"),
+    )
+}
+
+fn write_blockers(text: &mut String, blockers: &[String]) {
+    for blocker in blockers {
+        let _ = write!(text, "\n  - {blocker}");
+    }
+}
+
+fn render_preflight(report: &PreflightReport<'_>) -> String {
+    let verdict = if report.ok { "passed" } else { "failed" };
+    let mut text = format!(
+        "Stack preflight {verdict}: Check Template version {}",
+        report.version
+    );
+    write_blockers(&mut text, report.blockers);
+    let chain = report
+        .checks
+        .iter()
+        .map(|check| format!("{} ({})", check.name, profile(check.profile_revision)))
+        .collect::<Vec<_>>()
+        .join(" → ");
+    let _ = write!(text, "\nChecks: {chain}");
+    text
+}
+
+fn write_criteria(
+    text: &mut String,
+    criteria: &[CheckCriterion],
+    indent: &str,
+    descriptions: bool,
+) {
+    for (index, criterion) in criteria.iter().enumerate() {
         let _ = write!(
             text,
-            "\n{}: {} (profile revision: {:?})",
-            criterion.name, criterion.description, criterion.profile_revision
+            "\n{indent}{}. {} [{}]",
+            index + 1,
+            criterion.name,
+            profile(criterion.profile_revision)
         );
+        if descriptions {
+            let _ = write!(text, "\n{indent}   {}", criterion.description);
+        }
+    }
+}
+
+fn render_template(version: u64, criteria: &[CheckCriterion]) -> String {
+    let mut text = format!("Check Template version {version}");
+    write_criteria(&mut text, criteria, "  ", true);
+    text
+}
+
+fn render_show(page: &TemplatePage, history: bool) -> String {
+    let mut text = render_template(page.version, &page.criteria);
+    match &page.stack_preflight {
+        Some(preflight) if preflight.blockers.is_empty() => {
+            text.push_str("\nStack preflight: ready");
+        }
+        Some(preflight) => {
+            text.push_str("\nStack preflight: blocked");
+            write_blockers(&mut text, &preflight.blockers);
+        }
+        None => text.push_str("\nStack preflight: not reported by this server"),
+    }
+    if !history {
+        return text;
+    }
+    text.push_str("\n\nHistory:");
+    if page.history.is_empty() {
+        text.push_str(" none");
+    }
+    for change in &page.history {
+        let _ = write!(
+            text,
+            "\n  version {} (change {}) by {} at {}",
+            change.version,
+            change.id,
+            change.actor,
+            format_millis(change.created_at_millis)
+        );
+        for line in change.message.lines() {
+            let _ = write!(text, "\n    {line}");
+        }
+        write_criteria(&mut text, &change.criteria, "    ", false);
+    }
+    if let Some(cursor) = page.next_cursor {
+        let _ = write!(text, "\nMore history: --after {cursor}");
     }
     text
+}
+
+fn format_millis(millis: u64) -> String {
+    time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(millis) * 1_000_000)
+        .ok()
+        .and_then(|date| {
+            date.format(&time::format_description::well_known::Rfc3339)
+                .ok()
+        })
+        // Out-of-range values are shown truthfully rather than replaced.
+        .unwrap_or_else(|| format!("{millis} ms since Unix epoch"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn page(criteria: &serde_json::Value, blockers: Option<Vec<&str>>) -> TemplatePage {
+        let mut page = serde_json::json!({
+            "version": 5, "criteria": criteria, "history": [], "next_cursor": null
+        });
+        if let Some(blockers) = blockers {
+            page["stack_preflight"] = serde_json::json!({ "blockers": blockers });
+        }
+        serde_json::from_value(page).unwrap()
+    }
+
     #[test]
     fn preflight_rejects_older_servers_and_reports_blockers() {
-        let mut page: forge_rpc::TemplatePage = serde_json::from_value(serde_json::json!({
-            "version": 0, "criteria": [], "history": [], "next_cursor": null
-        }))
+        let criteria = serde_json::json!([
+            {"name": "Implementation", "description": "Deliver", "profile_revision": 24},
+            {"name": "Review", "description": "Review", "profile_revision": null}
+        ]);
+        let old = page(&criteria, None);
+        assert!(preflight_report(&old).unwrap_err().contains("update Forge"));
+
+        let blocked = page(&criteria, Some(vec!["final Check must be Publication"]));
+        let report = preflight_report(&blocked).unwrap();
+        assert!(!report.ok);
+        let text = render_preflight(&report);
+        assert!(text.starts_with("Stack preflight failed: Check Template version 5"));
+        assert!(text.contains("  - final Check must be Publication"));
+        assert!(text.contains("Implementation (profile r24) → Review (no profile)"));
+        assert_eq!(
+            to_value(&report).unwrap(),
+            serde_json::json!({
+                "ok": false, "version": 5,
+                "checks": [
+                    {"name": "Implementation", "profile_revision": 24},
+                    {"name": "Review", "profile_revision": null}
+                ],
+                "blockers": ["final Check must be Publication"]
+            })
+        );
+
+        let ready = page(&criteria, Some(vec![]));
+        let report = preflight_report(&ready).unwrap();
+        assert!(report.ok);
+        assert!(render_preflight(&report).starts_with("Stack preflight passed"));
+    }
+
+    #[test]
+    fn show_hides_history_unless_requested_and_formats_values() {
+        let mut page = page(
+            &serde_json::json!([{"name": "Implementation", "description": "Deliver", "profile_revision": 2}]),
+            Some(vec![]),
+        );
+        page.history = serde_json::from_value(serde_json::json!([{
+            "id": 7, "version": 1, "actor": "operator", "message": "Pin\nprofiles",
+            "created_at_millis": 1000,
+            "criteria": [{"name": "Implementation", "description": "Old", "profile_revision": null}]
+        }]))
         .unwrap();
-        assert!(
-            require_stack_preflight(&page)
-                .unwrap_err()
-                .contains("update Forge")
+        page.next_cursor = Some(7);
+        let brief = render_show(&page, false);
+        assert_eq!(
+            brief,
+            "Check Template version 5\n  1. Implementation [profile r2]\n     Deliver\nStack preflight: ready"
         );
-        page.stack_preflight = Some(forge_app::check_templates::StackTemplatePreflight {
-            blockers: vec!["final Check must be Publication".into()],
-        });
-        assert!(
-            require_stack_preflight(&page)
-                .unwrap_err()
-                .contains("Publication")
-        );
-        page.stack_preflight.as_mut().unwrap().blockers.clear();
-        assert!(require_stack_preflight(&page).is_ok());
+        let full = render_show(&page, true);
+        assert!(full.contains("version 1 (change 7) by operator at 1970-01-01T00:00:01Z"));
+        assert!(full.contains("\n    Pin\n    profiles\n    1. Implementation [no profile]"));
+        assert!(!full.contains("Old"));
+        assert!(full.ends_with("More history: --after 7"));
+        assert!(!full.contains("Some("));
     }
 }

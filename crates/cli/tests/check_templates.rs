@@ -143,10 +143,35 @@ async fn project_templates_round_trip_through_cli_and_typed_rpc_with_workspace_c
     let stale = run(&[base.as_slice(), &["--message", "stale"]].concat());
     assert!(!stale.status.success());
     assert!(String::from_utf8_lossy(&stale.stderr).contains("stale-version"));
-    let text = run(&["project", "check-template", "show", "api"]);
+    let brief = run(&["project", "check-template", "show", "api"]);
+    assert!(brief.status.success());
+    let brief = String::from_utf8(brief.stdout).unwrap();
+    assert!(brief.contains("version 1") && brief.contains("Review"));
+    assert!(!brief.contains("operator") && !brief.contains("History"));
+    let text = run(&["project", "check-template", "show", "api", "--history"]);
     assert!(text.status.success());
     let text = String::from_utf8(text.stdout).unwrap();
     assert!(text.contains("version 1") && text.contains("operator") && text.contains("Review"));
+    let brief = json(run(&["project", "check-template", "show", "api", "--json"]));
+    assert!(brief.get("history").is_none() && brief.get("next_cursor").is_none());
+    assert!(brief["stack_preflight"]["blockers"].is_array());
+    let paging = run(&["project", "check-template", "show", "api", "--limit", "1"]);
+    assert!(!paging.status.success());
+    assert!(String::from_utf8_lossy(&paging.stderr).contains("--history"));
+    let blocked = run(&["project", "check-template", "preflight", "api", "--json"]);
+    assert_eq!(blocked.status.code(), Some(1));
+    let blocked: serde_json::Value = serde_json::from_slice(&blocked.stdout).unwrap();
+    assert_eq!(blocked["ok"], false);
+    assert_eq!(blocked["version"], 1);
+    assert_eq!(blocked["checks"][2]["name"], "Tests");
+    assert!(blocked.get("history").is_none());
+    assert!(
+        blocked["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|b| b.as_str().unwrap().contains("Publication"))
+    );
     let old_checks = json(run(&[
         "record",
         "check",
@@ -319,11 +344,52 @@ async fn project_templates_round_trip_through_cli_and_typed_rpc_with_workspace_c
         .success()
     );
     assert_eq!(
-        json(run(&["project", "check-template", "show", "api", "--json"]))["history"]
+        json(run(&[
+            "project",
+            "check-template",
+            "show",
+            "api",
+            "--history",
+            "--json"
+        ]))["history"]
             .as_array()
             .unwrap()
             .len(),
         3
+    );
+    let spec = json(run(&[
+        "spec",
+        "open",
+        "--project",
+        "api",
+        "--body",
+        "Guarded plan",
+        "--json",
+    ]));
+    let spec_id = spec["id"].to_string();
+    let guarded = |version: &str| {
+        run(&[
+            "task",
+            "under-spec",
+            "--spec",
+            &spec_id,
+            "--body",
+            "Guarded Task",
+            "--expected-template-version",
+            version,
+        ])
+    };
+    let stale = guarded("2");
+    assert!(!stale.status.success());
+    assert!(String::from_utf8_lossy(&stale.stderr).contains("stale-version"));
+    let blocked = guarded("3");
+    assert!(!blocked.status.success());
+    assert!(String::from_utf8_lossy(&blocked.stderr).contains("check-template-blocked"));
+    assert!(
+        json(run(&["record", "show", &spec_id, "--json"]))["relationships"]
+            .as_array()
+            .unwrap()
+            .is_empty()
     );
     server.abort();
 }
