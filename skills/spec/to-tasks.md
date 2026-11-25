@@ -1,10 +1,12 @@
 # To Tasks
 
-Create a published Open Spec's full Task plan once, as one linear cumulative chain. The request authorizes Task creation and validated Spec start; no further approval or release command is needed. Dispatch and implementation are separate workflows.
+Break a published spec into its full Task plan once: tracer-bullet vertical slices ordered as one linear cumulative Builds-On chain. The request authorizes Task creation and validated Spec start; no further approval or release command is needed. Dispatch and implementation are separate workflows.
+
+Examples use illustrative IDs and selectors; substitute inspected values and preserve Workspace selection.
 
 ## 1. Require an unplanned Open Spec
 
-Resolve the existing Spec from the request or unambiguous conversation context. Use the Forge skill to select CLI, endpoint and Workspace, then inspect the Spec, Comments, Update Log and relationships:
+Resolve the existing Spec from the request or unambiguous conversation context. Use the Forge skill to select CLI, endpoint and Workspace, then inspect the Spec, Comments, Update Log and existing Tasks:
 
 ```sh
 forge record show 42 --json
@@ -13,62 +15,74 @@ forge record updates 42
 forge record list --project personal/alpha --type task --json
 ```
 
-Substitute inspected values in every example and preserve Workspace selection. Confirm publication, Open status and the intended single Project. Inspect direct child parentage, including Done Tasks. If the target or scope is ambiguous, ask before writing.
+Confirm publication, Open status and the Spec's single Project. Inspect direct child parentage, including Done Tasks. If the target or scope is ambiguous, ask before writing.
 
 **If any child Task exists, refuse creation.** Report existing children. Additions, replanning and partial-plan recovery are outside this one-shot mode. Return material Spec contradictions or missing decisions to grilling rather than redefining the outcome.
 
-## 2. Resolve and preflight before the first Task write
+## 2. Resolve the Stack destination and preflight
 
 Resolve the GitHub repository, push remote and starting branch from explicit context and repository observations. A feature or release branch is valid; the default branch is not an implicit choice. Resolve ambiguity with the human before creating Tasks.
 
-Inspect the Project Check Template and run the read-only preflight:
+Run the read-only Check Template preflight for the Spec's Project:
 
 ```sh
-forge project check-template show personal/alpha --json
 forge project check-template preflight personal/alpha --json
 ```
 
-Require a successful preflight from a supporting server. It checks Implementation first, Publication last and registered Task profile launch policies for every Check of future default Dispatched Tasks. Record the observed template version. This is configuration compatibility, not proof of credentials, hosting availability, provider readiness or a reservation against concurrent template replacement. Missing/invalid configuration stops before Task creation and requests operator action. This planning mode never rewrites templates, registers/selects profiles or repins existing Checks. Recheck the version before writing; inspect each created Task's actual immutable Checks and stop on drift.
+It exits 1 when `ok` is false or the server is too old to report blockers. Then report the `blockers` and stop: the operator must fix the template or profiles. This mode never edits templates, registers or selects profiles, or repins Checks. On success, record `version`; every Task creation in step 4 passes it so each Task opens with exactly the Checks you checked. Preflight covers configuration only, not credentials, hosting or provider readiness.
 
-## 3. Draft the full cumulative plan
+## 3. Explore and draft the plan
 
-Use the Spec and conversation as authority; inspect the codebase, domain glossary and relevant ADRs as needed.
+Use the Spec and conversation as authority. If you have not already, explore the codebase to understand its current state; use the domain glossary vocabulary and respect ADRs in the area you're touching. Look for prefactoring that makes the work easier: "Make the change easy, then make the easy change."
 
-- Cover the entire outcome with narrow end-to-end vertical slices. Each Task fits one fresh context window and is independently verifiable on its predecessor's result.
-- Put necessary prefactoring first; sequence expand–contract work so intermediate results stay green.
-- Order **all** Tasks into one Builds-On chain and its derived cumulative Stack by default, including research, review, verification and other Tasks consuming repository code without editing it. Unchanged output still runs every required Check, including Publication.
+Break the work into **tracer-bullet** Tasks:
+
+<vertical-slice-rules>
+
+- Each slice cuts a narrow but COMPLETE path through every layer (schema, API, UI, tests): vertical, NOT a horizontal slice of one layer
+- A completed slice is demoable or verifiable on its predecessor's result
+- Each slice is sized to fit in a single fresh context window
+- Any prefactoring comes first
+
+</vertical-slice-rules>
+
+**Wide refactors are the exception to vertical slicing.** A **wide refactor** is one mechanical change (rename a column, retype a shared symbol) whose **blast radius** fans across the whole codebase, so no vertical slice can land green. Sequence it as **expand–contract** within the chain: expand (add the new form beside the old so nothing breaks), then one Task per migration batch sized by blast radius (per package, per directory), then contract (delete the old form once no caller remains). Each Task inherits the previous one's commits, so the cumulative Stack is the integration branch; if a batch cannot stay green alone, say so in its body and promise green only at a final integrate-and-verify Task.
+
+Plan shape:
+
+- Order **all** Tasks into one Builds-On chain, including research, review, verification and other Tasks that consume repository code without editing it. Unchanged output still runs every required Check, including Publication.
 - Describe deliverables in ordinary Task bodies; there are no Task-kind flags.
 - Assign proposed glossary/ADR changes to their owning slices.
 - For code changes, include an integration/local Verification Task after implementation and review unless the user explicitly opts out. Add required release/handoff work after verification.
 
-Each body provides a descriptive outcome, context and settled decisions, scope boundaries, routing hints, numbered Spec criteria, observable acceptance checks, verification/evidence and its immediate predecessor. Require the predecessor's exact verified final commit as input, not the then-current Project Root. Repository inheritance transfers commits only: external files, untracked artifacts, services, credentials and other state need explicit handoff contracts.
+Each body provides a descriptive outcome, context and settled decisions, scope boundaries, routing hints, numbered Spec criteria, observable acceptance checks, verification/evidence and its immediate predecessor. Require the predecessor's exact verified final commit as input, not the then-current Project Root. Repository inheritance transfers commits only: external files, untracked artifacts, services, credentials and other state need explicit handoff contracts. Avoid file paths and code snippets that go stale, unless a prototype snippet encodes a decision more precisely than prose (state machine, schema, type shape).
 
-Declare immediate code inheritance with `builds-on`; it also requires predecessor completion. Declare independent completion-only prerequisites with `waits-for`:
+`builds-on` declares immediate code inheritance and predecessor completion. Use `waits-for` only for a completion-only prerequisite whose repository result the dependent does not consume, and document why in the body:
 
 ```sh
 forge record relate 57 --kind waits-for --to 49
 ```
 
-Use that only when the dependent does not consume the prerequisite's repository result; document why. Prose or missing Stack configuration is not an exception. Forks or multiple code prerequisites need an explicit integration decision before writing, not a guessed predecessor. Finish drafting only when every Spec criterion and domain change is covered and the default plan has one root and one immediate predecessor per successor.
+Prose or missing Stack configuration is not a reason for `waits-for`. Forks or multiple code prerequisites need an explicit integration decision before writing, not a guessed predecessor. Finish drafting only when every Spec criterion and domain change is covered and the plan has one root and one immediate predecessor per successor.
 
 ## 4. Publish in order
 
-Immediately before writing, recheck authoritative child membership and the template version. Refuse if another planner has created children or configuration changed. Create each Task under the Open Spec with its Markdown body on stdin:
+Immediately before each write, recheck the Spec's child membership; refuse if another planner has created children. Create each Task under the Spec with its Markdown body on stdin and the preflight version:
 
 ```sh
-forge task under-spec --spec 42 --body -
+forge task under-spec --spec 42 --expected-template-version 5 --body - --json
 ```
 
-Use actual returned IDs, even when non-consecutive. Configure the first Task as root and declare every later Task as building on the immediately preceding Task, including unchanged code consumers. For example, if the root returned 44 and the next Task returned 49:
+The server rejects the Task, creating nothing, with `stale-version` if the template was replaced since preflight or `check-template-blocked` if it is no longer Stack-ready. Treat either as a configuration change: stop and report.
+
+Use actual returned IDs, even when non-consecutive; never assume `N-1`. Configure the first Task as Stack root and declare every later Task as building on the immediately preceding one, including unchanged code consumers. Create and configure each Task before creating the next. For example, if the root returned 44 and the next Task returned 49:
 
 ```sh
 forge task stack root 44 --repository acme/widgets --remote origin --base feature/payments
 forge record relate 49 --kind builds-on --to 44
 ```
 
-Builds-On atomically declares completion ordering and immediate repository inheritance; relationship readback must match the complete plan. Record IDs are opaque, never `N-1`. Create and configure each Task before creating the next.
-
-Task creation, prerequisite declarations and root configuration are separate operations. On any failed write, unexpected child, incompatible immutable Check, validation error or concurrency conflict, stop. Report exact created IDs, Checks, relationships, Stack state and incomplete operations. Leave the incomplete plan Open; do not dispatch, blindly retry creation, delete children or repair through this mode.
+Creation, relationships and root configuration are separate operations. On any failed write, unexpected child, validation error or concurrency conflict, stop. Report exact created IDs, Checks, relationships, Stack state and incomplete operations. Leave the incomplete plan Open; do not dispatch, blindly retry creation, delete children or repair through this mode.
 
 ## 5. Read back, start and report
 
@@ -79,11 +93,11 @@ forge task stack show 44 --json
 forge task stack show 49 --json
 ```
 
-Require the resolved root destination and immediate Stack Predecessor for every successor, including unchanged Tasks; verify independent Waits-For prerequisites separately. Once the complete plan matches, invoke validated start:
+Require the resolved root destination and immediate Stack Predecessor for every successor, including unchanged Tasks; verify Waits-For prerequisites separately. Once the complete plan matches, invoke validated start:
 
 ```sh
 forge record start 42
 forge record show 42 --json
 ```
 
-Start transactionally validates the persisted plan before Open → In Progress. On failure, report the diagnostic and read back the actual state; validation failure leaves Open. Do not describe a concurrent actor's changes as your success. On successful start, report ordered IDs/outcomes, canonical prerequisites, derived Stack, template observation and parent status. Stop: the planner does not dispatch agents, prepare worktrees, publish PRs or manage production rollout.
+Start transactionally validates the persisted plan, including every Task's Checks, before Open → In Progress. On failure, report the diagnostic and read back the actual state; validation failure leaves the Spec Open. Do not describe a concurrent actor's changes as your success. On successful start, report ordered IDs and outcomes, prerequisites, the derived Stack, the template version used and the Spec status. Stop: the planner does not dispatch agents, prepare worktrees, publish PRs or manage production rollout.
