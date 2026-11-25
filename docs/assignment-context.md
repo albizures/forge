@@ -177,10 +177,15 @@ registered revision and does not alter existing immutable Check pins.
 ## Agent CLI examples
 
 In a delivered Assignment environment, first run `forge assignment bootstrap`.
-Its default output is agent-facing Markdown: trusted assignment identity and
-constraints, bound Check attempt metadata, worker behavior, and clearly labelled
-Record content. The pinned Task body is shown once; if the live body differs,
-both are labelled explicitly. Bootstrap and context inspection are preparation,
+Its default output is agent-facing Markdown limited to facts the agent acts on:
+execution directory and Projects, trusted constraints for the bound Record type,
+the outcome identity and input evidence of the bound Check attempt (plus any
+accepted Continuation checkpoint or authorized recovery), worker behavior, and
+clearly labelled Record content. Diagnostic identity (Assignment ID, profile
+revision, model, attempt number, freshness) is available only through `--json`.
+The pinned Task body is shown once; if the live body differs, both are labelled
+explicitly. Related Records are listed by title; read one with
+`forge assignment record <id> --json` only when needed. Bootstrap and context inspection are preparation,
 not completion of the bound work. Stop if bootstrap fails.
 
 Use `--json` for the unchanged versioned machine-readable response, including the

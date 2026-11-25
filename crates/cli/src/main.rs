@@ -45,6 +45,24 @@ struct Cli {
     #[command(subcommand)]
     command: Command,
 }
+/// Disposition reference kept out of worker profiles so rarely valid choices are
+/// not presented as ordinary ways to finish.
+const OUTCOME_DISPOSITIONS_HELP: &str = "\
+Dispositions (`verdict` / `disposition`):
+  pass / complete        The bound Check is met.
+  fail / complete        Implementation attempted but unfinished or failing; report
+                         actual clean output evidence, unfinished work and test results.
+  fail / handback        Review found substantive issues; add blocking Findings.
+  fail / human-input     A concrete missing prerequisite or human decision blocks the
+                         work; name it. Empty findings and verifications.
+  fail / interrupted     Only when the harness or operator actually stopped this
+                         execution before a substantive result. Repeat the bound input
+                         evidence; empty findings and verifications. Unfinished work,
+                         task size or complexity is never an interruption.
+  fail / {\"continuation\": {stopping_reason, completed_work, verification, remaining_work}}
+                         Implementation only: a deliberate clean checkpoint handoff
+                         when a concrete execution constraint prevents finishing now.";
+
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Manage Forge filesystem Workspace registrations and selection.
@@ -328,6 +346,7 @@ enum AssignmentCommand {
         json: bool,
     },
     /// Submit this Task Check attempt's outcome from a JSON file (actor is authenticated).
+    #[command(after_long_help = OUTCOME_DISPOSITIONS_HELP)]
     Outcome {
         #[arg(long)]
         file: std::path::PathBuf,
@@ -2458,6 +2477,30 @@ mod tests {
                 "{name}: missing/unfinished examples"
             );
         }
+    }
+
+    #[test]
+    fn outcome_long_help_restricts_interruption_to_actual_stops() {
+        use clap::CommandFactory;
+        let mut command = Cli::command();
+        let help = command
+            .find_subcommand_mut("assignment")
+            .and_then(|c| c.find_subcommand_mut("outcome"))
+            .unwrap()
+            .render_long_help()
+            .to_string();
+        for disposition in [
+            "pass / complete",
+            "fail / complete",
+            "fail / handback",
+            "fail / human-input",
+            "fail / interrupted",
+            "continuation",
+        ] {
+            assert!(help.contains(disposition), "missing {disposition}");
+        }
+        assert!(help.contains("Only when the harness or operator actually stopped"));
+        assert!(help.contains("never an interruption"));
     }
 
     #[test]

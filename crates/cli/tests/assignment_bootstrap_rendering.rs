@@ -35,26 +35,51 @@ fn response(live_body: &str) -> AssignmentBootstrapResponse {
 }
 
 #[test]
-fn default_bootstrap_deduplicates_equal_bodies_without_losing_attempt_identity() {
+fn default_bootstrap_deduplicates_equal_bodies_and_keeps_outcome_identity() {
     let text = render_assignment_bootstrap(&response("PINNED TASK BODY")).unwrap();
     assert_eq!(text.matches("PINNED TASK BODY").count(), 1);
     for expected in [
-        "\"id\": \"attempt\"",
-        "\"generation\": 2",
-        "\"check_id\": 117",
+        "# Assignment: task #7",
+        "do not run it again",
+        "Check: #117",
+        "Outcome `attempt_id`: attempt",
+        "Outcome `generation`: 2",
         "artifact://input",
         &"a".repeat(64),
-        "\"continuation\": null",
-        "\"recovery\": null",
-        "Freshness: freshness-token",
-        "Profile revision: 17",
         "Execution directory: /worktree",
         "Project: workspace/project — /project",
         "#36 (spec, in_progress): Parent",
+        "forge assignment record <id> --json",
     ] {
         assert!(text.contains(expected), "missing {expected}");
     }
-    assert!(!text.contains("\"body\":"));
+    // Diagnostic identity stays in the --json contract, not the agent-facing text.
+    for omitted in [
+        "freshness-token",
+        "Profile revision",
+        "provider/model",
+        "Attempt number",
+        "\"body\":",
+        "Continuation checkpoint",
+        "retained-work recovery",
+    ] {
+        assert!(!text.contains(omitted), "unexpected {omitted}");
+    }
+}
+
+#[test]
+fn default_bootstrap_renders_continuation_handoff_when_present() {
+    let mut value = response("PINNED TASK BODY");
+    value.context.bound.check_attempt.as_mut().unwrap().continuation = Some(
+        serde_json::from_value(serde_json::json!({
+            "attempt_id": "previous", "evidence": {"kind":"artifact", "uri":"artifact://checkpoint", "sha256":"b".repeat(64)},
+            "handoff": {"stopping_reason":"STOP", "completed_work":"DONE", "verification":"VERIFIED", "remaining_work":"REMAINING"}
+        }))
+        .unwrap(),
+    );
+    let text = render_assignment_bootstrap(&value).unwrap();
+    assert!(text.contains("### Accepted Continuation checkpoint"));
+    assert!(text.contains("REMAINING"));
 }
 
 #[test]

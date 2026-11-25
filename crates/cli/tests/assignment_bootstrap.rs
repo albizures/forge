@@ -82,9 +82,8 @@ async fn bootstrap_returns_context_and_behavior_only_from_unified_route() {
             assert_eq!(value["behavior"], "implementation instructions");
         } else {
             let text = String::from_utf8_lossy(&output.stdout);
-            assert!(text.starts_with("# Assignment bootstrap succeeded"));
+            assert!(text.starts_with(&format!("# Assignment: {record_type} #7")));
             assert!(text.contains("Execution directory: /workspace"));
-            assert!(text.contains(&format!("Record: #7 ({record_type})")));
             let constraints = text.find("Only work on the assigned Record.").unwrap();
             let behavior = text.find("## Worker behavior").unwrap();
             let record = text
