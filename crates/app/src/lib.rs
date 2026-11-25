@@ -13,6 +13,7 @@ pub mod checks;
 pub mod completion;
 pub mod findings;
 pub mod outcomes;
+pub mod planning_context;
 pub mod prerequisites;
 mod profile_catalog;
 pub mod spec_plans;

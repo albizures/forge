@@ -4,6 +4,7 @@ mod assignment_findings;
 pub use assignment_findings::{AssignmentFindingAction, assignment_finding};
 mod assignment_checks;
 pub use assignment_checks::{AssignmentCheckAction, assignment_check};
+pub mod planning_capture;
 mod record_selection;
 pub use record_selection::RecordEndpoint;
 use record_selection::record_client;
