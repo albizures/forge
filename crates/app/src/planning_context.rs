@@ -38,9 +38,45 @@ impl ProjectPlanningContext {
     }
 }
 
+/// Validate that observations can only describe Projects in the Record's scope.
+///
+/// # Errors
+/// Rejects invalid observations, duplicate Projects and out-of-scope Projects.
+pub fn validate_scope(
+    observations: &[ProjectPlanningContext],
+    project_slugs: &[String],
+) -> Result<(), crate::RegistrationError> {
+    let mut seen = std::collections::HashSet::new();
+    for observation in observations {
+        observation.validate()?;
+        if !project_slugs.contains(&observation.project) || !seen.insert(&observation.project) {
+            return Err(crate::RegistrationError::new(
+                "invalid-planning-context-scope",
+                "planning context Projects must be unique and belong to the Record scope",
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn observations_must_be_unique_and_in_scope() {
+        let observation = ProjectPlanningContext {
+            project: "workspace/project".into(),
+            context: PlanningContext::Unavailable {
+                reason: "no checkout".into(),
+            },
+        };
+        let scope = vec!["workspace/project".into()];
+        assert!(validate_scope(std::slice::from_ref(&observation), &scope).is_ok());
+        assert!(validate_scope(&[observation.clone(), observation.clone()], &scope).is_err());
+        assert!(validate_scope(&[observation], &["workspace/other".into()]).is_err());
+        assert!(validate_scope(&[], &scope).is_ok());
+    }
 
     #[test]
     fn validates_project_and_observation_fields() {
@@ -82,7 +118,7 @@ mod tests {
             ProjectPlanningContext {
                 context: PlanningContext::Available {
                     repository: "/checkout".into(),
-                    branch: "".into()
+                    branch: String::new()
                 },
                 ..available.clone()
             }

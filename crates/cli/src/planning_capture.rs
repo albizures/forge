@@ -68,15 +68,34 @@ fn capture(project_root: &Path, cwd: &Path) -> Result<(String, String), String> 
     if initiating_repository != project_repository {
         return Err("initiating checkout does not belong to this Project".into());
     }
+    // A Project may occupy only a subdirectory of a repository. Sharing Git's
+    // common directory alone would incorrectly accept its Workspace root or a
+    // sibling Project. Map the Project's relative path into the initiating
+    // worktree instead of substituting the configured checkout.
+    let checkout_root = |path: &Path| -> Result<PathBuf, String> {
+        PathBuf::from(git(path, &["rev-parse", "--show-toplevel"])?)
+            .canonicalize()
+            .map_err(|error| format!("cannot resolve checkout root: {error}"))
+    };
+    let project_root = project_root
+        .canonicalize()
+        .map_err(|error| format!("cannot resolve Project Root: {error}"))?;
+    let relative = project_root
+        .strip_prefix(checkout_root(&project_root)?)
+        .map_err(|_| "Project Root is outside its checkout".to_owned())?;
+    let initiating_root = checkout_root(cwd)?;
+    let initiating_directory = cwd
+        .canonicalize()
+        .map_err(|error| format!("cannot resolve initiating directory: {error}"))?;
+    if !initiating_directory.starts_with(initiating_root.join(relative)) {
+        return Err("initiating directory is outside this Project's checkout".into());
+    }
     let branch = git(cwd, &["symbolic-ref", "--quiet", "--short", "HEAD"])
         .map_err(|error| format!("branch unavailable (possibly detached HEAD): {error}"))?;
     if branch.is_empty() {
         return Err("branch unavailable: empty branch name".into());
     }
     let repository = project_root
-        .canonicalize()
-        .map_err(|error| format!("cannot resolve Project Root: {error}"))?;
-    let repository = repository
         .to_str()
         .ok_or("Project Root is not UTF-8")?
         .to_owned();
@@ -139,6 +158,19 @@ mod tests {
         assert_eq!(branch(observe("w/p", &main, &main)), Some("main".into()));
         assert_eq!(
             branch(observe("w/p", &main, &linked)),
+            Some("feature".into())
+        );
+        let subproject = main.join("project");
+        std::fs::create_dir(&subproject).unwrap();
+        std::fs::create_dir(linked.join("project")).unwrap();
+        assert_eq!(branch(observe("w/p", &subproject, &main)), None);
+        assert_eq!(
+            branch(observe("w/p", &subproject, &subproject)),
+            Some("main".into())
+        );
+        assert_eq!(branch(observe("w/p", &subproject, &linked)), None);
+        assert_eq!(
+            branch(observe("w/p", &subproject, &linked.join("project"))),
             Some("feature".into())
         );
         assert_eq!(branch(observe("w/p", &main, &other)), None);
