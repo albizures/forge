@@ -90,11 +90,15 @@ fn capture(project_root: &Path, cwd: &Path) -> Result<(String, String), String> 
     if !initiating_directory.starts_with(initiating_root.join(relative)) {
         return Err("initiating directory is outside this Project's checkout".into());
     }
-    let branch = git(cwd, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+    // Do not use --short: Git can return `heads/name` when another ref has
+    // the same short name, which is not the name of the planning branch.
+    let head = git(cwd, &["symbolic-ref", "--quiet", "HEAD"])
         .map_err(|error| format!("branch unavailable (possibly detached HEAD): {error}"))?;
-    if branch.is_empty() {
-        return Err("branch unavailable: empty branch name".into());
-    }
+    let branch = head
+        .strip_prefix("refs/heads/")
+        .filter(|branch| !branch.is_empty())
+        .ok_or("branch unavailable: HEAD does not name a local branch")?
+        .to_owned();
     let repository = project_root
         .to_str()
         .ok_or("Project Root is not UTF-8")?
@@ -128,6 +132,61 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn branch_name_is_not_changed_by_an_ambiguous_tag() {
+        let temp = tempdir().unwrap();
+        run(temp.path(), &["init", "-b", "feature"]);
+        run(
+            temp.path(),
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "initial",
+            ],
+        );
+        run(temp.path(), &["tag", "feature"]);
+        assert_eq!(
+            branch(observe("w/p", temp.path(), temp.path())),
+            Some("feature".into())
+        );
+    }
+
+    #[test]
+    fn capture_failures_retain_inspectable_reasons() {
+        let temp = tempdir().unwrap();
+        let main = temp.path().join("main");
+        std::fs::create_dir(&main).unwrap();
+        run(&main, &["init", "-b", "main"]);
+        run(
+            &main,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "initial",
+            ],
+        );
+        run(&main, &["checkout", "--detach"]);
+        let reason = |observation: ProjectPlanningContext| match observation.context {
+            PlanningContext::Unavailable { reason } => reason,
+            PlanningContext::Available { .. } => panic!("expected unavailable context"),
+        };
+        assert!(reason(observe("w/p", &main, &main)).contains("branch unavailable"));
+        assert!(reason(observe("w/p", &main, temp.path())).contains("git"));
+        assert!(
+            reason(observe("w/p", &temp.path().join("missing"), &main)).contains("Project Root")
+        );
+    }
+
     #[test]
     fn only_initiating_matching_worktree_supplies_branch() {
         let temp = tempdir().unwrap();
