@@ -29,8 +29,9 @@ chains use the same configuration gates as Spec children. Read-only
 `forge project check-template preflight <project> --json` checks the future
 Dispatched Task criteria and every pinned Task profile's registered launch policy.
 It fails on blockers or an older server without preflight support, without changing
-configuration. Successful output includes the observed template version, not a
-reservation or hosting/provider readiness guarantee. See
+configuration. Successful output includes the observed template version, not
+hosting/provider readiness. Pass that version to `task under-spec
+--expected-template-version` so each Task opens only with those Checks. See
 [publication profile behavior](profiles/publication.md).
 
 Select the Workspace by canonical cwd or `--workspace`. Substitute inspected IDs:

@@ -69,6 +69,44 @@ fn stack_template_preflight_is_read_only_and_checks_every_pin() {
 }
 
 #[test]
+fn guarded_task_opening_requires_the_observed_stack_ready_template_atomically() {
+    let repository = SqliteProjectRepository::in_memory().unwrap();
+    repository.register(&project("alpha", "/guarded-opening")).unwrap();
+    let parent = repository.open_typed_record(&NewTypedRecord {
+        record_type: RecordType::Spec, project_slugs: vec!["alpha".into()],
+        body: "Plan".into(), generated_by_ids: vec![],
+    }).unwrap();
+    let children = || repository.show_record(parent.id).unwrap().relationships;
+    let before = children();
+    let guarded = |version| repository.open_task_under_spec_at_template("Work", parent.id, vec![], Some(version));
+    // The unconfigured baseline is valid for unguarded opening but not Stack-ready.
+    let blocked = guarded(0).unwrap_err();
+    assert_eq!(blocked.code, "check-template-blocked");
+    assert!(blocked.message.contains("Publication"), "{}", blocked.message);
+    assert_eq!(children(), before);
+    let policy = forge_app::agent_profiles::ResolvedLaunchPolicy {
+        version: 1, runtime: "herdr/pi".into(), model: "test/model".into(), tools: vec![],
+        behavior: "Verify".into(), skills: vec![], extensions: vec![], mcp_servers: vec![],
+        thinking_level: None,
+    };
+    let profile = repository.register_agent_profile("test", RecordType::Task, &policy).unwrap();
+    let mut input = replacement(0, &["Publication"]);
+    for criterion in &mut input.criteria {
+        criterion.profile_revision = Some(profile.revision);
+    }
+    repository.replace_check_template("alpha", &input).unwrap();
+    // A planner that observed version 0 must not receive version 1 Checks.
+    let stale = guarded(0).unwrap_err();
+    assert_eq!(stale.code, "stale-version");
+    assert!(stale.message.contains("is 1, expected 0"), "{}", stale.message);
+    assert_eq!(children(), before);
+    let task = guarded(1).unwrap();
+    let checks = repository.list_record_checks(task.id).unwrap();
+    assert_eq!(checks.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["Implementation", "Publication"]);
+    assert!(checks.iter().all(|c| c.profile_revision == Some(profile.revision)));
+}
+
+#[test]
 fn preflight_then_cumulative_plan_readback_and_start_uses_returned_ids() {
     let repository = SqliteProjectRepository::in_memory().unwrap();
     repository.register(&project("alpha", "/planning-sequence")).unwrap();

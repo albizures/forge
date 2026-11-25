@@ -792,6 +792,10 @@ struct OpenTaskUnderSpecArgs {
     /// Record that generated this Record. Repeat for multiple generators.
     #[arg(long = "generated-by", value_name = "ID")]
     generated_by_ids: Vec<u64>,
+    /// Open only while the Project Check Template is at this version and has no
+    /// Stack preflight blockers, checked atomically with the Check snapshot.
+    #[arg(long, value_name = "VERSION")]
+    expected_template_version: Option<u64>,
     #[arg(long, value_name = "URL")]
     server_url: Option<String>,
     #[arg(long)]
@@ -2105,6 +2109,7 @@ async fn open_task_under_spec(args: OpenTaskUnderSpecArgs, workspace: Option<Str
             &body,
             args.spec,
             args.generated_by_ids,
+            args.expected_template_version,
         )
         .await,
     )

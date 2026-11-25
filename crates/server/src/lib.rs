@@ -1701,7 +1701,12 @@ impl RecordApiServer for Daemon {
         } = request;
         let application = self.record_application(&selection, &mut [])?;
         application
-            .open_task_under_spec(&request.body, request.spec_id, request.generated_by_ids)
+            .open_task_under_spec_at_template(
+                &request.body,
+                request.spec_id,
+                request.generated_by_ids,
+                request.expected_template_version,
+            )
             .map(Into::into)
             .map_err(rpc_error)
     }
@@ -4781,6 +4786,7 @@ mod tests {
                 body: "A daemon-backed Task".into(),
                 spec_id: spec.id,
                 generated_by_ids: vec![],
+                expected_template_version: None,
             }))
             .await
             .unwrap();
@@ -4861,6 +4867,7 @@ mod tests {
                     body: "Invalid child".into(),
                     spec_id: record.id,
                     generated_by_ids: vec![],
+                    expected_template_version: None,
                 }))
                 .await
                 .is_err()

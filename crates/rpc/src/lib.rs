@@ -1159,6 +1159,11 @@ pub struct OpenTaskUnderSpecRequest {
     pub body: String,
     pub spec_id: u64,
     pub generated_by_ids: Vec<u64>,
+    /// Planner guard: open only while the Project Check Template is at this
+    /// version and Stack-ready. Omitted when absent so older servers stay
+    /// compatible with unguarded requests; guarded requests fail closed there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_template_version: Option<u64>,
 }
 /// Opens a Task under a Wayfinder with an optional selected Project.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
