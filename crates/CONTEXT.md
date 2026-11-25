@@ -108,6 +108,10 @@ _Avoid_: Base Commit, default branch
 A Project's rule for selecting an explicitly configured root Task's starting branch. It does not select or replace a Builds-On successor's inherited repository input.
 _Avoid_: default branch, inheritance policy
 
+**Planning Branch**:
+The repository branch recorded as context for planning work. It identifies a branch, not an immutable commit or an implicit override of Builds-On inheritance.
+_Avoid_: current checkout, Base Commit
+
 **PR Base Branch**:
 The branch targeted by a Task's pull request. In a Stack it is the Task's Base Branch, distinct from the exact Base Commit used to begin execution.
 _Avoid_: target commit, main
