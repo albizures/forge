@@ -151,7 +151,7 @@ impl SqliteProjectRepository {
             if mode == ExecutionMode::Dispatched {
                 // Intrinsic validation also protects direct repository callers. External
                 // prerequisites are checked by the application before this transaction.
-                let invalid: Option<(i64, String)> = tx.query_row("SELECT c.id, c.name FROM record_checks c LEFT JOIN agent_profiles p ON p.record_type = 'task' AND p.revision = COALESCE((SELECT m.new_revision FROM check_profile_migration_changes m WHERE m.check_id = c.id ORDER BY m.migration_id DESC LIMIT 1), c.profile_revision) WHERE c.record_id = ?1 AND (COALESCE((SELECT m.new_revision FROM check_profile_migration_changes m WHERE m.check_id = c.id ORDER BY m.migration_id DESC LIMIT 1), c.profile_revision) IS NULL OR p.revision IS NULL OR p.launch_policy_json IS NULL) ORDER BY c.position LIMIT 1", [id.cast_signed()], |r| Ok((r.get(0)?, r.get(1)?))).optional().map_err(storage_error)?;
+                let invalid: Option<(i64, String)> = tx.query_row("SELECT c.id, c.name FROM record_checks c LEFT JOIN agent_profiles p ON p.record_type = 'task' AND p.revision = c.profile_revision WHERE c.record_id = ?1 AND (c.profile_revision IS NULL OR p.revision IS NULL OR p.launch_policy_json IS NULL) ORDER BY c.position LIMIT 1", [id.cast_signed()], |r| Ok((r.get(0)?, r.get(1)?))).optional().map_err(storage_error)?;
                 if let Some((check, name)) = invalid {
                     return Err(RegistrationError::new(
                         "invalid-check-profile",

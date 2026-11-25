@@ -38,33 +38,6 @@ impl Fixture {
             .unwrap();
         drop(repo);
         let c = Connection::open(&source).unwrap();
-        if schema < 25 {
-            // Revision 24's capacity trigger accepted only a reconciled retirement.
-            c.execute_batch("DROP TABLE durable_launch_reconciliations; DROP TRIGGER durable_runtime_capacity_retained;")
-                .unwrap();
-            c.execute_batch(include_str!("../src/upgrade/durable_retirement.sql"))
-                .unwrap();
-        }
-        if schema < 24 {
-            c.execute_batch("DROP TABLE durable_runtime_purge_removals;")
-                .unwrap();
-        }
-        if schema < 23 {
-            c.execute_batch("DROP TABLE durable_launch_rollbacks; DROP TABLE durable_runtime_purges; DROP TABLE check_profile_migration_changes; DROP TABLE check_profile_migrations; DROP TABLE durable_assignment_followup_deliveries; DROP TABLE durable_assignment_followups;")
-                .unwrap();
-        }
-        if schema < 22 {
-            c.execute_batch("DROP TABLE durable_assignment_retirements; DROP TRIGGER durable_runtime_capacity_retained;").unwrap();
-            c.execute_batch(include_str!("../src/upgrade/durable_execution.sql"))
-                .unwrap();
-        }
-        if schema < 21 {
-            c.execute_batch("DROP TABLE assignment_authorization_leases;")
-                .unwrap();
-        }
-        if schema < 20 {
-            c.execute_batch("DROP TABLE durable_assignment_runtimes; DROP TRIGGER durable_runtime_capacity_retained; DROP TRIGGER durable_runtime_capacity_not_deleted;").unwrap();
-        }
         if schema < 17 {
             c.execute_batch("DROP TABLE retained_work_recoveries;")
                 .unwrap();
@@ -151,7 +124,7 @@ fn explicit_seven_to_current_preserves_every_old_table_and_source_bytes() {
     let copy = f.root.join("snapshot.db");
     assert_eq!(upgrade::snapshot(&f.source, &copy).unwrap(), before);
     let after = upgrade::migrate(&copy).unwrap();
-    assert_eq!(after.schema, Some(25));
+    assert_eq!(after.schema, Some(19));
     for table in before.tables {
         assert!(after.tables.contains(&table), "lost {}", table.name);
     }
@@ -187,7 +160,7 @@ fn explicit_eight_to_eleven_preserves_all_old_facts_without_inventing_intent() {
     let copy = f.root.join("nine.db");
     upgrade::snapshot(&f.source, &copy).unwrap();
     let after = upgrade::migrate(&copy).unwrap();
-    assert_eq!(after.schema, Some(25));
+    assert_eq!(after.schema, Some(19));
     for table in before.tables {
         assert!(after.tables.contains(&table), "changed {}", table.name);
     }
@@ -217,7 +190,7 @@ fn nine_to_eleven_preserves_every_table_without_inventing_unchanged_results() {
     let copy = f.root.join("ten.db");
     upgrade::snapshot(&f.source, &copy).unwrap();
     let after = upgrade::migrate(&copy).unwrap();
-    assert_eq!(after.schema, Some(25));
+    assert_eq!(after.schema, Some(19));
     for table in before.tables {
         assert!(after.tables.contains(&table));
     }
@@ -243,7 +216,7 @@ fn ten_to_eleven_preserves_history_without_inventing_forced_completions() {
     let copy = f.root.join("eleven.db");
     upgrade::snapshot(&f.source, &copy).unwrap();
     let after = upgrade::migrate(&copy).unwrap();
-    assert_eq!(after.schema, Some(25));
+    assert_eq!(after.schema, Some(19));
     for table in before.tables {
         assert!(after.tables.contains(&table));
     }
@@ -269,7 +242,7 @@ fn eleven_expansion_preserves_old_intent_and_rejects_ordinary_open_before_writes
     assert_eq!(fs::read(&f.source).unwrap(), bytes);
     let before = upgrade::inspect(&f.source).unwrap();
     let after = upgrade::migrate(&f.source).unwrap();
-    assert_eq!(after.schema, Some(25));
+    assert_eq!(after.schema, Some(19));
     for table in before.tables {
         assert!(after.tables.contains(&table));
     }
@@ -295,7 +268,7 @@ fn semantic_twelve_requires_explicit_conversion_despite_identical_ddl() {
     let copy = f.root.join("thirteen.db");
     upgrade::snapshot(&f.source, &copy).unwrap();
     let after = upgrade::migrate(&copy).unwrap();
-    assert_eq!(after.schema, Some(25));
+    assert_eq!(after.schema, Some(19));
     for table in before.tables {
         assert!(after.tables.contains(&table));
     }
@@ -322,7 +295,7 @@ fn fourteen_requires_explicit_upgrade_without_historical_continuation_backfill()
     let copy = f.root.join("fifteen.db");
     upgrade::snapshot(&f.source, &copy).unwrap();
     let after = upgrade::migrate(&copy).unwrap();
-    assert_eq!(after.schema, Some(25));
+    assert_eq!(after.schema, Some(19));
     for table in before.tables {
         assert!(after.tables.contains(&table));
     }
@@ -352,7 +325,7 @@ fn fifteen_upgrade_retains_accounting_and_adds_no_reset_history() {
     let copy = f.root.join("sixteen.db");
     upgrade::snapshot(&f.source, &copy).unwrap();
     let after = upgrade::migrate(&copy).unwrap();
-    assert_eq!(after.schema, Some(25));
+    assert_eq!(after.schema, Some(19));
     let old = before
         .tables
         .iter()
@@ -382,7 +355,7 @@ fn sixteen_upgrade_preserves_history_and_invents_no_salvage_authority() {
     let copy = f.root.join("seventeen.db");
     upgrade::snapshot(&f.source, &copy).unwrap();
     let after = upgrade::migrate(&copy).unwrap();
-    assert_eq!(after.schema, Some(25));
+    assert_eq!(after.schema, Some(19));
     for table in before.tables {
         assert!(after.tables.contains(&table));
     }
@@ -431,19 +404,8 @@ fn verify_recovery_semantic_upgrade(schema: u32) {
     let copy = f.root.join("eighteen.db");
     upgrade::snapshot(&f.source, &copy).unwrap();
     let after = upgrade::migrate(&copy).unwrap();
-    assert_eq!(after.schema, Some(25));
-    for table in &before.tables {
-        assert!(after.tables.contains(table));
-    }
-    assert_eq!(
-        after
-            .tables
-            .iter()
-            .find(|t| t.name == "durable_assignment_runtimes")
-            .unwrap()
-            .rows,
-        0
-    );
+    assert_eq!(after.schema, Some(19));
+    assert_eq!(before.tables, after.tables);
     let store = SqliteProjectRepository::open(&copy).unwrap();
     let recovery = &store.record_work_state(1).unwrap().recoveries[0];
     assert_eq!(recovery.retained_state.is_some(), schema == 18);
@@ -454,68 +416,8 @@ fn verify_recovery_semantic_upgrade(schema: u32) {
 }
 
 #[test]
-fn twenty_requires_explicit_upgrade_and_creates_no_authorization() {
-    let f = Fixture::new(20);
-    let bytes = fs::read(&f.source).unwrap();
-    assert_eq!(
-        SqliteProjectRepository::open(&f.source).err().unwrap().code,
-        "fresh-store-required"
-    );
-    assert_eq!(fs::read(&f.source).unwrap(), bytes);
-    let before = upgrade::inspect(&f.source).unwrap();
-    let copy = f.root.join("twenty-one.db");
-    upgrade::snapshot(&f.source, &copy).unwrap();
-    let after = upgrade::migrate(&copy).unwrap();
-    assert_eq!(after.schema, Some(25));
-    for table in &before.tables {
-        assert!(after.tables.contains(table));
-    }
-    assert_eq!(
-        after
-            .tables
-            .iter()
-            .find(|t| t.name == "assignment_authorization_leases")
-            .unwrap()
-            .rows,
-        0
-    );
-    assert_eq!(fs::read(&f.source).unwrap(), bytes);
-    drop(SqliteProjectRepository::open(&copy).unwrap());
-}
-
-#[test]
-fn twenty_one_requires_explicit_upgrade_without_retirement_proof_backfill() {
-    let f = Fixture::new(21);
-    let bytes = fs::read(&f.source).unwrap();
-    assert_eq!(
-        SqliteProjectRepository::open(&f.source).err().unwrap().code,
-        "fresh-store-required"
-    );
-    assert_eq!(fs::read(&f.source).unwrap(), bytes);
-    let before = upgrade::inspect(&f.source).unwrap();
-    let copy = f.root.join("twenty-two.db");
-    upgrade::snapshot(&f.source, &copy).unwrap();
-    let after = upgrade::migrate(&copy).unwrap();
-    assert_eq!(after.schema, Some(25));
-    for table in before.tables {
-        assert!(after.tables.contains(&table));
-    }
-    assert_eq!(
-        after
-            .tables
-            .iter()
-            .find(|t| t.name == "durable_assignment_retirements")
-            .unwrap()
-            .rows,
-        0
-    );
-    drop(SqliteProjectRepository::open(&copy).unwrap());
-    assert_eq!(fs::read(&f.source).unwrap(), bytes);
-}
-
-#[test]
 fn same_schema_copy_keeps_ids_comments_and_history() {
-    let f = Fixture::new(25);
+    let f = Fixture::new(19);
     let before = upgrade::inspect(&f.source).unwrap();
     let copy = f.root.join("copy.db");
     upgrade::snapshot(&f.source, &copy).unwrap();

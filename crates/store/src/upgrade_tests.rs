@@ -15,7 +15,6 @@ fn frozen_contracts_and_advertised_target_match_ordinary_initialization() {
 fn failed_schema_stamp_rolls_back_ddl_and_all_existing_data() {
     let repo = SqliteProjectRepository::in_memory().unwrap();
     let mut c = repo.connection.lock().unwrap();
-    remove_durable_expansion(&c);
     c.execute_batch(
         "DROP TABLE retained_work_recoveries; DROP TABLE check_continuation_resets; DROP TABLE check_continuations; DROP TABLE assignment_sessions; DROP TABLE builds_on_dependencies; DROP TABLE forced_completions; DROP TABLE task_unchanged_results; DROP TABLE ordering_only_dependencies; DROP TABLE task_stacks; PRAGMA user_version=7",
     )
@@ -140,7 +139,7 @@ fn session_schema_expansion_preserves_history_and_stamp_failure_rolls_back() {
         .unwrap();
     assert_eq!(inspection(&c).unwrap(), before);
     let after = migrate_connection(&mut c).unwrap();
-    assert_eq!(after.schema, Some(25));
+    assert_eq!(after.schema, Some(19));
     for table in before.tables {
         assert!(after.tables.contains(&table));
     }
@@ -174,7 +173,7 @@ fn continuation_reset_schema_stamp_failure_rolls_back_rebuild_and_audit_table() 
     c.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
         .unwrap();
     assert_eq!(inspection(&c).unwrap(), before);
-    assert_eq!(migrate_connection(&mut c).unwrap().schema, Some(25));
+    assert_eq!(migrate_connection(&mut c).unwrap().schema, Some(19));
 }
 
 #[test]
@@ -196,7 +195,7 @@ fn continuation_expansion_is_empty_and_stamp_failure_rolls_back() {
         .unwrap();
     assert_eq!(inspection(&c).unwrap(), before);
     let after = migrate_connection(&mut c).unwrap();
-    assert_eq!(after.schema, Some(25));
+    assert_eq!(after.schema, Some(19));
     for table in before.tables {
         assert!(after.tables.contains(&table));
     }
@@ -240,19 +239,8 @@ fn verify_semantic_stamp_rollback(source: u32, denied: &'static str) {
         .unwrap();
     assert_eq!(inspection(&c).unwrap(), before);
     let after = migrate_connection(&mut c).unwrap();
-    assert_eq!(after.schema, Some(25));
-    for table in before.tables {
-        assert!(after.tables.contains(&table));
-    }
-    assert_eq!(
-        after
-            .tables
-            .iter()
-            .find(|t| t.name == "durable_assignment_runtimes")
-            .unwrap()
-            .rows,
-        0
-    );
+    assert_eq!(after.schema, Some(19));
+    assert_eq!(after.tables, before.tables);
 }
 
 #[test]
@@ -274,7 +262,7 @@ fn retained_work_schema_stamp_failure_rolls_back_all_authority_ddl() {
         .unwrap();
     assert_eq!(inspection(&c).unwrap(), before);
     let after = migrate_connection(&mut c).unwrap();
-    assert_eq!(after.schema, Some(25));
+    assert_eq!(after.schema, Some(19));
     assert_eq!(
         after
             .tables
@@ -287,187 +275,10 @@ fn retained_work_schema_stamp_failure_rolls_back_all_authority_ddl() {
 }
 
 #[test]
-fn authorization_lease_expansion_is_empty_and_failed_stamp_rolls_back() {
-    let mut c = reference(20).unwrap();
-    c.pragma_update(None, "application_id", APPLICATION_ID)
-        .unwrap();
-    let before = inspection(&c).unwrap();
-    c.authorizer(Some(|context: AuthContext<'_>| match context.action {
-        AuthAction::Pragma {
-            pragma_name: "user_version",
-            pragma_value: Some("21"),
-        } => Authorization::Deny,
-        _ => Authorization::Allow,
-    }))
-    .unwrap();
-    assert!(migrate_connection(&mut c).is_err());
-    c.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
-        .unwrap();
-    assert_eq!(inspection(&c).unwrap(), before);
-    let after = migrate_connection(&mut c).unwrap();
-    assert_eq!(after.schema, Some(25));
-    assert_eq!(
-        after
-            .tables
-            .iter()
-            .find(|t| t.name == "assignment_authorization_leases")
-            .unwrap()
-            .rows,
-        0
-    );
-    for table in before.tables {
-        assert!(after.tables.contains(&table));
-    }
-    assert_eq!(migrate_connection(&mut c).unwrap(), after);
-}
-
-#[test]
-fn durable_admission_expansion_is_empty_and_failed_stamp_rolls_back() {
-    let mut c = reference(19).unwrap();
-    c.pragma_update(None, "application_id", APPLICATION_ID)
-        .unwrap();
-    let before = inspection(&c).unwrap();
-    c.authorizer(Some(|context: AuthContext<'_>| match context.action {
-        AuthAction::Pragma {
-            pragma_name: "user_version",
-            pragma_value: Some("20"),
-        } => Authorization::Deny,
-        _ => Authorization::Allow,
-    }))
-    .unwrap();
-    assert!(migrate_connection(&mut c).is_err());
-    c.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
-        .unwrap();
-    assert_eq!(inspection(&c).unwrap(), before);
-    let after = migrate_connection(&mut c).unwrap();
-    assert_eq!(after.schema, Some(25));
-    for table in before.tables {
-        assert!(after.tables.contains(&table));
-    }
-    assert_eq!(
-        after
-            .tables
-            .iter()
-            .find(|t| t.name == "durable_assignment_runtimes")
-            .unwrap()
-            .rows,
-        0
-    );
-    assert_eq!(migrate_connection(&mut c).unwrap(), after);
-}
-
-#[test]
-fn retirement_expansion_and_stamp_failure_preserve_schema_twenty_one() {
-    verify_semantic_stamp_rollback(21, "22");
-    let mut c = reference(21).unwrap();
-    c.pragma_update(None, "application_id", APPLICATION_ID)
-        .unwrap();
-    let before = inspection(&c).unwrap();
-    let after = migrate_connection(&mut c).unwrap();
-    for table in before.tables {
-        assert!(after.tables.contains(&table));
-    }
-    assert_eq!(
-        after
-            .tables
-            .iter()
-            .find(|t| t.name == "durable_assignment_retirements")
-            .unwrap()
-            .rows,
-        0
-    );
-}
-
-#[test]
-fn follow_up_expansion_is_empty_and_stamp_failure_preserves_schema_twenty_two() {
-    verify_semantic_stamp_rollback(22, "23");
-    let mut c = reference(22).unwrap();
-    c.pragma_update(None, "application_id", APPLICATION_ID)
-        .unwrap();
-    let before = inspection(&c).unwrap();
-    let after = migrate_connection(&mut c).unwrap();
-    for table in before.tables {
-        assert!(after.tables.contains(&table));
-    }
-    assert_eq!(
-        after
-            .tables
-            .iter()
-            .find(|t| t.name == "durable_assignment_followups")
-            .unwrap()
-            .rows,
-        0
-    );
-    // Historical Checks gain no fabricated migration history.
-    for table in [
-        "check_profile_migrations",
-        "check_profile_migration_changes",
-        "durable_runtime_purges",
-        "durable_launch_rollbacks",
-    ] {
-        assert_eq!(
-            after.tables.iter().find(|t| t.name == table).unwrap().rows,
-            0
-        );
-    }
-}
-
-#[test]
-fn purge_removal_expansion_is_empty_and_stamp_failure_preserves_schema_twenty_three() {
-    verify_semantic_stamp_rollback(23, "24");
-    let mut c = reference(23).unwrap();
-    c.pragma_update(None, "application_id", APPLICATION_ID)
-        .unwrap();
-    let before = inspection(&c).unwrap();
-    let after = migrate_connection(&mut c).unwrap();
-    assert_eq!(after.schema, Some(25));
-    // Existing purge journal rows stay byte-exact; no removal is fabricated.
-    for table in before.tables {
-        assert!(after.tables.contains(&table));
-    }
-    assert_eq!(
-        after
-            .tables
-            .iter()
-            .find(|t| t.name == "durable_runtime_purge_removals")
-            .unwrap()
-            .rows,
-        0
-    );
-    assert_eq!(migrate_connection(&mut c).unwrap(), after);
-}
-
-#[test]
-fn launch_reconciliation_expansion_is_empty_and_stamp_failure_preserves_schema_twenty_four() {
-    verify_semantic_stamp_rollback(24, "25");
-    let mut c = reference(24).unwrap();
-    c.pragma_update(None, "application_id", APPLICATION_ID)
-        .unwrap();
-    let before = inspection(&c).unwrap();
-    let after = migrate_connection(&mut c).unwrap();
-    assert_eq!(after.schema, Some(25));
-    for table in before.tables {
-        assert!(after.tables.contains(&table));
-    }
-    // No launch is reported as reconciled without a grant before revision 25.
-    assert_eq!(
-        after
-            .tables
-            .iter()
-            .find(|t| t.name == "durable_launch_reconciliations")
-            .unwrap()
-            .rows,
-        0
-    );
-    assert_eq!(migrate_connection(&mut c).unwrap(), after);
-}
-
-#[test]
 fn unresolved_execution_resources_block_snapshot_and_migration() {
     let repo = SqliteProjectRepository::in_memory().unwrap();
     let mut c = repo.connection.lock().unwrap();
     // Active leases are retained, not reset as an incidental migration effect.
-    remove_durable_expansion(&c);
     c.execute_batch("DROP TABLE retained_work_recoveries; DROP TABLE check_continuation_resets; DROP TABLE check_continuations; DROP TABLE assignment_sessions; DROP TABLE builds_on_dependencies; DROP TABLE forced_completions; DROP TABLE task_unchanged_results; DROP TABLE ordering_only_dependencies; DROP TABLE task_stacks; PRAGMA user_version=7; INSERT INTO agent_dispatch_configuration(singleton, scan_lease_owner, scan_lease_until_millis) VALUES(1,'old-daemon',9223372036854775807)").unwrap();
     let before = inspection(&c).unwrap();
     assert!(

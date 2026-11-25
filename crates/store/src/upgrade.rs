@@ -27,27 +27,6 @@ mod v007_to_v008;
 
 const APPLICATION_ID: i64 = 0x464f_5247;
 
-/// Build older fixtures from current initialization without mislabelling new DDL.
-#[cfg(test)]
-pub(crate) fn remove_durable_expansion(c: &Connection) {
-    c.execute_batch(
-        "DROP TABLE durable_launch_reconciliations;
-        DROP TABLE durable_runtime_purge_removals;
-        DROP TABLE durable_launch_rollbacks;
-        DROP TABLE durable_runtime_purges;
-        DROP TABLE check_profile_migration_changes;
-        DROP TABLE check_profile_migrations;
-        DROP TABLE durable_assignment_followup_deliveries;
-        DROP TABLE durable_assignment_followups;
-        DROP TABLE durable_assignment_retirements;
-        DROP TABLE assignment_authorization_leases;
-        DROP TABLE durable_assignment_runtimes;
-        DROP TRIGGER durable_runtime_capacity_retained;
-        DROP TRIGGER durable_runtime_capacity_not_deleted;",
-    )
-    .unwrap();
-}
-
 fn error(message: impl Into<String>) -> RegistrationError {
     RegistrationError::new("state-upgrade-blocked", message)
 }
@@ -56,10 +35,8 @@ fn error(message: impl Into<String>) -> RegistrationError {
 pub fn capabilities() -> UpgradeCapabilities {
     UpgradeCapabilities {
         interface_version: UPGRADE_INTERFACE_VERSION,
-        target_schema: 25,
-        supported_sources: vec![
-            7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
-        ],
+        target_schema: 19,
+        supported_sources: vec![7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19],
         waits_for_decisions: true,
     }
 }
@@ -168,12 +145,11 @@ fn check_integrity(c: &Connection) -> Result<(), RegistrationError> {
     Ok(())
 }
 
-#[allow(clippy::too_many_lines)] // One linear schema-by-schema fixture builder; splitting would hide the order.
 fn reference(schema: u32) -> Result<Connection, RegistrationError> {
     let c = Connection::open_in_memory().map_err(storage_error)?;
     let ddl = match schema {
         7 => include_str!("upgrade/schema7.sql"),
-        8..=25 => include_str!("upgrade/schema8.sql"),
+        8..=19 => include_str!("upgrade/schema8.sql"),
         _ => return Err(error("missing frozen schema contract")),
     };
     c.execute_batch(ddl).map_err(storage_error)?;
@@ -239,47 +215,6 @@ fn reference(schema: u32) -> Result<Connection, RegistrationError> {
         c.pragma_update(None, "user_version", 19)
             .map_err(storage_error)?;
     }
-    if schema >= 20 {
-        c.execute_batch(include_str!("upgrade/durable_execution.sql"))
-            .map_err(storage_error)?;
-        c.pragma_update(None, "user_version", 20)
-            .map_err(storage_error)?;
-    }
-    if schema >= 21 {
-        c.execute_batch(include_str!("upgrade/authorization_leases.sql"))
-            .map_err(storage_error)?;
-        c.pragma_update(None, "user_version", 21)
-            .map_err(storage_error)?;
-    }
-    if schema >= 22 {
-        c.execute_batch(include_str!("upgrade/durable_retirement.sql"))
-            .map_err(storage_error)?;
-        c.pragma_update(None, "user_version", 22)
-            .map_err(storage_error)?;
-    }
-    if schema >= 23 {
-        c.execute_batch(concat!(
-            include_str!("upgrade/durable_followups.sql"),
-            include_str!("upgrade/check_profile_migrations.sql"),
-            include_str!("upgrade/durable_purges.sql"),
-            include_str!("upgrade/durable_launch_controls.sql"),
-        ))
-        .map_err(storage_error)?;
-        c.pragma_update(None, "user_version", 23)
-            .map_err(storage_error)?;
-    }
-    if schema >= 24 {
-        c.execute_batch(include_str!("upgrade/durable_purge_removals.sql"))
-            .map_err(storage_error)?;
-        c.pragma_update(None, "user_version", 24)
-            .map_err(storage_error)?;
-    }
-    if schema >= 25 {
-        c.execute_batch(include_str!("upgrade/durable_launch_reconciliations.sql"))
-            .map_err(storage_error)?;
-        c.pragma_update(None, "user_version", 25)
-            .map_err(storage_error)?;
-    }
     super::seed_agent_profiles(&c)?;
     c.execute_batch("INSERT INTO dispatch_provider_generation VALUES (1, 0)")
         .map_err(storage_error)?;
@@ -295,7 +230,7 @@ fn inspection(c: &Connection) -> Result<StoreInspection, RegistrationError> {
         .map_err(storage_error)?;
     if application != APPLICATION_ID || !capabilities().supported_sources.contains(&schema) {
         return Err(error(
-            "unsupported application or schema; supported source schemas: 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25",
+            "unsupported application or schema; supported source schemas: 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19",
         ));
     }
     check_integrity(c)?;
@@ -506,17 +441,9 @@ fn migrate_decisions(
     if !before.blockers.is_empty() {
         return Err(error(before.blockers.join(", ")));
     }
-    // Effective-pin reads are used by intermediate validation; empty history is
-    // created first so older sources never observe a missing table. No row is invented.
-    tx.execute_batch(include_str!("upgrade/check_profile_migrations.sql"))
-        .map_err(storage_error)?;
-    tx.execute_batch(include_str!("upgrade/durable_purges.sql"))
-        .map_err(storage_error)?;
-    tx.execute_batch(include_str!("upgrade/durable_launch_controls.sql"))
-        .map_err(storage_error)?;
     match before.schema {
         Some(7) => v007_to_v008::apply(&tx)?,
-        Some(8..=25) => {}
+        Some(8..=19) => {}
         _ => return Err(error("unsupported migration source")),
     }
     if before.schema.is_some_and(|s| s < 9) {
@@ -584,56 +511,6 @@ fn migrate_decisions(
     if before.schema.is_some_and(|s| s < 19) {
         // No historical fingerprint rewrite or renewed recovery authorization.
         tx.pragma_update(None, "user_version", 19)
-            .map_err(storage_error)?;
-    }
-    if before.schema.is_some_and(|s| s < 20) {
-        // Explicit offline expansion only; no historical runtime identities or backfill.
-        tx.execute_batch(include_str!("upgrade/durable_execution.sql"))
-            .map_err(storage_error)?;
-        tx.pragma_update(None, "user_version", 20)
-            .map_err(storage_error)?;
-    }
-    if before.schema.is_some_and(|s| s < 21) {
-        // No historical grants: a copied journal is not execution authority.
-        tx.execute_batch(include_str!("upgrade/authorization_leases.sql"))
-            .map_err(storage_error)?;
-        tx.pragma_update(None, "user_version", 21)
-            .map_err(storage_error)?;
-    }
-    if before.schema.is_some_and(|s| s < 22) {
-        tx.execute_batch(include_str!("upgrade/durable_retirement.sql"))
-            .map_err(storage_error)?;
-        tx.pragma_update(None, "user_version", 22)
-            .map_err(storage_error)?;
-    }
-    if before.schema.is_some_and(|s| s < 23) {
-        // Empty history only: no follow-up is fabricated for historical Assignments.
-        tx.execute_batch(include_str!("upgrade/durable_followups.sql"))
-            .map_err(storage_error)?;
-        // Empty history: no migration is fabricated for historical Checks.
-        tx.execute_batch(include_str!("upgrade/check_profile_migrations.sql"))
-            .map_err(storage_error)?;
-        tx.execute_batch(include_str!("upgrade/durable_purges.sql"))
-            .map_err(storage_error)?;
-        tx.execute_batch(include_str!("upgrade/durable_launch_controls.sql"))
-            .map_err(storage_error)?;
-        tx.pragma_update(None, "user_version", 23)
-            .map_err(storage_error)?;
-    }
-    if before.schema.is_some_and(|s| s < 24) {
-        // Empty history: a purge completed under revision 23 keeps no recorded
-        // removal, so it reads as unrecorded rather than a fabricated deletion.
-        tx.execute_batch(include_str!("upgrade/durable_purge_removals.sql"))
-            .map_err(storage_error)?;
-        tx.pragma_update(None, "user_version", 24)
-            .map_err(storage_error)?;
-    }
-    if before.schema.is_some_and(|s| s < 25) {
-        // Empty history: no launch was reconciled without a grant before
-        // revision 25. The capacity trigger keeps every existing guarantee.
-        tx.execute_batch(include_str!("upgrade/durable_launch_reconciliations.sql"))
-            .map_err(storage_error)?;
-        tx.pragma_update(None, "user_version", 25)
             .map_err(storage_error)?;
     }
     let after = inspection(&tx)?;

@@ -1,9 +1,8 @@
 # Operator-selected dispatch workspaces and conservative agent recovery
 
-- **Status:** Accepted
+- **Status:** Proposed
 - **Decision scope:** Herdr workspace ownership, assignment liveness, and dispatch recovery
 - **Supersedes:** The Forge-created workspace and deferred provider-replacement portions of ADR-005
-- **Partially superseded by:** [ADR-0014](0014-headless-durable-task-execution.md): the Herdr binding and Workspace-wide readiness are not prerequisites for durable Task Check attempts; they still govern Herdr Tasks and Grilling
 
 ## Context
 

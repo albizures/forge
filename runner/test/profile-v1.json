@@ -1,8 +1,0 @@
-{
-  "version": 1,
-  "model": "openai/gpt-4.1",
-  "thinkingLevel": "off",
-  "tools": ["read", "write", "edit", "bash"],
-  "context": { "instructions": "Explicit profile behavior", "resources": [] },
-  "cwd": "/fixture/worktree"
-}

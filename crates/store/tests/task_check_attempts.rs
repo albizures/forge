@@ -136,7 +136,7 @@ fn acceptance_claim_snapshots_first_unpassed_check_and_pinned_profile_atomically
                     .claim_task_check_acceptance(
                         task.id,
                         "attempt-1",
-                        &selection.into(),
+                        &selection,
                         &input,
                         check,
                         revision,
@@ -187,7 +187,7 @@ fn acceptance_claim_snapshots_first_unpassed_check_and_pinned_profile_atomically
             .claim_task_check_acceptance(
                 task.id,
                 "attempt-2",
-                &selection.clone().into(),
+                &selection,
                 &input,
                 checks[0].id,
                 pinned.revision,
@@ -275,7 +275,7 @@ fn acceptance_claim_snapshots_first_unpassed_check_and_pinned_profile_atomically
             .claim_task_check_acceptance(
                 task.id,
                 "skip-review",
-                &selection.into(),
+                &selection,
                 &outcome.evidence,
                 checks[1].id,
                 pinned.revision,

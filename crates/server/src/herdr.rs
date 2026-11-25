@@ -45,11 +45,6 @@ pub(super) fn pi_launch_arguments(
     let Some(policy) = &profile.launch_policy else {
         return Ok(vec!["--model".into(), profile.model.clone(), prompt.into()]);
     };
-    if policy.runtime != "herdr/pi" {
-        return Err(AgentAdapterError::InvalidRequest(
-            "Herdr requires an explicit herdr/pi profile".into(),
-        ));
-    }
     policy
         .validate_direct_inputs()
         .map_err(AgentAdapterError::InvalidRequest)?;
@@ -125,13 +120,10 @@ impl HerdrAdapterFactory {
     }
 
     pub fn validate_profile(profile: &AgentProfile) -> Result<(), AgentAdapterError> {
-        if profile.provider != "herdr" {
-            // No implicit Herdr fallback, including for not-yet-enabled durable profiles.
-            return Err(AgentAdapterError::Endpoint(
-                "unsupported execution provider".into(),
-            ));
-        }
-        if profile.agent_kind != "pi" || profile.model.trim().is_empty() {
+        if profile.provider != "herdr"
+            || profile.agent_kind != "pi"
+            || profile.model.trim().is_empty()
+        {
             return Err(AgentAdapterError::Endpoint(
                 "unsupported agent profile".into(),
             ));
@@ -157,26 +149,6 @@ impl HerdrAdapterFactory {
             AgentAdapterError::Endpoint("Herdr Unix socket endpoint is not configured".into())
         })?;
         Ok(HerdrAdapter { socket_path })
-    }
-}
-
-impl forge_app::AgentDispatchAdapterFactory for HerdrAdapterFactory {
-    fn validate_profile(&self, profile: &AgentProfile) -> Result<(), AgentAdapterError> {
-        Self::validate_profile(profile)
-    }
-
-    fn validate_preflight(&self, profile: &AgentProfile) -> Result<(), AgentAdapterError> {
-        Self::validate_profile(profile)?;
-        pi_launch_arguments(profile, "").map(|_| ())
-    }
-
-    fn adapter_for(
-        &self,
-        profile: &AgentProfile,
-    ) -> Result<Box<dyn AgentDispatchAdapter>, AgentAdapterError> {
-        // Selection validates immutable provenance only, never mutable source resources.
-        Self::adapter_for(self, profile)
-            .map(|adapter| Box::new(adapter) as Box<dyn AgentDispatchAdapter>)
     }
 }
 
@@ -977,22 +949,6 @@ impl HerdrAdapter {
 }
 
 impl AgentDispatchAdapter for HerdrAdapter {
-    fn validate_provision(&self, context: &AgentDispatchContext) -> Result<(), AgentAdapterError> {
-        // Keep Herdr's launch and exact container checks ahead of capability issuance.
-        pi_launch_arguments(&context.assignment.profile, "")?;
-        self.probe()?;
-        let binding = context.dispatch_workspace.as_ref().ok_or_else(|| {
-            AgentAdapterError::Conflict("Assignment has no retained provider binding".into())
-        })?;
-        let found = self.verify_workspace(&binding.id)?;
-        if found.id != binding.id {
-            return Err(AgentAdapterError::Conflict(
-                "provider Workspace identity mismatch".into(),
-            ));
-        }
-        Ok(())
-    }
-
     fn probe(&self) -> Result<(), AgentAdapterError> {
         self.request("ping", json!({}))?;
         self.snapshot().map(|_| ())

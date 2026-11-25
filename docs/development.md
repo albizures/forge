@@ -31,7 +31,7 @@ forgeup use dev
 Put Forgeup's **managed bin directory before `target/release` on `PATH`** so
 `forge` resolves to the selected snapshot rather than a later local rebuild.
 Find the platform-specific location in
-[Forgeup locations](forgeup.md#locations-and-recovery). For example,
+[Forgeup locations](../crates/docs/forgeup.md#locations-and-recovery). For example,
 on Linux with default XDG locations:
 
 ```sh
@@ -48,7 +48,7 @@ no fallback to a default manual endpoint. Use `forgeup doctor` and `forgeup logs
 for diagnosis. `forge --build-info --json` works offline.
 
 Rebuilding does not update an existing immutable registration. See
-[Replacement Registration](forgeup.md#register-a-revision) before
+[Replacement Registration](../crates/docs/forgeup.md#register-a-revision) before
 replacing artifacts under the same selector; retained state is not disposable.
 
 ## Run a manual daemon
@@ -87,127 +87,6 @@ A manual daemon defaults to `forge.sqlite3` in its working directory;
 advisory sidecar lock and rejects a second owner before binding the listener.
 This prevents competing daemon ownership, not deliberate direct SQLite access.
 Managed daemons instead use Forgeup's isolated per-Revision state.
-
-For durable-profile preview/registration and, when launch is composed, as the
-launched runner's model credential, a manual daemon may set `FORGE_DURABLE_OPENAI_KEY_FILE` to an explicit protected key-file **path**.
-Never put the key value in the environment. See the
-[profile/authentication contract](agent-profile-policy.md#durable-profiles-and-authentication)
-for permissions, supported inputs and fail-closed behavior. This setting neither
-enables durable dispatch nor supplies a Forge Assignment capability. Managed
-launches do not inherit it and have no equivalent yet; see the
-[supported configuration](durable-execution.md#supported-configuration).
-
-For controlled interrupted-effect resolution, a manual daemon may set both
-`FORGE_DURABLE_NODE` and `FORGE_DURABLE_EFFECT_INSPECTOR` to explicit absolute
-trusted executable/entrypoint paths. Partial or relative selection rejects;
-there is no PATH/npm/current-checkout discovery. The retained runtime's component
-hash must match the inspector, which uses committed read-only storage. The paths
-are host configuration, never RPC input. Managed launches do not inherit these
-ambient settings. A Revision registered with `forgeup register --runner-bundle` instead
-receives its own attested components, which `forgeup daemon start` passes explicitly
-(see [matched runner packaging](#matched-runner-packaging)). Missing
-components block new resolutions, but exact accepted-result audit reads still work.
-This configuration supplies no model key/capability and enables no durable dispatch
-or automatic recovery. A manual daemon that also sets both
-`FORGE_DURABLE_RUNNER_HOST` and `FORGE_DURABLE_RUNNER_ENTRY` (absolute paths to the
-matched `forge-runner-host` and `check-entry.ts`) composes durable launch and
-automatic same-attempt recovery; new durable launches still stay withheld by the
-[release gate](durable-execution.md#current-release-state). See [effect investigation](durable-execution.md#interrupted-effects).
-
-### Matched runner packaging
-
-Build the bundle with the pinned Node 24.18.0 on `PATH`:
-
-```sh
-cargo build --release -p forge-runner-host
-node runner/package-bundle.mjs --out DIR --forge-commit <40-hex SHA> \
-  --runner-host target/release/forge-runner-host
-```
-
-The packager assembles a **schema 2** bundle:
-
-- the pinned Node executable (`node/node`);
-- the `forge-runner-host` supervisor (`host/forge-runner-host`), which must
-  report runner protocol 1 and the same commit through `--compatibility`;
-- the runner sources (`runner/src`);
-- the `npm ci --omit=dev --ignore-scripts --no-bin-links` dependency closure,
-  plus the derived read-only adapter.
-
-`forge-runner-bundle.json` records:
-
-- the runner protocol, Node version and Forge commit;
-- the lockfile hash and a content tree hash;
-- the **runner component hash**. This is the `component_hash` that every
-  durable Launch records, as attested by the bundled sources with the bundled
-  Node.
-
-`forgeup register ... --runner-bundle DIR` verifies the bundle against the
-candidate Revision before it copies anything:
-
-- commit, protocol 1, Node version, lock and tree hash;
-- no symlinks or special files;
-- the packaged host's compatibility and Revision;
-- the recomputed runner component hash.
-
-It then copies the bundle into the immutable Installation and verifies the
-*installed copy* again. Schema 1 bundles still register. They have no host
-and serve only retained inspection, never a launch.
-
-`forgeup daemon start` re-attests the whole bundle and then passes the
-Installation's components to the managed daemon:
-
-- **schema 2:** `--durable-runner-bundle ROOT`;
-- **schema 1:** `--durable-node`/`--durable-effect-inspector`.
-
-For a schema 2 Revision, Forgeup also passes `--durable-retained-runner-bundle
-ROOT` for every other registered Revision whose schema 2 bundle verifies (see the
-[management protocol](../crates/docs/management-protocol.md#optional-durable-runner-inputs)).
-A missing, modified or mismatched component blocks startup with a redacted
-diagnostic. Global `PATH`, npm and the checkout are never consulted.
-
-**Launch preflight.** Before any allocation, the daemon checks the selected
-components on every durable profile validation, adapter probe and provision:
-
-- every component is present at its canonical path;
-- the host and Node files are unchanged since the daemon composed them;
-- Node is exactly v24.18.0;
-- the host reports this daemon's runner protocol, runtime schema and Forge
-  Revision;
-- the runner sources still attest the composed component hash.
-
-A failure is `durable-components-incompatible` and names the component.
-
-**Retained Assignments after a Revision switch.** The daemon serves an existing
-Launch only with the configured bundle whose runner component hash equals the
-Launch's `component_hash`. This covers transcripts, effect inspection and
-resolution, retirement reconciliation and recovery. When no configured bundle
-matches, the operation refuses with `durable-components-unavailable`, naming the
-hash. Find the Revision that shipped it with `forgeup runner resolve
---component-hash H`, which accepts either a Launch component hash or a bundle
-tree hash. Register that Revision and restart the daemon.
-
-**Other commands.**
-
-- `forgeup runner verify SELECTOR` re-attests a Revision's runner on demand.
-- `forgeup remove` refuses to delete a Revision's runner while its state exists,
-  unless `--purge-state` is given.
-- Selecting another Revision never changes a retained Assignment's components.
-
-**Compatibility.** The management protocol stays at revision 1. The new daemon
-inputs are optional, and Forgeup passes them only to a daemon built from the
-bundle's own commit. Runner wire protocol 1 and the storage schemas are
-unchanged.
-
-**Retained bundles and protocol bumps.** A retained Launch is served only by a bundle
-whose runner component hash matches it (above), and every such bundle speaks runner
-protocol 1. Today Forgeup refuses non-1 manifest and host protocols at `daemon start`, so Assignments that
-need such a bundle refuse with `durable-components-unavailable`. Any protocol bump must
-define a compatibility rule for retained bundles (a supported set, or a per-bundle
-protocol), or it strands their Assignments. No bump is planned.
-
-None of this enables durable dispatch. A managed daemon receives a model
-credential only from `forgeup daemon start --durable-openai-key-file PATH`,
-passed as the daemon's `--durable-openai-key-file`.
 
 ## Browser and RPC
 
@@ -250,6 +129,8 @@ one column on narrow screens; controls have visible labels and keyboard focus.
 Long code blocks scroll within the detail view. Browser access is read-only, but
 the shared unauthenticated listener also exposes mutating operator RPC: restrict
 it to trusted clients as described in [Security](../README.md#security).
+See [dashboard verification](records-dashboard-verification.md) for evidence and
+current limitations.
 
 CLI status calls `system.status` over JSON-RPC/HTTP and reports failures on
 stderr, with a request timeout of at most 10 seconds.
@@ -295,41 +176,6 @@ default-parallel gate:
 ```sh
 cargo test --workspace -- --test-threads=1
 ```
-
-Durable-execution tests have environment prerequisites:
-
-- **Real Node 24.18.0 first on `PATH`.** Several tests spawn `node` with a cleared
-  environment. A Volta shim refuses to run that way, so every `durable_check_bootstrap` test
-  fails. Prepend the real Node `bin` directory, for example
-  `PATH="$(dirname "$(volta which node)"):$PATH" cargo test --workspace`.
-- **Owner-only `.forge`.** Durable path validation correctly rejects a group-writable
-  ancestor. Under a `0002` umask, fixtures must create an owner-only `.forge` before anything
-  beneath it.
-
-Runner checks, from `runner/`: `npm run check && npm test`. After changing pi-durable, pi-ai,
-chord or Node, also run `npm run test:upstream`
-([upstream constraints](release-verification/README.md#upstream-pi-durable-152-constraints)).
-
-### Real-provider release gate
-
-Durable release verification also requires a real-provider Implementation → independent
-Review cycle on the exact Revision
-([requirements](release-verification/README.md#requirements)). It is opt-in and
-billed, so run it only with operator authorization:
-
-```sh
-cargo build -p forge-runner-host   # must be built from the same Revision
-FORGE_REAL_PROVIDER_KEY_FILE=/abs/owner-only-dir/openai.key \
-  cargo test -p forge-cli --test durable_real_provider -- --nocapture
-```
-
-Without the variable the test prints a skip line and passes. It needs a clean tree (a dirty tree voids the run),
-an owner-only `0600` key file that is never printed, and network access to OpenAI. It composes
-the production durable path with the shipped runner entry, the real host and the real CLI and
-daemon in scratch Workspaces under `/tmp`; the only test-only substitution is launch
-eligibility (`LaunchControl::enable_controlled`). Each run writes an `evidence-summary.json`.
-Record the Revision, component identities, commands, every run (including failures and their
-cause) and any unrun gates in `docs/release-verification/<revision>.md`.
 
 Recheck these limitations against the current checkout; historical test results
 are not release sign-off. Passing local checks does not establish package/install

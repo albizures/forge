@@ -102,7 +102,7 @@ fn seed_existing_launch(fixture: &Fixture, assignment: &forge_app::AgentAssignme
         fixture.root.join("one")
     };
     let adapter = super::super::ServerAgentDispatchAdapterFactory {
-        provider: Box::new(super::super::HerdrAdapterFactory::from_configuration_store(fixture.database.clone())),
+        herdr: super::super::HerdrAdapterFactory::from_configuration_store(fixture.database.clone()),
         daemon_url: "http://127.0.0.1:45003/rpc".into(),
         capability_secret_root: fixture.root.join("assignment-capabilities"),
         cli_override: Some(std::env::current_exe().unwrap()),
@@ -407,11 +407,7 @@ fn late_bootstrap_absence_repair_and_resume_do_not_authorize_replacement() {
     );
     assert!(app.reopen_task(original.record_id).is_err());
     assert_eq!(launch_count(&provider), 1);
-    assert_eq!(
-        app.retire_agent_assignment(&original.id).unwrap_err().code,
-        "assignment-retirement-unreconciled",
-        "provider absence cannot waive unknown launch resources",
-    );
+    app.retire_agent_assignment(&original.id).unwrap();
     assert!(session.context().is_err());
     assert!(
         session.acknowledge().is_err(),
@@ -447,9 +443,6 @@ fn late_bootstrap_absence_repair_and_resume_do_not_authorize_replacement() {
     );
     app.resolve_unknown_agent_resources(&original.id, true, true)
         .unwrap();
-    assert!(app.agent_assignment_info(&original.id).unwrap().capacity_reserved());
-    app.retire_agent_assignment(&original.id).unwrap();
-    app.resume_task_dispatch(original.record_id).unwrap();
     let new = fixture
         .store()
         .claim_record_agent_assignment(original.record_id, "safe-replacement")

@@ -28,10 +28,6 @@ impl RepositoryInspector for NoInspector {
 }
 
 fn inspection_application() -> Application {
-    inspection_application_with_missing_outcome(false)
-}
-
-fn inspection_application_with_missing_outcome(missing_outcome: bool) -> Application {
     let store = SqliteProjectRepository::in_memory().unwrap();
     support::register_project(&store, "alpha");
     let task = store
@@ -71,17 +67,6 @@ fn inspection_application_with_missing_outcome(missing_outcome: bool) -> Applica
     store
         .retire_agent_assignment_resource("inspect-me", "tab", "tab-retired")
         .unwrap();
-    if missing_outcome {
-        // Presentation fixture only: persistence/admission is covered by the
-        // durable store tests. No runtime is started by this inspection path.
-        store
-            .add_agent_assignment_resource(&NewAgentAssignmentResource {
-                assignment_id: "inspect-me".into(),
-                resource_kind: "missing-outcome".into(),
-                resource_id: "bound-attempt".into(),
-            })
-            .unwrap();
-    }
     Application::with_agent_dispatch(
         Box::new(SqliteProjectRepository::in_memory().unwrap()),
         Box::new(store),
@@ -115,52 +100,6 @@ fn assignment_info_renders_all_session_observations_without_claiming_liveness() 
     assert!(human.contains("not authority or liveness evidence"));
     let value = serde_json::to_value(info).unwrap();
     assert_eq!(value["sessions"].as_array().unwrap().len(), 2);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn missing_outcome_is_visible_through_actual_cli_rpc_without_provider_calls() {
-    let app = inspection_application_with_missing_outcome(true);
-    let before = app.agent_assignment_info("inspect-me").unwrap();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}/rpc", listener.local_addr().unwrap());
-    let server = tokio::spawn(async move {
-        axum::serve(listener, router(Daemon::new(app)))
-            .await
-            .unwrap();
-    });
-    for json in [false, true] {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_forge"));
-        command.args([
-            "dispatcher",
-            "assignment-info",
-            "inspect-me",
-            "--server-url",
-            &url,
-        ]);
-        if json {
-            command.arg("--json");
-        }
-        let output = command.output().unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let text = String::from_utf8(output.stdout).unwrap();
-        assert!(text.contains("missing-outcome"));
-        assert!(text.contains("bound-attempt"));
-        assert!(!text.contains("PRIVATE TASK PROMPT"));
-        if json {
-            let info: forge_rpc::AgentAssignmentInfoResponse = serde_json::from_str(&text).unwrap();
-            assert_eq!(
-                info,
-                forge_rpc::AgentAssignmentInfoResponse::from(before.clone())
-            );
-            assert!(info.capacity_reserved);
-            assert!(info.recovery_blockers.contains(&"missing-outcome".into()));
-        }
-    }
-    server.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

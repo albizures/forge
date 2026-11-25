@@ -11,8 +11,6 @@ consumer below are historical; protected Assignment Capability Delivery remains
 accepted and is used by `forge assignment` for authenticated reads and actions.
 See [Assignment context](../../../docs/assignment-context.md).
 
-Durable Task Assignments ([ADR-0014](0014-headless-durable-task-execution.md)) reuse this protected file delivery through their runner; the capability is never a runner argument, environment value or transcript entry.
-
 ## Context
 
 A Pi extension needs the owning Agent Assignment Identifier, Forge endpoint, and Assignment Capability to manage Record Update Subscriptions. Supplying the capability in a prompt or environment value exposes a bearer secret to transcript or process-environment surfaces; requiring a model-facing setup tool couples each session to a manual bootstrap step.

@@ -75,9 +75,6 @@ impl ResolvedLaunchPolicy {
             &self.model,
             &self.tools,
         )?;
-        if self.runtime == "pi-durable" {
-            return self.durable_context().map(|_| ());
-        }
         for entry in self.skills.iter().chain(&self.extensions) {
             if !entry.path.is_absolute()
                 || entry.name.trim().is_empty()

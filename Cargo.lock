@@ -442,7 +442,6 @@ dependencies = [
  "forge-app",
  "forge-build-info",
  "forge-rpc",
- "forge-runner-host",
  "forge-server",
  "forge-store",
  "forgeup",
@@ -469,24 +468,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "forge-runner-host"
-version = "0.1.0"
-dependencies = [
- "forge-app",
- "forge-build-info",
- "forge-rpc",
- "forge-server",
- "forge-store",
- "fs2",
- "rusqlite",
- "rustix",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
 name = "forge-server"
 version = "0.1.0"
 dependencies = [
@@ -495,7 +476,6 @@ dependencies = [
  "forge-app",
  "forge-build-info",
  "forge-rpc",
- "forge-runner-host",
  "forge-store",
  "form_urlencoded",
  "fs2",

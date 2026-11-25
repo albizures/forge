@@ -4,7 +4,7 @@ use super::{
     outcomes, storage_error, workspace_dispatch,
 };
 use forge_app::{
-    AgentAssignment, AgentDispatchRepository, CheckDispatchPreflight, RecordStatus, RecordType,
+    AgentAssignment, AgentDispatchRepository, DispatchPreflightSelection, RecordStatus, RecordType,
     RegistrationError,
     checks::Verdict,
     outcomes::{Attempt, Evidence, OutcomeInput},
@@ -253,15 +253,10 @@ impl SqliteProjectRepository {
         {
             return Ok(false);
         }
-        let (started, provider, herdr_known): (bool, String, bool) = tx.query_row(
-            "SELECT a.launch_started_at_millis IS NOT NULL, p.provider, EXISTS(SELECT 1 FROM agent_assignment_resources WHERE assignment_id = ?1 AND resource_kind = 'agent-name') FROM agent_assignments a JOIN agent_profiles p ON p.record_type = a.profile_record_type AND p.revision = a.profile_revision WHERE a.id = ?1",
-            [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).map_err(storage_error)?;
-        let known = if provider == "pi-durable" {
-            super::durable_execution::handoff_admitted(&tx, id, &attempt)?
-        } else {
-            herdr_known
-        };
-        if started && !known {
+        let uncertain_launch: bool = tx.query_row(
+            "SELECT launch_started_at_millis IS NOT NULL AND NOT EXISTS(SELECT 1 FROM agent_assignment_resources WHERE assignment_id = ?1 AND resource_kind = 'agent-name') FROM agent_assignments WHERE id = ?1",
+            [id], |r| r.get(0)).map_err(storage_error)?;
+        if uncertain_launch {
             return Ok(false);
         }
         // Only the first caller creates the blocker. Replays must not resurrect retired resources.
@@ -276,7 +271,7 @@ impl SqliteProjectRepository {
         &self,
         record: u64,
         id: &str,
-        selection: &CheckDispatchPreflight,
+        selection: &DispatchPreflightSelection,
         evidence: &Evidence,
         expected_check: u64,
         expected_profile: u32,
@@ -405,6 +400,7 @@ impl SqliteProjectRepository {
                 "Project dispatch capacity is reserved",
             ));
         }
+        workspace_dispatch::verify_preflight_selection(&tx, record, selection)?;
         let ids = tx
             .prepare("SELECT id FROM record_checks WHERE record_id = ?1 ORDER BY position")
             .map_err(storage_error)?
@@ -447,25 +443,6 @@ impl SqliteProjectRepository {
                 "invalid-check-profile",
                 "pinned revision requires a registered launch policy",
             ));
-        }
-        // Bind the consistency token to the immutable Check pin inside the same
-        // writer transaction. A caller cannot omit Herdr prerequisites by claiming
-        // that a retained Herdr profile is durable (or vice versa).
-        match (profile.provider.as_str(), selection) {
-            ("herdr", CheckDispatchPreflight::Herdr(selection)) => {
-                workspace_dispatch::verify_preflight_selection(&tx, record, selection)?;
-            }
-            ("pi-durable", CheckDispatchPreflight::PiDurable)
-                if profile
-                    .launch_policy
-                    .as_ref()
-                    .is_some_and(|p| p.runtime == "pi-durable") => {}
-            _ => {
-                return Err(error(
-                    "dispatch-preflight-stale",
-                    "Check provider does not match preflight; retry dispatch",
-                ));
-            }
         }
         let work = outcomes::state(&tx, record)?;
         let bound = if check.position == 0 {

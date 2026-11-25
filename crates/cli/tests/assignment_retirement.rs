@@ -247,23 +247,12 @@ async fn retirement_cli_retries_failed_cleanup_and_reports_remaining_uncertainty
         assert_eq!(info["capacity_reserved"], true);
         fail.store(false, Ordering::SeqCst);
         let retried = run("assignment-retire", false);
-        assert_eq!(
+        assert!(
             retried.status.success(),
-            !unknown,
             "{}",
             String::from_utf8_lossy(&retried.stderr)
         );
-        if unknown {
-            assert!(
-                String::from_utf8_lossy(&retried.stderr)
-                    .contains("assignment-retirement-unreconciled")
-            );
-            assert!(
-                retried.stdout.is_empty(),
-                "no success output for incomplete retirement"
-            );
-        }
-        let human = String::from_utf8(run("assignment-info", false).stdout).unwrap();
+        let human = String::from_utf8(retried.stdout).unwrap();
         assert_eq!(human.contains("uncertain-provisioning"), unknown, "{human}");
         assert!(human.contains("Dispatch Hold"));
         assert!(!human.contains("PRIVATE PROMPT"));
@@ -337,10 +326,7 @@ fn verify_unknown_resource_resolution(
     assert!(!human.contains("PRIVATE PROMPT"));
     let info: serde_json::Value =
         serde_json::from_slice(&run("assignment-info", true).stdout).unwrap();
-    assert_eq!(
-        info["capacity_reserved"], true,
-        "unknown resolution cannot finalize retirement"
-    );
+    assert_eq!(info["capacity_reserved"], false);
     assert!(info["dispatch_hold"].is_string());
     assert!(info["unknown_resource_resolution"]["confirmed_at_millis"].is_number());
     let json = resolve(&[
@@ -354,13 +340,4 @@ fn verify_unknown_resource_resolution(
         repeated["unknown_resource_resolution"],
         info["unknown_resource_resolution"]
     );
-    let finalized = run("assignment-retire", true);
-    assert!(
-        finalized.status.success(),
-        "{}",
-        String::from_utf8_lossy(&finalized.stderr)
-    );
-    let info: serde_json::Value = serde_json::from_slice(&finalized.stdout).unwrap();
-    assert_eq!(info["capacity_reserved"], false);
-    assert!(info["dispatch_hold"].is_string());
 }

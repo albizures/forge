@@ -170,10 +170,6 @@ async fn production_daemon_bootstraps_grilling_through_delivered_cli() {
     let daemon = tokio::spawn(serve(DaemonConfig {
         bind_addr: addr,
         store_path: db.clone(),
-        durable_model_key_file: None,
-        durable_inspection: None,
-        durable_execution: None,
-        durable_retained: Vec::new(),
         managed: None,
     }));
     for _ in 0..100 {

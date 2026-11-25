@@ -95,6 +95,8 @@ dispatch_requests! {
     dispatch_status(forge_rpc::AgentDispatchStatusRequest) -> forge_rpc::AgentDispatchStatusResponse;
     dispatch_record(forge_rpc::DispatchRecordRequest) -> forge_rpc::DispatchRecordResponse;
     task_check_acceptance(forge_rpc::DispatchRecordRequest) -> forge_rpc::DispatchRecordResponse;
+    unstick_plan(forge_rpc::UnstickRequest) -> forge_rpc::UnstickReport;
+    unstick(forge_rpc::UnstickRequest) -> forge_rpc::UnstickReport;
 }
 requests! {
     task_stack(forge_rpc::TaskStackRequest) -> Option<forge_rpc::TaskStack>;
@@ -116,8 +118,6 @@ requests! {
     record_outcome_submit(forge_rpc::RecordOutcomeSubmitRequest) -> forge_rpc::AcceptedOutcome;
     record_work_invalidate(forge_rpc::RecordWorkInvalidateRequest) -> forge_rpc::WorkState;
     execution_mode_set(forge_rpc::SetExecutionModeRequest) -> forge_rpc::RecordResponse;
-    check_profile_migrate(forge_rpc::CheckProfileMigrationRequest) -> forge_rpc::CheckProfileMigrationReceipt;
-    check_profile_migrations(RecordIdRequest) -> Vec<forge_rpc::CheckProfileMigrationReceipt>;
     open_initiative(OpenRecordRequest) -> RecordResponse;
     ready(ReadyRecordsRequest) -> ReadyRecordsResponse;
     open(OpenRecordRequest) -> RecordResponse;

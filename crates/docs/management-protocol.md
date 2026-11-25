@@ -80,45 +80,6 @@ and `FORGE_STORE_PATH` remain manual-launch defaults only.
 manager's per-instance runtime record. The lifecycle credential is secret and
 must not be logged or exposed through status.
 
-### Optional durable-runner inputs
-
-A Revision Installation may carry a matched durable-runner bundle (see
-`docs/development.md#matched-runner-packaging`). Forgeup then adds optional,
-managed-only inputs that select attested components by absolute path. A daemon
-never finds a durable component through `PATH`, npm or its working directory,
-and it inherits none of the manual `FORGE_DURABLE_*` environment settings.
-
-| Installation's bundle | Inputs Forgeup adds |
-| --- | --- |
-| None | None. |
-| Schema 1 (inspection only) | `--durable-node PATH --durable-effect-inspector PATH` (both or neither). |
-| Schema 2 (with `forge-runner-host`) | `--durable-runner-bundle ROOT`, plus `--durable-retained-runner-bundle ROOT` once for each other registered Revision whose schema 2 bundle verifies and has a distinct runner component hash. |
-
-- `--durable-runner-bundle ROOT` composes durable launch and recovery from the
-  bundle's fixed layout (`forge_app::durable_execution::bundle`). It cannot be
-  combined with `--durable-node`/`--durable-effect-inspector`. New durable
-  launches remain withheld by the release gate; these inputs grant no launch
-  eligibility and no model credential.
-- `--durable-openai-key-file PATH` is passed only when the operator
-  runs `forgeup daemon start --durable-openai-key-file PATH`. It requires
-  `--durable-runner-bundle` and an absolute path; the daemon validates the file
-  like a manual daemon's `FORGE_DURABLE_OPENAI_KEY_FILE`. Management protocol
-  revision 1 is unchanged: this is a launch argument, not a protocol message.
-- `--durable-retained-runner-bundle ROOT` requires `--durable-runner-bundle`.
-  The daemon uses a retained bundle only for an existing Launch whose
-  `component_hash` equals that bundle's attested runner component hash, so
-  Assignments launched by an earlier Revision are inspected, recovered and
-  retired with their original code. When no configured bundle matches, those
-  operations refuse with `durable-components-unavailable`. They never fall back
-  to the current Revision's components.
-- Forgeup re-attests every bundle it passes. A retained bundle that fails
-  verification is left out and recorded in the Revision's `forgeup.log`.
-
-Forgeup chooses the inputs from the Installation's *own* bundle schema. A
-bundle is packaged for exactly the commit of its Installation, so a Revision
-whose bundle is schema 2 also accepts the schema 2 inputs. Revisions without a
-bundle, or with a schema 1 bundle, receive only inputs they already accept.
-
 ## Graceful lifecycle control
 
 Managed lifecycle control is not an HTTP or JSON-RPC method. It uses the
@@ -145,13 +106,6 @@ Revision 1 covers offline Revision Identity, additive `system.status`
 management facts, explicit managed launch, managed-daemon ownership
 correlation, and authenticated local graceful shutdown. Compatible additions
 retain revision 1; incompatible changes require a new monotonic revision.
-
-The optional durable-runner inputs are a compatible addition and keep revision
-1. Forgeup passes them only to a Revision whose bundle was packaged for that
-same commit, and that bundle's schema shows which inputs the Revision accepts.
-The required inputs, Revision Identity, status and lifecycle control are
-unchanged. A Forgeup that predates these inputs passes none of them, and the
-daemon then composes no durable launch.
 
 This handoff deliberately excludes Forgeup registry entries and Source Labels,
 installation and activation, executable selection, state retention, logs,

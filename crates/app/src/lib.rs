@@ -8,14 +8,9 @@ use std::{
 
 pub mod agent_profiles;
 pub mod assignment;
-pub mod assignment_retirement;
-pub mod authorization_lease;
-pub mod check_profile_migration;
 pub mod check_templates;
 pub mod checks;
 pub mod completion;
-pub mod durable_execution;
-pub mod durable_profiles;
 pub mod findings;
 pub mod outcomes;
 pub mod prerequisites;
@@ -26,6 +21,7 @@ pub mod stacks;
 pub mod storage_upgrade;
 mod task_attempts;
 pub mod task_inspection;
+pub mod unstick;
 mod workspaces;
 pub use workspaces::{Workspace, WorkspaceRepository};
 mod workspace_dispatch;
@@ -1070,33 +1066,6 @@ pub trait RecordRepository: ProjectRepository {
         self.start_record(id)
     }
 
-    /// Commit an explicit effective-profile migration for existing Checks.
-    ///
-    /// # Errors
-    /// Rejects unsafe ownership, open attempts, stale work, invalid scope/profiles and conflicts.
-    fn migrate_check_profiles(
-        &self,
-        request: &check_profile_migration::Request,
-    ) -> Result<check_profile_migration::Receipt, RegistrationError> {
-        let _ = request;
-        Err(RegistrationError::new(
-            "unsupported",
-            "Check profile migration unavailable",
-        ))
-    }
-
-    /// Migration history for one Task, oldest first.
-    ///
-    /// # Errors
-    /// Rejects scope violations and invalid retained rows.
-    fn check_profile_migrations(
-        &self,
-        task: u64,
-    ) -> Result<Vec<check_profile_migration::Receipt>, RegistrationError> {
-        let _ = task;
-        Ok(Vec::new())
-    }
-
     /// Change explicit execution policy at a safe between-attempt boundary.
     ///
     /// # Errors
@@ -1356,24 +1325,6 @@ impl AgentAssignmentInfo {
         }) {
             blockers.push("uncertain-provisioning".into());
         }
-        if self.resources.iter().any(|resource| {
-            resource.resource_kind == "missing-outcome" && resource.retired_at_millis.is_none()
-        }) {
-            blockers.push("missing-outcome".into());
-        }
-        if self.resources.iter().any(|resource| {
-            resource.resource_kind == "interrupted-effect" && resource.retired_at_millis.is_none()
-        }) {
-            blockers.push("interrupted-effect".into());
-        }
-        // The specific failure point of a failed durable launch (T26).
-        for resource in &self.resources {
-            if resource.resource_kind == "durable-launch-failure"
-                && resource.retired_at_millis.is_none()
-            {
-                blockers.push(resource.resource_id.clone());
-            }
-        }
         if self.assignment.closed_at_millis.is_none()
             && matches!(
                 self.assignment.state,
@@ -1564,12 +1515,6 @@ pub trait AgentDispatchAdapter: Send + Sync {
         Err(AgentAdapterError::InvalidRequest(
             "workspace selection is unsupported".into(),
         ))
-    }
-    /// Check provider-specific launch prerequisites before capability delivery.
-    /// This is only for new execution, never observation, recovery or retirement.
-    /// Provision must still enforce its own ownership checks at the effect boundary.
-    fn validate_provision(&self, _context: &AgentDispatchContext) -> Result<(), AgentAdapterError> {
-        self.probe()
     }
     fn provision(
         &self,
@@ -2096,22 +2041,6 @@ pub struct DispatchPreflightSelection {
     pub binding_id: String,
 }
 
-/// Provider prerequisites observed for the pinned Check profile, not the mutable
-/// Workspace Task selection. This is a consistency token, not launch authority.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum CheckDispatchPreflight {
-    Herdr(DispatchPreflightSelection),
-    /// Durable profile/configuration validation is performed by the adapter. No
-    /// Herdr Workspace selection or endpoint generation authorizes this backend.
-    PiDurable,
-}
-
-impl From<DispatchPreflightSelection> for CheckDispatchPreflight {
-    fn from(selection: DispatchPreflightSelection) -> Self {
-        Self::Herdr(selection)
-    }
-}
-
 /// Durable persistence boundary for provider-neutral dispatch foundations.
 #[allow(clippy::missing_errors_doc)]
 pub trait AgentDispatchRepository: RecordRepository + WorkspaceDispatchRepository {
@@ -2194,7 +2123,7 @@ pub trait AgentDispatchRepository: RecordRepository + WorkspaceDispatchRepositor
         &self,
         _record: u64,
         _assignment: &str,
-        _selection: &CheckDispatchPreflight,
+        _selection: &DispatchPreflightSelection,
         _evidence: &outcomes::Evidence,
         _check: u64,
         _profile_revision: u32,
@@ -2364,14 +2293,6 @@ pub trait AgentDispatchRepository: RecordRepository + WorkspaceDispatchRepositor
         resource_kind: &str,
         resource_id: &str,
     ) -> Result<AgentAssignmentResource, RegistrationError>;
-    /// Finalizes operator retirement only after revocation and reconciliation of every
-    /// other retained resource. Atomically checks those facts and retires only the
-    /// `retirement-pending/operator` marker; adapter success alone is insufficient.
-    /// Exact retries preserve the original retirement timestamp. Never clears a hold.
-    fn finish_agent_assignment_retirement(
-        &self,
-        assignment_id: &str,
-    ) -> Result<(), RegistrationError>;
     /// Atomically audits an explicit operator assertion and resolves provisioning uncertainty.
     /// Requires a closed (capability-revoked) Assignment; never retires known resources.
     fn resolve_unknown_agent_resources(&self, assignment_id: &str)
@@ -2894,6 +2815,8 @@ impl Application {
                 dispatch.validate_task_check_preparation(record_id)?;
                 // No Git side effects until provider configuration and the actual Check pin
                 // are usable. The subsequent transactional claim rechecks mutable gates.
+                self.workspace_dispatch_readiness(&record.workspace_id)?
+                    .require_dispatchable()?;
                 let check = self
                     .list_record_checks(record_id)?
                     .into_iter()
@@ -2911,7 +2834,17 @@ impl Application {
                     })
                     .and_then(|revision| dispatch.agent_profile(RecordType::Task, revision))
                     .map_err(|e| RegistrationError::new("invalid-check-profile", e.message))?;
-                self.preflight_check_worktree_preparation(&record.workspace_id, &profile)?;
+                if profile.launch_policy.is_none()
+                    || self
+                        .adapter_factory()?
+                        .validate_preflight(&profile)
+                        .is_err()
+                {
+                    return Err(RegistrationError::new(
+                        "invalid-check-profile",
+                        "restore the next Check's pinned profile prerequisites",
+                    ));
+                }
                 self.prepare_dispatch_worktree(record_id)?;
             }
             return self.execute_task_check_acceptance(record_id);
@@ -3158,9 +3091,11 @@ impl Application {
         adapter.retire(&context, dispatch).map_err(|error| {
             RegistrationError::new("agent-retirement-failed", format!("{error:?}"))
         })?;
-        // A successful cancellation/cleanup request is not proof that retained
-        // resources are reconciled. Check and finalize together, after external I/O.
-        dispatch.finish_agent_assignment_retirement(assignment_id)?;
+        dispatch.retire_agent_assignment_resource(
+            assignment_id,
+            "retirement-pending",
+            "operator",
+        )?;
         Ok(assignment)
     }
 
@@ -3268,7 +3203,6 @@ impl Application {
             );
         })?;
         if scan.acquired_lease {
-            self.reconcile_durable_check_execution()?;
             self.continue_task_check_acceptance()?;
             self.schedule_agent_dispatch().inspect_err(|error| {
                 tracing::warn!(

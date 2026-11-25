@@ -5,38 +5,6 @@ use crate::{
 };
 
 impl Application {
-    /// Validate the actual Check backend before preparing a new checkout. Herdr
-    /// retains Workspace-wide readiness; durable readiness belongs to its adapter.
-    pub(crate) fn preflight_check_worktree_preparation(
-        &self,
-        workspace: &str,
-        profile: &crate::AgentProfile,
-    ) -> Result<(), RegistrationError> {
-        if profile.provider != "pi-durable" {
-            self.workspace_dispatch_readiness(workspace)?
-                .require_dispatchable()?;
-        }
-        let factory = self.adapter_factory()?;
-        if profile.launch_policy.is_none() || factory.validate_preflight(profile).is_err() {
-            return Err(RegistrationError::new(
-                "invalid-check-profile",
-                "restore the next Check's pinned profile prerequisites",
-            ));
-        }
-        if profile.provider == "pi-durable" {
-            factory
-                .adapter_for(profile)
-                .and_then(|adapter| adapter.probe())
-                .map_err(|_| {
-                    RegistrationError::new(
-                        "agent-dispatch-unavailable",
-                        "pinned profile provider unavailable",
-                    )
-                })?;
-        }
-        Ok(())
-    }
-
     /// Observe, but never repair, a dispatched Task's deliverables.
     pub(crate) fn observe_task_evidence(&self, record: u64) -> Result<Evidence, RegistrationError> {
         let info = self.managed_worktree_info(record)?;
@@ -266,10 +234,28 @@ impl Application {
                 ),
             )
         })?;
-        let selection = if profile.provider == "pi-durable" {
-            crate::CheckDispatchPreflight::PiDurable
-        } else {
-            self.herdr_check_preflight(&task.workspace_id)?.into()
+        let configuration = repository.workspace_dispatch_configuration(&task.workspace_id)?;
+        let (Some(task_profile), Some(grilling_profile), Some(binding)) = (
+            configuration.task_profile,
+            configuration.grilling_profile,
+            configuration.binding,
+        ) else {
+            return Err(RegistrationError::new(
+                "workspace-dispatch-incomplete",
+                "configure Workspace dispatch and verify its provider binding",
+            ));
+        };
+        if !configuration.provider_verified {
+            return Err(RegistrationError::new(
+                "provider-verification-stale",
+                "verify Workspace binding at the current provider endpoint",
+            ));
+        }
+        let selection = crate::DispatchPreflightSelection {
+            task_revision: task_profile.revision,
+            grilling_revision: grilling_profile.revision,
+            provider_generation: configuration.provider_generation,
+            binding_id: binding.id.clone(),
         };
         // Probe the pinned adapter, never replace its revision with a live Workspace selection.
         let adapter = factory.adapter_for(&profile).map_err(|_| {
@@ -284,17 +270,16 @@ impl Application {
                 "pinned profile provider unavailable",
             )
         })?;
-        if let crate::CheckDispatchPreflight::Herdr(expected) = &selection
-            && adapter
-                .verify_workspace(&expected.binding_id)
-                .map_err(|_| {
-                    RegistrationError::new(
-                        "agent-dispatch-unavailable",
-                        "cannot verify exact provider Workspace",
-                    )
-                })?
-                .id
-                != expected.binding_id
+        if adapter
+            .verify_workspace(&binding.id)
+            .map_err(|_| {
+                RegistrationError::new(
+                    "agent-dispatch-unavailable",
+                    "cannot verify exact provider Workspace",
+                )
+            })?
+            .id
+            != binding.id
         {
             return Err(RegistrationError::new(
                 "agent-dispatch-unavailable",
@@ -320,36 +305,5 @@ impl Application {
             crate::reconcile_assignment(repository, adapter.as_ref(), &assignment, true)?;
         }
         Ok((repository.agent_assignment(&assignment.id)?, existing))
-    }
-
-    fn herdr_check_preflight(
-        &self,
-        workspace: &str,
-    ) -> Result<crate::DispatchPreflightSelection, RegistrationError> {
-        let configuration = self
-            .dispatch()?
-            .workspace_dispatch_configuration(workspace)?;
-        let (Some(task_profile), Some(grilling_profile), Some(binding)) = (
-            configuration.task_profile,
-            configuration.grilling_profile,
-            configuration.binding,
-        ) else {
-            return Err(RegistrationError::new(
-                "workspace-dispatch-incomplete",
-                "configure Workspace dispatch and verify its provider binding",
-            ));
-        };
-        if !configuration.provider_verified {
-            return Err(RegistrationError::new(
-                "provider-verification-stale",
-                "verify Workspace binding at the current provider endpoint",
-            ));
-        }
-        Ok(crate::DispatchPreflightSelection {
-            task_revision: task_profile.revision,
-            grilling_revision: grilling_profile.revision,
-            provider_generation: configuration.provider_generation,
-            binding_id: binding.id,
-        })
     }
 }

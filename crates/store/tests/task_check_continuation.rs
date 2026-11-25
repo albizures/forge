@@ -1403,15 +1403,9 @@ fn run_case(case: &str) {
         assert_eq!(info.launch_intent.is_some(), expected_count == 1);
         assert_eq!(store.list_agent_assignments(task.id).unwrap().len(), 1);
         // Revocation still cannot reconcile a launch whose response/identity was lost.
-        let retirement = application().retire_agent_assignment(&assignment.id);
-        if case == "fault-before-provision" {
-            retirement.unwrap();
-        } else {
-            assert_eq!(
-                retirement.unwrap_err().code,
-                "assignment-retirement-unreconciled"
-            );
-        }
+        application()
+            .retire_agent_assignment(&assignment.id)
+            .unwrap();
         if case != "fault-before-provision" {
             assert!(
                 app.agent_assignment_info(&assignment.id)

@@ -41,13 +41,6 @@ struct ServerOptions {
     managed: Option<ManagedLaunchInputs>,
 }
 
-fn print_help() -> ! {
-    println!(
-        "Usage: forge-server [--bind-addr IP:PORT] [--managed --store-path PATH --runtime-record-path PATH --lifecycle-control-endpoint PATH --lifecycle-credential VALUE --daemon-instance-id ID [--durable-node PATH --durable-effect-inspector PATH | --durable-runner-bundle PATH [--durable-retained-runner-bundle PATH]... [--durable-openai-key-file PATH]]]\n\nFORGE_BIND_ADDR and FORGE_STORE_PATH supply manual-launch defaults. FORGE_DURABLE_OPENAI_KEY_FILE optionally selects an owner-only API-key file for durable profile preflight and, when launch is composed, the launched runner's model credential (a path, never a key value; not dispatch enablement). FORGE_DURABLE_NODE and FORGE_DURABLE_EFFECT_INSPECTOR optionally select both absolute trusted matched inspection components for operator effect resolution, never dispatch/recovery enablement. FORGE_DURABLE_RUNNER_HOST and FORGE_DURABLE_RUNNER_ENTRY (both or neither, with the Node and inspector) additionally compose durable launch and recovery; new durable launches stay withheld. Partial configuration rejects. Managed launches inherit none of these durable environment settings. Forgeup explicitly supplies the Revision's attested matched components: a schema 2 runner bundle as --durable-runner-bundle (composing durable launch and recovery from its fixed layout, still withheld by the release gate), plus each other registered Revision's attested bundle as --durable-retained-runner-bundle (used only for Assignments those Revisions launched), and, only when the operator passes `forgeup daemon start --durable-openai-key-file PATH`, that owner-only key file path as --durable-openai-key-file; a schema 1 bundle as --durable-node and --durable-effect-inspector (both or neither, inspection only). Remote bindings are unauthenticated; use only a trusted private network."
-    );
-    std::process::exit(0);
-}
-
 fn parse_options() -> Result<ServerOptions, String> {
     let mut arguments = std::env::args().skip(1);
     let mut bind_addr = None;
@@ -57,11 +50,6 @@ fn parse_options() -> Result<ServerOptions, String> {
     let mut lifecycle_control_endpoint = None;
     let mut lifecycle_credential = None;
     let mut daemon_instance_id = None;
-    let mut durable_node = None;
-    let mut durable_inspector = None;
-    let mut durable_runner_bundle = None;
-    let mut durable_retained_runner_bundles = Vec::new();
-    let mut durable_model_key_file = None;
 
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -85,30 +73,12 @@ fn parse_options() -> Result<ServerOptions, String> {
             "--daemon-instance-id" => {
                 daemon_instance_id = Some(argument_value(&mut arguments, "--daemon-instance-id")?);
             }
-            "--durable-node" => {
-                durable_node = Some(argument_value(&mut arguments, "--durable-node")?);
+            "--help" | "-h" => {
+                println!(
+                    "Usage: forge-server [--bind-addr IP:PORT] [--managed --store-path PATH --runtime-record-path PATH --lifecycle-control-endpoint PATH --lifecycle-credential VALUE --daemon-instance-id ID]\n\nFORGE_BIND_ADDR and FORGE_STORE_PATH supply manual-launch defaults. A managed launch must explicitly provide every managed input. Remote bindings are unauthenticated; use only a trusted private network."
+                );
+                std::process::exit(0);
             }
-            "--durable-effect-inspector" => {
-                durable_inspector = Some(argument_value(
-                    &mut arguments,
-                    "--durable-effect-inspector",
-                )?);
-            }
-            "--durable-runner-bundle" => {
-                durable_runner_bundle =
-                    Some(argument_value(&mut arguments, "--durable-runner-bundle")?);
-            }
-            "--durable-retained-runner-bundle" => {
-                durable_retained_runner_bundles.push(argument_value(
-                    &mut arguments,
-                    "--durable-retained-runner-bundle",
-                )?);
-            }
-            "--durable-openai-key-file" => {
-                durable_model_key_file =
-                    Some(argument_value(&mut arguments, "--durable-openai-key-file")?);
-            }
-            "--help" | "-h" => print_help(),
             _ => return Err(format!("unknown argument `{argument}`")),
         }
     }
@@ -125,11 +95,6 @@ fn parse_options() -> Result<ServerOptions, String> {
                 .ok_or("--managed requires --lifecycle-credential")?,
             daemon_instance_id: daemon_instance_id
                 .ok_or("--managed requires --daemon-instance-id")?,
-            durable_node,
-            durable_inspector,
-            durable_runner_bundle,
-            durable_retained_runner_bundles,
-            durable_model_key_file,
         })
     } else {
         if store_path.is_some()
@@ -137,11 +102,6 @@ fn parse_options() -> Result<ServerOptions, String> {
             || lifecycle_control_endpoint.is_some()
             || lifecycle_credential.is_some()
             || daemon_instance_id.is_some()
-            || durable_node.is_some()
-            || durable_inspector.is_some()
-            || durable_runner_bundle.is_some()
-            || !durable_retained_runner_bundles.is_empty()
-            || durable_model_key_file.is_some()
         {
             return Err("managed launch inputs require --managed".into());
         }

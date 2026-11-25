@@ -228,10 +228,6 @@ impl Fixture {
             &DaemonConfig {
                 bind_addr: "127.0.0.1:0".parse().unwrap(),
                 store_path: self.database.clone(),
-                durable_model_key_file: None,
-                durable_inspection: None,
-                durable_execution: None,
-                durable_retained: Vec::new(),
                 managed: None,
             },
             Some(std::env::current_exe().unwrap()),
@@ -283,11 +279,6 @@ mod spec_execution {
 mod recovery {
     use super::*;
     include!("workspace_recovery_tests.rs");
-}
-
-mod rollout {
-    use super::*;
-    include!("rollout_tests.rs");
 }
 
 fn has(ready: &forge_app::WorkspaceDispatchReadiness, code: &str) -> bool {

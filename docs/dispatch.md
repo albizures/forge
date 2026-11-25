@@ -1,17 +1,14 @@
 # Dispatcher operations
 
 Forge's daemon owns dispatch state, provider resources, and reconciliation.
-The CLI neither opens dispatch storage nor contacts Herdr directly. Herdr and the
-headless pi-durable runner are provider adapters: provider or runtime state is never
-proof of Forge Task completion. Each Task Check selects its backend through its
-effective pinned profile revision. This guide describes the shared Check rules and
-the Herdr backend; the durable backend, its release gate and its operator controls are
-in [Durable Task execution](durable-execution.md).
+The CLI neither opens dispatch storage nor contacts Herdr directly. Herdr is a
+provider adapter: provider state is never proof of Forge Task completion.
 
 ## Verified Check-driven Task dispatch
 
-Normal explicit and automatic Task dispatch is enabled after deterministic
-verification and a six-attempt real-provider handback/remediation gate.
+Normal explicit and automatic Task dispatch is enabled following Spec #644's
+retained deterministic verification (#660, renewed after provider fixes in #661)
+and six-attempt real-provider handback/remediation gate (#661 comment 2).
 Before those gates, normal dispatch rejected with
 `task-dispatch-unsupported-contract` and automatic scheduling made no Task claims.
 The acceptance command did not enable dispatch or change Execution Mode. This is
@@ -116,9 +113,10 @@ A false output commit claim is rejected without publishing an Assessment.
 
 ### Deliberate Implementation Continuations
 
-Use the delivered [Implementation profile](profiles/implementation.md)
-for the complete submission shape and stopping instructions. Registering it is
-separate from immutable Check pins and live recovery.
+Use the delivered [Implementation profile](profiles/implementation-continuations.md)
+for the complete submission shape and stopping instructions. Its
+[rollout handoff](profiles/implementation-continuations-handoff.md) is explicitly
+separate from registration, immutable Check pins and live recovery.
 
 Only the authenticated Task Implementation agent may deliberately hand off unfinished
 work. Keep implementing and testing until complete or a concrete execution constraint;
@@ -361,13 +359,6 @@ operator-directed store replacement.
 
 ## Configure dispatch
 
-This section configures the **Herdr backend**, used by Grilling and by Task Checks
-pinned to `herdr/pi` revisions. A Task Check pinned to a `pi-durable` revision does
-not require the Herdr socket, binding, Workspace profile selections or Workspace-wide
-readiness: its pinned adapter's preflight and the durable release gate apply instead,
-with no Herdr fallback. `dispatcher status` reports this Herdr-oriented Workspace
-readiness only.
-
 The adapter requires Herdr Socket API protocol **22**, schema version **1**, and
 an operator-selected existing Herdr Workspace. Each **Forge Workspace** independently
 selects a Task profile revision, a Grilling profile revision, and an exclusive
@@ -475,7 +466,7 @@ new revision for that Workspace and Record Type.
 and Record Type; unknown revisions are rejected. Registration selects only the
 revision it creates; there is no ongoing latest-revision tracking. Workspace Task selection supplies authoring/lifecycle defaults and
 configuration readiness, **not live Task attempt routing**. Configure each Project's
-[Check Template](checks.md#project-check-templates) with registered Task profile
+[Check Template](records.md#project-check-templates) with registered Task profile
 revisions **before opening Tasks**. Every attempt, retry and remediation uses its
 Check's copied revision; template or Workspace changes never rebind existing
 Checks. The default profile-less baseline is usable for Manual work, not dispatch.
@@ -511,11 +502,6 @@ replacement. Explicit dispatch is not a recovery override: follow the
 [recovery runbook](assignment-recovery.md) before retrying.
 
 ## Launch and acknowledgement
-
-This section describes Herdr launches. Durable launches use the same authenticated
-`forge assignment bootstrap` and protected capability file, but run headlessly under a
-supervised runner with bounded authorization leases; see
-[Durable Task execution](durable-execution.md#execution-model).
 
 Forge persists a one-shot launch intent and acknowledgement deadline before
 launching Pi. Pi starts without a positional prompt. Forge pins the returned
@@ -597,15 +583,29 @@ not directly mutate Assignments.
 
 ## Investigation and recovery
 
-Uncertain launches, holds, retirement, unknown resources and retained-work salvage follow
-the ordered [Assignment recovery runbook](assignment-recovery.md). Clearing a hold does not
-prove agent absence or authorize replacement, and closed Assignments can still reserve
-capacity.
+Start with retained evidence:
 
-Forge does not reset, rebase, delete, recreate or automatically repair dispatcher-created
-branches or worktrees. Failed setup hooks, branch collisions, unavailable bases, invalid
-checkouts and provider or workspace failures retain diagnostics for investigation. Repeated
-definite provisioning failures can create a hold; uncertain launches follow the runbook.
-Automated Git cleanup or repair, adoption or replacement of unknown resources, general
-cancellation beyond retirement and automatic shared-workspace conflict resolution are not
-provided.
+```sh
+forge dispatcher assignment-info <assignment-id>
+forge dispatcher status --project <slug>
+forge worktree info <task-id>
+forge worktree doctor
+```
+
+Follow the ordered [assignment recovery runbook](assignment-recovery.md) before
+retirement, unknown-resource resolution, or `resume`. Clearing a hold does not
+prove agent absence or authorize replacement. Revocation does not prove process
+death or undo external actions. Closed Assignments can still reserve capacity.
+
+Forge does not reset, rebase, delete, recreate, or automatically repair
+dispatcher-created branches/worktrees. Failed setup hooks, branch collisions,
+unavailable bases, invalid checkouts, and provider/workspace failures retain
+diagnostics for investigation. Repeated definite provisioning failures can create
+a hold; uncertain launches require the more conservative recovery runbook.
+
+Back up existing evidence before upgrades. Owned development schemas can evolve;
+pre-Workspace unowned data requires a new store, not legacy import or implicit
+adoption. Forge does not adopt legacy workspace/worktree state. Automated Git
+cleanup/repair, unknown-resource adoption/replacement, general cancellation beyond
+retirement, and automatic shared-workspace conflict resolution are not provided.
+Integration and release decisions remain explicit workflow actions.

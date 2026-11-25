@@ -67,18 +67,6 @@ impl Drop for Fixture {
 }
 
 #[test]
-fn herdr_flags_reject_even_a_supported_durable_policy() {
-    let fixture = Fixture::new();
-    let mut profile = fixture.profile(false);
-    let policy = profile.launch_policy.as_mut().unwrap();
-    policy.runtime = "pi-durable".into();
-    policy.model = "openai/gpt-4.1".into();
-    policy.thinking_level = Some(forge_app::agent_profiles::ThinkingLevel::Off);
-    policy.validate_direct_inputs().unwrap();
-    assert!(pi_launch_arguments(&profile, "bootstrap").is_err());
-}
-
-#[test]
 fn thinking_flags_apply_to_both_record_types_and_preserve_historical_launches() {
     let fixture = Fixture::new();
     let historical = r#"{"version":1,"runtime":"herdr/pi","model":"test/model","tools":[],"behavior":"old","skills":[],"extensions":[],"mcpServers":[]}"#;
@@ -170,9 +158,9 @@ fn pi_flags_drift_and_unsupported_mcp_fail_before_provider_or_provision_intent()
             resources: vec![],
         };
         let adapter = crate::CapabilityDeliveryAdapter {
-            inner: Box::new(super::HerdrAdapter {
+            inner: super::HerdrAdapter {
                 socket_path: fixture.0.join("no-provider.sock"),
-            }),
+            },
             daemon_url: "http://127.0.0.1:45003".into(),
             capability_secret_root: fixture.0.join("capabilities"),
             cli_override: None,
@@ -267,9 +255,9 @@ fn registered_grilling_receives_protected_capability_from_production_adapter() {
         resources: vec![],
     };
     let adapter = crate::CapabilityDeliveryAdapter {
-        inner: Box::new(super::HerdrAdapter {
+        inner: super::HerdrAdapter {
             socket_path: fixture.0.join("unused.sock"),
-        }),
+        },
         daemon_url: "http://127.0.0.1:45003".into(),
         capability_secret_root: fixture.0.join("secrets"),
         cli_override: None,

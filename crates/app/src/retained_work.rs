@@ -134,16 +134,7 @@ impl Application {
             &crate::stacks::task_branch(record),
             &base,
         )?;
-        let info = self.managed_worktree_info(record)?;
-        let dirty = info.safety.facts.iter().any(|f| f == "dirty");
-        let observed = if dirty {
-            Evidence::Repository {
-                repository: project.project_root.display().to_string(),
-                commit: self.inspector.head_commit(&claim.path)?,
-            }
-        } else {
-            self.observe_task_evidence(record)?
-        };
+        let (observed, dirty) = self.observe_retained_evidence(record, &project)?;
         let retained = if dirty {
             Some(self.worktree_adapter()?.retained_state(&claim.path)?)
         } else {
@@ -156,6 +147,26 @@ impl Application {
             ));
         }
         Ok(retained)
+    }
+
+    /// Observe, without repairing, the retained checkout's HEAD and whether it is dirty.
+    /// A dirty checkout's HEAD is selection input only, never clean checkpoint evidence.
+    pub(crate) fn observe_retained_evidence(
+        &self,
+        record: u64,
+        project: &crate::Project,
+    ) -> Result<(Evidence, bool), RegistrationError> {
+        let info = self.managed_worktree_info(record)?;
+        if info.safety.facts.iter().any(|f| f == "dirty") {
+            return Ok((
+                Evidence::Repository {
+                    repository: project.project_root.display().to_string(),
+                    commit: self.inspector.head_commit(&info.claim.path)?,
+                },
+                true,
+            ));
+        }
+        Ok((self.observe_task_evidence(record)?, false))
     }
 
     /// Revalidate clean and dirty salvage identity before reserving the first replacement.

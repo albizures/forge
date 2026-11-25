@@ -304,7 +304,7 @@ pub(super) fn compatible(c: &Connection, record: u64) -> Result<(), Registration
     forge_app::stacks::validate_stack_member(&task, last.as_ref())?;
     if task.execution_mode == ExecutionMode::Dispatched {
         let mut statement = c.prepare(
-            "SELECT c.id, c.name, COALESCE((SELECT m.new_revision FROM check_profile_migration_changes m WHERE m.check_id = c.id ORDER BY m.migration_id DESC LIMIT 1), c.profile_revision) FROM record_checks c WHERE c.record_id = ?1 ORDER BY c.position",
+            "SELECT id, name, profile_revision FROM record_checks WHERE record_id = ?1 ORDER BY position",
         ).map_err(storage_error)?;
         let checks = statement
             .query_map([record.cast_signed()], |r| {

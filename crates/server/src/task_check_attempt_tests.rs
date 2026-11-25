@@ -131,7 +131,7 @@ async fn check_bound_outcome_inspection(kind: u8) {
                 grilling_revision: 1,
                 binding_id: "provider".into(),
                 provider_generation: generation,
-            }.into(),
+            },
             &evidence,
             check.id,
             profile.revision,
@@ -147,9 +147,9 @@ async fn check_bound_outcome_inspection(kind: u8) {
             Box::new(super::GitWorktreeAdapter),
             Box::new(SqliteProjectRepository::open(&fixture.database_path).unwrap()),
             Box::new(super::ServerAgentDispatchAdapterFactory {
-                provider: Box::new(super::HerdrAdapterFactory::from_configuration_store(
+                herdr: super::HerdrAdapterFactory::from_configuration_store(
                     fixture.database_path.clone(),
-                )),
+                ),
                 daemon_url: "http://127.0.0.1:45003".into(),
                 capability_secret_root: root.clone(),
                 cli_override: None,

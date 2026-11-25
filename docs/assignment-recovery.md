@@ -2,10 +2,39 @@
 
 Use this ordered runbook to investigate uncertain launches, revoke Assignments,
 verify provider cleanup, and safely restore dispatch eligibility. For initial
-configuration and launch behavior, see [dispatch operations](dispatch.md). Durable
-(pi-durable) Assignments follow the same investigation, retirement, salvage and hold
-steps; their backend-specific operations are in
-[Durable Task execution](durable-execution.md#operate-durable-assignments).
+configuration and launch behavior, see [dispatch operations](dispatch.md).
+
+## One-command recovery
+
+`forge task unstick` plans and applies this runbook for one Task by composing the
+operations below. It adds no authority: each operator assertion is an explicit
+flag, and every operation keeps its own gates.
+
+```sh
+forge task unstick <task-id>
+forge task unstick <task-id> --apply
+forge task unstick <task-id> --apply --agent-gone --keep-work --actor <operator> --message <explanation>
+```
+
+Without `--apply` it changes nothing and lists the steps that apply, in order:
+retire old attempts, resolve unknown resources, salvage retained work, reset
+exhausted budgets, clear the hold, then dispatch. With `--apply` it refuses to
+start when any step still needs a flag or is blocked, and otherwise stops at the
+first failed step, leaving holds and evidence in place for the steps it did not
+reach. Exit status is 0 when nothing blocks progress, 2 when waiting on an
+operator flag or an in-progress launch, and 1 when recovery stopped or failed.
+
+- An agent still reported Working, Idle or Blocked is never retired unless you
+  pass `--retire-working`; a late acknowledgement only needs the hold cleared.
+- `--agent-gone` asserts **both** that the old agent cannot act and that its
+  known and unknown resources are safe. It feeds both confirmations of
+  `assignment-resolve-unknown` and `recover-retained-work`. Pass it only after
+  the external checks described below.
+- Retained work is never discarded: without `--keep-work` recovery stops.
+- `--reset-budgets` covers remediation and exhausted continuation budgets, and
+  requires `--actor` and `--message` like the underlying operations.
+- Spec execution problems (`stack-blocked`, `invalid-spec-plan`) and Manual Tasks
+  stop recovery; follow the sections below.
 
 ## Trust and upgrade boundary
 
@@ -62,24 +91,6 @@ hold. Late acknowledgement can still make the existing Assignment Working and
 allow its Task to start without clearing that hold. Do not retire an otherwise
 healthy agent just because its acknowledgement was late.
 
-## Durable Assignments
-
-For a durable Assignment, also read its
-[status and transcript](durable-execution.md#status-and-transcripts-read-only), and handle
-its backend-specific state in Durable Task execution before the steps below:
-
-- `interrupted-effect` blockers: [interrupted effects](durable-execution.md#interrupted-effects).
-  Nothing below waives them.
-- `durable-runtime-*` codes and fence proof:
-  [leases and outages](durable-execution.md#authorization-leases-and-outages). Recovery
-  after a proven crash or fence is automatic
-  ([same-attempt recovery](durable-execution.md#same-attempt-recovery)).
-- `durable-launch-*` codes: [failed launches](durable-execution.md#failed-launches).
-- Missing Outcome: [follow-ups](durable-execution.md#follow-ups) or retirement. After any
-  daemon, runner or host restart during Missing Outcome, retirement is the only exit
-  ([Missing Outcome](durable-execution.md#missing-outcome)).
-- After retirement: [runtime history deletion](durable-execution.md#runtime-history-retention-and-deletion).
-
 ## Revoke and clean up known resources
 
 ```sh
@@ -100,17 +111,6 @@ known resources, retirement-pending evidence and provisioning uncertainty surviv
 restart and reserve capacity. Correct the provider/endpoint problem and retry the
 same `assignment-retire`, including for an already closed Assignment. Do not
 bypass ownership checks or treat a successful mutation alone as verified absence.
-
-Provider success alone also cannot finalize retirement. Forge atomically requires
-revoked authority and every other retained resource to be reconciled before
-retiring its `retirement-pending/operator` marker. Otherwise `assignment-retire`
-returns `assignment-retirement-unreconciled`, with no success JSON, even if known
-provider cleanup succeeded. The marker, capacity reservation and Dispatch Hold
-remain. Generic provider resource cleanup cannot retire this marker. Exact
-finalization retries preserve its original retirement timestamp.
-
-For a durable Assignment, the same command reconciles the original host's receipt instead
-of Herdr resources; see [durable retirement](durable-execution.md#retirement).
 
 ## Resolve unknown resources only after external safety checks
 
@@ -137,12 +137,7 @@ calls preserve the original audit.
 Only provisioning-intent uncertainty is resolved. Known resources,
 retirement-pending and other blockers remain untouched and reserve capacity until
 separately resolved. The Dispatch Hold remains, too. Inspect again rather than
-assuming the command's success means recovery is complete. After resolving
-unknown provisioning resources, retry the same `assignment-retire` to reconcile
-and finalize its retained retirement marker. This does not clear the hold or
-waive any other blocker. The generic finalization gate itself supplies no
-process-death proof; durable cleanup additionally requires the exact protected
-supervisor receipt ([durable retirement](durable-execution.md#retirement)).
+assuming the command's success means recovery is complete.
 
 ## Authorize retained Implementation work for salvage
 
@@ -259,27 +254,31 @@ can retain diagnostic holds. Forge never commits or discards changes to recover.
 Description edits and substantive handback invalidate current passes without
 removing Findings/history; both original reviews rerun after Implementation.
 
-Three separate budgets can stop progress. Each is renewed by its own explicit operator
-action, taken only after investigation and safe retirement/resource reconciliation. The
-two resets clear no hold, Finding or other budget; only `resume` clears the hold:
-
-- **Interrupted retries** (two per Check): `forge dispatcher resume <task>` renews them
-  and clears the hold; Manual handoff is not required. See
-  [bounded progress](dispatch.md#bounded-progress-and-operator-intervention).
-- **Remediation cycles** (three per Task run) and no-progress stops:
-  `dispatcher reset-remediation <task> --actor <operator> --message <explanation>`,
-  then `resume`. `resume` alone cannot bypass them.
-- **Continuations** (20 total or two consecutive unchanged checkpoints per Check):
-  `dispatcher reset-continuations <task> --check <check> --workspace <id> --actor <operator> --message <explanation>`,
-  then `resume`. Neither `resume` nor a remediation reset bypasses them. See
-  [continuation operations](dispatch.md#deliberate-implementation-continuations).
-
-`record check work <task> --json` shows every counter, stop reason and reset audit.
+Two automatic retries per interrupted Check and three remediation cycles per Task
+run bound progress across restart, redispatch and mode changes. No progress stops
+earlier. `resume` renews interrupted retries, but cannot bypass remediation
+exhaustion or no-progress state. Only a recorded operator
+`dispatcher reset-remediation <task> --actor <operator> --message <explanation>`
+after safe ownership/resource reconciliation resets remediation budget; it does
+not reset interruption counts or clear holds, Findings or other safety state.
+See [bounded progress](dispatch.md#bounded-progress-and-operator-intervention)
+for interrupted-Check recovery through explicit resume; Manual handoff is not required.
 
 A final pass is not Done. Reconciliation separately requires confirmed retirement,
 all resources reconciled, clean current evidence/freshness, all current passes,
 no blockers/holds and satisfied dependencies. Managed Worktrees/branches remain
 retained after completion; no automatic Git integration or cleanup occurs.
+
+Continuation accounting is independent: 20 total or two consecutive unchanged
+checkpoints exhaust a Check. `record check work <task> --workspace <id>` (or `--json`)
+shows counters, retained handoff and reset audit. Only
+`dispatcher reset-continuations <task> --check <check> --workspace <id> --actor <operator> --message <explanation>`
+renews that Check's total and consecutive-unchanged allowance. It retains holds,
+ownership/resources, evidence and all other budgets/history, and launches nothing.
+After investigating the limit and recording a justified reset, complete the separate
+retirement/resource checks above before explicit resume. Neither resume nor remediation
+reset bypasses exhausted continuation accounting. See
+[continuation operations](dispatch.md#deliberate-implementation-continuations).
 
 ## Spec parent and inheritance rejections
 

@@ -2,14 +2,9 @@
 
 mod agent_profiles;
 mod assignment;
-pub mod durable_execution;
-pub mod effect_resolution;
-pub use effect_resolution::ResolveInterruptedEffectRequest;
-mod assignment_inspection;
 mod task_inspection;
 pub use agent_profiles::*;
 pub use assignment::*;
-pub use assignment_inspection::*;
 pub use task_inspection::*;
 mod workspaces;
 pub use workspaces::*;
@@ -27,13 +22,13 @@ pub use forge_app::findings::{
 pub use forge_app::outcomes::Evidence;
 pub use forge_app::outcomes::{AcceptedOutcome, Attempt, WorkState};
 pub use forge_app::retained_work::{RecoveryInput, RetainedWorkRecovery};
+pub use forge_app::unstick::{
+    UnstickConsent, UnstickFlag, UnstickReport, UnstickStep, UnstickStepKind, UnstickStepStatus,
+    UnstickVerdict,
+};
 pub use record_selection::*;
 
 pub use forge_app::ExecutionMode;
-pub use forge_app::check_profile_migration::{
-    Receipt as CheckProfileMigrationReceipt, Request as CheckProfileMigrationRequest,
-    Selection as CheckProfileSelection,
-};
 pub use forge_app::stacks::{StackDestination, StackSource, TaskStack};
 use forge_app::{
     AgentDispatchProjectStatus, AgentDispatchReconcileResult, AgentDispatchStatus, AgentProfile,
@@ -187,58 +182,25 @@ pub trait AgentDispatchApi {
         &self,
         request: AssignmentInfoRequest,
     ) -> RpcResult<AgentAssignmentInfoResponse>;
-    /// Read-only persisted status; starts no runner, scheduler, model call or lease.
-    #[method(name = "assignmentDurableStatus")]
-    async fn assignment_durable_status(
-        &self,
-        request: SelectedRecordRequest<AssignmentInfoRequest>,
-    ) -> RpcResult<AssignmentDurableStatusResponse>;
-    /// Read-only committed transcript page; never acquires host ownership or opens storage writable.
-    #[method(name = "assignmentTranscript")]
-    async fn assignment_transcript(
-        &self,
-        request: SelectedRecordRequest<AssignmentTranscriptRequest>,
-    ) -> RpcResult<AssignmentTranscriptResponse>;
-    /// Explicitly delete retired runtime history. Rejects open, unreconciled or
-    /// uncertain Assignments before deletion; never starts a runner or edits Forge records.
-    #[method(name = "assignmentPurgeRuntime")]
-    async fn assignment_purge_runtime(
-        &self,
-        request: SelectedRecordRequest<forge_app::durable_execution::purge::Request>,
-    ) -> RpcResult<forge_app::durable_execution::purge::Record>;
-    /// Read the persisted new-durable-launch policy. Starts nothing and contacts no provider.
-    #[method(name = "durableLaunchStatus")]
-    async fn durable_launch_status(
-        &self,
-    ) -> RpcResult<forge_app::durable_execution::launch_control::Status>;
-    /// Sticky rollback of NEW durable launches. Never moves, retires or rebinds existing
-    /// Assignments, rewrites Check pins or affects Herdr Tasks/Grilling.
-    #[method(name = "durableLaunchDisable")]
-    async fn durable_launch_disable(
-        &self,
-        request: forge_app::durable_execution::launch_control::DisableRequest,
-    ) -> RpcResult<forge_app::durable_execution::launch_control::Status>;
-    /// Durably record idempotent operator input bound to the original attempt. It
-    /// grants no lease, Outcome, recovery or rebinding and does not prove delivery.
-    #[method(name = "assignmentFollowUp")]
-    async fn assignment_follow_up(
-        &self,
-        request: SelectedRecordRequest<forge_app::durable_execution::followup::Request>,
-    ) -> RpcResult<forge_app::durable_execution::followup::Receipt>;
     #[method(name = "assignmentRetire")]
     async fn assignment_retire(&self, request: RetireAgentAssignmentRequest) -> RpcResult<()>;
-    /// Evidence-based resolution after revocation and exclusive committed inspection.
-    /// Workspace selection is routing, not operator authentication.
-    #[method(name = "assignmentResolveEffect")]
-    async fn assignment_resolve_effect(
-        &self,
-        request: SelectedRecordRequest<ResolveInterruptedEffectRequest>,
-    ) -> RpcResult<forge_app::durable_execution::effect_resolution::ResolutionReceipt>;
     #[method(name = "assignmentResolveUnknown")]
     async fn assignment_resolve_unknown(
         &self,
         request: ResolveUnknownAgentResourcesRequest,
     ) -> RpcResult<AgentAssignmentInfoResponse>;
+    /// Read-only one-command recovery plan for a Task; changes nothing.
+    #[method(name = "unstickPlan")]
+    async fn unstick_plan(
+        &self,
+        request: SelectedRecordRequest<UnstickRequest>,
+    ) -> RpcResult<UnstickReport>;
+    /// Applies the recovery plan through existing operations, stopping at the first gate.
+    #[method(name = "unstick")]
+    async fn unstick(
+        &self,
+        request: SelectedRecordRequest<UnstickRequest>,
+    ) -> RpcResult<UnstickReport>;
 }
 
 #[rpc(client, server, namespace = "worktree")]
@@ -439,18 +401,6 @@ pub trait RecordApi {
         &self,
         request: SelectedRecordRequest<SetExecutionModeRequest>,
     ) -> RpcResult<RecordResponse>;
-    /// Explicit, auditable effective-profile migration for existing Checks; never
-    /// rewrites historical pins and invalidates freshness once per operation ID.
-    #[method(name = "checkProfileMigrate")]
-    async fn check_profile_migrate(
-        &self,
-        request: SelectedRecordRequest<forge_app::check_profile_migration::Request>,
-    ) -> RpcResult<forge_app::check_profile_migration::Receipt>;
-    #[method(name = "checkProfileMigrations")]
-    async fn check_profile_migrations(
-        &self,
-        request: SelectedRecordRequest<RecordIdRequest>,
-    ) -> RpcResult<Vec<forge_app::check_profile_migration::Receipt>>;
     #[method(name = "start")]
     async fn start(
         &self,
@@ -996,6 +946,14 @@ pub struct ResetRemediationRequest {
     pub id: u64,
     pub actor: String,
     pub message: String,
+}
+/// Selects a Task and the explicit operator assertions for one-command recovery.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct UnstickRequest {
+    pub record_id: u64,
+    #[serde(default)]
+    pub consent: UnstickConsent,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]

@@ -4,22 +4,31 @@ use forge_app::{
 };
 use std::fs;
 
-const PROFILE: &str = include_str!("../../../docs/profiles/implementation.md");
+const PROFILE: &str = include_str!("../../../docs/profiles/implementation-continuations.md");
+const ORIGIN: &str = include_str!("../../../docs/profiles/implementation-continuations-origin.md");
 
 #[test]
-fn implementation_continuations_profile_resolves_with_stopping_guidance() {
+fn implementation_continuations_resolves_without_changing_runtime_policy() {
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");
     let operator = root.path().join("operator");
     fs::create_dir_all(&operator).unwrap();
     fs::create_dir_all(workspace.join(".agents/profiles")).unwrap();
     let path = workspace.join(".agents/profiles/implementation.md");
-    fs::write(&path, PROFILE).unwrap();
+    fs::write(&path, ORIGIN).unwrap();
     let catalog = ResourceCatalog::discover(&operator, &workspace).unwrap();
+    let original = catalog.resolve(&workspace, &path).unwrap();
+    fs::write(&path, PROFILE).unwrap();
     let revised = catalog.resolve(&workspace, &path).unwrap();
+    assert_eq!(PROFILE.split("---").nth(1), ORIGIN.split("---").nth(1));
     assert_eq!(revised.runtime, "herdr/pi");
     assert_eq!(revised.model, "openai-codex/gpt-6.1-terra");
     assert_eq!(revised.thinking_level, Some(ThinkingLevel::Medium));
+    let mut original_policy = serde_json::to_value(original).unwrap();
+    let mut revised_policy = serde_json::to_value(&revised).unwrap();
+    original_policy.as_object_mut().unwrap().remove("behavior");
+    revised_policy.as_object_mut().unwrap().remove("behavior");
+    assert_eq!(original_policy, revised_policy);
     for instruction in [
         "keep implementing and testing until the bound Check is met",
         "a small successful commit, or remaining complexity alone is insufficient",
@@ -133,5 +142,6 @@ fn implementation_continuations_documented_outcomes_validate_and_reject_invalid_
 #[test]
 fn implementation_continuations_glossary_matches_approved_block() {
     let block = "**Continuation**:\nA deliberate handoff of unfinished Implementation work for another Agent to continue without passing the bound Check.\n_Avoid_: interruption, implementation failure, Task completion";
-    assert!(include_str!("../../GLOSSARY.md").contains(block));
+    assert!(include_str!("../../../docs/specs/implementation-continuations.md").contains(block));
+    assert!(include_str!("../../CONTEXT.md").contains(block));
 }

@@ -10,7 +10,6 @@ repository.workspace = true
 forge-app = { path = "../app" }
 forge-build-info = { path = "../build-info" }
 forge-rpc = { path = "../rpc" }
-forge-runner-host = { path = "../runner-host" }
 forge-store = { path = "../store" }
 fs2.workspace = true
 sha2 = "0.10.9"
@@ -18,7 +17,7 @@ getrandom = "0.3.4"
 askama = "0.14.0"
 axum = "0.8.8"
 jsonrpsee = { version = "0.26.0", features = ["http-client", "server"] }
-tokio = { version = "1.48.0", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1.48.0", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tower = { version = "0.5.2", features = ["util"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
@@ -27,10 +26,6 @@ serde_json = "1.0.145"
 form_urlencoded = "1.2.2"
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 time = { version = "0.3", features = ["formatting"] }
-
-[features]
-# Test seam only (T26): lets integration tests force durable launch failures.
-test-faults = []
 
 [lints]
 workspace = true

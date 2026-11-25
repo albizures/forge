@@ -350,9 +350,9 @@ fn authenticated_grilling_bootstrap_separates_bound_identity_and_live_context() 
         Box::new(SqliteProjectRepository::open(&fixture.database_path).unwrap()),
         Box::new(SqliteProjectRepository::open(&fixture.database_path).unwrap()),
         Box::new(super::ServerAgentDispatchAdapterFactory {
-            provider: Box::new(super::HerdrAdapterFactory::from_configuration_store(
+            herdr: super::HerdrAdapterFactory::from_configuration_store(
                 fixture.database_path.clone(),
-            )),
+            ),
             daemon_url: "http://127.0.0.1:1".into(),
             capability_secret_root: root.clone(),
             cli_override: None,

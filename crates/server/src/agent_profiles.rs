@@ -48,7 +48,6 @@ impl AgentProfileApiServer for Daemon {
                 kind(&request.record_type)?,
             )
             .map_err(rpc_error)?;
-        self.preflight_profile_auth(&policy).map_err(rpc_error)?;
         Ok(AgentProfileDocumentResponse::new(
             request.workspace,
             request.record_type,
@@ -61,20 +60,14 @@ impl AgentProfileApiServer for Daemon {
         &self,
         request: AgentProfileDocumentRequest,
     ) -> RpcResult<AgentProfileDocumentResponse> {
-        let record_type = kind(&request.record_type)?;
-        let (policy, _) = self
+        let profile = self
             .application
-            .preview_agent_profile(
+            .register_agent_profile(
                 &request.workspace,
                 self.profile_operator_root()?,
                 Path::new(&request.document),
-                record_type,
+                kind(&request.record_type)?,
             )
-            .map_err(rpc_error)?;
-        self.preflight_profile_auth(&policy).map_err(rpc_error)?;
-        let profile = self
-            .application
-            .register_resolved_agent_profile(&request.workspace, record_type, &policy)
             .map_err(rpc_error)?;
         // A registered revision always has a launch policy. Do not serialize its credentials/behavior.
         let policy = profile.launch_policy.as_ref().ok_or_else(|| {

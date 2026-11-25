@@ -195,6 +195,8 @@ forge dispatcher assignment-retire assignment-example --json
 forge dispatcher assignment-resolve-unknown assignment-example --confirm-old-agent-cannot-act --confirm-unknown-resources-safe --json
 forge dispatcher resume 44 --json
 forge dispatcher task-reopen 44 --json
+forge task unstick 44
+forge task unstick 44 --apply --agent-gone --json
 ```
 
 Agents use `bootstrap` with their delivered environment, not operator recovery commands. Credentials are read from protected delivery, never copied into command arguments.
@@ -202,3 +204,5 @@ Agents use `bootstrap` with their delivered environment, not operator recovery c
 Operators: inspect `assignment-info` before recovery; it reads persisted evidence without contacting the provider. Retirement revokes Assignment access and attempts verified provider cleanup. Unresolved resources can continue reserving capacity after retirement, and the Dispatch Hold remains separate. Investigate before retrying or replacing an agent.
 
 Only use `assignment-resolve-unknown` after verifying both assertions, including external agent activity and unknown resource safety. It is not automatic cleanup. `resume` clears a Dispatch Hold; it neither proves the old agent is gone nor resolves recovery blockers or authorizes replacement. `task-reopen` is for an unassigned manual In Progress Task, not a workaround for an active Assignment.
+
+`task unstick` plans these steps for one Task and, with `--apply`, runs them in runbook order through the same operations, stopping at the first step that needs an operator flag or fails. `--agent-gone` supplies both safety assertions; see [one-command recovery](assignment-recovery.md#one-command-recovery).

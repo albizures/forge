@@ -95,14 +95,9 @@ Context separates:
 
 Context does not return MCP configuration, capability values, delivery paths or
 behavior. Behavioral Markdown is explicitly separate from trusted constraints.
-Profile selection changes do not rebind an existing Assignment: profile loading follows
-its bound Record Type and revision, never a current Workspace selection or the greatest
-revision. The bound profile's frozen launch policy supplies model, resources and behavior;
-it grants no authority to change retries or holds. Reading context,
+Profile selection changes do not rebind an existing Assignment. Reading context,
 authenticating and performing actions do not validate profile sources/direct
-inputs: deleting them after launch must not disable these operations. Direct-input
-validation applies only to new execution, and a failure never erases ownership
-evidence, proves process exit, releases capacity or replays a launch. No atomic
+inputs: deleting them after launch must not disable these operations. No atomic
 multi-read/filesystem snapshot, recursive dependency pinning or external
 service/model/credential reproducibility is promised.
 
@@ -173,8 +168,10 @@ work. Inspection adds a default-empty `sessions` collection. New clients supplyi
 
 ## Implementation profile delivery
 
-The tracked [Continuation profile source](profiles/implementation.md)
-provides full outcome JSON and stopping guidance. This artifact is not a live
+The tracked [Continuation profile source](profiles/implementation-continuations.md)
+provides full outcome JSON and stopping guidance. Its
+[handoff](profiles/implementation-continuations-handoff.md) records provenance,
+isolated validation and separate rollout approvals. This artifact is not a live
 registered revision and does not alter existing immutable Check pins.
 
 ## Agent CLI examples
@@ -264,6 +261,15 @@ not itself pass a Check. Operator publication requires Manual Execution Mode and
 safe ownership. No capability
 secret belongs in command arguments or diagnostics. See [Task stacks](stacks.md)
 for setup and retry behavior.
+
+## Subscription removal
+
+Record Update Subscriptions, their management RPCs, SSE endpoint, CLI commands,
+and Pi extension have been removed without compatibility shims or a replacement
+notification mechanism. Database initialization drops subscription tables and
+subscription-specific authorization audits. Records, Update Logs, Assignments,
+and unrelated authorization audits remain intact. Back up existing databases
+before upgrading; removed subscription state cannot be recovered by downgrading.
 
 ## Verification
 

@@ -29,9 +29,6 @@ enum Command {
         /// Discard Revision State while replacing the Installation.
         #[arg(long, requires = "replace")]
         purge_state: bool,
-        /// Packaged matched durable-runner bundle (see runner/package-bundle.mjs).
-        #[arg(long)]
-        runner_bundle: Option<PathBuf>,
     },
     /// Remove a Revision Installation, preserving its state by default.
     Remove {
@@ -61,11 +58,6 @@ enum Command {
     Daemon {
         #[command(subcommand)]
         command: DaemonCommand,
-    },
-    /// Attest or resolve the matched durable-runner components shipped with Revisions.
-    Runner {
-        #[command(subcommand)]
-        command: RunnerCommand,
     },
     /// Print paths to captured managed-daemon output for the active Revision.
     Logs,
@@ -128,18 +120,6 @@ enum UpgradeCommand {
 }
 
 #[derive(Debug, Subcommand)]
-enum RunnerCommand {
-    /// Fully re-attest a Revision's installed runner (tree hash, lock, Node, host, protocol).
-    Verify { selector: String },
-    /// Print the verified components of the Revision that shipped this exact bundle tree
-    /// hash or runner component hash (the `component_hash` a durable Launch records).
-    Resolve {
-        #[arg(long)]
-        component_hash: String,
-    },
-}
-
-#[derive(Debug, Subcommand)]
 enum DaemonCommand {
     /// Report managed ownership for the active Revision, or inspect an explicit manual endpoint.
     Status {
@@ -147,12 +127,7 @@ enum DaemonCommand {
         endpoint: Option<String>,
     },
     /// Start the active Revision's managed daemon.
-    Start {
-        /// Owner-only `OpenAI` API key file (a path; never the key) for durable
-        /// Task launches. Requires a schema 2 runner bundle. Forgeup never reads it.
-        #[arg(long)]
-        durable_openai_key_file: Option<std::path::PathBuf>,
-    },
+    Start,
     /// Gracefully stop the active Revision's proved-owned managed daemon.
     Stop,
 }
@@ -167,18 +142,14 @@ fn main() {
             replace,
             reuse_state,
             purge_state,
-            runner_bundle,
         } => register(
             &source_label,
             &cli,
             &daemon,
             local_build_alias.as_deref(),
-            forgeup::RegistrationOptions {
-                replace: replace.as_deref(),
-                reuse_state: reuse_state.as_deref(),
-                purge_state,
-                runner_bundle: runner_bundle.as_deref(),
-            },
+            replace.as_deref(),
+            reuse_state.as_deref(),
+            purge_state,
         ),
         Command::Remove {
             selector,
@@ -193,7 +164,6 @@ fn main() {
         Command::Upgrade { command } => upgrade(command),
         Command::Deactivate => deactivate(),
         Command::Daemon { command } => daemon(command),
-        Command::Runner { command } => runner(command),
         Command::Logs => logs(),
         Command::Doctor => doctor(),
     });
@@ -203,9 +173,21 @@ fn register(
     cli: &std::path::Path,
     daemon: &std::path::Path,
     alias: Option<&str>,
-    options: forgeup::RegistrationOptions<'_>,
+    replace: Option<&str>,
+    reuse_state: Option<&str>,
+    purge_state: bool,
 ) -> i32 {
-    match forgeup::register_with_options(source_label, cli, daemon, alias, options) {
+    match forgeup::register_with_options(
+        source_label,
+        cli,
+        daemon,
+        alias,
+        forgeup::RegistrationOptions {
+            replace,
+            reuse_state,
+            purge_state,
+        },
+    ) {
         Ok(item) => {
             println!("{}", item.selector);
             0
@@ -285,9 +267,7 @@ fn deactivate() -> i32 {
 fn daemon(command: DaemonCommand) -> i32 {
     let result = match command {
         DaemonCommand::Status { endpoint } => forgeup::daemon_status(endpoint.as_deref()),
-        DaemonCommand::Start {
-            durable_openai_key_file,
-        } => forgeup::daemon_start(durable_openai_key_file.as_deref()),
+        DaemonCommand::Start => forgeup::daemon_start(),
         DaemonCommand::Stop => forgeup::daemon_stop(),
     };
     match result {
@@ -297,42 +277,6 @@ fn daemon(command: DaemonCommand) -> i32 {
         }
         Err(error) => {
             eprintln!("forgeup daemon: {error}");
-            1
-        }
-    }
-}
-fn runner(command: RunnerCommand) -> i32 {
-    let result = match command {
-        RunnerCommand::Verify { selector } => forgeup::current(&selector),
-        RunnerCommand::Resolve { component_hash } => forgeup::runner_for_component(&component_hash),
-    }
-    .and_then(|item| {
-        forgeup::verify_runner(&item).map(|runner| {
-            format!(
-                "{}\nnode\t{}\nhost\t{}\nentry\t{}\ninspector\t{}\nprotocol\t{}\nnode-version\t{}\nlock-sha256\t{}\ntree-sha256\t{}\ncomponent-sha256\t{}",
-                item.selector,
-                runner.node_path.display(),
-                runner
-                    .host_path
-                    .as_ref()
-                    .map_or_else(|| "(schema 1: none; inspection only)".into(), |p| p.display().to_string()),
-                runner.entry_path.display(),
-                runner.inspector_path.display(),
-                runner.protocol,
-                runner.node_version,
-                runner.package_lock_sha256,
-                runner.tree_sha256,
-                runner.component_sha256.as_deref().unwrap_or("(schema 1: not recorded)"),
-            )
-        })
-    });
-    match result {
-        Ok(output) => {
-            println!("{output}");
-            0
-        }
-        Err(error) => {
-            eprintln!("forgeup runner: {error}");
             1
         }
     }

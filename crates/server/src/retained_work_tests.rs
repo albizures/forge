@@ -22,11 +22,8 @@ async fn verify_clean_recovery_rpc(
     store.close_agent_assignment("bound-check", forge_app::AgentAssignmentClosureReason::Retired).unwrap();
     assert!(RecordApiServer::recover_retained_work(daemon, request.clone()).await.is_err());
     for resource in store.list_agent_assignment_resources("bound-check").unwrap() {
-        if resource.resource_kind != "retirement-pending" {
-            store.retire_agent_assignment_resource("bound-check", &resource.resource_kind, &resource.resource_id).unwrap();
-        }
+        store.retire_agent_assignment_resource("bound-check", &resource.resource_kind, &resource.resource_id).unwrap();
     }
-    store.finish_agent_assignment_retirement("bound-check").unwrap();
     let mut wrong_scope = request.clone();
     wrong_scope.selection.workspace = Some("missing".into());
     assert!(RecordApiServer::recover_retained_work(daemon, wrong_scope).await.is_err());
@@ -155,10 +152,10 @@ async fn verify_clean_recovery_rpc(
         let mut stale = recovery.clone();
         stale.retained_state.as_mut().unwrap().sha256 = "0".repeat(64);
         for expected in [None, Some(&stale)] {
-            assert_eq!(store.claim_task_check_acceptance(task, "denied-salvage", &selection.clone().into(), &request.record.recovery.evidence, recovery.check_id, revision, expected).unwrap_err().code, "recovery-source-stale");
+            assert_eq!(store.claim_task_check_acceptance(task, "denied-salvage", &selection, &request.record.recovery.evidence, recovery.check_id, revision, expected).unwrap_err().code, "recovery-source-stale");
             assert_eq!(store.list_agent_assignments(task).unwrap().len(), 1);
         }
-        store.claim_task_check_acceptance(task, "salvage-successor", &selection.into(), &request.record.recovery.evidence, recovery.check_id, revision, Some(&recovery)).unwrap();
+        store.claim_task_check_acceptance(task, "salvage-successor", &selection, &request.record.recovery.evidence, recovery.check_id, revision, Some(&recovery)).unwrap();
         let secret_root = daemon.capability_secret_root.as_ref().unwrap();
         std::fs::write(secret_root.join("salvage-successor"), "salvage-secret").unwrap();
         let credentials = serde_json::json!({"assignmentId":"salvage-successor", "secret":"salvage-secret"});

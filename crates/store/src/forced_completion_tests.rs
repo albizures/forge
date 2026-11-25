@@ -254,7 +254,6 @@ fn persisted_force_survives_reload_and_old_normal_snapshots_have_no_override() {
     store.start_record(normal.id).unwrap();
     store.done_record(normal.id, None).unwrap();
     // An old snapshot needs explicit upgrade; historical Record evidence is preserved.
-    crate::upgrade::remove_durable_expansion(&store.connection.lock().unwrap());
     store
         .connection
         .lock()
