@@ -51,7 +51,10 @@ Bootstrap authenticates, acknowledges, idempotently starts the assigned Record,
 fetches trusted context, then returns separately labelled persisted `behavior`
 (registered Markdown, or the frozen prompt template for a legacy revision).
 Record bodies remain in live context rather than being mixed into behavior.
-Both Tasks and Grillings use this sequence. Each step can fail; failure does not
+Both Tasks and Grillings use this sequence. The Implementation Check's Assignment then
+receives the minimal form described under
+[Implementation bootstrap](#implementation-bootstrap); Review, Publication and Grilling
+Assignments receive the full form described here. Each step can fail; failure does not
 fall back to behavioral instructions, clear a Dispatch Hold or authorize another
 launch. Context bootstrap evidence is durable and only marked after an
 acknowledged In Progress Record's context is assembled. Instructions cannot be
@@ -100,6 +103,32 @@ authenticating and performing actions do not validate profile sources/direct
 inputs: deleting them after launch must not disable these operations. No atomic
 multi-read/filesystem snapshot, recursive dependency pinning or external
 service/model/credential reproducibility is promised.
+
+## Implementation bootstrap
+
+The Assignment bound to the Implementation Check authenticates, acknowledges, starts and
+reads context exactly as above, but is returned (human-readable and `--json`) only:
+
+- the execution directory (Managed Worktree path);
+- the pinned Task body (`taskBody`);
+- every open Finding in full (`findings`: id, severity, blocking, message);
+- the Forge-owned command contract (`commandContract`);
+- `retainedWorkRecovery`, only when the operator authorized retained-work recovery.
+
+Trusted constraints remain enforced server-side but are not rendered. There is no Check
+id, attempt id, generation, input evidence, related-Record list, Continuation checkpoint
+or Agent Profile outcome language. The JSON has no `context` or `behavior` field.
+
+The command contract is fixed Forge text in `forge_app::assignment`, identical for every
+pinned profile revision: work only in the worktree; commit as you go; run
+`forge assignment request-review` only when the Task and all open Findings are met; after
+requesting review, end your turn and wait; if blocked, explain with
+`forge assignment comment`. It names no other Forge command.
+
+The pinned Implementation profile body is **omitted**, not rendered as guidance: existing
+revisions embed outcome, Continuation and bootstrap instructions that would otherwise
+surface as authority. The profile still selects launch configuration. Review and
+Publication bootstraps are unchanged.
 
 ## Bounded reads and actions
 
@@ -177,7 +206,8 @@ registered revision and does not alter existing immutable Check pins.
 ## Agent CLI examples
 
 In a delivered Assignment environment, first run `forge assignment bootstrap`.
-Its default output is agent-facing Markdown limited to facts the agent acts on:
+For an Implementation Assignment the output is the minimal form above. For other
+Assignments its default output is agent-facing Markdown limited to facts the agent acts on:
 execution directory and Projects, trusted constraints for the bound Record type,
 the outcome identity and input evidence of the bound Check attempt (plus any
 accepted Continuation checkpoint or authorized recovery), worker behavior, and

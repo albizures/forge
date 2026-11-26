@@ -232,6 +232,10 @@ _Avoid_: agent token, agent credential
 The session-scoped endpoint, Assignment Identifier, and owner-only secret-file path through which Forge makes an Assignment Capability available to its bound Agent. The capability secret itself is not placed in the Agent's prompt or environment.
 _Avoid_: capability injection, agent token environment
 
+**Assignment Bootstrap**:
+The capability-authenticated step in which an Agent acknowledges and starts its Agent Assignment and receives its working context and Forge-owned instructions. An Implementation Agent's bootstrap carries only its Agent Workspace, its Task, its open Findings and its command contract.
+_Avoid_: initial prompt, assignment setup
+
 **Assignment Context**:
 The bounded Forge information an Agent Assignment may read, combining its bound execution identity with live assigned-Record, Forge Workspace and Project Scope information and directly related Records. Related visibility includes one-hop parent/child, prerequisite/dependent and generated-by relationships in either direction, but neither transitive traversal nor shared-membership access.
 _Avoid_: project visibility, record graph access, execution snapshot
