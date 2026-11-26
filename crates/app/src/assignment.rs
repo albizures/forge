@@ -84,6 +84,44 @@ pub struct Bootstrap {
     pub behavior: String,
 }
 
+/// Fixed Forge-owned command contract for Implementation Agents. It is identical for every
+/// pinned Agent Profile revision and names no Forge command other than the two it permits.
+pub const IMPLEMENTATION_COMMAND_CONTRACT: &str = "\
+- Work only in the execution directory above.
+- Commit your work as you go.
+- Run `forge assignment request-review` only when the Task and every open Finding above are fully met.
+- After requesting review, end your turn and wait.
+- If you are blocked, explain why with `forge assignment comment --message '<explanation>'`, then end your turn.";
+
+/// One open Finding, in full, as shown to an Implementation Agent.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct ImplementationFinding {
+    pub id: u64,
+    pub severity: String,
+    pub blocking: bool,
+    pub message: String,
+}
+
+/// Everything an Implementation Agent receives at bootstrap and nothing else.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImplementationBootstrap {
+    pub schema_version: u32,
+    pub execution_directory: std::path::PathBuf,
+    pub task_body: String,
+    pub findings: Vec<ImplementationFinding>,
+    /// Present only when the operator authorized retained-work recovery for this attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_work_recovery: Option<serde_json::Value>,
+    pub command_contract: String,
+}
+
+/// The role-specific bootstrap: Implementation Agents get the minimal form.
+pub enum AgentBootstrap {
+    Standard(Bootstrap),
+    Implementation(ImplementationBootstrap),
+}
+
 /// A bounded traversal with a signed opaque cursor and live freshness marker.
 pub struct Page<T> {
     pub items: Vec<T>,
@@ -548,6 +586,67 @@ impl AuthenticatedAssignment<'_> {
                 .register_assignment_session(self.id, session_id)?;
         }
         Ok(Bootstrap { context, behavior })
+    }
+
+    /// Bootstraps and returns the role-specific view: an Implementation Check Assignment gets
+    /// only its worktree, Task body, open Findings and the Forge-owned command contract.
+    /// Authentication, acknowledgement, start and context read still happen first.
+    /// # Errors
+    /// Returns bootstrap, invalid identity, session-persistence or Finding read failures.
+    pub fn agent_bootstrap_with_session(
+        &self,
+        session_id: Option<&str>,
+    ) -> Result<AgentBootstrap, RegistrationError> {
+        let bootstrap = self.bootstrap_with_session(session_id)?;
+        let Some(attempt) = bootstrap
+            .context
+            .bound
+            .check_attempt
+            .as_ref()
+            .filter(|attempt| self.is_implementation_attempt(attempt))
+        else {
+            return Ok(AgentBootstrap::Standard(bootstrap));
+        };
+        let mut findings = Vec::new();
+        let mut after = None;
+        loop {
+            let page = self.finding_list(after, 100, None)?;
+            findings.extend(
+                page.findings
+                    .iter()
+                    .filter(|f| f.state == crate::findings::FindingState::Open)
+                    .map(|f| ImplementationFinding {
+                        id: f.id,
+                        severity: serde_json::to_value(f.severity)
+                            .ok()
+                            .and_then(|v| v.as_str().map(str::to_owned))
+                            .unwrap_or_default(),
+                        blocking: f.blocking,
+                        message: f.raised.message.clone(),
+                    }),
+            );
+            match page.next_cursor {
+                Some(next) => after = Some(next),
+                None => break,
+            }
+        }
+        Ok(AgentBootstrap::Implementation(ImplementationBootstrap {
+            schema_version: 1,
+            execution_directory: bootstrap.context.bound.execution_directory.clone(),
+            task_body: attempt.body.clone(),
+            findings,
+            retained_work_recovery: attempt
+                .recovery
+                .as_ref()
+                .and_then(|r| serde_json::to_value(r).ok()),
+            command_contract: IMPLEMENTATION_COMMAND_CONTRACT.into(),
+        }))
+    }
+
+    fn is_implementation_attempt(&self, attempt: &crate::outcomes::Attempt) -> bool {
+        self.application
+            .list_record_checks(attempt.record_id)
+            .is_ok_and(|checks| checks.first().is_some_and(|c| c.id == attempt.check_id))
     }
 
     /// Fetches bound identity separately from live Record, scope and direct-neighbor facts.

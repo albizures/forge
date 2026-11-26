@@ -182,12 +182,19 @@ impl AssignmentApiServer for Daemon {
     ) -> RpcResult<AssignmentBootstrapResponse> {
         let result = self
             .assignment_session(&request.assignment_id, &request.secret)?
-            .bootstrap_with_session(request.session_id.as_deref());
+            .agent_bootstrap_with_session(request.session_id.as_deref());
         result
-            .map(|value| AssignmentBootstrapResponse {
-                schema_version: 1,
-                context: value.context.into(),
-                behavior: value.behavior,
+            .map(|value| match value {
+                forge_app::assignment::AgentBootstrap::Standard(value) => {
+                    AssignmentBootstrapResponse::Standard(forge_rpc::StandardBootstrapResponse {
+                        schema_version: 1,
+                        context: value.context.into(),
+                        behavior: value.behavior,
+                    })
+                }
+                forge_app::assignment::AgentBootstrap::Implementation(value) => {
+                    AssignmentBootstrapResponse::Implementation(value)
+                }
             })
             .map_err(rpc_error)
     }
