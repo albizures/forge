@@ -173,8 +173,12 @@ An immutable named Task completion criterion with a stable identity, description
 _Avoid_: executable check, check runner
 
 **Implementation Check**:
-The mandatory baseline Check on every Task, including Projectless Tasks, establishing that the work and deliverables described by the Task are complete. It applies to all Tasks, not only work that produces code.
-_Avoid_: coding check, implementation progress
+The mandatory baseline Check on every Task, including Projectless Tasks, recording the implementing Agent's submission that the work and deliverables described by the Task are complete; the Task's later review Checks judge that submission. It applies to all Tasks, not only work that produces code.
+_Avoid_: coding check, implementation progress, implementation verdict
+
+**Review Request**:
+An Implementation Agent's submission of its committed work for judgment by the Task's review Checks. It is the Implementation Agent's only way to finish its Agent Assignment and carries no verdict of its own.
+_Avoid_: ready signal, implementation outcome, self-assessment
 
 **Continuation**:
 A deliberate handoff of unfinished Implementation work for another Agent to continue without passing the bound Check.

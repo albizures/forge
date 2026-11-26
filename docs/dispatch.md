@@ -92,6 +92,23 @@ actual context identity/generation and a full commit):
 }
 ```
 
+An Implementation Assignment may instead finish with `forge assignment request-review`
+(optional `--json`), which takes no arguments and carries no verdict. It is accepted
+only from an open, acknowledged, bootstrapped Assignment bound to the Implementation
+Check; from any other Check it fails with `review-request-not-implementation`. Forge
+derives the attempt, generation and evidence itself: it runs the same Task evidence
+observation as outcome acceptance (active Managed Worktree, clean tree, recovery
+validation, observed HEAD) and rejects a dirty or invalid worktree with
+`review-request-worktree-invalid`, recording nothing (no Assessment, hold or progress
+change). On acceptance Forge records the Implementation Pass Assessment with the observed
+clean HEAD as evidence, attributed to the Assignment and its attempt, through the ordinary
+accepted-outcome path (output evidence set, interruption count reset, progress
+accounting); reconciliation then retires the Assignment and launches the next Check as for
+any accepted Implementation pass. An exact repeat returns the stored result, including
+after retirement; a Review Request after a different outcome on the same attempt fails
+with `outcome-conflict`. An Implementation session ends at its Review Request. The
+existing outcome paths remain available for now.
+
 Implementation may report a new output commit in the same Repository. Reviews
 must assess their bound output evidence and must not modify deliverables. Forge
 observes the actual clean checkout at outcome acceptance and again after retirement
