@@ -24,8 +24,8 @@ first failed step, leaving holds and evidence in place for the steps it did not
 reach. Exit status is 0 when nothing blocks progress, 2 when waiting on an
 operator flag or an in-progress launch, and 1 when recovery stopped or failed.
 
-- An agent still reported Working, Idle or Blocked is never retired unless you
-  pass `--retire-working`; a late acknowledgement only needs the hold cleared.
+- An agent still reported Working, Idle, Done (a finished turn, equivalent to
+  Idle) or Blocked is never retired unless you pass `--retire-working`; a late acknowledgement only needs the hold cleared.
 - `--agent-gone` asserts **both** that the old agent cannot act and that its
   known and unknown resources are safe. It feeds both confirmations of
   `assignment-resolve-unknown` and `recover-retained-work`. Pass it only after

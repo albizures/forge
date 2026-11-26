@@ -167,6 +167,11 @@ impl Provider {
     fn reset(&self) {
         *self.state.lock().unwrap() = ProviderState::default();
     }
+    fn set_agent_status(&self, status: &str) {
+        for agent in self.state.lock().unwrap().agents.values_mut() {
+            agent["agent_status"] = json!(status);
+        }
+    }
     fn no_provisioning(&self) {
         assert!(self.state.lock().unwrap().calls.iter().all(|call| matches!(
             call["method"].as_str(),
@@ -950,4 +955,102 @@ fn workspace_launch_context_and_recovery_stay_with_the_original_owner_after_rest
                 | "agent.prompt"
         )
     )));
+}
+
+/// Launches a Grilling Assignment and acknowledges it so reconciliation observes live Herdr state.
+fn live_grilling(
+    fixture: &Fixture,
+    app: &Application,
+    provider: &Provider,
+) -> forge_app::AgentAssignment {
+    fixture.configure(app, provider, "one");
+    let record = fixture.grilling("one");
+    let (assignment, _) = app.dispatch_record(record.id).unwrap();
+    let secret_root = fixture.root.join("assignment-capabilities");
+    let secret = std::fs::read_to_string(secret_root.join(&assignment.id)).unwrap();
+    app.assignment(&secret_root, &assignment.id, secret.trim())
+        .unwrap()
+        .bootstrap()
+        .unwrap();
+    app.reconcile_agent_dispatch("live", 1_000).unwrap();
+    fixture.store().agent_assignment(&assignment.id).unwrap()
+}
+
+#[test]
+fn herdr_done_is_a_finished_turn_and_only_an_absent_agent_is_lost() {
+    for status in ["idle", "done"] {
+        let fixture = Fixture::new();
+        let app = fixture.app();
+        let provider = Provider::new(fixture.root.join("herdr.sock"));
+        let assignment = live_grilling(&fixture, &app, &provider);
+        assert!(assignment.closed_at_millis.is_none());
+        let resources = fixture
+            .store()
+            .list_agent_assignment_resources(&assignment.id)
+            .unwrap();
+        provider.set_agent_status(status);
+        app.reconcile_agent_dispatch("finished-turn", 40_000)
+            .unwrap();
+        let after = fixture.store().agent_assignment(&assignment.id).unwrap();
+        assert!(
+            after.closed_at_millis.is_none(),
+            "{status} closed the Assignment"
+        );
+        assert_eq!(after.state, forge_app::AgentAssignmentState::Idle);
+        assert_eq!(
+            fixture
+                .store()
+                .list_agent_assignment_resources(&assignment.id)
+                .unwrap(),
+            resources,
+            "{status} retired Herdr resources"
+        );
+    }
+    let fixture = Fixture::new();
+    let app = fixture.app();
+    let provider = Provider::new(fixture.root.join("herdr.sock"));
+    let assignment = live_grilling(&fixture, &app, &provider);
+    provider.state.lock().unwrap().agents.clear();
+    app.reconcile_agent_dispatch("absent", 40_000).unwrap();
+    let after = fixture.store().agent_assignment(&assignment.id).unwrap();
+    assert!(after.closed_at_millis.is_some());
+    assert_eq!(
+        after.closure_reason,
+        Some(forge_app::AgentAssignmentClosureReason::Lost)
+    );
+}
+
+#[test]
+fn recovery_keeps_a_done_agent_and_crashes_only_an_absent_one() {
+    for (absent, status) in [(false, "done"), (true, "done")] {
+        let fixture = Fixture::new();
+        let app = fixture.app();
+        let provider = Provider::new(fixture.root.join("herdr.sock"));
+        let assignment = live_grilling(&fixture, &app, &provider);
+        let store = fixture.store();
+        store
+            .compare_and_set_agent_assignment_state(
+                &assignment.id,
+                assignment.state,
+                forge_app::AgentAssignmentState::Unknown,
+            )
+            .unwrap()
+            .unwrap();
+        provider.set_agent_status(status);
+        if absent {
+            provider.state.lock().unwrap().agents.clear();
+        }
+        app.reconcile_agent_dispatch("recover", 10_000_000_000_000)
+            .unwrap();
+        let after = store.agent_assignment(&assignment.id).unwrap();
+        if absent {
+            assert_eq!(
+                after.closure_reason,
+                Some(forge_app::AgentAssignmentClosureReason::Crashed)
+            );
+        } else {
+            assert!(after.closed_at_millis.is_none());
+            assert_eq!(after.state, forge_app::AgentAssignmentState::Idle);
+        }
+    }
 }

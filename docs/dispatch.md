@@ -576,6 +576,12 @@ access to trusted clients. Capabilities do not protect against hostile processes
 running as the same OS user.
 
 Pi admission, idle, done, or blocked provider states only inform reconciliation.
+Herdr reports `idle` and `done` as "ready for input"; `done` only adds that the
+completed turn has not been seen. Forge treats both as a finished turn: the
+Assignment stays open (state Idle) and its Herdr resources are not retired, in
+normal reconciliation and in recovery, for Task and Grilling Assignments alike.
+Only an absent Agent closes an Assignment as lost (reconciliation) or crashed
+(recovery).
 Task completion requires an explicit authorized Forge action. Herdr observations
 are wake signals: the daemon subscribes before snapshotting and reconnects after
 failures, while authoritative scans recover from persisted identities. Events do
