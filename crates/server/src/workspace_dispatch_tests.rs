@@ -1022,7 +1022,8 @@ fn herdr_done_is_a_finished_turn_and_only_an_absent_agent_is_lost() {
 
 #[test]
 fn recovery_keeps_a_done_agent_and_crashes_only_an_absent_one() {
-    for (absent, status) in [(false, "done"), (true, "done")] {
+    for absent in [false, true] {
+        let status = "done";
         let fixture = Fixture::new();
         let app = fixture.app();
         let provider = Provider::new(fixture.root.join("herdr.sock"));
