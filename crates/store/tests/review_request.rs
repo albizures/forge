@@ -367,3 +367,19 @@ fn review_request_after_another_outcome_conflicts() {
         );
     }
 }
+
+#[test]
+fn unacknowledged_assignment_cannot_request_review() {
+    let f = Fixture::new();
+    let app = f.app();
+    let (assignment, _) = app.execute_task_check_acceptance(f.task).unwrap();
+    std::fs::create_dir_all(&f.secrets).unwrap();
+    std::fs::write(f.secrets.join(&assignment.id), "secret").unwrap();
+    let before = f.store.list_record_checks(f.task).unwrap();
+    let error = f
+        .session(&app, &assignment.id)
+        .request_review()
+        .unwrap_err();
+    assert_eq!(error.code, "assignment-inactive");
+    assert_eq!(f.store.list_record_checks(f.task).unwrap(), before);
+}
