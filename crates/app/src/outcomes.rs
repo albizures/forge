@@ -76,7 +76,37 @@ pub struct OutcomeInput {
     #[serde(default)]
     pub verifications: Vec<FindingVerification>,
 }
+/// Explanation recorded on the Pass Assessment of every accepted Review Request.
+pub const REVIEW_REQUEST_MESSAGE: &str = "Review requested";
+
 impl OutcomeInput {
+    /// The Pass outcome Forge derives for a Review Request from its bound attempt and observed evidence.
+    #[must_use]
+    pub fn review_request(attempt: &Attempt, evidence: Evidence, actor: &str) -> Self {
+        Self {
+            attempt_id: attempt.id.clone(),
+            generation: attempt.generation,
+            evidence,
+            verdict: Verdict::Pass,
+            actor: actor.into(),
+            message: REVIEW_REQUEST_MESSAGE.into(),
+            disposition: OutcomeDisposition::Complete,
+            findings: vec![],
+            verifications: vec![],
+        }
+    }
+
+    /// Whether this is the outcome a Review Request derives for `actor`.
+    #[must_use]
+    pub fn is_review_request(&self, actor: &str) -> bool {
+        self.verdict == Verdict::Pass
+            && self.disposition == OutcomeDisposition::Complete
+            && self.actor == actor
+            && self.message == REVIEW_REQUEST_MESSAGE
+            && self.findings.is_empty()
+            && self.verifications.is_empty()
+    }
+
     /// Validate deliberate handoff authority and content without observing external state.
     /// # Errors
     /// Rejects Manual/review handoffs, substantive effects and incomplete content.

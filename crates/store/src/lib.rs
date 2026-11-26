@@ -1383,6 +1383,15 @@ impl RecordRepository for SqliteProjectRepository {
         self.submit_outcome(record, input, Some(assignment), Some(observed))
     }
 
+    fn submit_assignment_review_request(
+        &self,
+        record: u64,
+        assignment: &str,
+        observed: &Result<forge_app::outcomes::Evidence, RegistrationError>,
+    ) -> Result<forge_app::outcomes::AcceptedOutcome, RegistrationError> {
+        self.submit_review_request(record, assignment, observed)
+    }
+
     fn reconcile_task_evidence(
         &self,
         record: u64,

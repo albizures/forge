@@ -589,3 +589,34 @@ fn authenticated_actions_require_acknowledgement_and_normal_lifecycle_validation
     assert!(session.start().is_err());
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[tokio::test]
+async fn review_request_route_takes_credentials_only_and_rejects_unbound_assignments() {
+    let (fixture, assignment, _) = assignment_test_daemon();
+    let root = fixture.database_path.with_extension("review-request-secrets");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join(&assignment), "actual-secret\n").unwrap();
+    let mut daemon = fixture.daemon();
+    daemon.capability_secret_root = Some(root.clone());
+    let call = |extra: Option<(&str, serde_json::Value)>, secret: &str| {
+        let mut params = serde_json::json!({"assignmentId": assignment, "secret": secret});
+        if let Some((key, value)) = extra {
+            params[key] = value;
+        }
+        assignment_rpc(daemon.clone(), "assignment.reviewRequest", params)
+    };
+    let wrong_secret = call(None, "wrong").await;
+    assert_eq!(wrong_secret["error"]["data"], "assignment-capability-denied", "{wrong_secret}");
+    for (key, value) in [
+        ("verdict", serde_json::json!("pass")),
+        ("evidence", serde_json::json!({})),
+        ("attemptId", serde_json::json!("x")),
+    ] {
+        let spoofed = call(Some((key, value)), "actual-secret").await;
+        assert!(spoofed.get("error").is_some(), "{spoofed}");
+    }
+    // An Assignment that is not bound to the Implementation Check cannot request review.
+    let unbound = call(None, "actual-secret").await;
+    assert_eq!(unbound["error"]["data"], "review-request-not-implementation", "{unbound}");
+    std::fs::remove_dir_all(root).unwrap();
+}

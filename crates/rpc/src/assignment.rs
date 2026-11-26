@@ -307,6 +307,14 @@ pub struct AssignmentOutcomeRequest {
     pub outcome: forge_app::outcomes::OutcomeInput,
 }
 
+/// A Review Request carries credentials only; Forge derives everything else.
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssignmentReviewRequest {
+    pub assignment_id: String,
+    pub secret: String,
+}
+
 #[rpc(client, server, namespace = "assignment")]
 pub trait AssignmentApi {
     #[method(name = "stack")]
@@ -318,6 +326,11 @@ pub trait AssignmentApi {
     async fn outcome_submit(
         &self,
         request: AssignmentOutcomeRequest,
+    ) -> RpcResult<forge_app::outcomes::AcceptedOutcome>;
+    #[method(name = "reviewRequest")]
+    async fn review_request(
+        &self,
+        request: AssignmentReviewRequest,
     ) -> RpcResult<forge_app::outcomes::AcceptedOutcome>;
     #[method(name = "findingList")]
     async fn finding_list(

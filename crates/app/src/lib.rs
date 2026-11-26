@@ -807,6 +807,22 @@ pub trait RecordRepository: ProjectRepository {
             "Check-bound Assignment required",
         ))
     }
+    /// Accept an Implementation Assignment's Review Request as its Pass outcome, with exact replay.
+    /// A failed observation rejects without recording anything.
+    /// # Errors
+    /// Rejects non-Implementation bindings, invalid worktrees, conflicting prior outcomes and
+    /// everything `submit_assignment_outcome` rejects.
+    fn submit_assignment_review_request(
+        &self,
+        _record: u64,
+        _assignment: &str,
+        _observed: &Result<outcomes::Evidence, RegistrationError>,
+    ) -> Result<outcomes::AcceptedOutcome, RegistrationError> {
+        Err(RegistrationError::new(
+            "assignment-outcome-required",
+            "Check-bound Assignment required",
+        ))
+    }
     /// Reconcile observed deliverables only after ownership and resources are safe.
     /// # Errors
     /// Holds and invalidates unexpected evidence; never modifies the checkout.

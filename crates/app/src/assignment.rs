@@ -228,6 +228,35 @@ impl AuthenticatedAssignment<'_> {
         )
     }
 
+    /// Finish an Implementation Assignment by submitting its committed work to the review Checks.
+    /// Forge derives attempt, generation and evidence; the Agent supplies no verdict.
+    /// # Errors
+    /// Rejects invalid credentials, Assignments not bound to the Implementation Check, dirty or
+    /// invalid worktrees (recording nothing) and conflicting prior outcomes.
+    pub fn request_review(&self) -> Result<crate::outcomes::AcceptedOutcome, RegistrationError> {
+        let assignment = self.authenticate_identity(true)?;
+        let not_implementation = || {
+            RegistrationError::new(
+                "review-request-not-implementation",
+                "Review Request requires an Assignment bound to the Implementation Check",
+            )
+        };
+        let attempt = self
+            .application
+            .dispatch()?
+            .assignment_check_attempt(&assignment.id)?
+            .ok_or_else(not_implementation)?;
+        let checks = self.application.list_record_checks(assignment.record_id)?;
+        if checks.first().is_none_or(|c| c.id != attempt.check_id) {
+            return Err(not_implementation());
+        }
+        self.application.records.submit_assignment_review_request(
+            assignment.record_id,
+            &assignment.id,
+            &self.application.observe_task_evidence(assignment.record_id),
+        )
+    }
+
     /// Read a bounded page of the assigned Task's Findings.
     /// # Errors
     /// Rejects invalid delivery, non-Tasks, malformed revisions and invalid pagination.

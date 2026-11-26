@@ -63,6 +63,14 @@ impl AssignmentApiServer for Daemon {
             .submit_outcome(&r.outcome)
             .map_err(rpc_error)
     }
+    async fn review_request(
+        &self,
+        r: forge_rpc::AssignmentReviewRequest,
+    ) -> RpcResult<forge_app::outcomes::AcceptedOutcome> {
+        self.assignment_session(&r.assignment_id, &r.secret)?
+            .request_review()
+            .map_err(rpc_error)
+    }
     async fn finding_list(
         &self,
         r: forge_rpc::AssignmentFindingListRequest,

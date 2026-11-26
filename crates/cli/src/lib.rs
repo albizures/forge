@@ -593,6 +593,62 @@ pub async fn assignment_outcome(input: serde_json::Value) -> Result<serde_json::
     serde_json::to_value(result).map_err(|_| "invalid outcome response".into())
 }
 
+/// Request review of the committed work using protected Assignment delivery; takes no input.
+/// # Errors
+/// Returns redacted delivery failures or the specific rejection category.
+pub async fn assignment_request_review() -> Result<serde_json::Value, String> {
+    use forge_rpc::AssignmentApiClient;
+    let assignment_id = env::var("FORGE_ASSIGNMENT_ID").map_err(|_| "missing Assignment ID")?;
+    let endpoint =
+        env::var("FORGE_ASSIGNMENT_DAEMON_URL").map_err(|_| "missing Assignment daemon URL")?;
+    let file = env::var_os("FORGE_ASSIGNMENT_CAPABILITY_SECRET_FILE")
+        .ok_or("missing Assignment secret file")?;
+    let secret = read_assignment_secret(file)?;
+    let result = client(&format!("{}/rpc", endpoint.trim_end_matches('/')))
+        .map_err(|_| "invalid Assignment daemon URL")?
+        .review_request(forge_rpc::AssignmentReviewRequest {
+            assignment_id,
+            secret,
+        })
+        .await
+        .map_err(|error| {
+            let call = if let jsonrpsee::core::client::Error::Call(error) = error {
+                Some(error)
+            } else {
+                None
+            };
+            let category = call.as_ref().and_then(|error| {
+                error
+                    .data()
+                    .and_then(|data| serde_json::from_str::<String>(data.get()).ok())
+            });
+            match category.as_deref() {
+                // These two messages are Forge-authored and tell the Agent how to proceed.
+                Some(
+                    code
+                    @ ("review-request-worktree-invalid" | "review-request-not-implementation"),
+                ) => {
+                    let detail = call
+                        .as_ref()
+                        .map(jsonrpsee::types::ErrorObject::message)
+                        .unwrap_or_default();
+                    format!("Review Request rejected: {code}: {detail}")
+                }
+                Some(
+                    code @ ("assignment-capability-denied"
+                    | "assignment-inactive"
+                    | "attempt-closed"
+                    | "stale-generation"
+                    | "outcome-conflict"
+                    | "evidence-mismatch"
+                    | "evidence-drift"),
+                ) => format!("Review Request rejected: {code}; reread context and attempt state"),
+                _ => "Review Request rejected; reread context and attempt state".into(),
+            }
+        })?;
+    serde_json::to_value(result).map_err(|_| "invalid Review Request response".into())
+}
+
 /// Starts the Task bound to an Assignment Capability.
 ///
 /// # Errors

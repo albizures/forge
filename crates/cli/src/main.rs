@@ -353,6 +353,16 @@ enum AssignmentCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Finish your work by submitting your committed changes for review; takes no arguments.
+    ///
+    /// Run only when the Task and every open Finding are met and all work is committed.
+    /// Forge records the commit it observes, without any verdict from you. A dirty or
+    /// invalid worktree is rejected. After requesting review, end your turn and wait.
+    #[command(name = "request-review")]
+    RequestReview {
+        #[arg(long)]
+        json: bool,
+    },
     /// Complete the assigned Record; Grilling requires conversational confirmation.
     Done(AssignmentDoneArgs),
     /// Comment on the Record bound to this Assignment.
@@ -1187,6 +1197,23 @@ fn render_assignment_result(result: Result<serde_json::Value, String>, json: boo
     }
 }
 
+async fn request_review(json: bool) -> i32 {
+    match forge_cli::assignment_request_review().await {
+        Ok(value) => {
+            if json {
+                println!("{value}");
+            } else {
+                println!("Review requested. End your turn and wait.");
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("forge assignment request-review: {e}");
+            1
+        }
+    }
+}
+
 async fn assignment(command: AssignmentCommand) -> i32 {
     let history = matches!(&command, AssignmentCommand::History(_));
     match command {
@@ -1222,6 +1249,7 @@ async fn assignment(command: AssignmentCommand) -> i32 {
                 }
             }
         }
+        AssignmentCommand::RequestReview { json } => request_review(json).await,
         AssignmentCommand::Done(args) => {
             let human = args.confirmation.zip(args.agreed_outcome);
             render_assignment_result(
@@ -2254,6 +2282,8 @@ mod tests {
                 "outcome.json",
                 "--json",
             ],
+            vec!["forge", "assignment", "request-review"],
+            vec!["forge", "assignment", "request-review", "--json"],
             vec!["forge", "assignment", "bootstrap"],
             vec!["forge", "assignment", "start"],
         ] {
