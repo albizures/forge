@@ -203,7 +203,7 @@ impl ImplementationRig {
         (review, credentials, accepted["result"]["evidence"].clone())
     }
 
-    fn outcome(&self, credentials: &serde_json::Value, evidence: &serde_json::Value) -> serde_json::Value {
+    fn outcome(credentials: &serde_json::Value, evidence: &serde_json::Value) -> serde_json::Value {
         let mut request = credentials.clone();
         request["outcome"] = serde_json::json!({
             "attempt_id": credentials["assignmentId"],
@@ -250,7 +250,7 @@ async fn an_implementation_assignment_reads_comments_and_requests_review_but_can
     let before_findings = rig.store.list_record_findings(task.id, None, 100).unwrap();
     let evidence = serde_json::to_value(rig.evidence(&task)).unwrap();
     let forbidden = [
-        ("assignment.outcomeSubmit", rig.outcome(&credentials, &evidence)),
+        ("assignment.outcomeSubmit", ImplementationRig::outcome(&credentials, &evidence)),
         ("assignment.checkAssess", with(serde_json::json!({"check": task.checks[0].id, "expectedVersion": 0, "verdict": "pass", "message": "Done"}))),
         ("assignment.checkInvalidate", with(serde_json::json!({"check": task.checks[0].id, "expectedVersion": 0, "assessmentId": 1, "message": "No"}))),
         ("assignment.findingRaise", with(serde_json::json!({"severity": "major", "blocking": true, "message": "Self-raised"}))),
@@ -286,7 +286,7 @@ async fn a_review_check_may_pass_through_the_gated_handlers() {
     let rig = ImplementationRig::new();
     let task = rig.task();
     let (_, credentials, evidence) = rig.in_review(&task).await;
-    let accepted = rig.rpc("assignment.outcomeSubmit", rig.outcome(&credentials, &evidence)).await;
+    let accepted = rig.rpc("assignment.outcomeSubmit", ImplementationRig::outcome(&credentials, &evidence)).await;
     assert_eq!(accepted["result"]["check"]["current_verdict"], "pass", "{accepted}");
     assert_eq!(accepted["result"]["attempt"]["actor"], credentials["assignmentId"], "{accepted}");
 }
@@ -296,7 +296,7 @@ async fn a_review_check_may_hand_back_with_findings_through_the_gated_handlers()
     let rig = ImplementationRig::new();
     let task = rig.task();
     let (_, credentials, evidence) = rig.in_review(&task).await;
-    let mut request = rig.outcome(&credentials, &evidence);
+    let mut request = ImplementationRig::outcome(&credentials, &evidence);
     request["outcome"]["verdict"] = "fail".into();
     request["outcome"]["disposition"] = "handback".into();
     request["outcome"]["findings"] = serde_json::json!([{"severity": "major", "blocking": true, "message": "Result is missing"}]);
@@ -314,7 +314,7 @@ async fn a_review_check_may_request_human_input_or_report_an_interruption_throug
     let rig = ImplementationRig::new();
     let task = rig.task();
     let (_, credentials, evidence) = rig.in_review(&task).await;
-    let mut interrupted = rig.outcome(&credentials, &evidence);
+    let mut interrupted = ImplementationRig::outcome(&credentials, &evidence);
     interrupted["outcome"]["verdict"] = "fail".into();
     interrupted["outcome"]["disposition"] = "interrupted".into();
     let accepted = rig.rpc("assignment.outcomeSubmit", interrupted).await;
@@ -324,7 +324,7 @@ async fn a_review_check_may_request_human_input_or_report_an_interruption_throug
 
     let other = rig.task();
     let (_, credentials, evidence) = rig.in_review(&other).await;
-    let mut human = rig.outcome(&credentials, &evidence);
+    let mut human = ImplementationRig::outcome(&credentials, &evidence);
     human["outcome"]["verdict"] = "fail".into();
     human["outcome"]["disposition"] = "human-input".into();
     human["outcome"]["message"] = "Which API key?".into();
