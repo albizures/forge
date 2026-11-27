@@ -2524,6 +2524,20 @@ mod tests {
     }
 
     #[test]
+    fn dispatcher_help_no_longer_offers_reset_continuations() {
+        use clap::CommandFactory;
+        assert!(Cli::try_parse_from(["forge", "dispatcher", "reset-continuations"]).is_err());
+        let mut command = Cli::command();
+        let help = command
+            .find_subcommand_mut("dispatcher")
+            .unwrap()
+            .render_long_help()
+            .to_string();
+        assert!(!help.contains("reset-continuations"));
+        assert!(help.contains("reset-remediation"));
+    }
+
+    #[test]
     fn workspace_contract_is_visible_in_generated_help() {
         use clap::CommandFactory;
         let mut command = Cli::command();
