@@ -60,12 +60,21 @@ async fn planning_records_capture_only_the_initiating_checkout() {
             origin_url: "https://example.test/api.git".into(),
         })
         .unwrap();
+    store
+        .register(&Project {
+            reference: "one/other".into(),
+            workspace_id: "one".into(),
+            slug: "other".into(),
+            project_root: other.clone(),
+            origin_url: "https://example.test/other.git".into(),
+        })
+        .unwrap();
     let scoped = store.in_record_workspace("one").unwrap();
     let parent = scoped
         .open_typed_record(&NewTypedRecord {
             record_type: RecordType::Wayfinder,
             body: "parent".into(),
-            project_slugs: vec!["one/api".into()],
+            project_slugs: vec!["one/api".into(), "one/other".into()],
             generated_by_ids: vec![],
         })
         .unwrap();
@@ -126,6 +135,17 @@ async fn planning_records_capture_only_the_initiating_checkout() {
     assert_eq!(
         grilling["planning_context"][0]["context"]["branch"],
         "feature"
+    );
+    assert_eq!(grilling["planning_context"][1]["project"], "one/other");
+    assert_eq!(
+        grilling["planning_context"][1]["context"]["status"],
+        "unavailable"
+    );
+    assert!(
+        !grilling["planning_context"][1]["context"]["reason"]
+            .as_str()
+            .unwrap()
+            .is_empty()
     );
     git(&linked, &["checkout", "--detach"]);
     let detached = spec(&linked);
