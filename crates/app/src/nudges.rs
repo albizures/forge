@@ -4,8 +4,9 @@
 //! Every Nudge is durably recorded as a prompt intent before it is sent, and an uncertain
 //! delivery places a Dispatch Hold instead of being retried (ADR-0008, extended to all prompts).
 use crate::{
-    AgentAdapterError, AgentAssignment, AgentAssignmentClosureReason, AgentAssignmentState, AgentObservation, AgentPrompt,
-    AgentPromptOutcome, Application, RegistrationError, log_adapter_failure, outcomes::Evidence,
+    AgentAdapterError, AgentAssignment, AgentAssignmentClosureReason, AgentAssignmentState,
+    AgentObservation, AgentPrompt, AgentPromptOutcome, Application, RegistrationError,
+    log_adapter_failure, outcomes::Evidence,
 };
 use std::path::Path;
 
@@ -146,7 +147,9 @@ impl Application {
     fn reap_absent_agent(&self, assignment: &AgentAssignment) -> Result<bool, RegistrationError> {
         let repository = self.dispatch()?;
         if assignment.state == AgentAssignmentState::Provisioning
-            || repository.assignment_check_attempt(&assignment.id)?.is_none()
+            || repository
+                .assignment_check_attempt(&assignment.id)?
+                .is_none()
             || repository.assignment_attempt_outcome_accepted(&assignment.id)?
         {
             return Ok(false);

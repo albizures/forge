@@ -2,8 +2,7 @@
 //! against a scripted provider (the same seam the fake Herdr serves in the server tests).
 use forge_app::{
     AgentAdapterError, AgentAssignmentClosureReason, AgentDispatchRepository, AgentObservation,
-    AgentPromptOutcome, Application,
-    RecordRepository,
+    AgentPromptOutcome, Application, RecordRepository,
     nudges::{NudgeIntent, NudgeSettlement, NudgeState},
 };
 use std::sync::Arc;
@@ -466,12 +465,18 @@ fn an_absent_check_bound_agent_closes_its_assignment_lost_and_holds_the_task() {
     w.scan();
     let closed = w.f.store.agent_assignment(&w.assignment).unwrap();
     assert!(closed.closed_at_millis.is_some());
-    assert_eq!(closed.closure_reason, Some(AgentAssignmentClosureReason::Lost));
+    assert_eq!(
+        closed.closure_reason,
+        Some(AgentAssignmentClosureReason::Lost)
+    );
     assert_eq!(*w.script.retirements.lock().unwrap(), 1);
     let hold = w.hold().expect("an Absent Agent holds the Task");
     assert!(hold.contains(&w.assignment), "{hold}");
     assert!(hold.contains("recover-retained-work"), "{hold}");
-    assert!(w.script.sent().is_empty(), "an Absent Agent is never prompted");
+    assert!(
+        w.script.sent().is_empty(),
+        "an Absent Agent is never prompted"
+    );
     // Never automatically relaunched while the hold stands.
     w.scan();
     w.scan();
