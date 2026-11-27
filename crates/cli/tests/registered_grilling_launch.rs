@@ -242,7 +242,16 @@ async fn exercise_launch() {
         },
     };
     let record = store
-        .open_grilling_with_planning("A decision", parent.id, None, vec![], &[observation])
+        .open_grilling_with_planning(
+            "A decision",
+            parent.id,
+            None,
+            vec![],
+            std::slice::from_ref(&observation),
+        )
+        .unwrap();
+    let hidden = store
+        .open_grilling_with_planning("Private sibling", parent.id, None, vec![], &[observation])
         .unwrap();
     drop(store);
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -307,6 +316,9 @@ async fn exercise_launch() {
     assert_eq!(env["FORGE_ASSIGNMENT_ID"], assignment);
     let cli = Path::new(env["FORGE_ASSIGNMENT_FORGE_CLI"].as_str().unwrap()).to_owned();
     let environment = env.as_object().unwrap().clone();
+    let read_cli = cli.clone();
+    let read_env = environment.clone();
+    let hidden_id = hidden.id.to_string();
     let bootstrap = tokio::task::spawn_blocking(move || {
         let mut cmd = Command::new(cli);
         cmd.args(["assignment", "bootstrap", "--json"]);
@@ -330,6 +342,18 @@ async fn exercise_launch() {
         context["context"]["record"]["planning_context"][0]["context"]["branch"],
         "initiating-feature"
     );
+    let denied = tokio::task::spawn_blocking(move || {
+        let mut cmd = Command::new(read_cli);
+        cmd.args(["assignment", "record", &hidden_id, "--json"]);
+        for (key, value) in read_env {
+            cmd.env(key, value.as_str().unwrap());
+        }
+        cmd.output().unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(!denied.status.success());
+    assert!(!String::from_utf8_lossy(&denied.stdout).contains("initiating-feature"));
     let store = SqliteProjectRepository::open(&db).unwrap();
     assert!(
         store

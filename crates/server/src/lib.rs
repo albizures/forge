@@ -4798,6 +4798,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(grilling.record_type, "grilling");
+        assert_eq!(grilling.planning_context.len(), 1);
+        assert!(matches!(
+            grilling.planning_context[0].context,
+            forge_app::planning_context::PlanningContext::Unavailable { .. }
+        ));
         assert_eq!(grilling.project_scope, wayfinder.project_scope);
         assert_eq!(grilling.relationships[0].parent_id, wayfinder.id);
         let wayfinders = client

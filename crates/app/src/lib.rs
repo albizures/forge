@@ -3680,14 +3680,16 @@ impl Application {
         observations: &[planning_context::ProjectPlanningContext],
     ) -> Result<Record, RegistrationError> {
         Self::require_body(body)?;
+        let scope = vec![project_slug];
+        let observations = planning_context::with_unavailable_projects(observations, &scope);
         self.records.open_typed_record_with_planning(
             &NewTypedRecord {
                 record_type: RecordType::Spec,
                 body: body.to_owned(),
-                project_slugs: vec![project_slug],
+                project_slugs: scope,
                 generated_by_ids,
             },
-            observations,
+            &observations,
         )
     }
 
@@ -3811,12 +3813,17 @@ impl Application {
         observations: &[planning_context::ProjectPlanningContext],
     ) -> Result<Record, RegistrationError> {
         Self::require_body(body)?;
+        let scope = match &project_slugs {
+            Some(scope) => scope.clone(),
+            None => self.records.show_record(wayfinder_id)?.project_slugs,
+        };
+        let observations = planning_context::with_unavailable_projects(observations, &scope);
         self.records.open_grilling_with_planning(
             body,
             wayfinder_id,
             project_slugs,
             generated_by_ids,
-            observations,
+            &observations,
         )
     }
 

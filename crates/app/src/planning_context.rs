@@ -59,6 +59,29 @@ pub fn validate_scope(
     Ok(())
 }
 
+/// Fill missing Project observations without inventing checkout facts.
+#[must_use]
+pub fn with_unavailable_projects(
+    observations: &[ProjectPlanningContext],
+    project_slugs: &[String],
+) -> Vec<ProjectPlanningContext> {
+    let mut completed = observations.to_vec();
+    for project in project_slugs {
+        if !observations
+            .iter()
+            .any(|observation| &observation.project == project)
+        {
+            completed.push(ProjectPlanningContext {
+                project: project.clone(),
+                context: PlanningContext::Unavailable {
+                    reason: "initiating client supplied no checkout observation".into(),
+                },
+            });
+        }
+    }
+    completed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
