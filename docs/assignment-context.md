@@ -238,8 +238,8 @@ forge assignment outcome --file outcome.json --json
 Implementation workers never do. From an Implementation Assignment the server rejects
 `assignment outcome` (every disposition), `check assess`, `check invalidate`,
 `finding raise` and `finding mutate` with `implementation-outcome-forbidden`, changing
-nothing. They may use only `request-review`, `comment`, `context`, `finding list` and
-`record`.
+nothing. Their command contract is `request-review`, `comment`, `context`, `finding list`
+and `record`; the other read-only commands stay available.
 
 An Implementation worker whose committed work is ready finishes with a Review Request,
 which needs no outcome file and states no verdict:
