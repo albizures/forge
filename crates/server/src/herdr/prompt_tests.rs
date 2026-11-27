@@ -149,14 +149,14 @@ fn with_herdr<T>(
     (result, methods)
 }
 
-fn prompted() -> Option<Value> {
-    Some(json!({"type":"agent_prompted", "agent":agent("working", 4)}))
+fn prompted() -> Value {
+    json!({"type":"agent_prompted", "agent":agent("working", 4)})
 }
 
 #[test]
 fn an_idle_or_done_agent_at_the_expected_turn_receives_exactly_one_prompt() {
     for status in ["idle", "done"] {
-        let (result, methods) = send(&agent(status, 4), prompted(), true);
+        let (result, methods) = send(&agent(status, 4), Some(prompted()), true);
         assert_eq!(result.unwrap(), AgentPromptOutcome::Delivered);
         assert_eq!(
             methods.iter().filter(|m| *m == "agent.prompt").count(),
@@ -165,14 +165,14 @@ fn an_idle_or_done_agent_at_the_expected_turn_receives_exactly_one_prompt() {
         );
     }
     // Legacy Assignments launched before terminals were pinned still verify the rest.
-    let (result, _) = send(&agent("idle", 4), prompted(), false);
+    let (result, _) = send(&agent("idle", 4), Some(prompted()), false);
     assert_eq!(result.unwrap(), AgentPromptOutcome::Delivered);
 }
 
 #[test]
 fn an_agent_that_is_not_idle_at_the_expected_turn_is_not_prompted() {
     for (status, seq) in [("working", 4), ("blocked", 4), ("unknown", 4), ("idle", 5)] {
-        let (result, methods) = send(&agent(status, seq), prompted(), true);
+        let (result, methods) = send(&agent(status, seq), Some(prompted()), true);
         assert_eq!(result.unwrap(), AgentPromptOutcome::NotReady, "{status}");
         assert!(!methods.iter().any(|m| m == "agent.prompt"), "{methods:?}");
     }
@@ -188,7 +188,7 @@ fn a_changed_terminal_pane_or_tab_is_never_prompted() {
     ] {
         let mut info = agent("idle", 4);
         info[field] = value.into();
-        let (result, methods) = send(&info, prompted(), true);
+        let (result, methods) = send(&info, Some(prompted()), true);
         assert!(
             matches!(result, Err(AgentAdapterError::Conflict(_))),
             "{field}: {result:?}"
