@@ -48,6 +48,15 @@ async fn planning_records_capture_only_the_initiating_checkout() {
         &["worktree", "add", "-b", "feature", linked.to_str().unwrap()],
     );
     git(&other, &["init"]);
+    git(
+        &main,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/example/api.git",
+        ],
+    );
     let db = root.join("state.sqlite");
     let store = SqliteProjectRepository::open(&db).unwrap();
     store.create_workspace("one", "One", &root).unwrap();
@@ -112,6 +121,10 @@ async fn planning_records_capture_only_the_initiating_checkout() {
         "main"
     );
     let linked_spec = spec(&linked);
+    assert_eq!(
+        linked_spec["planning_context"][0]["context"]["repository"],
+        "example/api"
+    );
     assert_eq!(
         linked_spec["planning_context"][0]["context"]["branch"],
         "feature"

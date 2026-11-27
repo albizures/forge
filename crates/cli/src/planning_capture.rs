@@ -99,11 +99,30 @@ fn capture(project_root: &Path, cwd: &Path) -> Result<(String, String), String> 
         .filter(|branch| !branch.is_empty())
         .ok_or("branch unavailable: HEAD does not name a local branch")?
         .to_owned();
-    let repository = project_root
-        .to_str()
-        .ok_or("Project Root is not UTF-8")?
-        .to_owned();
-    Ok((repository, branch))
+    // Stack destinations currently use GitHub owner/repository names. Never persist
+    // a URL (which may contain credentials), a local path, or an arbitrary choice
+    // among remotes. Only a single supported origin is unambiguous.
+    let urls = git(cwd, &["remote", "get-url", "--all", "origin"])
+        .map_err(|_| "repository unavailable: cannot inspect origin".to_owned())?;
+    let path = urls
+        .strip_prefix("git@github.com:")
+        .or_else(|| urls.strip_prefix("https://github.com/"))
+        .or_else(|| urls.strip_prefix("ssh://git@github.com/"))
+        .ok_or("repository unavailable: origin is not a supported GitHub URL")?;
+    let repository = path.strip_suffix(".git").unwrap_or(path);
+    let mut components = repository.split('/');
+    let valid = |part: &str| {
+        !part.is_empty()
+            && part
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+    };
+    if !matches!((components.next(), components.next(), components.next()),
+        (Some(owner), Some(name), None) if valid(owner) && valid(name))
+    {
+        return Err("repository unavailable: invalid or ambiguous origin".into());
+    }
+    Ok((repository.to_owned(), branch))
 }
 
 #[cfg(test)]
@@ -150,10 +169,88 @@ mod tests {
             ],
         );
         run(temp.path(), &["tag", "feature"]);
+        run(
+            temp.path(),
+            &["remote", "add", "origin", "git@github.com:example/repo.git"],
+        );
         assert_eq!(
             branch(observe("w/p", temp.path(), temp.path())),
             Some("feature".into())
         );
+    }
+
+    #[test]
+    fn repository_identity_is_remote_not_checkout_path() {
+        let temp = tempdir().unwrap();
+        let first = temp.path().join("first");
+        let second = temp.path().join("second");
+        for path in [&first, &second] {
+            std::fs::create_dir(path).unwrap();
+            run(path, &["init", "-b", "main"]);
+        }
+        run(
+            &first,
+            &["remote", "add", "origin", "git@github.com:example/repo.git"],
+        );
+        run(
+            &second,
+            &["remote", "add", "origin", "https://github.com/example/repo"],
+        );
+        let context = |path: &Path| observe("w/p", path, path).context;
+        assert_eq!(context(&first), context(&second));
+        run(
+            &second,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "https://github.com/example/other.git",
+            ],
+        );
+        assert_ne!(context(&first), context(&second));
+        run(
+            &second,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "https://secret@github.com/example/repo.git",
+            ],
+        );
+        match context(&second) {
+            PlanningContext::Unavailable { reason } => assert!(!reason.contains("secret")),
+            PlanningContext::Available { .. } => {
+                panic!("credential-bearing URL must not be persisted")
+            }
+        }
+        run(
+            &second,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "https://github.com/example/repo",
+            ],
+        );
+        run(
+            &second,
+            &[
+                "remote",
+                "set-url",
+                "--add",
+                "origin",
+                "https://github.com/example/other",
+            ],
+        );
+        assert!(matches!(
+            context(&second),
+            PlanningContext::Unavailable { .. }
+        ));
+        run(&second, &["remote", "remove", "origin"]);
+        assert!(matches!(
+            context(&second),
+            PlanningContext::Unavailable { .. }
+        ));
     }
 
     #[test]
@@ -214,6 +311,15 @@ mod tests {
             &["worktree", "add", "-b", "feature", linked.to_str().unwrap()],
         );
         run(&other, &["init"]);
+        run(
+            &main,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/repo.git",
+            ],
+        );
         assert_eq!(branch(observe("w/p", &main, &main)), Some("main".into()));
         assert_eq!(
             branch(observe("w/p", &main, &linked)),
