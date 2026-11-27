@@ -1968,6 +1968,7 @@ mod tests {
     fn record_list_renders_records_in_response_order() {
         let records = ListRecordsResponse {
             records: vec![RecordResponse {
+                planning_context: vec![],
                 dependency_consequences: None,
                 already_done: false,
                 forced_completion: None,
@@ -2021,6 +2022,7 @@ mod tests {
     fn record_output_identifies_the_new_record() {
         assert_eq!(
             render_record_opened(&RecordResponse {
+                planning_context: vec![],
                 dependency_consequences: None,
                 already_done: false,
                 forced_completion: None,

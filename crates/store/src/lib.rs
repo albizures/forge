@@ -4049,7 +4049,9 @@ fn load_record(connection: &Connection, id: u64) -> Result<Record, RegistrationE
             _ => Err(RegistrationError::new("storage", "stored Record has an invalid Relationship kind")),
         })
         .collect::<Result<Vec<_>, RegistrationError>>()?;
+    let planning_context = load_planning_observations(connection, id)?;
     Ok(Record {
+        planning_context,
         workspace_id: record_workspaces::owner(connection, id)?,
         id,
         record_type: record_type(&stored_record_type)?,
@@ -4149,6 +4151,44 @@ fn migrate_record_status_schema(connection: &Connection) -> Result<(), Registrat
             .map_err(storage_error)?;
     }
     Ok(())
+}
+
+fn load_planning_observations(
+    connection: &Connection,
+    id: u64,
+) -> Result<Vec<forge_app::planning_context::ProjectPlanningContext>, RegistrationError> {
+    use forge_app::planning_context::{PlanningContext, ProjectPlanningContext};
+    let mut statement = connection.prepare("SELECT project_slug, status, repository, branch, reason FROM record_planning_context WHERE record_id = ?1 ORDER BY project_slug").map_err(storage_error)?;
+    let rows = statement
+        .query_map([id.cast_signed()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+            ))
+        })
+        .map_err(storage_error)?;
+    rows.map(|row| {
+        let (project, status, repository, branch, reason) = row.map_err(storage_error)?;
+        let context = match (status.as_str(), repository, branch, reason) {
+            ("available", Some(repository), Some(branch), None) => {
+                PlanningContext::Available { repository, branch }
+            }
+            ("unavailable", None, None, Some(reason)) => PlanningContext::Unavailable { reason },
+            _ => {
+                return Err(RegistrationError::new(
+                    "storage",
+                    "invalid persisted planning context",
+                ));
+            }
+        };
+        let value = ProjectPlanningContext { project, context };
+        value.validate()?;
+        Ok(value)
+    })
+    .collect()
 }
 
 fn insert_planning_observations(
@@ -4300,8 +4340,19 @@ mod tests {
                 .is_err()
         );
         let grilling = store
-            .open_grilling_with_planning("grilling", parent.id, None, vec![], &[observation])
+            .open_grilling_with_planning(
+                "grilling",
+                parent.id,
+                None,
+                vec![],
+                std::slice::from_ref(&observation),
+            )
             .unwrap();
+        assert_eq!(grilling.planning_context, vec![observation.clone()]);
+        assert_eq!(
+            store.show_record(grilling.id).unwrap().planning_context,
+            vec![observation]
+        );
         let db = store.connection.lock().unwrap();
         let count: i64 = db
             .query_row("SELECT count(*) FROM record_planning_context", [], |row| {

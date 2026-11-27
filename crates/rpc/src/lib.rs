@@ -1416,6 +1416,9 @@ pub struct RecordResponse {
     pub record_type: String,
     pub body: String,
     pub project_scope: ProjectScopeRequest,
+    /// Planning observations; absent on older servers and empty on older Records.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub planning_context: Vec<forge_app::planning_context::ProjectPlanningContext>,
     pub status: String,
     pub completion_resolution: Option<String>,
     pub relationships: Vec<RecordRelationshipResponse>,
@@ -1433,6 +1436,7 @@ impl From<Record> for RecordResponse {
             id: record.id,
             record_type: record_type_name(record.record_type),
             body: record.body,
+            planning_context: record.planning_context,
             project_scope: ProjectScopeRequest {
                 project_slugs: record.project_slugs,
             },

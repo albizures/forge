@@ -186,6 +186,8 @@ pub struct Record {
     pub body: String,
     /// Immutable, lexically ordered Project Scope selected at opening.
     pub project_slugs: Vec<String>,
+    /// Planning observations captured at creation, empty for older Records.
+    pub planning_context: Vec<planning_context::ProjectPlanningContext>,
     /// Explicit policy; never inferred from status or absence of Assignments.
     pub execution_mode: ExecutionMode,
     /// The Record's lifecycle status.
@@ -4164,6 +4166,7 @@ mod tests {
         fn open_record(&self, record: &NewRecord) -> Result<Record, RegistrationError> {
             let mut records = self.records.lock().unwrap();
             let record = Record {
+                planning_context: vec![],
                 workspace_id: "test".into(),
                 id: (records.len() + 1) as u64,
                 record_type: RecordType::Generic,
@@ -4183,6 +4186,7 @@ mod tests {
                 workspace_id: "test".into(),
                 id: (records.len() + 1) as u64,
                 record_type: record.record_type,
+                planning_context: vec![],
                 execution_mode: if record.record_type == RecordType::Task
                     && !record.project_slugs.is_empty()
                 {
@@ -4235,6 +4239,7 @@ mod tests {
                 id: task_id,
                 record_type: RecordType::Task,
                 body: body.to_owned(),
+                planning_context: vec![],
                 project_slugs: spec.project_slugs,
                 execution_mode: ExecutionMode::Dispatched,
                 workspace_id: spec.workspace_id,
@@ -4295,6 +4300,7 @@ mod tests {
                 id: task_id,
                 record_type: RecordType::Task,
                 body: body.to_owned(),
+                planning_context: vec![],
                 project_slugs: vec![project_slug],
                 execution_mode: ExecutionMode::Dispatched,
                 workspace_id: wayfinder.workspace_id,
@@ -4361,6 +4367,7 @@ mod tests {
                 workspace_id: wayfinder.workspace_id,
                 id: grilling_id,
                 record_type: RecordType::Grilling,
+                planning_context: vec![],
                 execution_mode: ExecutionMode::Manual,
                 body: body.to_owned(),
                 project_slugs,
@@ -4910,6 +4917,7 @@ mod tests {
     fn task_repository() -> Repository {
         Repository {
             records: Mutex::new(vec![Record {
+                planning_context: vec![],
                 workspace_id: "test".into(),
                 id: 7,
                 record_type: RecordType::Task,
@@ -4969,6 +4977,7 @@ mod tests {
     #[test]
     fn worktree_eligibility_requires_an_open_single_project_task() {
         let mut record = Record {
+            planning_context: vec![],
             workspace_id: "test".into(),
             id: 7,
             record_type: RecordType::Task,
@@ -5266,6 +5275,7 @@ mod tests {
                 .open_record("body", vec!["zeta".into(), "alpha".into()])
                 .unwrap(),
             Record {
+                planning_context: vec![],
                 workspace_id: "test".into(),
                 id: 1,
                 record_type: RecordType::Generic,
