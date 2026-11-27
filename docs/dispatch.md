@@ -196,6 +196,18 @@ is placed, and that prompt is never resent. A daemon restart that finds an inten
 without a confirmed response treats it the same way. The Assignment and its Agent stay
 open. Inspect the pane before resuming the Task.
 
+### Absent Agents of Check-bound Assignments
+
+Reconciliation skips open Check-bound Task Assignments, so the same scan that evaluates
+Nudges also checks their liveness. When Herdr reports the Agent `Absent` (the agent name
+is gone, for example after a reboot), Forge places a Dispatch Hold on the Task naming the
+Assignment (an existing hold keeps its reason), retires the Assignment's Herdr resources,
+and closes it as lost. It never relaunches automatically, because the worktree may hold
+unreported work; follow [retained-work recovery](assignment-recovery.md#lost-agent-holds).
+If retirement fails the Assignment stays open (the hold stands) and the next scan retries.
+`unknown`, `working`, `blocked`, `idle` and `done` observations are unchanged, and an
+Assignment still launching is never judged this way.
+
 ### Retained-work recovery RPC
 
 Operator RPC `record.recoverRetainedWork` takes selected Workspace and
@@ -570,7 +582,8 @@ completed turn has not been seen. Forge treats both as a finished turn: the
 Assignment stays open (state Idle) and its Herdr resources are not retired, in
 normal reconciliation and in recovery, for Task and Grilling Assignments alike.
 Only an absent Agent closes an Assignment as lost (reconciliation) or crashed
-(recovery).
+(recovery). Open Check-bound Assignments are closed as lost by the Nudge scan instead
+(see [Absent Agents of Check-bound Assignments](#absent-agents-of-check-bound-assignments)).
 Task completion requires an explicit authorized Forge action. Herdr observations
 are wake signals: the daemon subscribes before snapshotting and reconnects after
 failures, while authoritative scans recover from persisted identities. Events do

@@ -12,6 +12,8 @@ pub struct Script {
     pub turn: Mutex<AgentTurn>,
     pub prompts: Mutex<Vec<AgentPrompt>>,
     pub prompt_result: Mutex<Result<AgentPromptOutcome, AgentAdapterError>>,
+    pub retirements: Mutex<u32>,
+    pub retire_result: Mutex<Result<(), AgentAdapterError>>,
 }
 impl Script {
     pub fn new() -> Arc<Self> {
@@ -19,6 +21,8 @@ impl Script {
             turn: Mutex::new(turn(AgentObservation::Working, Some(0))),
             prompts: Mutex::new(vec![]),
             prompt_result: Mutex::new(Ok(AgentPromptOutcome::Delivered)),
+            retirements: Mutex::new(0),
+            retire_result: Mutex::new(Ok(())),
         })
     }
     pub fn report(&self, observation: AgentObservation, seq: u64) {
@@ -85,6 +89,7 @@ impl AgentDispatchAdapter for Adapter {
         _: &AgentDispatchContext,
         _: &dyn AgentDispatchRepository,
     ) -> Result<(), AgentAdapterError> {
-        Ok(())
+        *self.0.retirements.lock().unwrap() += 1;
+        self.0.retire_result.lock().unwrap().clone()
     }
 }

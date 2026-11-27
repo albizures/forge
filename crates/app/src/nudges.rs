@@ -4,8 +4,9 @@
 //! Every Nudge is durably recorded as a prompt intent before it is sent, and an uncertain
 //! delivery places a Dispatch Hold instead of being retried (ADR-0008, extended to all prompts).
 use crate::{
-    AgentAdapterError, AgentAssignment, AgentAssignmentState, AgentObservation, AgentPrompt,
-    AgentPromptOutcome, Application, RegistrationError, log_adapter_failure, outcomes::Evidence,
+    AgentAdapterError, AgentAssignment, AgentAssignmentClosureReason, AgentAssignmentState,
+    AgentObservation, AgentPrompt, AgentPromptOutcome, Application, RegistrationError,
+    log_adapter_failure, outcomes::Evidence,
 };
 use std::path::Path;
 
@@ -121,12 +122,84 @@ impl Application {
     pub(crate) fn nudge_idle_implementation_agents(&self) -> Result<(), RegistrationError> {
         let repository = self.dispatch()?;
         for assignment in repository.list_open_agent_assignments()? {
+            match self.reap_absent_agent(&assignment) {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(assignment_id = %assignment.id, code = error.code,
+                        "Absent Agent evaluation failed");
+                    continue;
+                }
+            }
             if let Err(error) = self.nudge_assignment(&assignment) {
                 tracing::warn!(assignment_id = %assignment.id, code = error.code,
                     "Nudge evaluation failed");
             }
         }
         Ok(())
+    }
+
+    /// Liveness for an open Check-bound Assignment whose Agent Herdr no longer has (`Absent`):
+    /// hold the Task, retire the provider resources and close the Assignment as Lost. The Task
+    /// is never relaunched automatically because its worktree may hold unreported work.
+    /// Returns whether the Assignment was Absent. Any other observation, including `Unknown`,
+    /// is left to the usual grace and recovery handling.
+    fn reap_absent_agent(&self, assignment: &AgentAssignment) -> Result<bool, RegistrationError> {
+        let repository = self.dispatch()?;
+        if assignment.state == AgentAssignmentState::Provisioning
+            || repository
+                .assignment_check_attempt(&assignment.id)?
+                .is_none()
+            || repository.assignment_attempt_outcome_accepted(&assignment.id)?
+        {
+            return Ok(false);
+        }
+        // While agent.start is in flight its identity is not yet retained, so an absent
+        // observation is not evidence that the Agent died.
+        if repository.agent_launch_intent(&assignment.id)?.is_some()
+            && !repository
+                .list_agent_assignment_resources(&assignment.id)?
+                .iter()
+                .any(|resource| {
+                    resource.resource_kind == "agent-name" && resource.retired_at_millis.is_none()
+                })
+        {
+            return Ok(false);
+        }
+        let context = crate::agent_dispatch_context(repository, assignment)?;
+        let adapter = self
+            .adapter_factory()?
+            .adapter_for(&assignment.profile)
+            .map_err(|error| {
+                log_adapter_failure(assignment, "select-adapter", &error);
+                RegistrationError::new("agent-adapter-unavailable", "adapter unavailable")
+            })?;
+        match adapter.observe(&context) {
+            Ok(AgentObservation::Absent) => {}
+            Ok(_) => return Ok(false),
+            Err(error) => {
+                log_adapter_failure(assignment, "observe", &error);
+                return Ok(false);
+            }
+        }
+        if repository.dispatch_hold(assignment.record_id)?.is_none() {
+            let reason = format!(
+                "Agent lost: Herdr no longer has the Agent of Assignment {}. The Assignment is closed as Lost and Forge will not relaunch it, because its worktree may hold unreported work. Inspect the worktree, then follow retained-work recovery in docs/assignment-recovery.md (`forge dispatcher recover-retained-work`) and `forge dispatcher resume` once it is safe.",
+                assignment.id
+            );
+            repository.hold_dispatch(assignment.record_id, &reason)?;
+            repository.add_record_comment(assignment.record_id, &reason, Some("agent-dispatch"))?;
+        }
+        if let Err(error) = adapter.retire(&context, repository) {
+            log_adapter_failure(assignment, "retire", &error);
+            return Ok(true);
+        }
+        repository.compare_and_close_agent_assignment(
+            &assignment.id,
+            assignment.state,
+            AgentAssignmentClosureReason::Lost,
+        )?;
+        Ok(true)
     }
 
     /// The bound attempt when the Assignment is bound to the Task's first (Implementation) Check.
