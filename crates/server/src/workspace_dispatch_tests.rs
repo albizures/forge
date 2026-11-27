@@ -474,6 +474,15 @@ fn registered_profile_blocker_is_durable_redacted_and_clears_on_input_repair() {
             .iter()
             .any(|b| b.message.contains(&profile.revision.to_string()))
     );
+    assert!(
+        ready
+            .blockers
+            .iter()
+            .any(|b| b.code == "task-profile-invalid"
+                && b.message.contains("selected direct input drifted: entry")),
+        "{:?}",
+        ready.blockers
+    );
     assert!(!format!("{ready:?}").contains("PRIVATE_BEHAVIOR"));
     let task = fixture
         .store()

@@ -83,12 +83,15 @@ impl ResolvedLaunchPolicy {
                     .canonicalize()
                     .is_ok_and(|path| path == entry.path)
             {
-                return Err("selected direct input identity is not canonical".into());
+                return Err(format!(
+                    "selected direct input identity is not canonical: {}",
+                    entry.name
+                ));
             }
-            if hash(&fs::read(&entry.path).map_err(|_| "selected direct input unavailable")?)
-                != entry.sha256
-            {
-                return Err("selected direct input drifted".into());
+            let bytes = fs::read(&entry.path)
+                .map_err(|_| format!("selected direct input unavailable: {}", entry.name))?;
+            if hash(&bytes) != entry.sha256 {
+                return Err(format!("selected direct input drifted: {}", entry.name));
             }
         }
         for entry in &self.mcp_servers {
