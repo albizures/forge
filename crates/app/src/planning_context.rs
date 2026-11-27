@@ -79,6 +79,34 @@ mod tests {
     }
 
     #[test]
+    fn observations_round_trip_as_structured_json() {
+        let observations = vec![
+            ProjectPlanningContext {
+                project: "workspace/one".into(),
+                context: PlanningContext::Available {
+                    repository: "/checkout".into(),
+                    branch: "feature/planning".into(),
+                },
+            },
+            ProjectPlanningContext {
+                project: "workspace/two".into(),
+                context: PlanningContext::Unavailable {
+                    reason: "detached HEAD".into(),
+                },
+            },
+        ];
+        let value = serde_json::to_value(&observations).unwrap();
+        assert_eq!(value[0]["context"]["status"], "available");
+        assert_eq!(value[0]["context"]["branch"], "feature/planning");
+        assert_eq!(value[1]["context"]["status"], "unavailable");
+        assert_eq!(value[1]["context"]["reason"], "detached HEAD");
+        assert_eq!(
+            serde_json::from_value::<Vec<ProjectPlanningContext>>(value).unwrap(),
+            observations
+        );
+    }
+
+    #[test]
     fn validates_project_and_observation_fields() {
         let available = ProjectPlanningContext {
             project: "workspace/project".into(),
