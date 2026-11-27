@@ -223,3 +223,49 @@ fn observing_a_turn_reports_the_herdr_completion_sequence() {
     });
     assert_eq!(turn.completion_seq, None);
 }
+
+/// The daemon never talks to `HerdrAdapter` directly: it selects the capability-delivery
+/// wrapper. A wrapper that did not forward turns and prompts left every Nudge silently skipped
+/// (the trait defaults report no `completion_seq` and refuse prompts).
+fn through_the_daemon_adapter<T>(
+    info: &Value,
+    prompted: Option<Value>,
+    call: impl FnOnce(&dyn AgentDispatchAdapter) -> T,
+) -> (T, Vec<String>) {
+    with_herdr(info, prompted, |herdr| {
+        let wrapper = crate::CapabilityDeliveryAdapter {
+            inner: HerdrAdapter {
+                socket_path: herdr.socket_path.clone(),
+            },
+            daemon_url: "http://127.0.0.1:1".into(),
+            capability_secret_root: std::env::temp_dir(),
+            cli_override: None,
+        };
+        call(&wrapper)
+    })
+}
+
+#[test]
+fn the_daemon_adapter_reports_the_finished_turn_sequence() {
+    let (turn, _) = through_the_daemon_adapter(&agent("idle", 35), None, |adapter| {
+        adapter.observe_turn(&context(true)).unwrap()
+    });
+    assert_eq!(turn.observation, forge_app::AgentObservation::Idle);
+    assert_eq!(turn.completion_seq, Some(35));
+}
+
+#[test]
+fn the_daemon_adapter_delivers_a_nudge_prompt() {
+    let (result, methods) =
+        through_the_daemon_adapter(&agent("idle", 4), Some(prompted()), |adapter| {
+            adapter.prompt(
+                &context(true),
+                &AgentPrompt {
+                    text: "keep going".into(),
+                    completion_seq: 4,
+                },
+            )
+        });
+    assert_eq!(result.unwrap(), AgentPromptOutcome::Delivered);
+    assert_eq!(methods.iter().filter(|m| *m == "agent.prompt").count(), 1);
+}

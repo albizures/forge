@@ -828,6 +828,21 @@ impl AgentDispatchAdapter for CapabilityDeliveryAdapter {
         self.inner.recover(context)
     }
 
+    fn observe_turn(
+        &self,
+        context: &AgentDispatchContext,
+    ) -> Result<forge_app::AgentTurn, forge_app::AgentAdapterError> {
+        self.inner.observe_turn(context)
+    }
+
+    fn prompt(
+        &self,
+        context: &AgentDispatchContext,
+        prompt: &forge_app::AgentPrompt,
+    ) -> Result<forge_app::AgentPromptOutcome, forge_app::AgentAdapterError> {
+        self.inner.prompt(context, prompt)
+    }
+
     fn retire(
         &self,
         context: &AgentDispatchContext,
