@@ -89,13 +89,6 @@ fn render_standard_bootstrap(
             attempt.generation,
             serde_json::to_string(&attempt.evidence)?,
         );
-        if let Some(continuation) = &attempt.continuation {
-            let _ = writeln!(
-                output,
-                "\n### Accepted Continuation checkpoint\n\n```json\n{}\n```",
-                serde_json::to_string_pretty(continuation)?
-            );
-        }
         if let Some(recovery) = &attempt.recovery {
             let _ = writeln!(
                 output,

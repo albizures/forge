@@ -19,7 +19,7 @@ pub struct UnstickConsent {
     pub agent_gone: bool,
     /// Authorizes salvaging retained Implementation work instead of stopping.
     pub keep_work: bool,
-    /// Authorizes resetting exhausted remediation or continuation budgets.
+    /// Authorizes resetting exhausted remediation budgets.
     pub reset_budgets: bool,
     /// Authorizes retiring an agent that persisted observations still report as active.
     pub retire_working: bool,
@@ -46,7 +46,6 @@ pub enum UnstickStepKind {
     ResolveUnknown,
     Salvage,
     ResetRemediation,
-    ResetContinuations,
     Resume,
     Dispatch,
 }
@@ -69,8 +68,6 @@ pub struct UnstickStep {
     pub reason: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assignment_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub check_id: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_flags: Vec<UnstickFlag>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -137,7 +134,6 @@ fn step(kind: UnstickStepKind, reason: impl Into<String>) -> UnstickStep {
         status: UnstickStepStatus::Pending,
         reason: reason.into(),
         assignment_id: None,
-        check_id: None,
         required_flags: Vec::new(),
         error: None,
     }
@@ -324,13 +320,6 @@ impl Application {
                 self.reset_task_remediation(record, &actor, &message)?;
                 Ok(None)
             }
-            UnstickStepKind::ResetContinuations => {
-                let check = step.check_id.ok_or_else(|| {
-                    RegistrationError::new("unstick-invalid", "step has no Check")
-                })?;
-                self.reset_check_continuations(record, check, &actor, &message)?;
-                Ok(None)
-            }
             UnstickStepKind::Resume => {
                 self.resume_task_dispatch(record, None)?;
                 Ok(None)
@@ -509,20 +498,6 @@ impl Application {
                     .requiring(consent, &budget_flags),
             );
         }
-        for continuations in work.progress.continuations.iter().filter(|c| c.exhausted()) {
-            let mut reset = step(
-                UnstickStepKind::ResetContinuations,
-                format!(
-                    "Check {} exhausted its continuations ({} total, {} unchanged in a row)",
-                    continuations.check_id,
-                    continuations.total,
-                    continuations.consecutive_unchanged
-                ),
-            );
-            reset.check_id = Some(continuations.check_id);
-            steps.push(reset.requiring(consent, &budget_flags));
-        }
-
         let retiring = steps.iter().any(|s| s.kind == UnstickStepKind::Retire);
         if hold.is_some() || retiring {
             steps.push(step(

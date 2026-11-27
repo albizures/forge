@@ -1,12 +1,21 @@
 use super::*;
 use forge_app::retained_work::RecoveryInput;
 
+pub struct Fixture<'a, F> {
+    pub store: &'a SqliteProjectRepository,
+    pub path: &'a std::path::Path,
+    pub root: &'a std::path::Path,
+    pub application: &'a F,
+    pub task: u64,
+    pub head: &'a Arc<Mutex<String>>,
+    pub dirty: &'a Arc<AtomicBool>,
+    pub unavailable: &'a Arc<AtomicBool>,
+    pub launches: &'a Arc<Mutex<Vec<u32>>>,
+}
+
 #[allow(clippy::too_many_lines)]
-pub fn run(
-    f: &implementation_continuations::Fixture<'_, impl Fn() -> Application + Sync>,
-    dirty_recovery: bool,
-) {
-    let implementation_continuations::Fixture {
+pub fn run(f: &Fixture<'_, impl Fn() -> Application + Sync>, dirty_recovery: bool) {
+    let Fixture {
         store,
         path,
         root,
@@ -25,24 +34,19 @@ pub fn run(
     std::fs::write(secrets.join(&old.id), "secret").unwrap();
     let session = app.assignment(&secrets, &old.id, "secret").unwrap();
     session.bootstrap().unwrap();
-    // Retain real prior checkpoint/accounting history, not merely zeroed budgets.
-    let checkpoint = OutcomeInput {
+    // Retain a real prior interruption, not merely zeroed budgets.
+    let interruption = OutcomeInput {
         attempt_id: attempt.id.clone(),
         generation: attempt.generation,
         evidence: attempt.evidence.clone(),
         verdict: Verdict::Fail,
         actor: "ignored".into(),
-        message: "Checkpoint".into(),
-        disposition: OutcomeDisposition::Continuation(forge_app::outcomes::ContinuationHandoff {
-            stopping_reason: "Execution constraint".into(),
-            completed_work: "Inspection".into(),
-            verification: "Full gates unrun".into(),
-            remaining_work: "Implement".into(),
-        }),
+        message: "Interrupted".into(),
+        disposition: OutcomeDisposition::Interrupted,
         findings: vec![],
         verifications: vec![],
     };
-    let accepted_checkpoint = session.submit_outcome(&checkpoint).unwrap();
+    let accepted_interruption = session.submit_outcome(&interruption).unwrap();
     let (old, _) = application().execute_task_check_acceptance(task).unwrap();
     let attempt = store.assignment_check_attempt(&old.id).unwrap().unwrap();
     std::fs::write(secrets.join(&old.id), "secret").unwrap();
@@ -167,11 +171,11 @@ pub fn run(
     assert_eq!(store.task_base_commit(task).unwrap(), Some("a".repeat(40)));
     assert_eq!(store.list_agent_assignments(task).unwrap().len(), 2);
     assert_eq!(
-        app.assignment(&secrets, &checkpoint.attempt_id, "secret")
+        app.assignment(&secrets, &interruption.attempt_id, "secret")
             .unwrap()
-            .submit_outcome(&checkpoint)
+            .submit_outcome(&interruption)
             .unwrap(),
-        accepted_checkpoint
+        accepted_interruption
     );
     assert_eq!(
         application().recover_retained_work(task, &input).unwrap(),
@@ -217,10 +221,6 @@ pub fn run(
     assert_eq!(successor.evidence, evidence);
     assert_eq!(successor.recovery, Some(recovery.clone()));
     assert_eq!(
-        successor.continuation, attempt.continuation,
-        "recovery does not rewrite historical accepted handoff"
-    );
-    assert_eq!(
         application().recover_retained_work(task, &input).unwrap(),
         recovery,
         "retry after restart/launch is read-only"
@@ -242,14 +242,12 @@ pub fn run(
             boot.context.bound.check_attempt.unwrap().recovery,
             Some(recovery.clone())
         );
-        let mut output = checkpoint.clone();
+        let mut output = interruption.clone();
         output.attempt_id = successor.id;
         output.generation = successor.generation;
         output.evidence = evidence.clone();
-        assert!(
-            replacement_session.submit_outcome(&output).is_err(),
-            "dirty salvage input cannot become a checkpoint"
-        );
+        output.verdict = Verdict::Pass;
+        output.disposition = OutcomeDisposition::Complete;
         dirty.store(false, Ordering::SeqCst);
         *head.lock().unwrap() = "d".repeat(40);
         output.evidence = Evidence::Repository {
@@ -257,7 +255,7 @@ pub fn run(
             commit: "d".repeat(40),
         };
         let accepted = replacement_session.submit_outcome(&output).unwrap();
-        assert_eq!(accepted.work.input, Some(output.evidence));
+        assert_eq!(accepted.work.output, Some(output.evidence));
         // Retirement after reservation never makes the old authorization reusable.
         app.retire_agent_assignment(&replacement.id).unwrap();
         store.resume_dispatch(task).unwrap();

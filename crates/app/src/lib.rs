@@ -756,21 +756,6 @@ pub trait RecordRepository: ProjectRepository {
             "Retained-work recovery is unavailable",
         ))
     }
-    /// Operator-only reset, scoped to this repository's Workspace and selected Task/Check.
-    /// # Errors
-    /// Returns unsupported, scope or storage errors.
-    fn reset_record_continuations(
-        &self,
-        _record: u64,
-        _check: u64,
-        _actor: &str,
-        _message: &str,
-    ) -> Result<outcomes::WorkState, RegistrationError> {
-        Err(RegistrationError::new(
-            "unsupported-contract",
-            "continuation reset is unavailable",
-        ))
-    }
     /// Inspect a Task's current work evidence and freshness.
     /// # Errors
     /// Returns unsupported, scope or storage errors.
@@ -1540,8 +1525,7 @@ pub struct AgentDispatchContext {
     /// The prepared active Managed Worktree in which this Task's Pi process runs.
     pub agent_workspace: Option<PathBuf>,
     pub dispatch_workspace: Option<DispatchWorkspace>,
-    pub rendered_initial_prompt: String,
-    /// A short, verified bootstrap, distinct from the full rendered instructions.
+    /// A short, verified bootstrap instruction.
     pub bootstrap_prompt: Option<String>,
     /// Capability delivery is intentionally opaque to the provider. A later capability issuer
     /// supplies this value without exposing its secret in assignment persistence.
@@ -1979,44 +1963,14 @@ fn agent_dispatch_context(
     repository: &dyn AgentDispatchRepository,
     assignment: &AgentAssignment,
 ) -> Result<AgentDispatchContext, RegistrationError> {
-    use std::fmt::Write;
     let project = repository.project(&assignment.project_slug)?;
-    let record = repository.show_record(assignment.record_id)?;
     let agent_workspace = repository.assignment_execution_directory(&assignment.id)?;
-    let execution_instruction = if record.record_type == RecordType::Grilling {
-        let mut instruction = agent_workspace.as_ref().map_or_else(String::new, |path| {
-            format!("\n\nYour Forge Workspace root is {}.", path.display())
-        });
-        instruction.push_str("\nApplicable Project scope paths:");
-        for reference in &record.project_slugs {
-            let scoped_project = repository.project(reference)?;
-            write!(
-                instruction,
-                "\n- {}: {}",
-                reference,
-                scoped_project.project_root.display()
-            )
-            .expect("writing to a String cannot fail");
-        }
-        instruction
-    } else {
-        agent_workspace.as_ref().map_or_else(String::new, |path| {
-            format!(
-                "\n\nYour assigned Managed Worktree is {}. Perform Task work only in this worktree.",
-                path.display()
-            )
-        })
-    };
     Ok(AgentDispatchContext {
         assignment: assignment.clone(),
         project_root: project.project_root,
         agent_workspace,
         dispatch_workspace: repository.assignment_dispatch_workspace(&assignment.id)?,
         bootstrap_prompt: None,
-        rendered_initial_prompt: format!(
-            "{}\n\n{}{}",
-            assignment.profile.prompt_template, record.body, execution_instruction
-        ),
         capability_delivery: None,
         resources: repository.list_agent_assignment_resources(&assignment.id)?,
     })

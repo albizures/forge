@@ -15,7 +15,7 @@ fn response(live_body: &str) -> AssignmentBootstrapResponse {
                     "id":"attempt", "record_id":7, "check_id":117, "generation":2,
                     "actor":"assignment", "body":"PINNED TASK BODY",
                     "evidence":{"kind":"artifact", "uri":"artifact://input", "sha256":"a".repeat(64)},
-                    "continuation":null, "recovery":null
+                    "recovery":null
                 }
             },
             "record":{
@@ -65,24 +65,6 @@ fn default_bootstrap_deduplicates_equal_bodies_and_keeps_outcome_identity() {
     ] {
         assert!(!text.contains(omitted), "unexpected {omitted}");
     }
-}
-
-#[test]
-fn default_bootstrap_renders_continuation_handoff_when_present() {
-    let mut value = response("PINNED TASK BODY");
-    let AssignmentBootstrapResponse::Standard(standard) = &mut value else {
-        unreachable!()
-    };
-    standard.context.bound.check_attempt.as_mut().unwrap().continuation = Some(
-        serde_json::from_value(serde_json::json!({
-            "attempt_id": "previous", "evidence": {"kind":"artifact", "uri":"artifact://checkpoint", "sha256":"b".repeat(64)},
-            "handoff": {"stopping_reason":"STOP", "completed_work":"DONE", "verification":"VERIFIED", "remaining_work":"REMAINING"}
-        }))
-        .unwrap(),
-    );
-    let text = render_assignment_bootstrap(&value).unwrap();
-    assert!(text.contains("### Accepted Continuation checkpoint"));
-    assert!(text.contains("REMAINING"));
 }
 
 #[test]

@@ -22,7 +22,6 @@ mod assignment_sessions;
 mod check_templates;
 mod checks;
 mod completion;
-mod continuations;
 mod execution_modes;
 mod findings;
 mod nudges;
@@ -256,12 +255,6 @@ impl SqliteProjectRepository {
             connection.execute_batch(include_str!("upgrade/retained_work.sql")).map_err(storage_error)?;
         }
         task_progress::schema(connection)?;
-        connection
-            .execute_batch(concat!(
-                include_str!("upgrade/continuations16.sql"),
-                include_str!("upgrade/continuation_resets.sql")
-            ))
-            .map_err(storage_error)?;
         findings::schema(connection)?;
         check_templates::schema(connection)?;
         migrate_record_status_schema(connection)?;
@@ -1335,33 +1328,6 @@ impl RecordRepository for SqliteProjectRepository {
     ) -> Result<forge_app::retained_work::RetainedWorkRecovery, RegistrationError> {
         self.recover_retained_work(record, input, claim, retained_state)
     }
-    fn reset_record_continuations(
-        &self,
-        record: u64,
-        check: u64,
-        actor: &str,
-        message: &str,
-    ) -> Result<forge_app::outcomes::WorkState, RegistrationError> {
-        if actor.trim().is_empty() || message.trim().is_empty() {
-            return Err(RegistrationError::new(
-                "invalid-progress-reset",
-                "operator actor and explanation are required",
-            ));
-        }
-        let mut c = self
-            .connection
-            .lock()
-            .map_err(|_| RegistrationError::new("storage", "storage lock poisoned"))?;
-        let tx = c
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(storage_error)?;
-        self.check_task(&tx, record)?;
-        continuations::reset(&tx, record, check, actor, message)?;
-        let state = outcomes::state(&tx, record)?;
-        tx.commit().map_err(storage_error)?;
-        Ok(state)
-    }
-
     fn record_work_state(
         &self,
         record: u64,

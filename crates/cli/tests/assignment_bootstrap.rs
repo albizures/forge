@@ -30,7 +30,7 @@ async fn bootstrap_returns_context_and_behavior_only_from_unified_route() {
                 response["result"]["context"]["bound"]["checkAttempt"] = serde_json::json!({
                     "id":"attempt-7", "record_id":7, "check_id":117, "generation":2,
                     "actor":"a", "evidence":{"kind":"repository", "repository":"/repository", "commit":"a".repeat(40)},
-                    "body":"work", "continuation":null, "recovery":null
+                    "body":"work", "recovery":null
                 });
             }
             Json(response)

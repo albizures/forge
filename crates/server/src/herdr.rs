@@ -1308,7 +1308,6 @@ mod tests {
             project_root: "/project".into(),
             agent_workspace: None,
             dispatch_workspace: None,
-            rendered_initial_prompt: "full instructions".into(),
             bootstrap_prompt: None,
             capability_delivery: None,
             resources: vec![],
@@ -1483,7 +1482,6 @@ mod tests {
             dispatch_workspace: Some(DispatchWorkspace {
                 id: "workspace".into(),
             }),
-            rendered_initial_prompt: "private full instructions".into(),
             bootstrap_prompt: Some("short bootstrap".into()),
             capability_delivery: Some(AssignmentCapabilityDelivery {
                 endpoint: "http://127.0.0.1:45003".into(),
@@ -2080,7 +2078,6 @@ mod tests {
             assignment: assignment.clone(),
             project_root: "/project".into(),
             agent_workspace: Some("/worktree".into()),
-            rendered_initial_prompt: String::new(),
             bootstrap_prompt: None,
             capability_delivery: None,
             dispatch_workspace: Some(forge_app::DispatchWorkspace {

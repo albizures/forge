@@ -1475,16 +1475,6 @@ impl RecordApiServer for Daemon {
             .recover_retained_work(request.record.record, &request.record.recovery)
             .map_err(rpc_error)
     }
-    async fn reset_continuations(
-        &self,
-        request: forge_rpc::SelectedRecordRequest<forge_rpc::ResetContinuationsRequest>,
-    ) -> RpcResult<forge_app::outcomes::WorkState> {
-        let application = self.record_application(&request.selection, &mut [])?;
-        let r = request.record;
-        application
-            .reset_check_continuations(r.record, r.check, &r.actor, &r.message)
-            .map_err(rpc_error)
-    }
     async fn record_work_state(
         &self,
         request: forge_rpc::SelectedRecordRequest<forge_rpc::RecordWorkStateRequest>,
@@ -2855,16 +2845,6 @@ mod tests {
         let contexts = launches.lock().unwrap();
         assert_eq!(contexts.len(), 1);
         assert_eq!(contexts[0].agent_workspace.as_ref(), Some(&root));
-        assert!(
-            contexts[0]
-                .rendered_initial_prompt
-                .contains(root.join("repo").to_str().unwrap())
-        );
-        assert!(
-            !contexts[0]
-                .rendered_initial_prompt
-                .contains("assigned Managed Worktree")
-        );
         assert_eq!(
             store.show_record(records[1].id).unwrap().status,
             RecordStatus::Open

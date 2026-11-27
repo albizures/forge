@@ -44,14 +44,14 @@ fn legacy_completed_and_prepared_chain_round_trips_without_inventing_evidence() 
     for (id, predecessor) in [(review, first), (successor, review)] {
         c.execute("UPDATE task_stacks SET predecessor=?2, source_json=?3 WHERE record_id=?1", params![id.cast_signed(), predecessor.cast_signed(), serde_json::to_string(&StackSource::Predecessor { record_id: predecessor }).unwrap()]).unwrap();
     }
-    c.execute_batch("DROP TABLE assignment_prompt_intents; DROP TABLE assignment_nudges; DROP TABLE retained_work_recoveries; DROP TABLE check_continuation_resets; DROP TABLE check_continuations; DROP TABLE assignment_sessions; DROP TABLE builds_on_dependencies; PRAGMA user_version=11;").unwrap();
+    c.execute_batch("DROP TABLE assignment_prompt_intents; DROP TABLE assignment_nudges; DROP TABLE retained_work_recoveries; DROP TABLE assignment_sessions; DROP TABLE builds_on_dependencies; PRAGMA user_version=11;").unwrap();
     drop(c);
     let bytes = fs::read(&source).unwrap();
     assert!(SqliteProjectRepository::open(&source).is_err());
     let before = crate::upgrade::snapshot(&source,&copy).unwrap();
     let after = crate::upgrade::migrate(&copy).unwrap();
     assert_eq!(fs::read(&source).unwrap(),bytes);
-    for old in before.tables {
+    for old in before.tables.into_iter().filter(|t| !t.name.starts_with("check_continuation")) {
         if !matches!(old.name.as_str(),"task_stacks" | "ordering_only_dependencies") {
             assert!(after.tables.contains(&old),"changed {}",old.name);
         }

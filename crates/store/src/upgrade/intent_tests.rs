@@ -87,7 +87,11 @@ fn historical_matrix_converts_only_explicit_or_provable_intent_and_preserves_his
         if schema >= 9 {
             assert_eq!(kind(&c, 4, 2), Some(PrerequisiteKind::WaitsFor));
         }
-        for old in before.tables {
+        for old in before
+            .tables
+            .into_iter()
+            .filter(|t| !t.name.starts_with("check_continuation"))
+        {
             if !matches!(
                 old.name.as_str(),
                 "task_stacks" | "ordering_only_dependencies" | "builds_on_dependencies"
@@ -144,7 +148,7 @@ fn incomplete_open_chains_survive_conversion_and_same_schema_snapshot_transfer()
             .unwrap();
             c.execute(&format!("DELETE FROM task_stacks WHERE {missing}"), [])
                 .unwrap();
-            c.execute_batch("DROP TABLE assignment_prompt_intents; DROP TABLE assignment_nudges; DROP TABLE retained_work_recoveries; DROP TABLE check_continuation_resets; DROP TABLE check_continuations; DROP TABLE assignment_sessions")
+            c.execute_batch("DROP TABLE assignment_prompt_intents; DROP TABLE assignment_nudges; DROP TABLE retained_work_recoveries; DROP TABLE assignment_sessions")
                 .unwrap();
             c.pragma_update(None, "user_version", schema).unwrap();
             let dir = std::env::temp_dir().join(format!(
@@ -165,7 +169,11 @@ fn incomplete_open_chains_survive_conversion_and_same_schema_snapshot_transfer()
             assert_eq!(snapshot(&source, &target).unwrap(), before);
             let after = migrate(&target).unwrap();
             assert_eq!(after.schema, Some(20));
-            for table in &before.tables {
+            for table in before
+                .tables
+                .iter()
+                .filter(|t| !t.name.starts_with("check_continuation"))
+            {
                 assert!(after.tables.contains(table));
             }
             assert_eq!(
@@ -212,7 +220,7 @@ fn incomplete_lineage_cannot_hide_preparation_results_or_invalid_configuration()
             c.execute_batch("DELETE FROM task_stacks WHERE record_id=1")
                 .unwrap();
             c.execute_batch(invalid).unwrap();
-            c.execute_batch("DROP TABLE assignment_prompt_intents; DROP TABLE assignment_nudges; DROP TABLE retained_work_recoveries; DROP TABLE check_continuation_resets; DROP TABLE check_continuations; DROP TABLE assignment_sessions")
+            c.execute_batch("DROP TABLE assignment_prompt_intents; DROP TABLE assignment_nudges; DROP TABLE retained_work_recoveries; DROP TABLE assignment_sessions")
                 .unwrap();
             c.pragma_update(None, "user_version", schema).unwrap();
             let before = inventory(&c).unwrap();
@@ -319,7 +327,11 @@ fn explicit_completed_waits_for_decisions_preserve_history_and_require_both_done
             )
             .unwrap();
             assert_eq!(kind(&c, 4, 8), Some(PrerequisiteKind::WaitsFor));
-            for table in before.tables {
+            for table in before
+                .tables
+                .into_iter()
+                .filter(|t| !t.name.starts_with("check_continuation"))
+            {
                 if !matches!(
                     table.name.as_str(),
                     "task_stacks" | "ordering_only_dependencies" | "builds_on_dependencies"
