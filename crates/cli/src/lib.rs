@@ -1691,18 +1691,8 @@ fn render_completion(record: &RecordResponse, text: &mut String) {
     }
 }
 
-#[must_use]
-pub fn render_record(record: &RecordResponse) -> String {
+fn render_planning_context(record: &RecordResponse, text: &mut String) {
     use std::fmt::Write as _;
-    let mut text = format!(
-        "{} {} ({}, {})\n\n{}",
-        record.record_type,
-        record.id,
-        record.status,
-        record.execution_mode.as_str(),
-        record.body
-    );
-    render_completion(record, &mut text);
     for observation in &record.planning_context {
         use forge_app::planning_context::PlanningContext;
         match &observation.context {
@@ -1722,6 +1712,21 @@ pub fn render_record(record: &RecordResponse) -> String {
             }
         }
     }
+}
+
+#[must_use]
+pub fn render_record(record: &RecordResponse) -> String {
+    use std::fmt::Write as _;
+    let mut text = format!(
+        "{} {} ({}, {})\n\n{}",
+        record.record_type,
+        record.id,
+        record.status,
+        record.execution_mode.as_str(),
+        record.body
+    );
+    render_completion(record, &mut text);
+    render_planning_context(record, &mut text);
     for relationship in &record.relationships {
         let _ = write!(
             text,
@@ -2037,7 +2042,9 @@ mod tests {
                 .iter()
                 .all(|record| record.record_type == "task")
         );
-        assert_eq!(render_record(&spec), "spec 1 (open, manual)\n\nSpec body");
+        assert!(render_record(&spec).starts_with(
+            "spec 1 (open, manual)\n\nSpec body\nPlanning context test/cli-test-project:"
+        ));
         assert_eq!(render_record_opened(&child), "Opened task 5 (open)");
 
         server.abort();
