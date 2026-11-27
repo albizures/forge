@@ -262,6 +262,9 @@ impl SqliteProjectRepository {
         stacks::schema(connection)?;
         ordering_dependencies::schema(connection)?;
         project_policy::schema(connection)?;
+        connection
+            .execute_batch(include_str!("planning_context.sql"))
+            .map_err(storage_error)?;
         Ok(())
     }
 }

@@ -48,6 +48,14 @@ is documented separately in [Records](../../docs/records.md),
   copy-and-upgrade targets revision 14 from revisions 7 through 14; unsupported
   stores are rejected without automatic conversion or reset.
 
+## Planning observations
+
+`record_planning_context` is an additive table keyed by `(record_id, project_slug)`,
+with a composite foreign key to `record_projects`. An available observation stores
+nonblank `repository` and `branch`; an unavailable observation stores a nonblank
+`reason` instead. An absent row does not infer context for older Records. This
+schema alone does not expose or populate observations.
+
 ## Project Base Branch Policy (revision 14)
 
 `project_base_branch_policy` stores an optional row keyed by the Project's
