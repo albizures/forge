@@ -104,10 +104,10 @@ pub struct Bootstrap {
 /// pinned Agent Profile revision and names no Forge command other than the two it permits.
 pub const IMPLEMENTATION_COMMAND_CONTRACT: &str = "\
 - Work only in the execution directory above.
-- Commit your work as you go.
-- Run `forge assignment request-review` only when the Task and every open Finding above are fully met.
-- After requesting review, end your turn and wait.
-- If you are blocked, explain why with `forge assignment comment --message '<explanation>'`, then end your turn.";
+- There is no time, capacity or attempt limit on this Assignment; it continues across as many turns as needed.
+- Commit your work as you go. A commit is not a stopping point; keep going.
+- Run `forge assignment request-review` only when the Task and every open Finding above are fully met. After requesting review, end your turn and wait.
+- A blocker is only a missing prerequisite or a human decision; the size of the work or \"cannot finish in this attempt\" is never a blocker. If you hit a real blocker, explain it with `forge assignment comment --message '<explanation>'`, then end your turn.";
 
 /// One open Finding, in full, as shown to an Implementation Agent.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]

@@ -117,10 +117,13 @@ id, attempt id, generation, input evidence, related-Record list
 or Agent Profile outcome language. The JSON has no `context` or `behavior` field.
 
 The command contract is fixed Forge text in `forge_app::assignment`, identical for every
-pinned profile revision: work only in the worktree; commit as you go; run
-`forge assignment request-review` only when the Task and all open Findings are met; after
-requesting review, end your turn and wait; if blocked, explain with
-`forge assignment comment`. It names no other Forge command.
+pinned profile revision: work only in the worktree; there is no time, capacity or attempt
+limit and the Assignment continues across as many turns as needed; commit as you go, and a
+commit is not a stopping point; run `forge assignment request-review` only when the Task
+and all open Findings are met; after requesting review, end your turn and wait; a blocker
+is only a missing prerequisite or a human decision (the size of the work or "cannot finish
+in this attempt" is never one), and a real blocker is explained with
+`forge assignment comment` before ending the turn. It names no other Forge command.
 
 The pinned Implementation profile body is **omitted**, not rendered as guidance: existing
 revisions embed outcome and bootstrap instructions that would otherwise

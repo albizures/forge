@@ -335,7 +335,9 @@ fn nudge_text_follows_the_template_and_counts_consecutive_no_commit_nudges() {
             text.contains(&worktree.display().to_string()),
             "names the worktree: {text}"
         );
-        assert!(text.contains("commit your work"));
+        assert!(text.contains("commit as you go. A commit is not a stopping point."));
+        assert!(text.contains("There is no time, capacity or attempt limit"));
+        assert!(text.contains("the size of the work is never a blocker"));
         assert!(text.contains("forge assignment request-review"));
         assert!(text.contains("forge assignment comment"));
         assert!(!text.contains("Deliver work"), "does not repeat the Task");

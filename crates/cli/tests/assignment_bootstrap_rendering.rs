@@ -106,7 +106,7 @@ fn implementation_bootstrap_carries_only_worktree_task_findings_and_contract() {
     let text = render_assignment_bootstrap(&response).unwrap();
     assert_eq!(
         text,
-        "# Assignment: Implementation\n\nBootstrap is complete.\n\nExecution directory: /worktree\n\n## Task\n\nPINNED TASK BODY\n\n## Open Findings\n\n### Finding #9 (major, blocking)\n\nFULL FINDING\nSECOND LINE\n\n## Command contract\n\n- Work only in the execution directory above.\n- Commit your work as you go.\n- Run `forge assignment request-review` only when the Task and every open Finding above are fully met.\n- After requesting review, end your turn and wait.\n- If you are blocked, explain why with `forge assignment comment --message '<explanation>'`, then end your turn.\n"
+        "# Assignment: Implementation\n\nBootstrap is complete.\n\nExecution directory: /worktree\n\n## Task\n\nPINNED TASK BODY\n\n## Open Findings\n\n### Finding #9 (major, blocking)\n\nFULL FINDING\nSECOND LINE\n\n## Command contract\n\n- Work only in the execution directory above.\n- There is no time, capacity or attempt limit on this Assignment; it continues across as many turns as needed.\n- Commit your work as you go. A commit is not a stopping point; keep going.\n- Run `forge assignment request-review` only when the Task and every open Finding above are fully met. After requesting review, end your turn and wait.\n- A blocker is only a missing prerequisite or a human decision; the size of the work or \"cannot finish in this attempt\" is never a blocker. If you hit a real blocker, explain it with `forge assignment comment --message '<explanation>'`, then end your turn.\n"
     );
     for omitted in [
         "Trusted constraints",
@@ -146,4 +146,21 @@ fn implementation_bootstrap_without_findings_or_recovery_omits_those_sections() 
     ))
     .unwrap();
     assert!(text.contains("Authorized retained-work recovery") && text.contains("RECOVERED"));
+}
+
+#[test]
+fn implementation_command_contract_names_only_request_review_and_comment() {
+    let contract = forge_app::assignment::IMPLEMENTATION_COMMAND_CONTRACT;
+    let mut commands: Vec<&str> = contract
+        .split("`forge ")
+        .skip(1)
+        .map(|rest| rest.split('`').next().unwrap())
+        .map(|command| command.split(" --").next().unwrap())
+        .collect();
+    commands.sort_unstable();
+    assert_eq!(
+        commands,
+        ["assignment comment", "assignment request-review"]
+    );
+    assert_eq!(contract.matches("forge ").count(), 2, "{contract}");
 }
