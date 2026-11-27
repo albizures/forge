@@ -127,7 +127,7 @@ excluded from automatic scheduling. A Dispatched Projectless Task is ineligible
 with `dispatch-requires-project`; Dispatched metadata cannot supply a Project.
 Eligible Task dispatch now advances immutable ordered Checks with their pinned
 profiles, after the verified rollout gates. See [dispatch operations](dispatch.md)
-for prerequisites, bounded continuation and the separate final completion gate.
+for prerequisites, bounded progress and the separate final completion gate.
 It never silently falls back to Manual.
 
 ## Relationships and lifecycle

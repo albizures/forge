@@ -69,9 +69,6 @@ Context separates:
   identity. Task `bound.checkAttempt` binds the immutable attempt/Check identity,
   starting freshness generation, input evidence and Task body; the Assignment
   revision is that Check's pin, never a live Workspace Task selection.
-  `checkAttempt.continuation` is null or the latest accepted Implementation handoff
-  captured at attempt creation: accepted attempt id, checkpoint evidence and the
-  stopping reason, completed work, actual verification/unrun gates and remaining work.
   `checkAttempt.recovery` separately captures explicit operator salvage authorization.
   Its optional `retained_state.sha256` binds dirty/staged/untracked starting state,
   not a clean accepted checkpoint. Inspect and salvage that retained checkout;
@@ -116,7 +113,7 @@ reads context exactly as above, but is returned (human-readable and `--json`) on
 - `retainedWorkRecovery`, only when the operator authorized retained-work recovery.
 
 Trusted constraints remain enforced server-side but are not rendered. There is no Check
-id, attempt id, generation, input evidence, related-Record list, Continuation checkpoint
+id, attempt id, generation, input evidence, related-Record list
 or Agent Profile outcome language. The JSON has no `context` or `behavior` field.
 
 The command contract is fixed Forge text in `forge_app::assignment`, identical for every
@@ -126,7 +123,7 @@ requesting review, end your turn and wait; if blocked, explain with
 `forge assignment comment`. It names no other Forge command.
 
 The pinned Implementation profile body is **omitted**, not rendered as guidance: existing
-revisions embed outcome, Continuation and bootstrap instructions that would otherwise
+revisions embed outcome and bootstrap instructions that would otherwise
 surface as authority. The profile still selects launch configuration. Review and
 Publication bootstraps are unchanged.
 
@@ -198,10 +195,8 @@ work. Inspection adds a default-empty `sessions` collection. New clients supplyi
 ## Implementation profile delivery
 
 Implementation Agents receive Forge-owned instructions at bootstrap, not profile outcome
-guidance, and cannot submit outcomes (see below). The tracked
-[Continuation profile source](profiles/implementation-continuations.md) and its
-[handoff](profiles/implementation-continuations-handoff.md) are historical, not live
-registered revisions, and do not alter existing immutable Check pins.
+guidance, and cannot submit outcomes (see below). Retired profile revisions that embedded
+outcome language do not alter existing immutable Check pins.
 
 ## Agent CLI examples
 
@@ -210,7 +205,7 @@ For an Implementation Assignment the output is the minimal form above. For other
 Assignments its default output is agent-facing Markdown limited to facts the agent acts on:
 execution directory and Projects, trusted constraints for the bound Record type,
 the outcome identity and input evidence of the bound Check attempt (plus any
-accepted Continuation checkpoint or authorized recovery), worker behavior, and
+authorized recovery), worker behavior, and
 clearly labelled Record content. Diagnostic identity (Assignment ID, profile
 revision, model, attempt number, freshness) is available only through `--json`.
 The pinned Task body is shown once; if the live body differs, both are labelled
