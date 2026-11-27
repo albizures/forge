@@ -1664,7 +1664,8 @@ fn reconcile_assignment<A: AgentDispatchAdapter + ?Sized>(
         AgentObservation::Working => {
             update_assignment_state(repository, assignment, AgentAssignmentState::Working)
         }
-        AgentObservation::Idle => {
+        // Herdr `done` is a finished turn ("ready for input", completion unseen), not exit.
+        AgentObservation::Idle | AgentObservation::Done => {
             update_assignment_state(repository, assignment, AgentAssignmentState::Idle)
         }
         AgentObservation::Blocked => {
@@ -1673,7 +1674,7 @@ fn reconcile_assignment<A: AgentDispatchAdapter + ?Sized>(
         AgentObservation::Unknown => {
             update_assignment_state(repository, assignment, AgentAssignmentState::Unknown)
         }
-        AgentObservation::Done | AgentObservation::Absent => {
+        AgentObservation::Absent => {
             if let Err(error) = adapter.retire(&context, repository) {
                 log_adapter_failure(assignment, "retire", &error);
                 return Ok(AssignmentReconciliation::Retained(match error {
@@ -1879,13 +1880,13 @@ fn reconcile_recovery<A: AgentDispatchAdapter + ?Sized>(
         Ok(AgentObservation::Working) => {
             update_assignment_state(repository, assignment, AgentAssignmentState::Working)
         }
-        Ok(AgentObservation::Idle) => {
+        Ok(AgentObservation::Idle | AgentObservation::Done) => {
             update_assignment_state(repository, assignment, AgentAssignmentState::Idle)
         }
         Ok(AgentObservation::Blocked) => {
             update_assignment_state(repository, assignment, AgentAssignmentState::Blocked)
         }
-        Ok(AgentObservation::Unknown | AgentObservation::Done | AgentObservation::Absent) => {
+        Ok(AgentObservation::Unknown | AgentObservation::Absent) => {
             if let Err(error) = adapter.retire(&context, repository) {
                 log_adapter_failure(assignment, "recover-retire", &error);
                 return Ok(AssignmentReconciliation::Retained(retention_from_error(
