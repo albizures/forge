@@ -509,10 +509,13 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "forge-app",
+ "forge-store",
  "fs4",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "toml",
 ]
 
