@@ -141,11 +141,14 @@ returns to Implementation only after old ownership/resources are safely retired.
 Historical Assessments and Findings remain, but invalidated passes never revive.
 A false output commit claim is rejected without publishing an Assessment.
 
-### Nudges for idle Implementation Agents
+### Nudges for idle Check-bound Agents
 
-When an Implementation Agent ends a turn without a Review Request, reconciliation sends
-exactly one **Nudge** to the same live Herdr session. Only open Assignments bound to the
-Task's Implementation Check are nudged; Review and Publication Assignments never are.
+When a live Agent bound to any Check of a Task ends a turn without finishing its Agent
+Assignment, reconciliation sends exactly one **Nudge** to the same live Herdr session. Every
+open Check-bound Assignment is a candidate. The role comes from Check position: the Task's
+first Check is Implementation, finished by a Review Request, and any later Check (Review
+Implementation, Review Coding Standards, Publication, or a later template Check) is a review
+Check, finished only when Forge accepts its verdict. There is no allowlist by Check name.
 Nudge evaluation reads Herdr `completion_seq` from `agent.get` (earlier Forge versions
 ignored it) and sends one Nudge when all of these hold:
 
@@ -154,11 +157,12 @@ ignored it) and sends one Nudge when all of these hold:
   again sends nothing). `working`, `blocked`, `unknown`, an absent sequence or an
   absent Agent never nudge;
 - the Assignment is past bootstrap (its context was read);
-- the bound attempt has accepted no outcome, so no Review Request exists (a Review
-  Request or any other accepted outcome means the Assignment is being retired);
+- the bound attempt has accepted no outcome (a Review Request, an accepted verdict or any
+  other accepted outcome means the Assignment is being retired). A submitted but rejected
+  outcome is not accepted, so the Agent is still nudged;
 - the Task has no Dispatch Hold.
 
-The Nudge text is fixed Forge text that names the Managed Worktree, tells the Agent to
+The Implementation Nudge text is fixed Forge text that names the Managed Worktree, tells the Agent to
 continue and commit, to run `forge assignment request-review` only when the Task and every
 open Finding are met, and to explain a blocker with `forge assignment comment`. It does not
 repeat the Task body and ends with the state line `No new commit since the last nudge: N
@@ -168,10 +172,21 @@ Nudge and the HEAD observed at the previous Nudge afterwards; a new commit reset
 Per-Assignment counters (last nudged `completion_seq`, total Nudges, consecutive no-commit
 Nudges, last HEAD) start at zero for each new Assignment.
 
+The review Nudge text is separate fixed Forge text. It names the Check and the Managed
+Worktree and tells the Agent to finish the review and submit its verdict with
+`forge assignment outcome --file <json>` (`pass`/`complete`, `fail`/`handback` with blocking
+Findings, or `fail`/`human-input` naming the concrete blocker), and not to commit or run
+`forge assignment request-review`. It does not offer `interrupted`, carries the operator
+explanation exactly as the Implementation text does, does not repeat the Task body and ends
+with the state line `Nudges without a verdict: N of 3.` A review Check ignores HEAD: every
+review Nudge counts as no progress, so N is simply the number of consecutive Nudges
+(including this one). The `consecutive_no_commit` counter holds that count for review
+Assignments; the schema is unchanged.
+
 Nudges are bounded per Assignment. When the Agent next finishes a turn and a further Nudge
-would be a fourth consecutive no-commit Nudge, or a twenty-first Nudge overall, Forge sends
-nothing and places a Dispatch Hold that names the limit reached (consecutive-no-commit or
-total), references the Task's latest comment that Forge did not write (a blocked Agent is
+would be a fourth consecutive no-progress Nudge, or a twenty-first Nudge overall, Forge sends
+nothing and places a Dispatch Hold that names the limit reached (consecutive-no-commit,
+no-verdict for a review Check, or total), references the Task's latest comment that Forge did not write (a blocked Agent is
 expected to explain itself with `forge assignment comment` before going idle) and adds the
 same text as an `agent-dispatch` comment. The Assignment stays open, keeps its capacity and
 the Agent is not retired. `forge dispatcher resume <task> --explanation '<text>'` clears

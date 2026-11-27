@@ -1,5 +1,5 @@
 // Tests at the production application/provider seam. All resources are isolated fixtures.
-fn registered_policy(fixture: &Fixture, kind: RecordType) -> (forge_app::AgentProfile, PathBuf) {
+pub(super) fn registered_policy(fixture: &Fixture, kind: RecordType) -> (forge_app::AgentProfile, PathBuf) {
     register_behavior(fixture, kind, "FROZEN-BEHAVIOR-SENTINEL")
 }
 

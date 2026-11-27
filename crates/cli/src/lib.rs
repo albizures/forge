@@ -717,7 +717,7 @@ pub async fn request_recover_retained_work(
 }
 
 /// Clear only the operator-controlled Dispatch Hold. An explanation is delivered to the warm
-/// Implementation Agent as its next Nudge.
+/// Check-bound Agent as its next Nudge.
 /// # Errors
 /// Returns endpoint or daemon hold-clearing failures.
 pub async fn request_resume_dispatch_task(

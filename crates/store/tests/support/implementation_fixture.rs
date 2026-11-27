@@ -83,6 +83,11 @@ impl Fixture {
     }
 
     pub fn with_profile_body(profile_body: &str) -> Self {
+        Self::with_checks(profile_body, &["Implementation", "Review"])
+    }
+
+    /// A Fixture whose Check Template has exactly `checks`, in order.
+    pub fn with_checks(profile_body: &str, checks: &[&str]) -> Self {
         let root = std::env::temp_dir().join(format!(
             "forge-review-request-{}-{}",
             std::process::id(),
@@ -148,13 +153,14 @@ impl Fixture {
                     expected_version: 0,
                     actor: "operator".into(),
                     message: "Pin".into(),
-                    criteria: ["Implementation", "Review"]
+                    criteria: checks
+                        .iter()
                         .map(|name| CheckCriterion {
-                            name: name.into(),
-                            description: name.into(),
+                            name: (*name).into(),
+                            description: (*name).into(),
                             profile_revision: Some(pinned.revision),
                         })
-                        .into(),
+                        .collect(),
                 },
             )
             .unwrap();

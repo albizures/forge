@@ -181,7 +181,7 @@ An Implementation Agent's submission of its committed work for judgment by the T
 _Avoid_: ready signal, implementation outcome, self-assessment
 
 **Nudge**:
-A Forge-sent prompt instructing a live Implementation Agent that ended its turn without a Review Request to continue its work. Nudges are bounded per Agent Assignment; exhausting them places a Dispatch Hold.
+A Forge-sent prompt instructing a live Agent that ended its turn without finishing its Agent Assignment (a Review Request on the Implementation Check, an accepted verdict on a review Check) to continue its work. Nudges are bounded per Agent Assignment; exhausting them places a Dispatch Hold.
 _Avoid_: retry, reminder
 
 **Assessment**:

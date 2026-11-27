@@ -3304,7 +3304,7 @@ impl Application {
             );
         })?;
         if scan.acquired_lease {
-            if let Err(error) = self.nudge_idle_implementation_agents() {
+            if let Err(error) = self.nudge_idle_agents() {
                 tracing::warn!(
                     phase = "nudge-agents",
                     code = error.code,

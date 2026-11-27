@@ -286,6 +286,11 @@ mod recovery {
     include!("workspace_recovery_tests.rs");
 }
 
+mod nudges {
+    use super::*;
+    include!("nudge_tests.rs");
+}
+
 fn has(ready: &forge_app::WorkspaceDispatchReadiness, code: &str) -> bool {
     ready.blockers.iter().any(|blocker| blocker.code == code)
 }

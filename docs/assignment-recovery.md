@@ -217,7 +217,7 @@ Task checkout**, not interrupted In Progress work or unexplained commits.
 ## Prompt Delivery Uncertainty after a Nudge
 
 A Dispatch Hold whose reason begins with `Prompt Delivery Uncertainty` means Forge
-recorded a [Nudge](dispatch.md#nudges-for-idle-implementation-agents) and could not
+recorded a [Nudge](dispatch.md#nudges-for-idle-check-bound-agents) and could not
 establish that Herdr admitted it (timeout, lost response, identity mismatch, or a daemon
 restart before confirmation). The Assignment stays open and keeps its capacity because the
 Agent may still be live. Forge never resends that prompt. Look at the Agent's pane to see
@@ -236,14 +236,17 @@ and clear the hold with `forge dispatcher resume <task-id>` once resources are s
 
 ## Nudge exhaustion holds
 
-A Dispatch Hold whose reason begins with `Nudges exhausted` means the Implementation Agent
-kept ending turns without a Review Request: three Nudges in a row produced no new commit,
-or twenty were sent in total. The reason names the limit and quotes the Task's latest
+A Dispatch Hold whose reason begins with `Nudges exhausted` means a Check-bound Agent
+kept ending turns without finishing its Assignment. For an Implementation Agent (no Review
+Request) three Nudges in a row produced no new commit; for a review Agent (no accepted
+verdict, including Publication) three Nudges in a row ended without a verdict, whether or
+not HEAD moved (the reason says "no-verdict limit"). For either, twenty Nudges in total also
+exhaust them. The reason names the limit and quotes the Task's latest
 comment, which is where a blocked Agent should have explained itself. The Assignment stays
 open and the Agent is not retired. Read the comment and the pane, then either
 `forge dispatcher resume <task-id> --explanation '<guidance>'`, which clears the hold,
-restarts the Nudge counters and sends one Nudge containing the guidance at the Agent's
-next finished turn, or `forge task unstick <task-id> --retire-working --agent-gone` to
+restarts the Nudge counters and sends one Nudge (review text for a review Agent) containing
+the guidance at the Agent's next finished turn, or `forge task unstick <task-id> --retire-working --agent-gone` to
 retire the Agent (counted as an interruption) and start over.
 
 ## Clear the hold separately; eligibility is not a launch guarantee
@@ -266,7 +269,7 @@ forge dispatcher reconcile
 
 `resume` atomically clears the operator-controlled hold, resets the Task's
 interrupted-Check retry counts and the Nudge counters of its open Assignments. An optional
-`--explanation` is delivered to a live Implementation Agent as its next Nudge. It leaves remediation budget unchanged and does not
+`--explanation` is delivered to a live Check-bound Agent as its next Nudge. It leaves remediation budget unchanged and does not
 resolve blockers, prove agent absence, redeliver a prompt or itself authorize
 replacement. Its JSON
 `resolves_recovery_blockers: false` and `authorizes_replacement: false` describe
