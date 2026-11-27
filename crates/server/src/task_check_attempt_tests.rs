@@ -163,9 +163,13 @@ async fn check_bound_outcome_inspection(kind: u8) {
     daemon.capability_secret_root = Some(root);
     let credentials = serde_json::json!({"assignmentId":"bound-check", "secret":"check-secret"});
     let boot = assignment_rpc(daemon.clone(), "assignment.bootstrap", credentials.clone()).await;
+    // The Implementation bootstrap is minimal; Check identity stays readable via context.
+    assert!(boot["result"]["commandContract"].is_string(), "{boot}");
+    assert!(boot["result"].get("context").is_none(), "{boot}");
+    let context = assignment_rpc(daemon.clone(), "assignment.context", credentials.clone()).await;
     assert_eq!(
-        boot["result"]["context"]["bound"]["checkAttempt"]["check_id"], check.id,
-        "{boot}"
+        context["result"]["bound"]["checkAttempt"]["check_id"], check.id,
+        "{context}"
     );
     // Implementation may commit clean output B rather than re-report input A.
     std::fs::write(checkout.path.join("deliverable.txt"), "Implemented\n").unwrap();
