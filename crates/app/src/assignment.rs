@@ -598,15 +598,12 @@ impl AuthenticatedAssignment<'_> {
         session_id: Option<&str>,
     ) -> Result<AgentBootstrap, RegistrationError> {
         let bootstrap = self.bootstrap_with_session(session_id)?;
-        let Some(attempt) = bootstrap
-            .context
-            .bound
-            .check_attempt
-            .as_ref()
-            .filter(|attempt| self.is_implementation_attempt(attempt))
-        else {
+        let Some(attempt) = bootstrap.context.bound.check_attempt.as_ref() else {
             return Ok(AgentBootstrap::Standard(Box::new(bootstrap)));
         };
+        if !self.is_implementation_attempt(attempt)? {
+            return Ok(AgentBootstrap::Standard(Box::new(bootstrap)));
+        }
         let mut findings = Vec::new();
         let mut after = None;
         loop {
@@ -643,10 +640,16 @@ impl AuthenticatedAssignment<'_> {
         }))
     }
 
-    fn is_implementation_attempt(&self, attempt: &crate::outcomes::Attempt) -> bool {
-        self.application
-            .list_record_checks(attempt.record_id)
-            .is_ok_and(|checks| checks.first().is_some_and(|c| c.id == attempt.check_id))
+    fn is_implementation_attempt(
+        &self,
+        attempt: &crate::outcomes::Attempt,
+    ) -> Result<bool, RegistrationError> {
+        // A failed lookup must fail the bootstrap rather than fall back to the full form.
+        Ok(self
+            .application
+            .list_record_checks(attempt.record_id)?
+            .first()
+            .is_some_and(|c| c.id == attempt.check_id))
     }
 
     /// Fetches bound identity separately from live Record, scope and direct-neighbor facts.
