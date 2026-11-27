@@ -12,6 +12,7 @@ pub mod check_templates;
 pub mod checks;
 pub mod completion;
 pub mod findings;
+pub mod nudges;
 pub mod outcomes;
 pub mod prerequisites;
 mod profile_catalog;
@@ -1506,6 +1507,31 @@ pub enum AgentObservation {
     Absent,
 }
 
+/// A provider observation that also reports whether a turn has finished since the last one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AgentTurn {
+    pub observation: AgentObservation,
+    /// Monotonic count of the Agent's finished turns, when the provider reports one.
+    pub completion_seq: Option<u64>,
+}
+
+/// A prompt sent to a live Agent after its bootstrap, bound to the finished turn it answers.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentPrompt {
+    pub text: String,
+    /// The finished turn this prompt follows; a provider sends only while it is still current.
+    pub completion_seq: u64,
+}
+
+/// Result of a prompt attempt that provably did not fail ambiguously.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentPromptOutcome {
+    /// The provider confirmed it admitted the prompt.
+    Delivered,
+    /// The Agent was no longer idle at the finished turn, so nothing was sent.
+    NotReady,
+}
+
 /// Provider-neutral facts supplied to an adapter for one lifecycle operation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentDispatchContext {
@@ -1563,6 +1589,24 @@ pub trait AgentDispatchAdapter: Send + Sync {
         &self,
         context: &AgentDispatchContext,
     ) -> Result<AgentObservation, AgentAdapterError>;
+    /// Observe the Agent and, when the provider reports it, its finished-turn sequence.
+    fn observe_turn(&self, context: &AgentDispatchContext) -> Result<AgentTurn, AgentAdapterError> {
+        self.observe(context).map(|observation| AgentTurn {
+            observation,
+            completion_seq: None,
+        })
+    }
+    /// Send one post-bootstrap prompt after re-verifying the Agent's pinned identity. Any error
+    /// means delivery cannot be established and the caller must never resend the prompt.
+    fn prompt(
+        &self,
+        _context: &AgentDispatchContext,
+        _prompt: &AgentPrompt,
+    ) -> Result<AgentPromptOutcome, AgentAdapterError> {
+        Err(AgentAdapterError::InvalidRequest(
+            "prompting is unsupported".into(),
+        ))
+    }
     fn retire(
         &self,
         context: &AgentDispatchContext,
@@ -2186,6 +2230,54 @@ pub trait AgentDispatchRepository: RecordRepository + WorkspaceDispatchRepositor
         _assignment: &str,
     ) -> Result<Option<outcomes::Attempt>, RegistrationError> {
         Ok(None)
+    }
+    /// Nudge accounting for one Assignment; all zero until its first Nudge.
+    fn assignment_nudge_state(
+        &self,
+        _assignment: &str,
+    ) -> Result<nudges::NudgeState, RegistrationError> {
+        Ok(nudges::NudgeState::default())
+    }
+    /// Atomically record a prompt intent keyed by Assignment and prompt sequence. False means an
+    /// intent with that sequence already exists, so this caller must not send.
+    fn begin_assignment_nudge(
+        &self,
+        _assignment: &str,
+        _intent: &nudges::NudgeIntent,
+    ) -> Result<bool, RegistrationError> {
+        Ok(false)
+    }
+    /// The recorded prompt intent that was neither confirmed nor declared uncertain, if any.
+    fn unsettled_assignment_nudge(
+        &self,
+        _assignment: &str,
+    ) -> Result<Option<nudges::NudgeIntent>, RegistrationError> {
+        Ok(None)
+    }
+    /// Close an intent and apply its counters. An uncertain prompt still counts as spent.
+    fn settle_assignment_nudge(
+        &self,
+        _assignment: &str,
+        _sequence: u32,
+        _settlement: nudges::NudgeSettlement,
+    ) -> Result<(), RegistrationError> {
+        Ok(())
+    }
+    /// Forget an unsettled intent whose prompt was provably never sent; counters are untouched.
+    fn cancel_assignment_nudge(
+        &self,
+        _assignment: &str,
+        _sequence: u32,
+    ) -> Result<(), RegistrationError> {
+        Ok(())
+    }
+    /// Whether the Assignment's bound attempt already accepted an outcome, including a
+    /// Review Request; such an Assignment is being retired, not nudged.
+    fn assignment_attempt_outcome_accepted(
+        &self,
+        _assignment: &str,
+    ) -> Result<bool, RegistrationError> {
+        Ok(false)
     }
     /// Persists successful trusted-context bootstrap independently of source files.
     fn mark_assignment_context_read(&self, _assignment_id: &str) -> Result<(), RegistrationError> {
@@ -3238,6 +3330,13 @@ impl Application {
             );
         })?;
         if scan.acquired_lease {
+            if let Err(error) = self.nudge_idle_implementation_agents() {
+                tracing::warn!(
+                    phase = "nudge-agents",
+                    code = error.code,
+                    "agent dispatch phase failed"
+                );
+            }
             self.continue_task_check_acceptance()?;
             self.schedule_agent_dispatch().inspect_err(|error| {
                 tracing::warn!(

@@ -25,6 +25,7 @@ mod completion;
 mod continuations;
 mod execution_modes;
 mod findings;
+mod nudges;
 mod ordering_dependencies;
 mod outcome_findings;
 mod outcomes;
@@ -250,6 +251,7 @@ impl SqliteProjectRepository {
         completion::schema(connection)?;
         checks::schema(connection)?;
         outcomes::schema(connection)?;
+        nudges::schema(connection)?;
         if !connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'retained_work_recoveries')", [], |r| r.get::<_, bool>(0)).map_err(storage_error)? {
             connection.execute_batch(include_str!("upgrade/retained_work.sql")).map_err(storage_error)?;
         }
@@ -2451,6 +2453,52 @@ impl AgentDispatchRepository for SqliteProjectRepository {
             .lock()
             .map_err(|_| RegistrationError::new("storage", "storage lock poisoned"))?;
         task_attempts::binding(&c, assignment)
+    }
+
+    fn assignment_nudge_state(
+        &self,
+        assignment: &str,
+    ) -> Result<forge_app::nudges::NudgeState, RegistrationError> {
+        nudges::state(self, assignment)
+    }
+
+    fn begin_assignment_nudge(
+        &self,
+        assignment: &str,
+        intent: &forge_app::nudges::NudgeIntent,
+    ) -> Result<bool, RegistrationError> {
+        nudges::begin(self, assignment, intent)
+    }
+
+    fn unsettled_assignment_nudge(
+        &self,
+        assignment: &str,
+    ) -> Result<Option<forge_app::nudges::NudgeIntent>, RegistrationError> {
+        nudges::unsettled(self, assignment)
+    }
+
+    fn settle_assignment_nudge(
+        &self,
+        assignment: &str,
+        sequence: u32,
+        settlement: forge_app::nudges::NudgeSettlement,
+    ) -> Result<(), RegistrationError> {
+        nudges::settle(self, assignment, sequence, settlement)
+    }
+
+    fn cancel_assignment_nudge(
+        &self,
+        assignment: &str,
+        sequence: u32,
+    ) -> Result<(), RegistrationError> {
+        nudges::cancel(self, assignment, sequence)
+    }
+
+    fn assignment_attempt_outcome_accepted(
+        &self,
+        assignment: &str,
+    ) -> Result<bool, RegistrationError> {
+        nudges::attempt_outcome_accepted(self, assignment)
     }
 
     fn create_agent_assignment(

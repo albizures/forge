@@ -1,10 +1,10 @@
 //! Shared Implementation Check fixture: a launched Task with a controllable HEAD and dirty flag.
 #![allow(dead_code)]
 use forge_app::{
-    Application, DispatchWorkspace, ManagedWorktreeAdapter,
-    ManagedWorktreeRepository, NewTypedRecord, Project, ProjectRepository, RecordRepository,
-    RecordType, RegistrationError, RepositoryInspector, WorkspaceDispatchRepository,
-    WorkspaceRepository, WorktreeSafetyAssessment,
+    Application, DispatchWorkspace, ManagedWorktreeAdapter, ManagedWorktreeRepository,
+    NewTypedRecord, Project, ProjectRepository, RecordRepository, RecordType, RegistrationError,
+    RepositoryInspector, WorkspaceDispatchRepository, WorkspaceRepository,
+    WorktreeSafetyAssessment,
     agent_profiles::ResourceCatalog,
     check_templates::{CheckCriterion, TemplateReplacement},
     outcomes::Evidence,
@@ -184,15 +184,23 @@ impl Fixture {
     }
 
     pub fn app(&self) -> Application {
+        self.app_with(Box::new(Provider {
+            unavailable: Arc::new(AtomicBool::new(false)),
+            launches: self.launches.clone(),
+        }))
+    }
+
+    /// An Application whose provider adapters come from `factory`.
+    pub fn app_with(
+        &self,
+        factory: Box<dyn forge_app::AgentDispatchAdapterFactory>,
+    ) -> Application {
         Application::with_managed_worktrees_and_agent_dispatch(
             Box::new(SqliteProjectRepository::open(&self.path).unwrap()),
             Box::new(SqliteProjectRepository::open(&self.path).unwrap()),
             Box::new(Checkout(self.dirty.clone())),
             Box::new(SqliteProjectRepository::open(&self.path).unwrap()),
-            Box::new(Provider {
-                unavailable: Arc::new(AtomicBool::new(false)),
-                launches: self.launches.clone(),
-            }),
+            factory,
             Box::new(Head(self.head.clone())),
         )
         .with_workspace_repository(Box::new(SqliteProjectRepository::open(&self.path).unwrap()))
