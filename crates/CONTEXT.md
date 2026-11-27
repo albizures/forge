@@ -182,11 +182,7 @@ _Avoid_: ready signal, implementation outcome, self-assessment
 
 **Nudge**:
 A Forge-sent prompt instructing a live Implementation Agent that ended its turn without a Review Request to continue its work. Nudges are bounded per Agent Assignment; exhausting them places a Dispatch Hold.
-_Avoid_: continuation, retry, reminder
-
-**Continuation**:
-A deliberate handoff of unfinished Implementation work for another Agent to continue without passing the bound Check.
-_Avoid_: interruption, implementation failure, Task completion
+_Avoid_: retry, reminder
 
 **Assessment**:
 An immutable pass or fail verdict for one Check, optionally carrying revision evidence. The latest Assessment is authoritative; explicitly invalidating it leaves the Check unassessed rather than restoring an older verdict.

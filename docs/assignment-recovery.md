@@ -32,7 +32,7 @@ operator flag or an in-progress launch, and 1 when recovery stopped or failed.
   `assignment-resolve-unknown` and `recover-retained-work`. Pass it only after
   the external checks described below.
 - Retained work is never discarded: without `--keep-work` recovery stops.
-- `--reset-budgets` covers remediation and exhausted continuation budgets, and
+- `--reset-budgets` covers exhausted remediation budgets and
   requires `--actor` and `--message` like the underlying operations.
 - Spec execution problems (`stack-blocked`, `invalid-spec-plan`) and Manual Tasks
   stop recovery; follow the sections below.
@@ -142,7 +142,7 @@ assuming the command's success means recovery is complete.
 
 ## Authorize retained Implementation work for salvage
 
-Unreported changed HEAD is **not** an accepted Continuation. Ordinary dispatch or
+Unreported changed HEAD is never trusted input. Ordinary dispatch or
 clearing a drift hold never adopts that commit. After retirement and complete
 known/unknown resource reconciliation above, inspect the actual checkout and any
 external children. Only when the old agent cannot act and all resources are safe:
@@ -194,14 +194,14 @@ not by bootstrap, preventing crash/restart from duplicating an actor. A failed o
 uncertain launch still requires normal retirement/resource reconciliation; it does
 not renew salvage authority. Do not clean or reset work to satisfy dispatch.
 The replacement receives the original checkout and explicit recovery context.
-Its Continuation/success must report actual clean committed output: dirty recovery
+Its Review Request must report actual clean committed output: dirty recovery
 input never waives output, review or publication validation.
 
 Authorization atomically records selected evidence, source Assignment, actor,
 explanation, confirmations, canonical path and timestamp. It advances freshness,
 invalidates current passes/attempts while retaining all historical Assessments,
 outcomes and Findings, and selects retained HEAD plus the separate dirty-state identity as Implementation input.
-It does not backfill a Continuation, pass a Check, certify correctness, change the
+It does not pass a Check, certify correctness, change the
 immutable Stack Base Commit, reset any budget, clear existing holds, or launch an
 agent. A hold is retained (existing safety reasons win). Exact retries for the same
 source Assignment return the original authorization, including after restart or
@@ -244,7 +244,7 @@ Workspace and worktree health. Forge-managed In Progress Tasks with durable
 Check-bound Assignment history continue without reopening: accepted interruption
 or safely reconciled explicit retirement retries the same Check, within its
 persisted budget, after the hold is explicitly cleared. Manual/unmanaged In
-Progress status or missing ownership alone never authorizes continuation.
+Progress status or missing ownership alone never authorizes resuming it.
 Retirement does not complete or automatically reopen a Task. Use explicit safe
 mode handoff for Manual work; do not invent Check history to resume dispatch.
 
@@ -292,17 +292,6 @@ A final pass is not Done. Reconciliation separately requires confirmed retiremen
 all resources reconciled, clean current evidence/freshness, all current passes,
 no blockers/holds and satisfied dependencies. Managed Worktrees/branches remain
 retained after completion; no automatic Git integration or cleanup occurs.
-
-Continuation accounting is independent: 20 total or two consecutive unchanged
-checkpoints exhaust a Check. `record check work <task> --workspace <id>` (or `--json`)
-shows counters, retained handoff and reset audit. Only
-`dispatcher reset-continuations <task> --check <check> --workspace <id> --actor <operator> --message <explanation>`
-renews that Check's total and consecutive-unchanged allowance. It retains holds,
-ownership/resources, evidence and all other budgets/history, and launches nothing.
-After investigating the limit and recording a justified reset, complete the separate
-retirement/resource checks above before explicit resume. Neither resume nor remediation
-reset bypasses exhausted continuation accounting. See
-[continuation operations](dispatch.md#deliberate-implementation-continuations).
 
 ## Spec parent and inheritance rejections
 

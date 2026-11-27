@@ -1,5 +1,7 @@
 //! Explicit upgrades preserve historical evidence and convert prerequisite intent.
-use forge_app::{NewTypedRecord, RecordRepository, RecordType, WorkspaceRepository};
+use forge_app::{
+    AgentDispatchRepository, NewTypedRecord, RecordRepository, RecordType, WorkspaceRepository,
+};
 use forge_store::{SqliteProjectRepository, upgrade};
 use rusqlite::Connection;
 use std::{
@@ -46,17 +48,16 @@ impl Fixture {
             c.execute_batch("DROP TABLE retained_work_recoveries;")
                 .unwrap();
         }
-        if schema == 15 {
-            c.execute_batch("DROP TABLE check_continuations;").unwrap();
+        if (15..20).contains(&schema) {
+            // Revisions 15 through 19 carried the since-removed Continuation tables.
             c.execute_batch(include_str!("../src/upgrade/continuations.sql"))
                 .unwrap();
-        }
-        if schema < 16 {
-            c.execute_batch("DROP TABLE check_continuation_resets;")
-                .unwrap();
-        }
-        if schema < 15 {
-            c.execute_batch("DROP TABLE check_continuations;").unwrap();
+            if schema >= 16 {
+                c.execute_batch(include_str!("../src/upgrade/resettable_continuations.sql"))
+                    .unwrap();
+                c.execute_batch(include_str!("../src/upgrade/continuation_resets.sql"))
+                    .unwrap();
+            }
         }
         if schema < 14 {
             c.execute_batch("DROP TABLE assignment_sessions;").unwrap();
@@ -105,7 +106,11 @@ fn frozen_historical_schema_seven_fixture_upgrades_without_current_initializers(
     drop(c);
     let before = upgrade::inspect(&legacy).unwrap();
     let after = upgrade::migrate(&legacy).unwrap();
-    for table in before.tables {
+    for table in before
+        .tables
+        .into_iter()
+        .filter(|t| !t.name.starts_with("check_continuation"))
+    {
         assert!(after.tables.contains(&table));
     }
     let repo = SqliteProjectRepository::open(&legacy)
@@ -129,7 +134,11 @@ fn explicit_seven_to_current_preserves_every_old_table_and_source_bytes() {
     assert_eq!(upgrade::snapshot(&f.source, &copy).unwrap(), before);
     let after = upgrade::migrate(&copy).unwrap();
     assert_eq!(after.schema, Some(20));
-    for table in before.tables {
+    for table in before
+        .tables
+        .into_iter()
+        .filter(|t| !t.name.starts_with("check_continuation"))
+    {
         assert!(after.tables.contains(&table), "lost {}", table.name);
     }
     assert_eq!(
@@ -165,7 +174,11 @@ fn explicit_eight_to_eleven_preserves_all_old_facts_without_inventing_intent() {
     upgrade::snapshot(&f.source, &copy).unwrap();
     let after = upgrade::migrate(&copy).unwrap();
     assert_eq!(after.schema, Some(20));
-    for table in before.tables {
+    for table in before
+        .tables
+        .into_iter()
+        .filter(|t| !t.name.starts_with("check_continuation"))
+    {
         assert!(after.tables.contains(&table), "changed {}", table.name);
     }
     assert_eq!(
@@ -195,7 +208,11 @@ fn nine_to_eleven_preserves_every_table_without_inventing_unchanged_results() {
     upgrade::snapshot(&f.source, &copy).unwrap();
     let after = upgrade::migrate(&copy).unwrap();
     assert_eq!(after.schema, Some(20));
-    for table in before.tables {
+    for table in before
+        .tables
+        .into_iter()
+        .filter(|t| !t.name.starts_with("check_continuation"))
+    {
         assert!(after.tables.contains(&table));
     }
     assert_eq!(
@@ -221,7 +238,11 @@ fn ten_to_eleven_preserves_history_without_inventing_forced_completions() {
     upgrade::snapshot(&f.source, &copy).unwrap();
     let after = upgrade::migrate(&copy).unwrap();
     assert_eq!(after.schema, Some(20));
-    for table in before.tables {
+    for table in before
+        .tables
+        .into_iter()
+        .filter(|t| !t.name.starts_with("check_continuation"))
+    {
         assert!(after.tables.contains(&table));
     }
     assert_eq!(
@@ -247,7 +268,11 @@ fn eleven_expansion_preserves_old_intent_and_rejects_ordinary_open_before_writes
     let before = upgrade::inspect(&f.source).unwrap();
     let after = upgrade::migrate(&f.source).unwrap();
     assert_eq!(after.schema, Some(20));
-    for table in before.tables {
+    for table in before
+        .tables
+        .into_iter()
+        .filter(|t| !t.name.starts_with("check_continuation"))
+    {
         assert!(after.tables.contains(&table));
     }
     assert_eq!(
@@ -273,7 +298,11 @@ fn semantic_twelve_requires_explicit_conversion_despite_identical_ddl() {
     upgrade::snapshot(&f.source, &copy).unwrap();
     let after = upgrade::migrate(&copy).unwrap();
     assert_eq!(after.schema, Some(20));
-    for table in before.tables {
+    for table in before
+        .tables
+        .into_iter()
+        .filter(|t| !t.name.starts_with("check_continuation"))
+    {
         assert!(after.tables.contains(&table));
     }
     assert_eq!(
@@ -296,57 +325,189 @@ fn fourteen_requires_explicit_upgrade_without_historical_continuation_backfill()
     assert!(SqliteProjectRepository::open(&f.source).is_err());
     assert_eq!(fs::read(&f.source).unwrap(), bytes);
     let before = upgrade::inspect(&f.source).unwrap();
-    let copy = f.root.join("fifteen.db");
+    let copy = f.root.join("current.db");
     upgrade::snapshot(&f.source, &copy).unwrap();
     let after = upgrade::migrate(&copy).unwrap();
     assert_eq!(after.schema, Some(20));
     for table in before.tables {
         assert!(after.tables.contains(&table));
     }
-    assert_eq!(
+    // The retired Continuation tables are neither invented nor left behind.
+    assert!(
         after
             .tables
             .iter()
-            .find(|t| t.name == "check_continuations")
-            .unwrap()
-            .rows,
-        0
+            .all(|t| !t.name.starts_with("check_continuation"))
     );
     assert_eq!(fs::read(&f.source).unwrap(), bytes);
     drop(SqliteProjectRepository::open(&copy).unwrap());
 }
 
-#[test]
-fn fifteen_upgrade_retains_accounting_and_adds_no_reset_history() {
-    let f = Fixture::new(15);
+const LEGACY_EVIDENCE: &str = r#"{"kind":"repository","repository":"repo","commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#;
+const LEGACY_HANDOFF: &str = r#"{"stopping_reason":"budget","completed_work":"partial","verification":"unrun","remaining_work":"finish"}"#;
+
+/// A store that still carries Continuation counters, checkpoints, reset audit rows,
+/// historical Attempt and outcome JSON, and an exhaustion Dispatch Hold.
+fn legacy_continuation_fixture(schema: u32) -> Fixture {
+    let f = Fixture::new(schema);
     let c = Connection::open(&f.source).unwrap();
-    c.execute_batch("INSERT INTO check_continuations SELECT id,20,1,'{\"attempt_id\":\"retained\",\"evidence\":{\"kind\":\"repository\",\"repository\":\"repo\",\"commit\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"handoff\":{\"stopping_reason\":\"budget\",\"completed_work\":\"partial\",\"verification\":\"unrun\",\"remaining_work\":\"finish\"}}' FROM record_checks WHERE record_id=1 AND position=0;").unwrap();
+    let check: i64 = c
+        .query_row(
+            "SELECT id FROM record_checks WHERE record_id=1 AND position=0",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let checkpoint = format!(
+        r#"{{"attempt_id":"retained","evidence":{LEGACY_EVIDENCE},"handoff":{LEGACY_HANDOFF}}}"#
+    );
+    c.execute(
+        "INSERT INTO check_continuations(check_id,total,consecutive_unchanged,checkpoint_json) VALUES (?1,20,1,?2)",
+        rusqlite::params![check, checkpoint],
+    )
+    .unwrap();
+    if schema >= 16 {
+        c.execute(
+            "INSERT INTO check_continuation_resets(check_id,actor,message,created_at_millis) VALUES (?1,'operator','renew',1)",
+            [check],
+        )
+        .unwrap();
+    }
+    let attempt = |id: &str, continuation: &str| {
+        format!(
+            r#"{{"id":"{id}","record_id":1,"check_id":{check},"generation":2,"evidence":{LEGACY_EVIDENCE},"actor":"agent","body":"Keep my old Task","continuation":{continuation},"recovery":null}}"#
+        )
+    };
+    let outcome = format!(
+        r#"{{"attempt_id":"closed","generation":2,"evidence":{LEGACY_EVIDENCE},"verdict":"fail","actor":"agent","message":"checkpoint","disposition":{{"continuation":{LEGACY_HANDOFF}}},"findings":[],"verifications":[]}}"#
+    );
+    let result = format!(
+        r#"{{"attempt":{},"marker":"kept"}}"#,
+        attempt("closed", &checkpoint)
+    );
+    c.execute(
+        "INSERT INTO record_attempts(id,record_id,check_id,attempt_json) VALUES ('open',1,?1,?2)",
+        rusqlite::params![check, attempt("open", &checkpoint)],
+    )
+    .unwrap();
+    c.execute(
+        "INSERT INTO record_attempts(id,record_id,check_id,attempt_json,closed,outcome_json,result_json) VALUES ('closed',1,?1,?2,1,?3,?4)",
+        rusqlite::params![check, attempt("closed", &checkpoint), outcome, result],
+    )
+    .unwrap();
+    let plain = format!(
+        r#"{{"attempt_id":"plain","generation":2,"evidence":{LEGACY_EVIDENCE},"verdict":"pass","actor":"agent","message":"done","disposition":"complete","findings":[],"verifications":[]}}"#
+    );
+    c.execute(
+        "INSERT INTO record_attempts(id,record_id,check_id,attempt_json,closed,outcome_json,result_json) VALUES ('plain',1,?1,?2,1,?3,'{}')",
+        rusqlite::params![check, attempt("plain", "null"), plain],
+    )
+    .unwrap();
+    c.execute(
+        "INSERT INTO dispatch_holds(record_id,reason) VALUES (1,'Implementation Continuation limit reached for Check 1')",
+        [],
+    )
+    .unwrap();
     drop(c);
+    f
+}
+
+fn continuation_state_is_dropped_and_history_still_decodes(schema: u32) {
+    let f = legacy_continuation_fixture(schema);
     let bytes = fs::read(&f.source).unwrap();
     assert!(SqliteProjectRepository::open(&f.source).is_err());
-    assert_eq!(fs::read(&f.source).unwrap(), bytes);
     let before = upgrade::inspect(&f.source).unwrap();
-    let copy = f.root.join("sixteen.db");
-    upgrade::snapshot(&f.source, &copy).unwrap();
-    let after = upgrade::migrate(&copy).unwrap();
-    assert_eq!(after.schema, Some(20));
-    let old = before
+    let continuations = before
         .tables
         .iter()
         .find(|t| t.name == "check_continuations")
         .unwrap();
-    let new = after.tables.iter().find(|t| t.name == old.name).unwrap();
-    assert_eq!((old.rows, &old.digest), (new.rows, &new.digest));
-    assert_eq!(
+    assert_eq!(continuations.rows, 1);
+    let copy = f.root.join("migrated.db");
+    upgrade::snapshot(&f.source, &copy).unwrap();
+    let after = upgrade::migrate(&copy).unwrap();
+    assert_eq!(after.schema, Some(20));
+    assert_eq!(fs::read(&f.source).unwrap(), bytes);
+    assert!(
         after
             .tables
             .iter()
-            .find(|t| t.name == "check_continuation_resets")
+            .all(|t| !t.name.starts_with("check_continuation"))
+    );
+    // Every other table survives; attempt history keeps its rows (JSON shapes are rewritten).
+    for table in before
+        .tables
+        .iter()
+        .filter(|t| !t.name.starts_with("check_continuation") && t.name != "record_attempts")
+    {
+        assert!(after.tables.contains(table), "changed {}", table.name);
+    }
+    let rows = |inspection: &forge_app::storage_upgrade::StoreInspection| {
+        inspection
+            .tables
+            .iter()
+            .find(|t| t.name == "record_attempts")
             .unwrap()
-            .rows,
+            .rows
+    };
+    assert_eq!((rows(&before), rows(&after)), (3, 3));
+
+    let c = Connection::open(&copy).unwrap();
+    let json = |id: &str, column: &str| -> Option<String> {
+        c.query_row(
+            &format!("SELECT {column} FROM record_attempts WHERE id = ?1"),
+            [id],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    for id in ["open", "closed", "plain"] {
+        let attempt: forge_app::outcomes::Attempt =
+            serde_json::from_str(&json(id, "attempt_json").unwrap()).unwrap();
+        assert_eq!(attempt.id, id);
+        assert!(!json(id, "attempt_json").unwrap().contains("continuation"));
+    }
+    let outcome: forge_app::outcomes::OutcomeInput =
+        serde_json::from_str(&json("closed", "outcome_json").unwrap()).unwrap();
+    assert_eq!(
+        outcome.disposition,
+        forge_app::outcomes::OutcomeDisposition::Interrupted
+    );
+    assert!(
+        json("plain", "outcome_json")
+            .unwrap()
+            .contains(r#""disposition":"complete""#)
+    );
+    let result: serde_json::Value =
+        serde_json::from_str(&json("closed", "result_json").unwrap()).unwrap();
+    assert!(result["attempt"].get("continuation").is_none());
+    assert_eq!(result["marker"], "kept");
+    drop(c);
+
+    // Dispatch continues: the migrated store opens, and resuming the exhaustion hold clears
+    // it for good because no Continuation allowance remains to re-impose it.
+    let repo = SqliteProjectRepository::open(&copy).unwrap();
+    let repo = repo.in_record_workspace("personal").unwrap();
+    assert!(repo.dispatch_hold(1).unwrap().is_some());
+    repo.resume_dispatch(1).unwrap();
+    assert!(repo.dispatch_hold(1).unwrap().is_none());
+    assert_eq!(
+        repo.record_work_state(1)
+            .unwrap()
+            .progress
+            .remediation_cycles,
         0
     );
-    assert_eq!(fs::read(&f.source).unwrap(), bytes);
+}
+
+#[test]
+fn fifteen_upgrade_drops_continuation_state_and_history_still_decodes() {
+    continuation_state_is_dropped_and_history_still_decodes(15);
+}
+
+#[test]
+fn nineteen_upgrade_drops_continuation_state_and_history_still_decodes() {
+    continuation_state_is_dropped_and_history_still_decodes(19);
 }
 
 #[test]
@@ -360,7 +521,11 @@ fn sixteen_upgrade_preserves_history_and_invents_no_salvage_authority() {
     upgrade::snapshot(&f.source, &copy).unwrap();
     let after = upgrade::migrate(&copy).unwrap();
     assert_eq!(after.schema, Some(20));
-    for table in before.tables {
+    for table in before
+        .tables
+        .into_iter()
+        .filter(|t| !t.name.starts_with("check_continuation"))
+    {
         assert!(after.tables.contains(&table));
     }
     assert_eq!(
@@ -410,7 +575,13 @@ fn verify_recovery_semantic_upgrade(schema: u32) {
     let after = upgrade::migrate(&copy).unwrap();
     assert_eq!(after.schema, Some(20));
     // Only the empty Nudge tables are new; every earlier table is byte-exact.
-    assert!(before.tables.iter().all(|t| after.tables.contains(t)));
+    assert!(
+        before
+            .tables
+            .iter()
+            .filter(|t| !t.name.starts_with("check_continuation"))
+            .all(|t| after.tables.contains(t))
+    );
     let store = SqliteProjectRepository::open(&copy).unwrap();
     let recovery = &store.record_work_state(1).unwrap().recoveries[0];
     assert_eq!(recovery.retained_state.is_some(), schema == 18);
@@ -595,6 +766,12 @@ fn nineteen_upgrades_with_empty_nudge_tables_and_no_invented_prompts() {
             "{name}"
         );
     }
-    assert!(before.tables.iter().all(|t| after.tables.contains(t)));
+    assert!(
+        before
+            .tables
+            .iter()
+            .filter(|t| !t.name.starts_with("check_continuation"))
+            .all(|t| after.tables.contains(t))
+    );
     SqliteProjectRepository::open(&copy).unwrap();
 }

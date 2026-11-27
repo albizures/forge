@@ -50,7 +50,7 @@ For explicit acceptance testing only, `forge dispatcher task-check-acceptance
 <task-id> --workspace <id> --json` executes **one** Check-bound attempt. It requires
 a clean, active, already prepared Managed Worktree, Dispatched mode, a single
 Project, satisfied dependencies, available capacity, no hold and reconciled prior
-ownership/resources. In Progress continuation additionally requires durable
+ownership/resources. Resuming an In Progress Task additionally requires durable
 Check-bound Assignment history; lifecycle status or missing ownership alone is
 not sufficient. Normal `dispatcher dispatch <task-id>` uses the same guarded
 Check execution path, preparing a Managed Worktree first if needed for an eligible
@@ -192,105 +192,7 @@ is placed, and that prompt is never resent. A daemon restart that finds an inten
 without a confirmed response treats it the same way. The Assignment and its Agent stay
 open. Inspect the pane before resuming the Task.
 
-### Deliberate Implementation Continuations
-
-**Superseded.** Implementation Agents can no longer submit outcomes, so new Continuations
-cannot be created (`assignment outcome` fails with `implementation-outcome-forbidden`);
-the remainder of this section describes historical behavior pending removal of the
-Continuation subsystem. The [Implementation profile](profiles/implementation-continuations.md)
-and its [rollout handoff](profiles/implementation-continuations-handoff.md) are historical.
-
-Only the authenticated Task Implementation agent could deliberately hand off unfinished
-work. Keep implementing and testing until complete or a concrete execution constraint;
-inspection, a small commit, or complexity alone is not a stopping reason. Use the
-same outcome command and identity/evidence fields, with `verdict: "fail"` (a wire
-sentinel, **not** a failed Assessment) and this explicit disposition:
-
-```json
-{
-  "continuation": {
-    "stopping_reason": "Context budget nearly exhausted after implementation and focused tests",
-    "completed_work": "Implemented the checkpoint; list concrete deliverables here",
-    "verification": "Focused tests passed; full workspace gates unrun due to the constraint",
-    "remaining_work": "Finish boundary tests and run the full required gates"
-  }
-}
-```
-
-The object above is the value of `disposition`, not the whole outcome. All four
-handoff strings are required and nonblank; report actual results and explicitly
-identify unrun gates. Findings and Finding verifications must be empty. Manual,
-review and Publication attempts cannot use this disposition. Forge validates shape
-and authority, not whether a prose constraint or changed commit represents meaningful
-progress. Dirty, mismatched, stale or foreign checkpoints reject without partial
-adoption, counter increments or new drift holds.
-
-Forge independently observes a clean active bound Managed Worktree and its full
-commit. Acceptance atomically closes the attempt, records the handoff/checkpoint
-and counters, and replaces Implementation input with that checkpoint. It creates
-no Assessment, passes no Check, leaves the Task In Progress, and preserves Findings,
-history and immutable Stack Base Commit. The same Check is selected after safe
-retirement/resource reconciliation and all ordinary dispatch gates. Its next
-`bound.checkAttempt.continuation` contains the accepted attempt id, evidence and
-full handoff; this context is captured with the successor attempt. It is not a
-review or certification of partial work.
-
-Each stable Check allows **20 accepted Continuations total** or **two consecutive
-unchanged-evidence Continuations**, whichever comes first. Evidence is compared
-with that attempt's input. Changed evidence resets only the consecutive-unchanged
-count; it does not certify semantic progress. The checkpoint reaching either limit
-is accepted and retained with a durable Dispatch Hold. Existing safety diagnostics
-are not overwritten. Counters survive restart, invalidation, body edits, retries,
-remediation reset and ordinary resume. Resume cannot bypass exhausted allowance;
-only an explicit continuation accounting reset renews its allowance. Inspect with
-`forge record check work <task> --workspace <id>` (human) or `--json`. Both expose
-`progress.continuations`: Check id, total, consecutive unchanged count, latest
-checkpoint/handoff and append-only `resets`. Historical checkpoints and outcomes
-remain available through attempt history. Human diagnostics distinguish available
-allowance from total/unchanged exhaustion; evidence change is not semantic progress.
-
-To renew one Check's allowance explicitly:
-
-```sh
-forge dispatcher reset-continuations <task-id> --check <check-id> --workspace <id> \
-  --actor <operator> --message <explanation> --json
-```
-
-Actor and explanation must be nonblank. This operator-only command routes through
-`record.resetContinuations` with selected Workspace and `{record, check, actor,
-message}`; the Check must belong to the selected Task and have continuation
-accounting. It atomically sets **only** total and consecutive-unchanged counts to
-zero and appends timestamped attribution. Checkpoint, handoff, historical outcomes,
-Assessments, Findings, remediation/interruption counters, freshness, ownership,
-resources and Dispatch Holds remain unchanged. Repeated requests record separate
-resets (this is an intervention, not an idempotent outcome submission).
-
-Safe order: inspect checkpoint and safety state; investigate the exhaustion;
-explicitly reset if justified; independently retire/reconcile old agents and all
-retained/unknown resources using the [recovery runbook](assignment-recovery.md);
-then inspect eligibility and explicitly resume. Reset is permitted without safe
-ownership transfer because it transfers no ownership, clears no blocker and launches
-nothing. Clearing a hold alone never bypasses exhaustion; resetting alone never
-clears the hold or authorizes replacement. The trusted operator interface is
-unauthenticated: attribution is an audit assertion, not proof of human identity;
-Assignment capabilities cannot invoke this as an agent operation.
-
-Exact replay, including after closure/restart, returns the original accepted result
-and spends budget once; conflicting retries reject. Cleanup uncertainty retains
-capacity and never authorizes another agent. Continuation has accounting separate
-from substantive failure/remediation and actual interruption retries.
-
-Wire compatibility: existing unit-string dispositions and omitted disposition
-(`complete`) are unchanged. The externally tagged `{"continuation": {...}}` variant
-requires a supporting server/client; older peers may reject it. Attempt context
-adds default-null `continuation`, and progress adds default-empty `continuations`.
-Strict older response decoders may reject the added fields; upgrade CLI and server
-together. Storage revision **19** corrects Repository identity/cleanliness validation
-and binds extended index flags in v2 dirty fingerprints (18 added content-bound
-dirty salvage; 17 added explicit retained-work authorization; 16 added
-reset audit/resettable accounting; 15 introduced Continuations). It requires explicit isolated upgrade; ordinary opening never
-converts old state or invents historical Continuations. Accepted historical JSON
-is preserved, with absent added fields decoded as empty/null.
+### Retained-work recovery RPC
 
 Operator RPC `record.recoverRetainedWork` takes selected Workspace and
 `{record, recovery: {source_assignment, generation, evidence, actor, message,
@@ -300,12 +202,11 @@ pass or automatic launch. `WorkState.recoveries` defaults empty and
 `Attempt.recovery` defaults null for historical stored JSON. Strict older clients
 must upgrade with the server; the Assignment capability surface has no recovery
 operation. Recovery context adds default-null `retained_state` with a SHA-256
-fingerprint for dirty salvage; this is not an accepted checkpoint. Schema 19 prevents
-older dispatchers ignoring corrected identity and extended-index binding. No existing
-stored JSON is rewritten. Historical v1 dirty authorizations fail closed rather than
+fingerprint for dirty salvage; this is not a Check pass. Schema 19 prevents
+older dispatchers ignoring corrected identity and extended-index binding. Historical v1 dirty authorizations fail closed rather than
 silently gaining new authority; see [state upgrade limitations](state-upgrades.md).
 See the recovery runbook for the public CLI, safety assertions and
-separate resume. No historical accepted response is rewritten.
+separate resume.
 
 A failed substantive review submits `"disposition": "handback"` with its Findings.
 Acceptance atomically records the failure and Findings, invalidates Implementation
@@ -316,8 +217,8 @@ fixes but cannot verify reviewer Findings; each originating Check verifies its o
 A passing review that leaves its own blocking Findings unresolved is rejected
 without partial effects.
 
-Reviewer-owned blockers allow remediation and review continuation without creating
-a new hold. Unlinked blocking Findings stop continuation: explicitly assign a
+Reviewer-owned blockers let remediation and review proceed without creating
+a new hold. Unlinked blocking Findings stop them: explicitly assign a
 same-Task review verification owner and clear the diagnostic hold. Merely clearing
 the hold without assigning an owner cannot authorize another attempt. If every
 Check passes but blockers remain, acceptance retains a diagnostic hold, never Done.
@@ -399,9 +300,8 @@ no Assessment, Finding or substantive handback.
 New `interrupted` submissions must repeat the attempt's bound input evidence.
 Changed evidence is rejected as `interrupted-evidence-changed` before acceptance,
 interruption counters, Assessments, Findings, or work-input/hold changes. The
-checkout (including committed, tracked and untracked work) is preserved. Deliberate
-checkpoint handoffs use the explicit Implementation Continuation disposition above;
-genuinely interrupted retained work requires operator recovery. The operator must use the separate retained-work
+checkout (including committed, tracked and untracked work) is preserved. Genuinely
+interrupted retained work requires the operator to use the separate retained-work
 recovery operation after verified retirement. Preserve the checkout rather than
 resetting, discarding changes, or reporting completion merely to hand off work. This does not
 change substantive failed Implementation or `human-input` semantics.
@@ -411,8 +311,7 @@ interruption, still returns the original durable result after authorization;
 conflicting retries remain rejected. No historical outcome is rewritten. This is
 an intentional tightening of new-submission validation, with an additive structured
 RPC error category (`error.data`) and redacted CLI guidance on stderr (no successful
-JSON on rejection). Historical outcomes are not converted into Continuations;
-the new explicit disposition and schema-15 upgrade are described above.
+JSON on rejection).
 
 Inspect counters, the pending baseline, verified-resolution count, stop reason and
 latest 20 recorded resets using `forge record check work <task> --json` (the

@@ -66,7 +66,6 @@ fn context(terminal_pinned: bool) -> AgentDispatchContext {
         dispatch_workspace: Some(DispatchWorkspace {
             id: "workspace".into(),
         }),
-        rendered_initial_prompt: String::new(),
         bootstrap_prompt: None,
         capability_delivery: None,
         resources,

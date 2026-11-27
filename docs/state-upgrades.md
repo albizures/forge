@@ -8,11 +8,22 @@ it never migrates, resets, or rewrites an older store's marker.
 Supported transfers target schema **20** from schemas **7** through **20**.
 The 19 → 20 step adds the empty `assignment_nudges` and `assignment_prompt_intents`
 tables for [Nudge](dispatch.md#nudges-for-idle-implementation-agents) counters and
-durable prompt intents. No Nudge or prompt intent is invented for existing Assignments,
-and every earlier table is preserved byte-for-byte; ordinary schema-19 opening rejects
-before writes. The `pending_explanation` column (operator resume text) belongs to this
-same unreleased revision rather than a 21st step; stores created from an earlier
-revision-20 development build must be recreated.
+durable prompt intents. No Nudge or prompt intent is invented for existing Assignments;
+ordinary schema-19 opening rejects before writes. The `pending_explanation` column
+(operator resume text) belongs to this same unreleased revision rather than a 21st step;
+stores created from an earlier revision-20 development build must be recreated.
+The same step removes the retired agent-submitted handoff state (formerly
+"Continuations"). It **drops** the `check_continuations` and `check_continuation_resets`
+tables rather than keeping them read-only, because no read surface (Update Log, Record
+history, work inspection) depends on them; their counters, latest checkpoints and reset
+audit rows are not preserved. It also rewrites retired shapes inside `record_attempts`
+so historical rows keep decoding: `continuation` is removed from `attempt_json` and
+`result_json.attempt`, and a closed attempt whose disposition was the retired handoff is
+recorded as `interrupted`. Every attempt row is kept. All other earlier tables are
+preserved byte-for-byte. The change is folded into revision 20 rather than a 21st
+revision because revision 20 has not been released; main is at revision 19, so a real
+revision-19 store with handoff rows takes one 19 → 20 step. The unreleased-development
+rule above still applies to revision-20 builds that predate this change.
 The 18 → 19 step fences corrected Repository/branch/Base Commit revalidation for
 clean checkpoints and salvage, configuration-independent cleanliness checks, and
 v2 dirty fingerprints including extended index flags (not mutable stat-cache data).

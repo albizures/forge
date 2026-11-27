@@ -562,7 +562,7 @@ pub async fn assignment_outcome(input: serde_json::Value) -> Result<serde_json::
                 None
             };
             if category.as_deref() == Some("interrupted-evidence-changed") {
-                return "Assignment outcome rejected: interrupted-evidence-changed; interruption must repeat bound input evidence. Deliberate checkpoint handoffs require explicit Continuation support; genuinely interrupted retained work requires operator recovery. Use the explicit continuation disposition for a deliberate clean Implementation checkpoint; retained work requires the operator's explicit recover-retained-work authorization after safe retirement. Preserve the checkout and ask the operator; do not reset, discard changes, or report completion merely to hand off work.".into();
+                return "Assignment outcome rejected: interrupted-evidence-changed; interruption must repeat bound input evidence. Genuinely interrupted retained work requires the operator's explicit recover-retained-work authorization after safe retirement. Preserve the checkout and ask the operator; do not reset, discard changes, or report completion merely to hand off work.".into();
             }
             let category = category.as_deref().filter(|code| {
                 matches!(
@@ -578,9 +578,7 @@ pub async fn assignment_outcome(input: serde_json::Value) -> Result<serde_json::
                         | "check-order"
                         | "check-already-passed"
                         | "invalid-outcome"
-                        | "invalid-continuation"
                         | "implementation-outcome-forbidden"
-                        | "continuation-exhausted"
                         | "unresolved-check-findings"
                         | "unauthorized-verification"
                         | "stale-version"
@@ -716,56 +714,6 @@ pub async fn request_recover_retained_work(
         .recover_retained_work(request)
         .await
         .map_err(|error| error.to_string())
-}
-
-/// Reset only selected Check continuation counters through the operator interface.
-/// # Errors
-/// Returns routing, attribution or daemon failures.
-pub async fn request_reset_continuations(
-    url: impl Into<RecordEndpoint>,
-    request: forge_rpc::ResetContinuationsRequest,
-) -> Result<forge_rpc::WorkState, String> {
-    record_client(url)?
-        .reset_continuations(request)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-/// Render continuation facts without certifying semantic progress or safe replacement.
-#[must_use]
-pub fn render_continuations(state: &forge_rpc::WorkState) -> String {
-    use std::fmt::Write;
-    let mut text = String::from(
-        "Continuation accounting (changed evidence is not certified meaningful progress):",
-    );
-    for c in &state.progress.continuations {
-        let _ = write!(
-            text,
-            "\nCheck {}: {} total, {} consecutive unchanged; {}\nCheckpoint: {:?}\nReason: {}\nCompleted: {}\nVerification: {}\nRemaining: {}",
-            c.check_id,
-            c.total,
-            c.consecutive_unchanged,
-            if c.exhausted() {
-                "limit exhausted"
-            } else {
-                "allowance available"
-            },
-            c.checkpoint.evidence,
-            c.checkpoint.handoff.stopping_reason,
-            c.checkpoint.handoff.completed_work,
-            c.checkpoint.handoff.verification,
-            c.checkpoint.handoff.remaining_work
-        );
-        for r in &c.resets {
-            let _ = write!(
-                text,
-                "\nReset by {} at {}: {}",
-                r.actor, r.created_at_millis, r.message
-            );
-        }
-    }
-    text.push_str("\nHolds, retirement and retained resources require separate inspection; accounting never authorizes dispatch.");
-    text
 }
 
 /// Clear only the operator-controlled Dispatch Hold. An explanation is delivered to the warm

@@ -13,7 +13,8 @@ use rusqlite::Connection;
 // Revision 17 records explicit retained-work salvage authority without historical backfill.
 // Revision 18 requires content-bound dirty salvage enforcement, even with unchanged SQL tables.
 // Revision 19 revalidates clean salvage identity and binds extended index flags.
-// Revision 20 adds per-Assignment Nudge counters and durable prompt intents.
+// Revision 20 adds per-Assignment Nudge counters and durable prompt intents, and drops
+// the retired Check-scoped Continuation tables.
 const SCHEMA_REVISION: i64 = 20;
 const APPLICATION_ID: i64 = 0x464f_5247; // FORG
 

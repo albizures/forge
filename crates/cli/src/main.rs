@@ -432,8 +432,6 @@ enum AgentDispatchCommand {
     TaskReopen(DispatchTaskArgs),
     /// Explicitly reset only remediation limits; does not clear holds, retries or recovery blockers.
     ResetRemediation(ResetRemediationArgs),
-    /// Reset one Check's continuation counters; retain holds, history and resources.
-    ResetContinuations(ResetContinuationsArgs),
     /// Authorize clean or content-bound dirty/staged/untracked salvage after verified retirement; retains holds.
     RecoverRetainedWork(RecoverRetainedWorkArgs),
     /// Clear a Dispatch Hold, reset interrupted-Check retries and Nudge counters, and optionally nudge the warm Agent with an operator explanation.
@@ -563,18 +561,6 @@ struct RecoverRetainedWorkArgs {
     #[arg(long, required = true)]
     confirm_resources_safe: bool,
 }
-#[derive(Args, Debug)]
-struct ResetContinuationsArgs {
-    #[command(flatten)]
-    task: DispatchTaskArgs,
-    #[arg(long)]
-    check: u64,
-    #[arg(long)]
-    actor: String,
-    #[arg(long)]
-    message: String,
-}
-
 #[derive(Args, Debug)]
 struct ResetRemediationArgs {
     #[command(flatten)]
@@ -1441,36 +1427,6 @@ async fn agent_dispatch(command: AgentDispatchCommand, workspace: Option<String>
                 }
                 Err(error) => {
                     eprintln!("forge dispatcher recover-retained-work: {error}");
-                    1
-                }
-            };
-        }
-        AgentDispatchCommand::ResetContinuations(args) => {
-            let result = forge_cli::request_reset_continuations(
-                selected_record_endpoint(args.task.server_url.as_deref(), workspace.as_deref())
-                    .await,
-                forge_rpc::ResetContinuationsRequest {
-                    record: args.task.task_id,
-                    check: args.check,
-                    actor: args.actor,
-                    message: args.message,
-                },
-            )
-            .await;
-            return match result {
-                Ok(state) => {
-                    if args.task.json {
-                        println!(
-                            "{}",
-                            serde_json::to_string(&state).expect("serializable WorkState")
-                        );
-                    } else {
-                        println!("{}", forge_cli::render_continuations(&state));
-                    }
-                    0
-                }
-                Err(error) => {
-                    eprintln!("forge dispatcher reset-continuations: {error}");
                     1
                 }
             };
@@ -2480,10 +2436,6 @@ mod tests {
                 "profiles/publication.md",
                 include_str!("../../../docs/profiles/publication.md"),
             ),
-            (
-                "profiles/implementation-continuations.md",
-                include_str!("../../../docs/profiles/implementation-continuations.md"),
-            ),
             ("worktrees.md", include_str!("../../../docs/worktrees.md")),
             ("dispatch.md", include_str!("../../../docs/dispatch.md")),
             (
@@ -2572,22 +2524,17 @@ mod tests {
     }
 
     #[test]
-    fn implementation_continuations_inline_commands_parse_without_execution() {
-        let profile = include_str!("../../../docs/profiles/implementation-continuations.md");
-        let mut count = 0;
-        for example in profile.split('`').filter(|part| part.starts_with("forge ")) {
-            let args: Vec<String> = shlex::split(example)
-                .unwrap()
-                .into_iter()
-                .map(|arg| match arg.as_str() {
-                    "<id>" => "42".into(),
-                    _ => arg,
-                })
-                .collect();
-            Cli::try_parse_from(args).unwrap_or_else(|error| panic!("{example}: {error}"));
-            count += 1;
-        }
-        assert!(count >= 3, "missing inline profile command examples");
+    fn dispatcher_help_no_longer_offers_reset_continuations() {
+        use clap::CommandFactory;
+        assert!(Cli::try_parse_from(["forge", "dispatcher", "reset-continuations"]).is_err());
+        let mut command = Cli::command();
+        let help = command
+            .find_subcommand_mut("dispatcher")
+            .unwrap()
+            .render_long_help()
+            .to_string();
+        assert!(!help.contains("reset-continuations"));
+        assert!(help.contains("reset-remediation"));
     }
 
     #[test]

@@ -472,10 +472,6 @@ impl SqliteProjectRepository {
                         && r.generation <= work.generation
                         && r.request.evidence == *evidence
                 }),
-            continuation: super::continuations::state(&tx, record)?
-                .into_iter()
-                .find(|s| s.check_id == check.id)
-                .map(|s| s.checkpoint),
         };
         let attempt_number: u32 = tx.query_row("SELECT COALESCE(MAX(attempt_number), 0) + 1 FROM agent_assignments WHERE record_id = ?1", [record.cast_signed()], |r| r.get(0)).map_err(storage_error)?;
         tx.execute("INSERT INTO agent_assignments(id, record_id, project_slug, profile_record_type, profile_revision, attempt_number, claimed_at_millis, state_changed_at_millis, safe_dispatch_generation) VALUES (?1, ?2, ?3, 'task', ?4, ?5, ?6, ?6, 1)", params![id, record.cast_signed(), slug, revision, attempt_number, now_millis()?]).map_err(storage_error)?;

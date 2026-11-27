@@ -218,6 +218,8 @@ fn reference(schema: u32) -> Result<Connection, RegistrationError> {
     if schema >= 20 {
         c.execute_batch(include_str!("upgrade/assignment_nudges.sql"))
             .map_err(storage_error)?;
+        c.execute_batch(include_str!("upgrade/remove_continuations.sql"))
+            .map_err(storage_error)?;
         c.pragma_update(None, "user_version", 20)
             .map_err(storage_error)?;
     }
@@ -425,13 +427,6 @@ fn migrate_connection(c: &mut Connection) -> Result<StoreInspection, Registratio
     migrate_decisions(c, &[])
 }
 
-fn preserves_rows(after: &StoreInspection, before: &TableInventory) -> bool {
-    after
-        .tables
-        .iter()
-        .any(|t| t.name == before.name && t.rows == before.rows && t.digest == before.digest)
-}
-
 // Keep the ordered schema steps and their preservation checks in one explicit transaction.
 #[allow(clippy::too_many_lines)]
 fn migrate_decisions(
@@ -523,6 +518,9 @@ fn migrate_decisions(
         // Empty tables: no Nudges or prompt intents are invented for existing Assignments.
         tx.execute_batch(include_str!("upgrade/assignment_nudges.sql"))
             .map_err(storage_error)?;
+        // Continuation state is dropped, not retained: nothing reads it any more.
+        tx.execute_batch(include_str!("upgrade/remove_continuations.sql"))
+            .map_err(storage_error)?;
         tx.pragma_update(None, "user_version", 20)
             .map_err(storage_error)?;
     }
@@ -536,11 +534,24 @@ fn migrate_decisions(
         ) {
             continue;
         }
-        // Revision 16 relaxes only the total's lower bound for explicit resets.
-        // Existing checkpoints/counters must remain byte-exact through the rebuild.
-        if table.name == "check_continuations" && before.schema.is_some_and(|s| s < 16) {
-            if !preserves_rows(&after, table) {
-                return Err(error("migration changed continuation accounting"));
+        // Revision 20 drops Continuation state and rewrites retired JSON shapes in
+        // record_attempts; the attempts themselves must all survive.
+        if matches!(
+            table.name.as_str(),
+            "check_continuations" | "check_continuation_resets"
+        ) {
+            if after.tables.iter().any(|t| t.name == table.name) {
+                return Err(error("migration kept Continuation state"));
+            }
+            continue;
+        }
+        if table.name == "record_attempts" {
+            if !after
+                .tables
+                .iter()
+                .any(|t| t.name == table.name && t.rows == table.rows)
+            {
+                return Err(error("migration changed attempt history"));
             }
             continue;
         }

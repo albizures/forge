@@ -36,45 +36,17 @@ fn only_interruption_requires_unchanged_evidence_not_prose_or_failure() {
         OutcomeDisposition::Complete,
         OutcomeDisposition::HumanInput,
         OutcomeDisposition::Handback,
-        OutcomeDisposition::Continuation(forge_app::outcomes::ContinuationHandoff {
-            stopping_reason: "Concrete execution constraint".into(),
-            completed_work: "Checkpoint".into(),
-            verification: "Focused tests passed; full gates unrun".into(),
-            remaining_work: "Finish".into(),
-        }),
     ] {
         input.disposition = disposition;
         input.validate_interruption_evidence(&bound).unwrap();
     }
-    input.validate_continuation(true, true).unwrap();
-    for (implementation, authenticated) in [(false, true), (true, false), (false, false)] {
-        assert_eq!(
-            input
-                .validate_continuation(implementation, authenticated)
-                .unwrap_err()
-                .code,
-            "invalid-continuation"
-        );
-    }
-    let json = serde_json::to_value(&input).unwrap();
-    assert!(json["disposition"]["continuation"].is_object());
-    assert_eq!(
-        serde_json::from_value::<OutcomeInput>(json.clone()).unwrap(),
-        input
-    );
-    for field in [
-        "stopping_reason",
-        "completed_work",
-        "verification",
-        "remaining_work",
-    ] {
-        let mut missing = json.clone();
-        missing["disposition"]["continuation"]
-            .as_object_mut()
-            .unwrap()
-            .remove(field);
-        assert!(serde_json::from_value::<OutcomeInput>(missing).is_err());
-    }
-    input.verdict = Verdict::Pass;
-    assert!(input.validate_continuation(true, true).is_err());
+    let retired = serde_json::json!({
+        "attempt_id": "attempt", "generation": 1, "verdict": "fail",
+        "evidence": {"kind": "repository", "repository": "/repo", "commit": "a".repeat(40)},
+        "actor": "agent", "message": "m",
+        "disposition": {"continuation": {
+            "stopping_reason": "r", "completed_work": "c", "verification": "v", "remaining_work": "w"
+        }}
+    });
+    assert!(serde_json::from_value::<OutcomeInput>(retired).is_err());
 }

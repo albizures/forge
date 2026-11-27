@@ -148,7 +148,6 @@ fn pi_flags_drift_and_unsupported_mcp_fail_before_provider_or_provision_intent()
             dispatch_workspace: Some(forge_app::DispatchWorkspace {
                 id: "workspace".into(),
             }),
-            rendered_initial_prompt: "private instructions".into(),
             bootstrap_prompt: Some("bootstrap".into()),
             capability_delivery: Some(forge_app::AssignmentCapabilityDelivery {
                 endpoint: "http://127.0.0.1:45003".into(),
@@ -249,7 +248,6 @@ fn registered_grilling_receives_protected_capability_from_production_adapter() {
         project_root: fixture.0.join("catalog"),
         agent_workspace: Some(fixture.0.join("catalog")),
         dispatch_workspace: None,
-        rendered_initial_prompt: "private instructions".into(),
         bootstrap_prompt: None,
         capability_delivery: None,
         resources: vec![],
@@ -325,7 +323,6 @@ fn direct_input_drift_after_tab_allocation_blocks_launch_and_retains_evidence() 
         dispatch_workspace: Some(forge_app::DispatchWorkspace {
             id: "workspace".into(),
         }),
-        rendered_initial_prompt: "private".into(),
         bootstrap_prompt: Some("bootstrap".into()),
         capability_delivery: Some(forge_app::AssignmentCapabilityDelivery {
             endpoint: "http://127.0.0.1:45003".into(),

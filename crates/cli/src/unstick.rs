@@ -21,7 +21,7 @@ pub struct UnstickArgs {
     /// Salvage the old agent's unreported commits or uncommitted work (never discarded).
     #[arg(long)]
     keep_work: bool,
-    /// Reset exhausted remediation or continuation budgets (requires --actor and --message).
+    /// Reset exhausted remediation budgets (requires --actor and --message).
     #[arg(long)]
     reset_budgets: bool,
     /// Retire an agent that Forge still reports as active.
@@ -105,7 +105,6 @@ fn kind(kind: UnstickStepKind) -> &'static str {
         UnstickStepKind::ResolveUnknown => "Resolve unknown resources",
         UnstickStepKind::Salvage => "Keep leftover work",
         UnstickStepKind::ResetRemediation => "Reset remediation budget",
-        UnstickStepKind::ResetContinuations => "Reset continuation budget",
         UnstickStepKind::Resume => "Clear Dispatch Hold",
         UnstickStepKind::Dispatch => "Dispatch",
     }
@@ -132,9 +131,6 @@ fn render(report: &UnstickReport) -> String {
         let mut target = String::new();
         if let Some(id) = &step.assignment_id {
             let _ = write!(target, " [Assignment {id}]");
-        }
-        if let Some(check) = step.check_id {
-            let _ = write!(target, " [Check {check}]");
         }
         let _ = writeln!(
             out,
@@ -199,7 +195,6 @@ mod tests {
             status: UnstickStepStatus::NeedsFlag,
             reason: "r".into(),
             assignment_id: Some("a1".into()),
-            check_id: None,
             required_flags: vec![UnstickFlag::KeepWork, UnstickFlag::AgentGone],
             error: None,
         };
@@ -225,7 +220,6 @@ mod tests {
                 status: UnstickStepStatus::Pending,
                 reason: "r".into(),
                 assignment_id: None,
-                check_id: None,
                 required_flags: Vec::new(),
                 error: None,
             }],

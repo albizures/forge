@@ -18,21 +18,12 @@ use std::sync::{
 #[path = "support/task_attempt_adapters.rs"]
 mod adapters;
 use adapters::Provider;
-#[path = "support/implementation_continuations.rs"]
-mod implementation_continuations;
 #[path = "support/retained_work.rs"]
 mod retained_work;
 
 #[test]
 fn clean_retained_work_requires_atomic_operator_authority_and_safe_retirement() {
     run_case("retained-work");
-}
-
-#[test]
-fn deliberate_continuations_are_bounded_and_atomic() {
-    run_case("continuation-total");
-    run_case("continuation-unchanged");
-    run_case("continuation-sequence");
 }
 
 #[test]
@@ -107,11 +98,6 @@ impl ManagedWorktreeAdapter for Checkout {
     ) -> Result<(), RegistrationError> {
         unreachable!()
     }
-}
-
-#[test]
-fn review_cannot_submit_implementation_continuation() {
-    run_case("review-continuation-denied");
 }
 
 #[test]
@@ -858,7 +844,7 @@ fn provisioning_launch_and_acknowledgement_faults_never_authorize_a_second_attem
 #[allow(clippy::too_many_lines)]
 fn run_case(case: &str) {
     let root = std::env::temp_dir().join(format!(
-        "forge-continuation-{}-{}",
+        "forge-task-check-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1042,7 +1028,7 @@ fn run_case(case: &str) {
     };
     if case.starts_with("retained-") {
         retained_work::run(
-            &implementation_continuations::Fixture {
+            &retained_work::Fixture {
                 store: &store,
                 path: &path,
                 root: &root,
@@ -1054,24 +1040,6 @@ fn run_case(case: &str) {
                 launches: &launches,
             },
             case == "retained-dirty",
-        );
-        std::fs::remove_dir_all(root).unwrap();
-        return;
-    }
-    if case.starts_with("continuation-") {
-        implementation_continuations::run(
-            &implementation_continuations::Fixture {
-                store: &store,
-                path: &path,
-                root: &root,
-                application: &application,
-                task: task.id,
-                head: &head,
-                dirty: &dirty,
-                unavailable: &unavailable,
-                launches: &launches,
-            },
-            case,
         );
         std::fs::remove_dir_all(root).unwrap();
         return;
@@ -1530,25 +1498,6 @@ fn run_case(case: &str) {
             findings: vec![],
             verifications: vec![],
         };
-        if index > 0 && case == "review-continuation-denied" {
-            let mut denied = input.clone();
-            denied.verdict = Verdict::Fail;
-            denied.disposition =
-                OutcomeDisposition::Continuation(forge_app::outcomes::ContinuationHandoff {
-                    stopping_reason: "Context exhausted".into(),
-                    completed_work: "Reviewed".into(),
-                    verification: "Partial review; remaining gates unrun".into(),
-                    remaining_work: "Finish review".into(),
-                });
-            let before = app.record_work_state(task.id).unwrap();
-            let before_checks = app.list_record_checks(task.id).unwrap();
-            assert_eq!(
-                session.submit_outcome(&denied).unwrap_err().code,
-                "invalid-continuation"
-            );
-            assert_eq!(application().record_work_state(task.id).unwrap(), before);
-            assert_eq!(app.list_record_checks(task.id).unwrap(), before_checks);
-        }
         if index == 0 && case == "residual" {
             input.findings.push(forge_app::outcomes::OutcomeFinding {
                 severity: forge_app::findings::Severity::Major,
@@ -1741,7 +1690,7 @@ fn run_case(case: &str) {
                 match continue_request.join().unwrap() {
                     Ok((existing, true)) => assert_eq!(existing.id, assignment.id),
                     Err(error) => assert_eq!(error.code, "agent-retirement-failed"),
-                    other => panic!("unexpected concurrent continuation: {other:?}"),
+                    other => panic!("unexpected concurrent dispatch: {other:?}"),
                 }
                 accepted
             });
@@ -1806,12 +1755,12 @@ fn run_case(case: &str) {
                     barrier.wait();
                     session.submit_outcome(&input).unwrap()
                 });
-                let continuation = scope.spawn(|| {
+                let dispatch = scope.spawn(|| {
                     let app = application();
                     barrier.wait();
                     app.execute_task_check_acceptance(task.id).unwrap()
                 });
-                (replay.join().unwrap(), continuation.join().unwrap())
+                (replay.join().unwrap(), dispatch.join().unwrap())
             });
             assert_eq!(results.0, accepted);
             let replacement = results.1.0;
@@ -2193,7 +2142,7 @@ fn run_case(case: &str) {
         }
         // A new Application/store connection resumes from durable acceptance, not memory.
         application()
-            .reconcile_agent_dispatch("continuation", (index as u64 + 1) * 400_000)
+            .reconcile_agent_dispatch("successor", (index as u64 + 1) * 400_000)
             .unwrap();
         assert!(
             store

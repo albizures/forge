@@ -111,7 +111,6 @@ requests! {
     record_check_invalidate(forge_rpc::RecordCheckInvalidateRequest) -> forge_rpc::RecordCheck;
     record_check_show(forge_rpc::RecordCheckShowRequest) -> forge_rpc::CheckPage;
     record_check_assess(forge_rpc::RecordCheckAssessRequest) -> forge_rpc::RecordCheck;
-    reset_continuations(forge_rpc::ResetContinuationsRequest) -> forge_rpc::WorkState;
     recover_retained_work(forge_rpc::RecoverRetainedWorkRequest) -> forge_rpc::RetainedWorkRecovery;
     record_work_state(forge_rpc::RecordWorkStateRequest) -> forge_rpc::WorkState;
     record_attempt_begin(forge_rpc::RecordAttemptBeginRequest) -> forge_rpc::Attempt;

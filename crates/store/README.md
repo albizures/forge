@@ -67,8 +67,18 @@ prompt was provably never sent. The primary key makes an intent exclusive per se
 recorded one plus one, independent of the resettable counters.
 
 Revision 20 is a breaking storage expansion: ordinary opening rejects revision 19 and
-earlier before writes. Explicit offline upgrade adds the two **empty** tables and preserves
-every existing value; no Nudge history is invented.
+earlier before writes. Explicit offline upgrade adds the two **empty** tables; no Nudge
+history is invented.
+
+The same revision removes the retired Check-scoped agent handoff state. The upgrade drops
+the `check_continuations` and `check_continuation_resets` tables (counters, latest
+checkpoints and reset audit rows) instead of retaining them read-only: no Update Log,
+Record history or work-inspection surface reads them. It also rewrites the retired shapes
+in `record_attempts` so historical rows still decode: the `continuation` key is removed
+from `attempt_json` and from `result_json.attempt`, and a closed attempt whose
+`outcome_json.disposition` was the retired handoff variant is recorded as `interrupted`.
+Every attempt row, its identity and every other column survive. Stores carrying the old
+tables are validated against the frozen revision 15 to 19 contracts before the upgrade.
 
 ## Retained-work salvage authorization (revision 17)
 
@@ -83,7 +93,7 @@ retries return its original result and conflicts reject atomically.
 An immediate transaction revalidates Task/Check/scope, latest source, explicit
 retirement and all resources, active canonical claim/Repository and freshness.
 Authorization, freshness invalidation, selected work input and retained hold commit
-together. No Check passes, Continuation is invented, budget resets, or Stack pins
+together. No Check passes, budget resets, or Stack pins
 change. Historical outcomes, Assessments and Findings remain. External Git identity
 and retained-state observations run outside the transaction. The next matching
 Implementation attempt captures `recovery` context; work inspection returns the
@@ -122,53 +132,6 @@ fingerprints are not rewritten or reauthorized; they fail closed at dispatch.
 Exact retries still return their original audit, so an unconsumed old dirty
 recovery has no automatic reauthorization path. Preserve it for separately approved
 operator recovery design rather than editing storage or discarding evidence.
-
-## Continuation resets (revision 16)
-
-`check_continuation_resets` is append-only through supported operations: `id` PK,
-`check_id` FK to `record_checks`, nonblank `actor` and `message` validated at the
-application/persistence boundary, and `created_at_millis`. Explicit operator reset
-atomically sets only the selected Check's total and consecutive-unchanged counts
-to zero and inserts the audit row. Checkpoint/handoff and historical outcomes,
-holds, remediation/interruption budgets and resource/ownership state are retained.
-Inspection includes the full reset history ordered by audit id, not a truncated page.
-Concurrent resets serialize; audit failure rolls back both effects.
-
-Revision 16 is breaking: `check_continuations.total` now permits zero. Ordinary
-opening rejects schema 15 and earlier before writes. Explicit offline upgrade
-rebuilds the counter table preserving all existing typed values/checkpoint bytes,
-and adds an empty audit table without invented resets. Same-schema transfers
-retain actual history. Wire additions are compatible for permissive decoders:
-`CheckContinuations.resets` defaults empty for old stored JSON; strict older clients
-must coordinate CLI/server upgrades. Historical accepted results are never rewritten.
-
-## Implementation Continuations (revision 15)
-
-`check_continuations` stores one row per stable Check: `check_id` is its primary
-key and FK to `record_checks`; `total` is constrained to 0–20 (1–20 in revision 15);
-`consecutive_unchanged` to 0–2; `checkpoint_json` contains accepted attempt id,
-Repository evidence and full structured handoff. Acceptance updates these fields,
-`record_work.input_json` (clearing output), closed attempt request/result and any
-limit-triggered Dispatch Hold in one immediate transaction. No Assessment is added,
-no Finding cleared, and immutable Stack Base Commit is untouched. Historical
-checkpoint requests/results remain in `record_attempts`; the counter row retains
-the latest checkpoint. Each successor's immutable `attempt_json` captures its
-handoff context. New serialized fields have absent-field defaults for decoding
-historical results, not fabricated historical handoffs.
-
-Claim, evidence reconciliation and completion recreate exhausted continuation holds;
-ordinary resume retains/reinstates them. Remediation resets, invalidation and body
-edits never change continuation counters. Existing safety hold reasons win through
-`INSERT OR IGNORE`. Exact replay returns the original accepted result before live
-freshness checks and never spends the budget again.
-
-Revision 15 is a breaking storage expansion: old writers cannot enforce the new
-checkpoint and budget semantics. Ordinary opening rejects revision 14 and earlier
-before initialization writes. Explicit offline staging upgrade adds an **empty**
-table and preserves every pre-existing typed value and historical JSON byte-for-byte.
-It does not infer Continuations from prior failures/interruptions or reset existing
-budgets. Same-schema transfer retains continuation counters, handoffs and replay.
-No live conversion is performed by application opening.
 
 ## Assignment session provenance (revision 14)
 
@@ -1081,7 +1044,7 @@ failed Assessment, invalidates all current Assessments and advances freshness in
 same transaction; remediation input is the reviewed evidence. Interrupted review
 attempts close without an Assessment or substantive effects. Passing reviews cannot
 leave their own blocking Findings unresolved. In Dispatched mode, owned blocking
-Findings permit remediation and review continuation; unlinked blockers or blockers
+Findings let remediation and review proceed; unlinked blockers or blockers
 remaining when all Checks pass retain a durable Dispatch Hold. Claim-time validation
 recreates an unlinked-blocker hold even after explicit clearance, until an operator
 assigns a review verification owner. Manual outcomes retain a hold for any residual

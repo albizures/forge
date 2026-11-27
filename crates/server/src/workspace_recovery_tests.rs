@@ -113,7 +113,6 @@ fn seed_existing_launch(fixture: &Fixture, assignment: &forge_app::AgentAssignme
         project_root: fixture.root.join("one"),
         agent_workspace: Some(workspace),
         dispatch_workspace: store.assignment_dispatch_workspace(&assignment.id).unwrap(),
-        rendered_initial_prompt: "Historical launch fixture".into(),
         bootstrap_prompt: None,
         capability_delivery: None,
         resources: store.list_agent_assignment_resources(&assignment.id).unwrap(),

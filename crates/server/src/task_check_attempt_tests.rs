@@ -267,12 +267,6 @@ async fn check_bound_outcome_inspection(kind: u8) {
         ("fail", serde_json::json!("handback")),
         ("fail", serde_json::json!("human-input")),
         ("fail", serde_json::json!("interrupted")),
-        ("fail", serde_json::json!({"continuation": {
-            "stopping_reason": "Context budget nearly exhausted",
-            "completed_work": "Implemented checkpoint",
-            "verification": "Focused tests passed",
-            "remaining_work": "Finish and run full gates"
-        }})),
     ] {
         forbidden["outcome"]["verdict"] = verdict.into();
         forbidden["outcome"]["disposition"] = disposition;
@@ -282,6 +276,20 @@ async fn check_bound_outcome_inspection(kind: u8) {
         assert_eq!(store.list_record_checks(task.id).unwrap(), before_checks);
         assert_eq!(store.list_record_updates(task.id).unwrap(), before_updates);
     }
+    // The retired Continuation disposition no longer parses, so it never reaches the gate.
+    forbidden["outcome"]["verdict"] = "fail".into();
+    forbidden["outcome"]["disposition"] = serde_json::json!({"continuation": {
+        "stopping_reason": "Context budget nearly exhausted",
+        "completed_work": "Implemented checkpoint",
+        "verification": "Focused tests passed",
+        "remaining_work": "Finish and run full gates"
+    }});
+    let rejected = assignment_rpc(daemon.clone(), "assignment.outcomeSubmit", forbidden.clone()).await;
+    assert!(
+        rejected["error"]["data"].as_str().is_some_and(|m| m.contains("unknown variant `continuation`")),
+        "{rejected}"
+    );
+    assert_eq!(store.record_work_state(task.id).unwrap(), before_work);
     // Verdict-adjacent commands are closed to the Implementation Agent as well.
     let with = |extra: serde_json::Value| {
         let mut value = credentials_for_denials.clone();

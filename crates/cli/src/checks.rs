@@ -163,14 +163,6 @@ pub async fn run(command: CheckCommand, workspace: Option<String>) -> i32 {
             Ok(value) => {
                 if json {
                     println!("{value}");
-                } else if let Ok(state) =
-                    serde_json::from_value::<forge_rpc::WorkState>(value.clone())
-                {
-                    println!(
-                        "{}\n{}",
-                        serde_json::to_string_pretty(&value).expect("JSON value"),
-                        forge_cli::render_continuations(&state)
-                    );
                 } else {
                     println!(
                         "{}",
