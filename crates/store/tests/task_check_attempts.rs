@@ -11,6 +11,8 @@ use forge_app::{
 use forge_store::SqliteProjectRepository;
 #[path = "support/task_attempt_adapters.rs"]
 mod adapters;
+#[path = "support/review_path.rs"]
+mod review_path;
 use adapters::{Local, Provider};
 
 #[test]
@@ -337,22 +339,9 @@ fn acceptance_claim_snapshots_first_unpassed_check_and_pinned_profile_atomically
     pass.actor = "spoofed actor is replaced".into();
     pass.verdict = forge_app::checks::Verdict::Pass;
     pass.message = "Implemented".into();
-    assert_eq!(
-        session.submit_outcome(&outcome).unwrap_err().code,
-        "unauthorized-attempt"
-    );
-    let mut forged = pass.clone();
-    forged.evidence = Evidence::Artifact {
-        uri: "urn:bypass".into(),
-        sha256: "b".repeat(64),
-    };
-    assert_eq!(
-        session.submit_outcome(&forged).unwrap_err().code,
-        "evidence-mismatch"
-    );
-    let accepted = session.submit_outcome(&pass).unwrap();
+    let accepted = review_path::submit(&session, &pass).unwrap();
     assert_eq!(accepted.attempt.actor, retry.id);
-    assert_eq!(session.submit_outcome(&pass).unwrap(), accepted);
+    assert_eq!(review_path::submit(&session, &pass).unwrap(), accepted);
     assert_eq!(
         session
             .check_invalidate(
@@ -368,7 +357,7 @@ fn acceptance_claim_snapshots_first_unpassed_check_and_pinned_profile_atomically
             )
             .unwrap_err()
             .code,
-        "attempt-required"
+        "implementation-outcome-forbidden"
     );
     store
         .close_agent_assignment(&retry.id, forge_app::AgentAssignmentClosureReason::Retired)

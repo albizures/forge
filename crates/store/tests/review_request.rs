@@ -112,41 +112,6 @@ fn review_check_assignment_cannot_request_review() {
 }
 
 #[test]
-fn review_request_after_another_outcome_conflicts() {
-    for (verdict, disposition, message) in [
-        (
-            Verdict::Pass,
-            OutcomeDisposition::Complete,
-            "Self-reported pass",
-        ),
-        (Verdict::Fail, OutcomeDisposition::Interrupted, "Stopped"),
-    ] {
-        let f = Fixture::new();
-        let app = f.app();
-        let id = f.launch(&app);
-        let session = f.session(&app, &id);
-        let attempt = f.store.assignment_check_attempt(&id).unwrap().unwrap();
-        session
-            .submit_outcome(&OutcomeInput {
-                attempt_id: attempt.id,
-                generation: attempt.generation,
-                evidence: attempt.evidence,
-                verdict,
-                actor: "ignored".into(),
-                message: message.into(),
-                disposition,
-                findings: vec![],
-                verifications: vec![],
-            })
-            .unwrap();
-        assert_eq!(
-            session.request_review().unwrap_err().code,
-            "outcome-conflict"
-        );
-    }
-}
-
-#[test]
 fn unacknowledged_assignment_cannot_request_review() {
     let f = Fixture::new();
     let app = f.app();
@@ -288,4 +253,125 @@ fn only_the_implementation_assignment_is_closed_to_verdict_commands() {
     f.session(&app, &review)
         .ensure_not_implementation()
         .unwrap();
+}
+
+#[test]
+fn every_verdict_entry_point_refuses_an_implementation_assignment_and_records_nothing() {
+    use forge_app::{
+        checks::{AssessmentInput, InvalidationInput},
+        findings::{
+            FindingMutation, FindingMutationInput, FindingRaiseInput, FindingResolveInput, Severity,
+        },
+    };
+    let f = Fixture::new();
+    let app = f.app();
+    let id = f.launch(&app);
+    let session = f.session(&app, &id);
+    let attempt = f.store.assignment_check_attempt(&id).unwrap().unwrap();
+    let checks = f.store.list_record_checks(f.task).unwrap();
+    let before = (
+        checks.clone(),
+        f.store.list_record_findings(f.task, None, 100).unwrap(),
+    );
+    let codes = [
+        session
+            .submit_outcome(&OutcomeInput {
+                attempt_id: attempt.id.clone(),
+                generation: attempt.generation,
+                evidence: attempt.evidence.clone(),
+                verdict: Verdict::Pass,
+                actor: "x".into(),
+                message: "Self pass".into(),
+                disposition: OutcomeDisposition::Complete,
+                findings: vec![],
+                verifications: vec![],
+            })
+            .map(|_| ()),
+        session
+            .check_assess(
+                checks[0].id,
+                &AssessmentInput {
+                    expected_version: 0,
+                    verdict: Verdict::Pass,
+                    actor: "x".into(),
+                    message: "Self pass".into(),
+                    revision: None,
+                    dirty: None,
+                },
+            )
+            .map(|_| ()),
+        session
+            .check_invalidate(
+                checks[0].id,
+                &InvalidationInput {
+                    expected_version: 0,
+                    assessment_id: 1,
+                    actor: "x".into(),
+                    message: "No".into(),
+                    revision: None,
+                    dirty: None,
+                },
+            )
+            .map(|_| ()),
+        session
+            .finding_raise(&FindingRaiseInput {
+                severity: Severity::Major,
+                blocking: Some(true),
+                check_id: None,
+                assessment_id: None,
+                actor: "x".into(),
+                message: "Self-raised".into(),
+                revision: None,
+                dirty: None,
+            })
+            .map(|_| ()),
+        session
+            .finding_mutate(
+                1,
+                &FindingMutationInput {
+                    change: FindingMutation::Resolve,
+                    explanation: FindingResolveInput {
+                        expected_version: 1,
+                        actor: "x".into(),
+                        message: "Self-resolved".into(),
+                        revision: None,
+                        dirty: None,
+                    },
+                },
+            )
+            .map(|_| ()),
+    ];
+    for result in codes {
+        assert_eq!(result.unwrap_err().code, "implementation-outcome-forbidden");
+    }
+    assert_eq!(
+        (
+            f.store.list_record_checks(f.task).unwrap(),
+            f.store.list_record_findings(f.task, None, 100).unwrap()
+        ),
+        before
+    );
+    // Review Request stays open.
+    f.set_head(&"b".repeat(40));
+    session.request_review().unwrap();
+}
+
+#[test]
+fn assignment_instructions_withhold_the_profile_body_from_implementation_only() {
+    const BODY: &str = "Submit an outcome with fail/complete and list what remains";
+    let f = Fixture::with_profile_body(BODY);
+    let app = f.app();
+    let id = f.launch(&app);
+    let instructions = f.session(&app, &id).behavior().unwrap();
+    assert_eq!(
+        instructions,
+        forge_app::assignment::IMPLEMENTATION_COMMAND_CONTRACT
+    );
+    assert!(!instructions.contains(BODY));
+
+    f.session(&app, &id).request_review().unwrap();
+    app.reconcile_agent_dispatch("review-request", 100_000)
+        .unwrap();
+    let review = f.launch(&app);
+    assert_eq!(f.session(&app, &review).behavior().unwrap(), BODY);
 }

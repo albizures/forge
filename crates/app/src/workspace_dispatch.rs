@@ -17,6 +17,19 @@ pub struct WorkspaceDispatchReadiness {
     pub dispatchable: bool,
     pub blockers: Vec<DispatchBlocker>,
 }
+/// The reason a profile failed preflight, for the operator. Preflight is local validation with
+/// reviewed static messages, but the text is still bounded and stripped of control characters
+/// so a future adapter cannot smuggle in a payload.
+fn preflight_reason(error: &AgentAdapterError) -> String {
+    use AgentAdapterError::{Cleanup, Conflict, Endpoint, InvalidRequest, NotFound, Transient};
+    let (Endpoint(m) | Transient(m) | NotFound(m) | Conflict(m) | InvalidRequest(m) | Cleanup(m)) =
+        error;
+    m.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(160)
+        .collect()
+}
+
 impl WorkspaceDispatchReadiness {
     pub(crate) fn preflight_selection(
         &self,
@@ -79,7 +92,8 @@ fn readiness<F: AgentDispatchAdapterFactory + ?Sized>(
             });
             continue;
         };
-        let invalid = factory.validate_preflight(profile).is_err();
+        let preflight = factory.validate_preflight(profile);
+        let invalid = preflight.is_err();
         if !repository.record_profile_preflight(
             workspace,
             record_type,
@@ -95,9 +109,13 @@ fn readiness<F: AgentDispatchAdapterFactory + ?Sized>(
                 record_type,
                 profile_revision: profile.revision,
             });
+            let reason = preflight
+                .err()
+                .map(|e| preflight_reason(&e))
+                .unwrap_or_default();
             blockers.push(DispatchBlocker {
                 code: format!("{kind}-profile-invalid"),
-                message: format!("selected {kind} profile revision {} is invalid or unsupported in Workspace {workspace}", profile.revision),
+                message: format!("selected {kind} profile revision {} is invalid or unsupported in Workspace {workspace}: {reason}", profile.revision),
             });
         }
     }

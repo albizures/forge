@@ -195,7 +195,8 @@ work. Inspection adds a default-empty `sessions` collection. New clients supplyi
 ## Implementation profile delivery
 
 Implementation Agents receive Forge-owned instructions at bootstrap, not profile outcome
-guidance, and cannot submit outcomes (see below). Retired profile revisions that embedded
+guidance, and cannot submit outcomes (see below). The `assignmentInstructions` read returns
+the same Forge-owned command contract for them, never the pinned profile body. Retired profile revisions that embedded
 outcome language do not alter existing immutable Check pins.
 
 ## Agent CLI examples
@@ -235,7 +236,8 @@ Review Check workers submit their bound Check outcome rather than calling Done:
 forge assignment outcome --file outcome.json --json
 ```
 
-Implementation workers never do. From an Implementation Assignment the server rejects
+Implementation workers never do. From an Implementation Assignment the application layer
+(and so every entry point) rejects
 `assignment outcome` (every disposition), `check assess`, `check invalidate`,
 `finding raise` and `finding mutate` with `implementation-outcome-forbidden`, changing
 nothing. Their command contract is `request-review`, `comment`, `context`, `finding list`

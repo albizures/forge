@@ -105,15 +105,17 @@ clean HEAD as evidence, attributed to the Assignment and its attempt, through th
 accepted-outcome path (output evidence set, interruption count reset, progress
 accounting); reconciliation then retires the Assignment and launches the next Check as for
 any accepted Implementation pass. An exact repeat returns the stored result, including
-after retirement; a Review Request after a different outcome on the same attempt fails
-with `outcome-conflict`. An Implementation session ends at its Review Request.
+after retirement. An Implementation session ends at its Review Request.
 
 Implementation Agents do not judge their own work ([ADR 0012](../crates/docs/adr/0012-implementation-agents-do-not-judge-their-own-work.md)).
 An Implementation Agent is given `request-review`, `comment`, `context`, `finding list`
 and `record`; the server stays closed to verdicts rather than listing every read. From an
 Implementation Assignment, `assignment outcome` (every disposition),
 `check assess`, `check invalidate`, `finding raise` and `finding mutate` are rejected
-with `implementation-outcome-forbidden` and change nothing. Review Checks keep
+with `implementation-outcome-forbidden` and change nothing. The application layer
+enforces this, so RPC, CLI and in-process callers get the same rejection; the
+`assignmentInstructions` read returns the Forge-owned command contract, never the pinned
+profile body. Review Checks keep
 `pass/complete`, `fail/handback`, `fail/human-input` and `fail/interrupted` under the
 rules below. A handback launches a fresh Implementation Assignment whose minimal
 bootstrap lists every open Finding. Interruption of an Implementation attempt arises only
@@ -537,7 +539,8 @@ acknowledgement may still let the existing agent start, without clearing the hol
 
 Before a new claim, Forge checks the selected revision's direct inputs, supported
 provider/profile, selected MCP configuration and neighboring CLI. A redacted
-configuration blocker is distinct from a Dispatch Hold; repair the inputs or
+configuration blocker names the reason (for example `selected direct input drifted:
+<skill name>`) and is distinct from a Dispatch Hold; repair the inputs or
 explicitly select a supported revision and recheck status. Repair does not clear
 an unrelated hold. A final direct-input check before launch can fail after
 allocation; retain the resources and follow the recovery runbook. Existing
