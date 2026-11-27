@@ -185,7 +185,12 @@ fn implementation_bootstrap_carries_only_worktree_task_open_findings_and_contrac
         bootstrap.command_contract,
         forge_app::assignment::IMPLEMENTATION_COMMAND_CONTRACT
     );
-    let json = serde_json::to_string(&bootstrap).unwrap();
+    // The fixed command contract legitimately says "attempt limit"; check the rest for leaks.
+    let json = serde_json::to_string(&forge_app::assignment::ImplementationBootstrap {
+        command_contract: String::new(),
+        ..bootstrap.clone()
+    })
+    .unwrap();
     for omitted in [
         OUTCOME_LANGUAGE,
         "trusted",

@@ -147,3 +147,20 @@ fn implementation_bootstrap_without_findings_or_recovery_omits_those_sections() 
     .unwrap();
     assert!(text.contains("Authorized retained-work recovery") && text.contains("RECOVERED"));
 }
+
+#[test]
+fn implementation_command_contract_names_only_request_review_and_comment() {
+    let contract = forge_app::assignment::IMPLEMENTATION_COMMAND_CONTRACT;
+    let mut commands: Vec<&str> = contract
+        .split("`forge ")
+        .skip(1)
+        .map(|rest| rest.split('`').next().unwrap())
+        .map(|command| command.split(" --").next().unwrap())
+        .collect();
+    commands.sort_unstable();
+    assert_eq!(
+        commands,
+        ["assignment comment", "assignment request-review"]
+    );
+    assert_eq!(contract.matches("forge ").count(), 2, "{contract}");
+}

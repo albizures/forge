@@ -511,7 +511,12 @@ mod tests {
 
     #[test]
     fn implementation_text_states_no_limit_and_defines_a_blocker_with_explanation() {
-        let text = nudge_text(&NudgeRole::Implementation, Path::new("/wt"), 3, Some("Use staging."));
+        let text = nudge_text(
+            &NudgeRole::Implementation,
+            Path::new("/wt"),
+            3,
+            Some("Use staging."),
+        );
         let expected = format!(
             "Your turn ended without a Review Request. Keep working in /wt.\n\nOperator explanation: Use staging.\n\n{}No new commit since the last nudge: 3 of 3.",
             IMPLEMENTATION_RULE_LINES.concat()
