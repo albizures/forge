@@ -153,8 +153,22 @@ of 3.`, where N counts consecutive Nudges (including this one) after which the o
 HEAD had not moved. The baseline HEAD is the attempt's input commit for the first
 Nudge and the HEAD observed at the previous Nudge afterwards; a new commit resets N to 0.
 Per-Assignment counters (last nudged `completion_seq`, total Nudges, consecutive no-commit
-Nudges, last HEAD) start at zero for each new Assignment. In this version they only
-count; the three-in-a-row and twenty-total limits are not yet enforced.
+Nudges, last HEAD) start at zero for each new Assignment.
+
+Nudges are bounded per Assignment. When the Agent next finishes a turn and a further Nudge
+would be a fourth consecutive no-commit Nudge, or a twenty-first Nudge overall, Forge sends
+nothing and places a Dispatch Hold that names the limit reached (consecutive-no-commit or
+total), references the Task's latest comment that Forge did not write (a blocked Agent is
+expected to explain itself with `forge assignment comment` before going idle) and adds the
+same text as an `agent-dispatch` comment. The Assignment stays open, keeps its capacity and
+the Agent is not retired. `forge dispatcher resume <task> --explanation '<text>'` clears
+the hold, restarts the Assignment's Nudge counters at zero and sends exactly one Nudge that
+also carries `Operator explanation: <text>`: at the Agent's next finished turn, including
+the one that tripped the limit. The explanation is stored with the counters until that
+Nudge is recorded, then dropped. Without `--explanation` the next Nudge is the plain
+template. `forge task unstick --retire-working --agent-gone` retires the held Agent and
+counts an interruption as for any retirement. Prompt sequences keep counting across a
+resume; they are not reset with the counters.
 
 Delivery is durable and never retried. Before any provider call Forge records a prompt
 intent keyed by Assignment and prompt sequence, then re-reads the Agent and verifies its

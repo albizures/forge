@@ -10,7 +10,9 @@ The 19 → 20 step adds the empty `assignment_nudges` and `assignment_prompt_int
 tables for [Nudge](dispatch.md#nudges-for-idle-implementation-agents) counters and
 durable prompt intents. No Nudge or prompt intent is invented for existing Assignments,
 and every earlier table is preserved byte-for-byte; ordinary schema-19 opening rejects
-before writes.
+before writes. The `pending_explanation` column (operator resume text) belongs to this
+same unreleased revision rather than a 21st step; stores created from an earlier
+revision-20 development build must be recreated.
 The 18 → 19 step fences corrected Repository/branch/Base Commit revalidation for
 clean checkpoints and salvage, configuration-independent cleanliness checks, and
 v2 dirty fingerprints including extended index flags (not mutable stat-cache data).
