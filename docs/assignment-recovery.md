@@ -86,7 +86,8 @@ identifier is not proof of absence or current ownership. Investigate the actual
 provider resources and external processes separately; retain evidence without
 copying capabilities or prompt contents into logs or tickets.
 
-A missed acknowledgement deadline retains the Assignment and capacity. Clearing
+A missed acknowledgement deadline retains the Assignment and capacity, and holds
+a Check-bound Task as soon as a scan sees it, with the runbook in a comment. Clearing
 the hold cannot replay a launch or prompt; reconciliation may reapply the timeout
 hold. Late acknowledgement can still make the existing Assignment Working and
 allow its Task to start without clearing that hold. Do not retire an otherwise
@@ -115,8 +116,14 @@ bypass ownership checks or treat a successful mutation alone as verified absence
 
 ## Resolve unknown resources only after external safety checks
 
-A crash may leave a provisioning-intent marker without the resource identity
-Forge would need to clean it up. Known-resource retirement alone does not resolve
+A crash, or any adapter error after the launch intent (for example a Herdr
+`agent.start` error code, or a lost response), may leave a provisioning-intent
+marker without the resource identity Forge would need to clean it up. The Task
+then carries a Dispatch Hold and an `agent-dispatch` comment naming the
+Assignment. Run, in order: check `herdr agent get forge-dispatch-<assignment-id>`
+and that its tab and pane are gone, then `forge dispatcher assignment-retire
+<assignment-id>`, then the resolve-unknown command below, then
+`forge dispatcher resume <task>`. Known-resource retirement alone does not resolve
 this uncertainty. First revoke the Assignment, verify known-resource cleanup,
 investigate unknown resources and make the old agent and any external children
 unable to act. Remove unknown resources or otherwise make them safe. Only when
