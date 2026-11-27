@@ -258,7 +258,7 @@ fn persisted_force_survives_reload_and_old_normal_snapshots_have_no_override() {
         .connection
         .lock()
         .unwrap()
-        .execute_batch("DROP TABLE project_base_branch_policy; DROP TABLE builds_on_dependencies; DROP TABLE forced_completions; PRAGMA user_version=10")
+        .execute_batch("DROP TABLE record_planning_context; DROP TABLE project_base_branch_policy; DROP TABLE builds_on_dependencies; DROP TABLE forced_completions; PRAGMA user_version=10")
         .unwrap();
     drop(store);
     assert!(SqliteProjectRepository::open(&path).is_err());

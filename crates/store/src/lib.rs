@@ -4158,6 +4158,13 @@ fn load_planning_observations(
     id: u64,
 ) -> Result<Vec<forge_app::planning_context::ProjectPlanningContext>, RegistrationError> {
     use forge_app::planning_context::{PlanningContext, ProjectPlanningContext};
+    // Offline upgrade validation reads historical Records before the new table exists.
+    let revision: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(storage_error)?;
+    if (1..15).contains(&revision) {
+        return Ok(vec![]);
+    }
     let mut statement = connection.prepare("SELECT project_slug, status, repository, branch, reason FROM record_planning_context WHERE record_id = ?1 ORDER BY project_slug").map_err(storage_error)?;
     let rows = statement
         .query_map([id.cast_signed()], |row| {
