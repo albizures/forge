@@ -176,6 +176,7 @@ fn a_review_agent_that_finishes_a_turn_without_a_verdict_is_nudged_once_with_the
     );
     assert!(text.contains("forge assignment outcome --file"), "{text}");
     assert!(text.contains("request-review"), "forbids it: {text}");
+    assert!(!text.contains("assignment comment"), "{text}");
     assert!(!text.contains("Deliver work"), "does not repeat the Task");
     assert!(
         text.ends_with("Nudges without a verdict: 1 of 3."),

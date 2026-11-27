@@ -98,7 +98,7 @@ fn review_text(
         "Your turn ended without a verdict on the {check_name} Check. Finish the review of {}.\n{explanation}\
 - Submit your verdict with `forge assignment outcome --file <json>`: `pass`/`complete`; `fail`/`handback` with blocking Findings; or `fail`/`human-input` naming the concrete blocker.\n\
 - Do not commit and do not run `forge assignment request-review`.\n\
-- If you are blocked, explain why with `forge assignment comment --message '<explanation>'`, then end your turn.\n\n\
+\n\
 Nudges without a verdict: {nudges_without_verdict} of {NO_COMMIT_NUDGE_LIMIT}.",
         worktree.display()
     )
@@ -479,6 +479,7 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("interrupted"), "{text}");
+        assert!(!text.contains("assignment comment"), "{text}");
         assert!(!text.contains("Operator explanation"), "{text}");
         assert!(
             text.ends_with("Nudges without a verdict: 1 of 3."),
