@@ -1,12 +1,11 @@
 //! Nudges: exactly one durable prompt per finished Implementation turn, driven by reconciliation
 //! against a scripted provider (the same seam the fake Herdr serves in the server tests).
 use forge_app::{
-    AgentAdapterError, AgentDispatchAdapter, AgentDispatchAdapterFactory, AgentDispatchContext,
-    AgentDispatchRepository, AgentObservation, AgentProfile, AgentPrompt, AgentPromptOutcome,
-    AgentTurn, Application, DispatchWorkspace, RecordRepository,
+    AgentAdapterError, AgentDispatchRepository, AgentObservation, AgentPromptOutcome, Application,
+    RecordRepository,
     nudges::{NudgeIntent, NudgeSettlement, NudgeState},
 };
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 #[path = "support/implementation_fixture.rs"]
 mod fixture;
 use fixture::Fixture;
