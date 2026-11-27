@@ -224,6 +224,16 @@ Agent may still be live. Forge never resends that prompt. Look at the Agent's pa
 whether it received the instruction, then resume or `task unstick` as appropriate; a
 resume is the explicit resolution that lets later finished turns be nudged again.
 
+## Lost Agent holds
+
+A Dispatch Hold whose reason begins with `Agent lost` means Herdr no longer has the Agent
+of an open Check-bound Assignment (for example after a reboot or a closed pane). Forge
+closed that Assignment as lost, retired its Herdr resources and holds the Task. It does not
+relaunch, because the Managed Worktree may contain unreported work. Inspect the worktree,
+then follow [Authorize retained Implementation work for
+salvage](#authorize-retained-implementation-work-for-salvage) if the work is worth keeping,
+and clear the hold with `forge dispatcher resume <task-id>` once resources are safe.
+
 ## Nudge exhaustion holds
 
 A Dispatch Hold whose reason begins with `Nudges exhausted` means the Implementation Agent
