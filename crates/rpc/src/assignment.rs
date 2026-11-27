@@ -160,7 +160,7 @@ pub struct StandardBootstrapResponse {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum AssignmentBootstrapResponse {
-    Standard(StandardBootstrapResponse),
+    Standard(Box<StandardBootstrapResponse>),
     Implementation(forge_app::assignment::ImplementationBootstrap),
 }
 

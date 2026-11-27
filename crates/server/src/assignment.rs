@@ -186,11 +186,14 @@ impl AssignmentApiServer for Daemon {
         result
             .map(|value| match value {
                 forge_app::assignment::AgentBootstrap::Standard(value) => {
-                    AssignmentBootstrapResponse::Standard(forge_rpc::StandardBootstrapResponse {
-                        schema_version: 1,
-                        context: value.context.into(),
-                        behavior: value.behavior,
-                    })
+                    let value = *value;
+                    AssignmentBootstrapResponse::Standard(Box::new(
+                        forge_rpc::StandardBootstrapResponse {
+                            schema_version: 1,
+                            context: value.context.into(),
+                            behavior: value.behavior,
+                        },
+                    ))
                 }
                 forge_app::assignment::AgentBootstrap::Implementation(value) => {
                     AssignmentBootstrapResponse::Implementation(value)

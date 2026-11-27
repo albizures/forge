@@ -99,8 +99,8 @@ fn default_bootstrap_preserves_different_live_and_pinned_content_and_trust_label
 }
 
 fn implementation_json(
-    findings: serde_json::Value,
-    recovery: serde_json::Value,
+    findings: &serde_json::Value,
+    recovery: &serde_json::Value,
 ) -> AssignmentBootstrapResponse {
     let mut value = serde_json::json!({
         "schemaVersion": 1,
@@ -110,7 +110,7 @@ fn implementation_json(
         "commandContract": forge_app::assignment::IMPLEMENTATION_COMMAND_CONTRACT,
     });
     if !recovery.is_null() {
-        value["retainedWorkRecovery"] = recovery;
+        value["retainedWorkRecovery"] = recovery.clone();
     }
     serde_json::from_value(value).unwrap()
 }
@@ -118,8 +118,8 @@ fn implementation_json(
 #[test]
 fn implementation_bootstrap_carries_only_worktree_task_findings_and_contract() {
     let response = implementation_json(
-        serde_json::json!([{"id": 9, "severity": "major", "blocking": true, "message": "FULL FINDING\nSECOND LINE"}]),
-        serde_json::Value::Null,
+        &serde_json::json!([{"id": 9, "severity": "major", "blocking": true, "message": "FULL FINDING\nSECOND LINE"}]),
+        &serde_json::Value::Null,
     );
     let text = render_assignment_bootstrap(&response).unwrap();
     assert_eq!(
@@ -153,14 +153,14 @@ fn implementation_bootstrap_carries_only_worktree_task_findings_and_contract() {
 #[test]
 fn implementation_bootstrap_without_findings_or_recovery_omits_those_sections() {
     let text = render_assignment_bootstrap(&implementation_json(
-        serde_json::json!([]),
-        serde_json::Value::Null,
+        &serde_json::json!([]),
+        &serde_json::Value::Null,
     ))
     .unwrap();
     assert!(!text.contains("Open Findings") && !text.contains("recovery"));
     let text = render_assignment_bootstrap(&implementation_json(
-        serde_json::json!([]),
-        serde_json::json!({"note": "RECOVERED"}),
+        &serde_json::json!([]),
+        &serde_json::json!({"note": "RECOVERED"}),
     ))
     .unwrap();
     assert!(text.contains("Authorized retained-work recovery") && text.contains("RECOVERED"));

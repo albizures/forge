@@ -118,7 +118,7 @@ pub struct ImplementationBootstrap {
 
 /// The role-specific bootstrap: Implementation Agents get the minimal form.
 pub enum AgentBootstrap {
-    Standard(Bootstrap),
+    Standard(Box<Bootstrap>),
     Implementation(ImplementationBootstrap),
 }
 
@@ -605,7 +605,7 @@ impl AuthenticatedAssignment<'_> {
             .as_ref()
             .filter(|attempt| self.is_implementation_attempt(attempt))
         else {
-            return Ok(AgentBootstrap::Standard(bootstrap));
+            return Ok(AgentBootstrap::Standard(Box::new(bootstrap)));
         };
         let mut findings = Vec::new();
         let mut after = None;
