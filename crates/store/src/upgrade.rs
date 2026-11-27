@@ -35,8 +35,8 @@ fn error(message: impl Into<String>) -> RegistrationError {
 pub fn capabilities() -> UpgradeCapabilities {
     UpgradeCapabilities {
         interface_version: UPGRADE_INTERFACE_VERSION,
-        target_schema: 19,
-        supported_sources: vec![7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19],
+        target_schema: 20,
+        supported_sources: vec![7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
         waits_for_decisions: true,
     }
 }
@@ -149,7 +149,7 @@ fn reference(schema: u32) -> Result<Connection, RegistrationError> {
     let c = Connection::open_in_memory().map_err(storage_error)?;
     let ddl = match schema {
         7 => include_str!("upgrade/schema7.sql"),
-        8..=19 => include_str!("upgrade/schema8.sql"),
+        8..=20 => include_str!("upgrade/schema8.sql"),
         _ => return Err(error("missing frozen schema contract")),
     };
     c.execute_batch(ddl).map_err(storage_error)?;
@@ -215,6 +215,12 @@ fn reference(schema: u32) -> Result<Connection, RegistrationError> {
         c.pragma_update(None, "user_version", 19)
             .map_err(storage_error)?;
     }
+    if schema >= 20 {
+        c.execute_batch(include_str!("upgrade/assignment_nudges.sql"))
+            .map_err(storage_error)?;
+        c.pragma_update(None, "user_version", 20)
+            .map_err(storage_error)?;
+    }
     super::seed_agent_profiles(&c)?;
     c.execute_batch("INSERT INTO dispatch_provider_generation VALUES (1, 0)")
         .map_err(storage_error)?;
@@ -230,7 +236,7 @@ fn inspection(c: &Connection) -> Result<StoreInspection, RegistrationError> {
         .map_err(storage_error)?;
     if application != APPLICATION_ID || !capabilities().supported_sources.contains(&schema) {
         return Err(error(
-            "unsupported application or schema; supported source schemas: 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19",
+            "unsupported application or schema; supported source schemas: 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20",
         ));
     }
     check_integrity(c)?;
@@ -443,7 +449,7 @@ fn migrate_decisions(
     }
     match before.schema {
         Some(7) => v007_to_v008::apply(&tx)?,
-        Some(8..=19) => {}
+        Some(8..=20) => {}
         _ => return Err(error("unsupported migration source")),
     }
     if before.schema.is_some_and(|s| s < 9) {
@@ -511,6 +517,13 @@ fn migrate_decisions(
     if before.schema.is_some_and(|s| s < 19) {
         // No historical fingerprint rewrite or renewed recovery authorization.
         tx.pragma_update(None, "user_version", 19)
+            .map_err(storage_error)?;
+    }
+    if before.schema.is_some_and(|s| s < 20) {
+        // Empty tables: no Nudges or prompt intents are invented for existing Assignments.
+        tx.execute_batch(include_str!("upgrade/assignment_nudges.sql"))
+            .map_err(storage_error)?;
+        tx.pragma_update(None, "user_version", 20)
             .map_err(storage_error)?;
     }
     let after = inspection(&tx)?;
