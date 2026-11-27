@@ -28,25 +28,15 @@ pub fn run(f: &Fixture<'_, impl Fn() -> Application + Sync>, dirty_recovery: boo
     } = *f;
     let app = application();
     let (old, _) = app.execute_task_check_acceptance(task).unwrap();
-    let attempt = store.assignment_check_attempt(&old.id).unwrap().unwrap();
     let secrets = root.join("secrets");
     std::fs::create_dir_all(&secrets).unwrap();
     std::fs::write(secrets.join(&old.id), "secret").unwrap();
     let session = app.assignment(&secrets, &old.id, "secret").unwrap();
     session.bootstrap().unwrap();
-    // Retain a real prior interruption, not merely zeroed budgets.
-    let interruption = OutcomeInput {
-        attempt_id: attempt.id.clone(),
-        generation: attempt.generation,
-        evidence: attempt.evidence.clone(),
-        verdict: Verdict::Fail,
-        actor: "ignored".into(),
-        message: "Interrupted".into(),
-        disposition: OutcomeDisposition::Interrupted,
-        findings: vec![],
-        verifications: vec![],
-    };
-    let accepted_interruption = session.submit_outcome(&interruption).unwrap();
+    // Retain a real prior interruption: an Implementation Agent cannot report one itself, so the
+    // operator retires it and clears the resulting hold.
+    app.retire_agent_assignment(&old.id).unwrap();
+    store.resume_dispatch(task).unwrap();
     let (old, _) = application().execute_task_check_acceptance(task).unwrap();
     let attempt = store.assignment_check_attempt(&old.id).unwrap().unwrap();
     std::fs::write(secrets.join(&old.id), "secret").unwrap();
@@ -171,13 +161,6 @@ pub fn run(f: &Fixture<'_, impl Fn() -> Application + Sync>, dirty_recovery: boo
     assert_eq!(store.task_base_commit(task).unwrap(), Some("a".repeat(40)));
     assert_eq!(store.list_agent_assignments(task).unwrap().len(), 2);
     assert_eq!(
-        app.assignment(&secrets, &interruption.attempt_id, "secret")
-            .unwrap()
-            .submit_outcome(&interruption)
-            .unwrap(),
-        accepted_interruption
-    );
-    assert_eq!(
         application().recover_retained_work(task, &input).unwrap(),
         recovery
     );
@@ -242,19 +225,24 @@ pub fn run(f: &Fixture<'_, impl Fn() -> Application + Sync>, dirty_recovery: boo
             boot.context.bound.check_attempt.unwrap().recovery,
             Some(recovery.clone())
         );
-        let mut output = interruption.clone();
-        output.attempt_id = successor.id;
-        output.generation = successor.generation;
-        output.evidence = evidence.clone();
-        output.verdict = Verdict::Pass;
-        output.disposition = OutcomeDisposition::Complete;
+        let mut output = OutcomeInput {
+            attempt_id: successor.id,
+            generation: successor.generation,
+            evidence: evidence.clone(),
+            verdict: Verdict::Pass,
+            actor: "ignored".into(),
+            message: "Salvaged".into(),
+            disposition: OutcomeDisposition::Complete,
+            findings: vec![],
+            verifications: vec![],
+        };
         dirty.store(false, Ordering::SeqCst);
         *head.lock().unwrap() = "d".repeat(40);
         output.evidence = Evidence::Repository {
             repository: root.display().to_string(),
             commit: "d".repeat(40),
         };
-        let accepted = replacement_session.submit_outcome(&output).unwrap();
+        let accepted = review_path::submit(&replacement_session, &output).unwrap();
         assert_eq!(accepted.work.output, Some(output.evidence));
         // Retirement after reservation never makes the old authorization reusable.
         app.retire_agent_assignment(&replacement.id).unwrap();

@@ -24,17 +24,6 @@ impl Daemon {
             .map_err(rpc_error)
     }
 
-    /// Session for verdict-bearing commands, which Implementation Assignments may never use.
-    fn gated_session<'a>(
-        &'a self,
-        id: &'a str,
-        secret: &'a str,
-    ) -> RpcResult<forge_app::assignment::AuthenticatedAssignment<'a>> {
-        let session = self.assignment_session(id, secret)?;
-        session.ensure_not_implementation().map_err(rpc_error)?;
-        Ok(session)
-    }
-
     fn assignment_record_response(
         &self,
         record: forge_app::Record,
@@ -70,7 +59,7 @@ impl AssignmentApiServer for Daemon {
         &self,
         r: forge_rpc::AssignmentOutcomeRequest,
     ) -> RpcResult<forge_app::outcomes::AcceptedOutcome> {
-        self.gated_session(&r.assignment_id, &r.secret)?
+        self.assignment_session(&r.assignment_id, &r.secret)?
             .submit_outcome(&r.outcome)
             .map_err(rpc_error)
     }
@@ -102,7 +91,7 @@ impl AssignmentApiServer for Daemon {
         &self,
         r: forge_rpc::AssignmentFindingRaiseRequest,
     ) -> RpcResult<forge_rpc::Finding> {
-        self.gated_session(&r.assignment_id, &r.secret)?
+        self.assignment_session(&r.assignment_id, &r.secret)?
             .finding_raise(&forge_rpc::FindingRaiseInput {
                 severity: r.severity,
                 blocking: r.blocking,
@@ -119,7 +108,7 @@ impl AssignmentApiServer for Daemon {
         &self,
         r: forge_rpc::AssignmentFindingMutationRequest,
     ) -> RpcResult<forge_rpc::Finding> {
-        self.gated_session(&r.assignment_id, &r.secret)?
+        self.assignment_session(&r.assignment_id, &r.secret)?
             .finding_mutate(
                 r.finding,
                 &forge_rpc::FindingMutationInput {
@@ -155,7 +144,7 @@ impl AssignmentApiServer for Daemon {
         &self,
         r: forge_rpc::AssignmentCheckAssessRequest,
     ) -> RpcResult<forge_rpc::RecordCheck> {
-        self.gated_session(&r.assignment_id, &r.secret)?
+        self.assignment_session(&r.assignment_id, &r.secret)?
             .check_assess(
                 r.check,
                 &forge_rpc::AssessmentInput {
@@ -173,7 +162,7 @@ impl AssignmentApiServer for Daemon {
         &self,
         r: forge_rpc::AssignmentCheckInvalidateRequest,
     ) -> RpcResult<forge_rpc::RecordCheck> {
-        self.gated_session(&r.assignment_id, &r.secret)?
+        self.assignment_session(&r.assignment_id, &r.secret)?
             .check_invalidate(
                 r.check,
                 &forge_rpc::InvalidationInput {

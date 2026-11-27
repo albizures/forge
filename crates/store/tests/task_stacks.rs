@@ -16,6 +16,8 @@ use std::{
 };
 #[path = "support/task_attempt_adapters.rs"]
 mod adapters;
+#[path = "support/review_path.rs"]
+mod review_path;
 
 struct Fixture(PathBuf);
 impl Drop for Fixture {
@@ -417,7 +419,7 @@ fn dispatched_publication(unchanged: bool) {
                     RecordStatus::InProgress
                 );
                 assert_eq!(
-                    session.submit_outcome(&outcome).unwrap_err().code,
+                    review_path::submit(&session, &outcome).unwrap_err().code,
                     "stack-blocked"
                 );
                 // An operator cannot inject publication while an Assignment owns the Task.
@@ -439,12 +441,12 @@ fn dispatched_publication(unchanged: bool) {
                     session.stack(Some(&prs[index].url)).unwrap();
                 }
             }
-            let accepted = session.submit_outcome(&outcome).unwrap();
-            assert_eq!(session.submit_outcome(&outcome).unwrap(), accepted);
+            let accepted = review_path::submit(&session, &outcome).unwrap();
+            assert_eq!(review_path::submit(&session, &outcome).unwrap(), accepted);
             if index > 0 {
                 let retained = hosting.0.lock().unwrap().remove(0);
                 // An accepted exact replay remains replay-only despite later drift.
-                assert_eq!(session.submit_outcome(&outcome).unwrap(), accepted);
+                assert_eq!(review_path::submit(&session, &outcome).unwrap(), accepted);
                 hosting.0.lock().unwrap().insert(0, retained);
             }
             assert_eq!(

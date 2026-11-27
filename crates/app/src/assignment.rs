@@ -255,6 +255,7 @@ impl AuthenticatedAssignment<'_> {
         &self,
         input: &crate::outcomes::OutcomeInput,
     ) -> Result<crate::outcomes::AcceptedOutcome, RegistrationError> {
+        self.ensure_not_implementation()?;
         let assignment = self.authenticate_identity(true)?;
         let mut input = input.clone();
         input.actor.clone_from(&assignment.id);
@@ -333,6 +334,7 @@ impl AuthenticatedAssignment<'_> {
         &self,
         input: &crate::findings::FindingRaiseInput,
     ) -> Result<crate::findings::Finding, RegistrationError> {
+        self.ensure_not_implementation()?;
         let assignment = self.authenticate()?;
         self.record(assignment.record_id)?;
         let mut input = input.clone();
@@ -353,6 +355,7 @@ impl AuthenticatedAssignment<'_> {
         finding: u64,
         input: &crate::findings::FindingMutationInput,
     ) -> Result<crate::findings::Finding, RegistrationError> {
+        self.ensure_not_implementation()?;
         let assignment = self.authenticate()?;
         self.record(assignment.record_id)?;
         let mut input = input.clone();
@@ -403,6 +406,7 @@ impl AuthenticatedAssignment<'_> {
         check: u64,
         input: &crate::checks::AssessmentInput,
     ) -> Result<crate::checks::RecordCheck, RegistrationError> {
+        self.ensure_not_implementation()?;
         let assignment = self.authenticate()?;
         self.record(assignment.record_id)?;
         let mut input = input.clone();
@@ -424,6 +428,7 @@ impl AuthenticatedAssignment<'_> {
         check: u64,
         input: &crate::checks::InvalidationInput,
     ) -> Result<crate::checks::RecordCheck, RegistrationError> {
+        self.ensure_not_implementation()?;
         let assignment = self.authenticate()?;
         self.record(assignment.record_id)?;
         let mut input = input.clone();
@@ -640,8 +645,9 @@ impl AuthenticatedAssignment<'_> {
         }))
     }
 
-    /// Implementation Agents never judge their own work; the server calls this before every
-    /// verdict-bearing command (outcome, Finding raise/mutate, Check assess/invalidate).
+    /// Implementation Agents never judge their own work; every verdict-bearing method here
+    /// (outcome, Finding raise/mutate, Check assess/invalidate) calls this first, so the rule
+    /// holds for every entry point (RPC, CLI and in-process callers).
     /// # Errors
     /// Returns `implementation-outcome-forbidden` for an Assignment bound to the Implementation
     /// Check, and authentication or lookup failures otherwise.

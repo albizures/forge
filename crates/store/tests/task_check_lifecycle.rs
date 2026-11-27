@@ -17,6 +17,8 @@ use std::sync::{
 };
 #[path = "support/task_attempt_adapters.rs"]
 mod adapters;
+#[path = "support/review_path.rs"]
+mod review_path;
 use adapters::Provider;
 #[path = "support/retained_work.rs"]
 mod retained_work;
@@ -145,8 +147,8 @@ fn retry_budget(
             findings: vec![],
             verifications: vec![],
         };
-        session.submit_outcome(&input).unwrap();
-        session.submit_outcome(&input).unwrap();
+        review_path::submit(&session, &input).unwrap();
+        review_path::submit(&session, &input).unwrap();
         application()
             .reconcile_agent_dispatch("budget-restart", 800_000)
             .unwrap();
@@ -224,16 +226,6 @@ fn human_input_requests_hold_without_assessment_or_automatic_completion() {
 }
 
 #[test]
-fn failed_implementation_stops_on_no_progress() {
-    run_case("failed-budget");
-}
-
-#[test]
-fn changing_failed_implementation_still_exhausts_remediation_budget() {
-    run_case("failed-changing-budget");
-}
-
-#[test]
 fn passing_but_unchanged_review_cycle_stops_on_no_progress() {
     run_case("no-progress-success-budget");
 }
@@ -259,15 +251,8 @@ fn remediation_budget(
 ) {
     let secrets = root.join("secrets");
     std::fs::create_dir_all(&secrets).unwrap();
-    let failed = matches!(case, "failed-budget" | "failed-changing-budget");
-    let exhausted = matches!(case, "remediation-budget" | "failed-changing-budget");
-    let count = if failed {
-        if exhausted { 4 } else { 2 }
-    } else if exhausted {
-        12
-    } else {
-        6
-    };
+    let exhausted = case == "remediation-budget";
+    let count = if exhausted { 12 } else { 6 };
     for index in 0..count {
         let app = application();
         let (assignment, _) = app.execute_task_check_acceptance(task).unwrap();
@@ -282,7 +267,7 @@ fn remediation_budget(
             .find(|c| c.id == attempt.check_id)
             .unwrap()
             .position;
-        assert_eq!(position, if failed { 0 } else { index % 3 });
+        assert_eq!(position, index % 3);
         std::fs::write(secrets.join(&assignment.id), "secret").unwrap();
         let session = app.assignment(&secrets, &assignment.id, "secret").unwrap();
         session.acknowledge().unwrap();
@@ -299,19 +284,14 @@ fn remediation_budget(
             attempt_id: attempt.id,
             generation: attempt.generation,
             evidence,
-            verdict: if failed
-                || (position == 2 && !(case == "no-progress-success-budget" && index == 5))
-            {
+            verdict: if position == 2 && !(case == "no-progress-success-budget" && index == 5) {
                 Verdict::Fail
             } else {
                 Verdict::Pass
             },
             actor: "ignored".into(),
             message: "Cycle result".into(),
-            disposition: if !failed
-                && position == 2
-                && !(case == "no-progress-success-budget" && index == 5)
-            {
+            disposition: if position == 2 && !(case == "no-progress-success-budget" && index == 5) {
                 OutcomeDisposition::Handback
             } else {
                 OutcomeDisposition::Complete
@@ -319,8 +299,8 @@ fn remediation_budget(
             findings: vec![],
             verifications: vec![],
         };
-        session.submit_outcome(&input).unwrap();
-        session.submit_outcome(&input).unwrap();
+        review_path::submit(&session, &input).unwrap();
+        review_path::submit(&session, &input).unwrap();
         application()
             .reconcile_agent_dispatch("remediation-restart", 800_000)
             .unwrap();
@@ -391,11 +371,6 @@ fn remediation_budget(
     );
     store.resume_dispatch(task).unwrap();
     application().execute_task_check_acceptance(task).unwrap();
-}
-
-#[test]
-fn dirty_implementation_creates_a_durable_hold_without_an_assessment() {
-    run_case("dirty");
 }
 
 #[test]
@@ -595,7 +570,7 @@ fn handback(
             fault.execute_batch("CREATE TRIGGER reject_outcome BEFORE UPDATE OF result_json ON record_attempts WHEN NEW.result_json IS NOT NULL BEGIN SELECT RAISE(ABORT, 'injected acceptance failure'); END;").unwrap();
             let before = app.list_record_checks(task).unwrap();
             let updates = store.list_record_updates(task).unwrap();
-            assert!(session.submit_outcome(&input).is_err());
+            assert!(review_path::submit(&session, &input).is_err());
             assert_eq!(app.list_record_checks(task).unwrap(), before);
             assert_eq!(store.list_record_updates(task).unwrap(), updates);
             assert!(
@@ -608,39 +583,45 @@ fn handback(
             assert!(store.dispatch_hold(task).unwrap().is_none());
             fault.execute_batch("DROP TRIGGER reject_outcome").unwrap();
         }
-        if index == 3 || index == 5 {
+        if index == 4 {
+            // A review Check may not verify another Check's Finding.
+            let raised: &forge_app::findings::Finding = finding.as_ref().unwrap();
+            let mut foreign = input.clone();
+            foreign.verifications.push(FindingVerification {
+                finding_id: raised.id,
+                expected_version: raised.version,
+                message: "Verified against current deliverable".into(),
+            });
+            let before = store.list_record_updates(task).unwrap();
+            assert_eq!(
+                review_path::submit(&session, &foreign).unwrap_err().code,
+                "unauthorized-verification"
+            );
+            assert_eq!(store.list_record_updates(task).unwrap(), before);
+        }
+        if index == 5 {
             let raised: &forge_app::findings::Finding = finding.as_ref().unwrap();
             input.verifications.push(FindingVerification {
                 finding_id: raised.id,
                 expected_version: raised.version,
                 message: "Verified against current deliverable".into(),
             });
-            if index == 3 {
-                let before = store.list_record_updates(task).unwrap();
-                assert_eq!(
-                    session.submit_outcome(&input).unwrap_err().code,
-                    "unauthorized-verification"
-                );
-                assert_eq!(store.list_record_updates(task).unwrap(), before);
-                input.verifications.clear();
-            } else {
-                let mut unresolved = input.clone();
-                unresolved.verifications.clear();
-                let before = store.list_record_updates(task).unwrap();
-                assert_eq!(
-                    session.submit_outcome(&unresolved).unwrap_err().code,
-                    "unresolved-check-findings"
-                );
-                assert_eq!(store.list_record_updates(task).unwrap(), before);
-                assert!(
-                    app.list_record_checks(task).unwrap()[2]
-                        .current_verdict
-                        .is_none()
-                );
-            }
+            let mut unresolved = input.clone();
+            unresolved.verifications.clear();
+            let before = store.list_record_updates(task).unwrap();
+            assert_eq!(
+                review_path::submit(&session, &unresolved).unwrap_err().code,
+                "unresolved-check-findings"
+            );
+            assert_eq!(store.list_record_updates(task).unwrap(), before);
+            assert!(
+                app.list_record_checks(task).unwrap()[2]
+                    .current_verdict
+                    .is_none()
+            );
         }
-        let accepted = session.submit_outcome(&input).unwrap();
-        assert_eq!(session.submit_outcome(&input).unwrap(), accepted);
+        let accepted = review_path::submit(&session, &input).unwrap();
+        assert_eq!(review_path::submit(&session, &input).unwrap(), accepted);
         if index == 2 {
             finding = Some(accepted.findings[0].clone());
             replay = Some((assignment.id.clone(), input.clone(), accepted.clone()));
@@ -1115,31 +1096,45 @@ fn run_case(case: &str) {
         let app = application();
         let secrets = root.join("secrets");
         std::fs::create_dir_all(&secrets).unwrap();
-        let (assignment, _) = app.execute_task_check_acceptance(task.id).unwrap();
-        let attempt = store
-            .assignment_check_attempt(&assignment.id)
-            .unwrap()
-            .unwrap();
-        std::fs::write(secrets.join(&assignment.id), "secret").unwrap();
-        let session = app.assignment(&secrets, &assignment.id, "secret").unwrap();
-        session.acknowledge().unwrap();
-        session.start().unwrap();
-        session.context().unwrap();
-        let input = OutcomeInput {
-            attempt_id: attempt.id,
-            generation: attempt.generation,
-            evidence: attempt.evidence,
-            verdict: Verdict::Fail,
-            actor: "ignored".into(),
-            message: "Need operator credentials decision".into(),
-            disposition: OutcomeDisposition::HumanInput,
-            findings: vec![],
-            verifications: vec![],
-        };
-        session.submit_outcome(&input).unwrap();
-        application()
-            .reconcile_agent_dispatch("human-restart", 800_000)
-            .unwrap();
+        // The Implementation Agent can only request review; the human-input need comes from the
+        // review Check that follows.
+        for index in 0..2 {
+            let (assignment, _) = application()
+                .execute_task_check_acceptance(task.id)
+                .unwrap();
+            let attempt = store
+                .assignment_check_attempt(&assignment.id)
+                .unwrap()
+                .unwrap();
+            std::fs::write(secrets.join(&assignment.id), "secret").unwrap();
+            let session = app.assignment(&secrets, &assignment.id, "secret").unwrap();
+            session.acknowledge().unwrap();
+            session.start().unwrap();
+            session.context().unwrap();
+            let input = OutcomeInput {
+                attempt_id: attempt.id,
+                generation: attempt.generation,
+                evidence: attempt.evidence,
+                verdict: if index == 0 {
+                    Verdict::Pass
+                } else {
+                    Verdict::Fail
+                },
+                actor: "ignored".into(),
+                message: "Need operator credentials decision".into(),
+                disposition: if index == 0 {
+                    OutcomeDisposition::Complete
+                } else {
+                    OutcomeDisposition::HumanInput
+                },
+                findings: vec![],
+                verifications: vec![],
+            };
+            review_path::submit(&session, &input).unwrap();
+            application()
+                .reconcile_agent_dispatch("human-restart", 800_000)
+                .unwrap();
+        }
         assert!(
             store
                 .dispatch_hold(task.id)
@@ -1152,23 +1147,20 @@ fn run_case(case: &str) {
             app.list_record_checks(task.id)
                 .unwrap()
                 .iter()
+                .skip(1)
                 .all(|c| c.latest_assessment.is_none())
         );
         assert_eq!(
             app.show_record(task.id).unwrap().status,
             RecordStatus::InProgress
         );
-        assert_eq!(store.list_agent_assignments(task.id).unwrap().len(), 1);
+        assert_eq!(store.list_agent_assignments(task.id).unwrap().len(), 2);
         std::fs::remove_dir_all(root).unwrap();
         return;
     }
     if matches!(
         case,
-        "failed-budget"
-            | "remediation-budget"
-            | "no-progress-budget"
-            | "failed-changing-budget"
-            | "no-progress-success-budget"
+        "remediation-budget" | "no-progress-budget" | "no-progress-success-budget"
     ) {
         remediation_budget(&store, &root, &application, &head, task.id, case);
         std::fs::remove_dir_all(root).unwrap();
@@ -1438,26 +1430,17 @@ fn run_case(case: &str) {
         session.context().unwrap();
         if index == 0 && case == "unchanged-implementation-interruption" {
             let before = app.record_work_state(task.id).unwrap();
-            let input = OutcomeInput {
-                attempt_id: attempt.id.clone(),
-                generation: attempt.generation,
-                evidence: attempt.evidence.clone(),
-                verdict: Verdict::Fail,
-                actor: "ignored".into(),
-                message: "Execution was interrupted".into(),
-                disposition: OutcomeDisposition::Interrupted,
-                findings: vec![],
-                verifications: vec![],
-            };
-            let accepted = session.submit_outcome(&input).unwrap();
-            assert_eq!(session.submit_outcome(&input).unwrap(), accepted);
+            // An Implementation Agent cannot report its own interruption; the operator retires it.
+            application()
+                .retire_agent_assignment(&assignment.id)
+                .unwrap();
             let after = application().record_work_state(task.id).unwrap();
             assert_eq!(after.input, before.input);
             assert_eq!(after.output, before.output);
             assert_eq!(after.generation, before.generation);
-            assert_eq!(after.progress.interrupted_checks[0].interruptions, 1);
             assert_eq!(app.list_record_checks(task.id).unwrap(), checks);
-            assert!(store.dispatch_hold(task.id).unwrap().is_none());
+            assert!(store.dispatch_hold(task.id).unwrap().is_some());
+            store.resume_dispatch(task.id).unwrap();
             application()
                 .reconcile_agent_dispatch("unchanged-interruption", 800_000)
                 .unwrap();
@@ -1498,39 +1481,30 @@ fn run_case(case: &str) {
             findings: vec![],
             verifications: vec![],
         };
-        if index == 0 && case == "residual" {
-            input.findings.push(forge_app::outcomes::OutcomeFinding {
-                severity: forge_app::findings::Severity::Major,
-                blocking: Some(true),
-                message: "Implementation-owned residual blocker".into(),
-            });
-        }
-        if index == 0 && case == "dirty" {
-            dirty.store(true, std::sync::atomic::Ordering::SeqCst);
-            assert_eq!(
-                session.submit_outcome(&input).unwrap_err().code,
-                "evidence-drift"
-            );
-            assert!(store.dispatch_hold(task.id).unwrap().is_some());
-            assert!(
-                app.list_record_checks(task.id).unwrap()[0]
-                    .latest_assessment
-                    .is_none()
-            );
+        if index == 2 && case == "residual" {
+            // A blocker no Check owns is raised while the last review runs; Implementation
+            // Agents cannot raise one themselves.
             application()
-                .reconcile_agent_dispatch("dirty", 400_000)
+                .raise_record_finding(
+                    task.id,
+                    &forge_app::findings::FindingRaiseInput {
+                        severity: forge_app::findings::Severity::Major,
+                        blocking: Some(true),
+                        check_id: None,
+                        assessment_id: None,
+                        actor: "operator".into(),
+                        message: "Operator-raised residual blocker".into(),
+                        revision: None,
+                        dirty: None,
+                    },
+                )
                 .unwrap();
-            assert_eq!(launches.lock().unwrap().len(), 1);
-            assert!(store.dispatch_hold(task.id).unwrap().is_some());
-            assert!(dirty.load(std::sync::atomic::Ordering::SeqCst));
-            std::fs::remove_dir_all(root).unwrap();
-            return;
         }
         if index == 1 && matches!(case, "review-mutation" | "description-edit") {
             if case == "review-mutation" {
                 *head.lock().unwrap() = "c".repeat(40);
                 assert_eq!(
-                    session.submit_outcome(&input).unwrap_err().code,
+                    review_path::submit(&session, &input).unwrap_err().code,
                     "evidence-drift"
                 );
                 assert!(store.dispatch_hold(task.id).unwrap().is_some());
@@ -1538,7 +1512,7 @@ fn run_case(case: &str) {
                 app.edit_record(task.id, "Changed requirements").unwrap();
             }
             assert_eq!(
-                session.submit_outcome(&input).unwrap_err().code,
+                review_path::submit(&session, &input).unwrap_err().code,
                 "stale-generation"
             );
             let work = app.record_work_state(task.id).unwrap();
@@ -1594,20 +1568,6 @@ fn run_case(case: &str) {
             std::fs::remove_dir_all(root).unwrap();
             return;
         }
-        if index == 0 {
-            let mut false_output = input.clone();
-            false_output.evidence = attempt.evidence.clone();
-            assert_eq!(
-                session.submit_outcome(&false_output).unwrap_err().code,
-                "evidence-mismatch"
-            );
-            assert!(store.dispatch_hold(task.id).unwrap().is_none());
-            assert!(
-                app.list_record_checks(task.id).unwrap()[0]
-                    .latest_assessment
-                    .is_none()
-            );
-        }
         if case == "retired-interruption" && index == 1 {
             unavailable.store(true, std::sync::atomic::Ordering::SeqCst);
             assert_eq!(
@@ -1662,7 +1622,7 @@ fn run_case(case: &str) {
             );
             assert_eq!(launches.lock().unwrap().len(), 3);
             assert_eq!(
-                session.submit_outcome(&input).unwrap_err().code,
+                review_path::submit(&session, &input).unwrap_err().code,
                 "attempt-closed"
             );
             std::fs::remove_dir_all(root).unwrap();
@@ -1679,7 +1639,7 @@ fn run_case(case: &str) {
                     let app = application();
                     let session = app.assignment(&secrets, &assignment.id, "secret").unwrap();
                     acceptance_barrier.wait();
-                    session.submit_outcome(&input).unwrap()
+                    review_path::submit(&session, &input).unwrap()
                 });
                 let continue_request = scope.spawn(|| {
                     let app = application();
@@ -1753,7 +1713,7 @@ fn run_case(case: &str) {
                     let app = application();
                     let session = app.assignment(&secrets, &assignment.id, "secret").unwrap();
                     barrier.wait();
-                    session.submit_outcome(&input).unwrap()
+                    review_path::submit(&session, &input).unwrap()
                 });
                 let dispatch = scope.spawn(|| {
                     let app = application();
@@ -1814,7 +1774,7 @@ fn run_case(case: &str) {
             std::fs::remove_dir_all(root).unwrap();
             return;
         }
-        let accepted = session.submit_outcome(&input).unwrap();
+        let accepted = review_path::submit(&session, &input).unwrap();
         if index == 2 && case == "final-concurrent" {
             let barrier = std::sync::Barrier::new(2);
             std::thread::scope(|scope| {
@@ -1842,7 +1802,7 @@ fn run_case(case: &str) {
                     .count(),
                 1
             );
-            assert_eq!(session.submit_outcome(&input).unwrap(), accepted);
+            assert_eq!(review_path::submit(&session, &input).unwrap(), accepted);
             assert_eq!(launches.lock().unwrap().len(), 3);
             std::fs::remove_dir_all(root).unwrap();
             return;
@@ -1939,7 +1899,7 @@ fn run_case(case: &str) {
                 RecordStatus::InProgress
             );
             assert_eq!(launches.lock().unwrap().len(), 3);
-            assert_eq!(session.submit_outcome(&input).unwrap(), accepted);
+            assert_eq!(review_path::submit(&session, &input).unwrap(), accepted);
             if matches!(
                 case,
                 "final-commit" | "final-dirty" | "final-description" | "final-mode"
@@ -2008,7 +1968,7 @@ fn run_case(case: &str) {
         }
         if index == 0 && case == "external-commit" {
             *head.lock().unwrap() = "c".repeat(40);
-            assert_eq!(session.submit_outcome(&input).unwrap(), accepted);
+            assert_eq!(review_path::submit(&session, &input).unwrap(), accepted);
             assert_eq!(
                 application()
                     .execute_task_check_acceptance(task.id)
@@ -2028,7 +1988,7 @@ fn run_case(case: &str) {
                     .iter()
                     .all(|c| c.current_verdict.is_none())
             );
-            assert_eq!(session.submit_outcome(&input).unwrap(), accepted);
+            assert_eq!(review_path::submit(&session, &input).unwrap(), accepted);
             assert_eq!(
                 session.context().err().unwrap().code,
                 "assignment-capability-denied"
@@ -2037,13 +1997,7 @@ fn run_case(case: &str) {
             let replay = restarted
                 .assignment(&secrets, &assignment.id, "secret")
                 .unwrap();
-            assert_eq!(replay.submit_outcome(&input).unwrap(), accepted);
-            let mut conflicting = input.clone();
-            conflicting.message = "Different result".into();
-            assert_eq!(
-                replay.submit_outcome(&conflicting).unwrap_err().code,
-                "outcome-conflict"
-            );
+            assert_eq!(replay.request_review().unwrap(), accepted);
             std::fs::remove_dir_all(root).unwrap();
             return;
         }
