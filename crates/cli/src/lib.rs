@@ -579,6 +579,7 @@ pub async fn assignment_outcome(input: serde_json::Value) -> Result<serde_json::
                         | "check-already-passed"
                         | "invalid-outcome"
                         | "invalid-continuation"
+                        | "implementation-outcome-forbidden"
                         | "continuation-exhausted"
                         | "unresolved-check-findings"
                         | "unauthorized-verification"

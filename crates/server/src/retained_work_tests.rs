@@ -164,17 +164,10 @@ async fn verify_clean_recovery_rpc(
         assert_eq!(std::fs::read(checkout.join("untracked.txt")).unwrap(), b"Untracked retained work\0\xff");
         assert_eq!(super::git(checkout, &["show", ":deliverable.txt"]).unwrap(), "Staged retained work");
         assert_eq!(std::fs::read_to_string(checkout.join("deliverable.txt")).unwrap(), "Unstaged retained work\n");
-        let attempt = store.assignment_check_attempt("salvage-successor").unwrap().unwrap();
-        let mut output = outcome["outcome"].clone();
-        output["attempt_id"] = "salvage-successor".into();
-        output["generation"] = attempt.generation.into();
-        let mut submission = credentials;
-        submission["outcome"] = output;
         super::git(checkout, &["add", "deliverable.txt", "untracked.txt"]).unwrap();
         super::git(checkout, &["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "Salvaged output"]).unwrap();
         let commit = super::git(checkout, &["rev-parse", "HEAD"]).unwrap();
-        submission["outcome"]["evidence"]["commit"] = commit.clone().into();
-        let accepted = assignment_rpc(daemon.clone(), "assignment.outcomeSubmit", submission).await;
+        let accepted = assignment_rpc(daemon.clone(), "assignment.reviewRequest", credentials).await;
         assert_eq!(accepted["result"]["evidence"]["commit"], commit, "{accepted}");
         assert_ne!(accepted["result"]["evidence"], outcome["outcome"]["evidence"]);
     }

@@ -268,3 +268,22 @@ fn review_check_bootstrap_keeps_the_full_standard_form() {
     assert!(!standard.context.trusted_constraints.is_empty());
     assert!(standard.context.bound.check_attempt.is_some());
 }
+
+#[test]
+fn only_the_implementation_assignment_is_closed_to_verdict_commands() {
+    let f = Fixture::new();
+    let app = f.app();
+    let id = f.launch(&app);
+    let session = f.session(&app, &id);
+    assert_eq!(
+        session.ensure_not_implementation().unwrap_err().code,
+        "implementation-outcome-forbidden"
+    );
+    // The gate records nothing and leaves the Review Request path open.
+    f.set_head(&"b".repeat(40));
+    session.request_review().unwrap();
+    app.reconcile_agent_dispatch("review-request", 100_000)
+        .unwrap();
+    let review = f.acknowledged(&app);
+    f.session(&app, &review).ensure_not_implementation().unwrap();
+}

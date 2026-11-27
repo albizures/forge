@@ -48,20 +48,19 @@ struct Cli {
 /// Disposition reference kept out of worker profiles so rarely valid choices are
 /// not presented as ordinary ways to finish.
 const OUTCOME_DISPOSITIONS_HELP: &str = "\
-Dispositions (`verdict` / `disposition`):
-  pass / complete        The bound Check is met.
-  fail / complete        Implementation attempted but unfinished or failing; report
-                         actual clean output evidence, unfinished work and test results.
-  fail / handback        Review found substantive issues; add blocking Findings.
-  fail / human-input     A concrete missing prerequisite or human decision blocks the
-                         work; name it. Empty findings and verifications.
-  fail / interrupted     Only when the harness or operator actually stopped this
-                         execution before a substantive result. Repeat the bound input
-                         evidence; empty findings and verifications. Unfinished work,
-                         task size or complexity is never an interruption.
-  fail / {\"continuation\": {stopping_reason, completed_work, verification, remaining_work}}
-                         Implementation only: a deliberate clean checkpoint handoff
-                         when a concrete execution constraint prevents finishing now.";
+Review Checks only. Implementation Assignments never submit outcomes: they commit and run\n\
+`forge assignment request-review`, and Forge rejects `outcome` from them with\n\
+`implementation-outcome-forbidden`.\n\
+\n\
+Dispositions (`verdict` / `disposition`):\n\
+  pass / complete        The review Check is met.\n\
+  fail / handback        Review found substantive issues; add blocking Findings.\n\
+  fail / human-input     A concrete missing prerequisite or human decision blocks the\n\
+                         review; name it. Empty findings and verifications.\n\
+  fail / interrupted     Only when the harness or operator actually stopped this\n\
+                         execution before a substantive result. Repeat the bound input\n\
+                         evidence; empty findings and verifications. Unfinished work,\n\
+                         task size or complexity is never an interruption.";
 
 #[derive(Debug, Subcommand)]
 enum Command {
@@ -345,7 +344,7 @@ enum AssignmentCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Submit this Task Check attempt's outcome from a JSON file (actor is authenticated).
+    /// Submit this review Check attempt's outcome from a JSON file (actor is authenticated).
     #[command(after_long_help = OUTCOME_DISPOSITIONS_HELP)]
     Outcome {
         #[arg(long)]
@@ -2558,13 +2557,15 @@ mod tests {
             .to_string();
         for disposition in [
             "pass / complete",
-            "fail / complete",
             "fail / handback",
             "fail / human-input",
             "fail / interrupted",
-            "continuation",
+            "implementation-outcome-forbidden",
         ] {
             assert!(help.contains(disposition), "missing {disposition}");
+        }
+        for removed in ["fail / complete", "continuation"] {
+            assert!(!help.contains(removed), "stale {removed}");
         }
         assert!(help.contains("Only when the harness or operator actually stopped"));
         assert!(help.contains("never an interruption"));

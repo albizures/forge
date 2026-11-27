@@ -6,16 +6,6 @@ async fn check_bound_rpc_context_outcome_and_normal_dispatch_share_same_owner() 
 }
 
 #[tokio::test]
-async fn task_inspection_after_accepted_human_input_and_clean_retirement() {
-    check_bound_outcome_inspection(1).await;
-}
-
-#[tokio::test]
-async fn implementation_continuation_rpc_retains_clean_checkpoint_and_handoff() {
-    check_bound_outcome_inspection(2).await;
-}
-
-#[tokio::test]
 async fn clean_retained_work_recovery_rpc_checks_git_scope_and_operator_authority() {
     check_bound_outcome_inspection(3).await;
 }
@@ -28,8 +18,6 @@ async fn dirty_retained_work_recovery_rpc_binds_staged_tracked_and_untracked_byt
 #[allow(clippy::too_many_lines)]
 async fn check_bound_outcome_inspection(kind: u8) {
     use forge_app::{ManagedWorktreeRepository, WorkspaceDispatchRepository, WorkspaceRepository};
-    let human_input = kind == 1;
-    let continuation = kind == 2;
     let (fixture, _, _) = assignment_test_daemon_scoped(true);
     let store = SqliteProjectRepository::open(&fixture.database_path).unwrap();
     for assignment in ["owner-assignment", "target-assignment"] {
@@ -184,10 +172,10 @@ async fn check_bound_outcome_inspection(kind: u8) {
         attempt_id: "bound-check".into(),
         generation: 1,
         evidence: output,
-        verdict: if human_input { forge_app::checks::Verdict::Fail } else { forge_app::checks::Verdict::Pass },
+        verdict: forge_app::checks::Verdict::Pass,
         actor: "spoofed".into(),
         message: "Delivered".into(),
-        disposition: if human_input { forge_app::outcomes::OutcomeDisposition::HumanInput } else { forge_app::outcomes::OutcomeDisposition::Complete },
+        disposition: forge_app::outcomes::OutcomeDisposition::Complete,
         findings: vec![],
         verifications: vec![],
     };
@@ -250,11 +238,7 @@ async fn check_bound_outcome_inspection(kind: u8) {
             std::fs::write(checkout.path.join("untracked.txt"), "Retained new work\n").unwrap();
         }
         let rejected = assignment_rpc(daemon.clone(), "assignment.outcomeSubmit", interrupted.clone()).await;
-        assert_eq!(rejected["error"]["data"], "interrupted-evidence-changed", "{rejected}");
-        let message = rejected["error"]["message"].as_str().unwrap();
-        assert!(message.contains("Continuation"), "{message}");
-        assert!(message.contains("operator recovery"), "{message}");
-        assert!(message.contains("recover-retained-work"), "{message}");
+        assert_eq!(rejected["error"]["data"], "implementation-outcome-forbidden", "{rejected}");
         assert_eq!(store.record_work_state(task.id).unwrap(), before_work);
         assert_eq!(store.list_record_checks(task.id).unwrap(), before_checks);
         assert_eq!(store.agent_assignment_info("bound-check").unwrap(), before_owner);
@@ -275,133 +259,59 @@ async fn check_bound_outcome_inspection(kind: u8) {
         verify_clean_recovery_rpc(&daemon, &store, task.id, &checkout.path, &request, kind == 4, &fixture.database_path).await;
         return;
     }
-    if continuation {
-        request["outcome"]["verdict"] = "fail".into();
-        request["outcome"]["disposition"] = serde_json::json!({"continuation": {
+    let credentials_for_denials = serde_json::json!({"assignmentId":"bound-check", "secret":"check-secret"});
+    let mut forbidden = request.clone();
+    for (verdict, disposition) in [
+        ("pass", serde_json::json!("complete")),
+        ("fail", serde_json::json!("complete")),
+        ("fail", serde_json::json!("handback")),
+        ("fail", serde_json::json!("human-input")),
+        ("fail", serde_json::json!("interrupted")),
+        ("fail", serde_json::json!({"continuation": {
             "stopping_reason": "Context budget nearly exhausted",
             "completed_work": "Implemented checkpoint",
-            "verification": "Focused tests passed; full gates unrun due to constraint",
+            "verification": "Focused tests passed",
             "remaining_work": "Finish and run full gates"
-        }});
-        for (field, value) in [("secret", "wrong"), ("attempt_id", "owner-assignment")] {
-            let mut denied = request.clone();
-            if field == "secret" { denied[field] = value.into(); } else { denied["outcome"][field] = value.into(); }
-            assert!(assignment_rpc(daemon.clone(), "assignment.outcomeSubmit", denied).await.get("error").is_some());
-            assert_eq!(store.record_work_state(task.id).unwrap(), before_work);
-        }
-        for field in ["stopping_reason", "completed_work", "verification", "remaining_work"] {
-            let mut missing = request.clone();
-            missing["outcome"]["disposition"]["continuation"].as_object_mut().unwrap().remove(field);
-            assert!(assignment_rpc(daemon.clone(), "assignment.outcomeSubmit", missing).await.get("error").is_some());
-            assert_eq!(store.record_work_state(task.id).unwrap(), before_work);
-        }
-        // Neither config-hidden untracked files nor index trust flags waive cleanliness.
-        super::git(&checkout.path, &["config", "status.showUntrackedFiles", "no"]).unwrap();
-        for flag in ["--assume-unchanged", "--skip-worktree"] {
-            super::git(&checkout.path, &["update-index", flag, "deliverable.txt"]).unwrap();
-            std::fs::write(checkout.path.join("deliverable.txt"), "Hidden tracked work\n").unwrap();
-            let denied = assignment_rpc(daemon.clone(), "assignment.outcomeSubmit", request.clone()).await;
-            assert_eq!(denied["error"]["data"], "invalid-continuation", "{denied}");
-            std::fs::write(checkout.path.join("deliverable.txt"), "Implemented\n").unwrap();
-            let clear = if flag == "--assume-unchanged" { "--no-assume-unchanged" } else { "--no-skip-worktree" };
-            super::git(&checkout.path, &["update-index", clear, "deliverable.txt"]).unwrap();
-        }
-        std::fs::write(checkout.path.join("untracked.txt"), "Retain dirty work").unwrap();
-        let rejected = assignment_rpc(daemon.clone(), "assignment.outcomeSubmit", request.clone()).await;
-        assert_eq!(rejected["error"]["data"], "invalid-continuation", "{rejected}");
+        }})),
+    ] {
+        forbidden["outcome"]["verdict"] = verdict.into();
+        forbidden["outcome"]["disposition"] = disposition;
+        let rejected = assignment_rpc(daemon.clone(), "assignment.outcomeSubmit", forbidden.clone()).await;
+        assert_eq!(rejected["error"]["data"], "implementation-outcome-forbidden", "{rejected}");
         assert_eq!(store.record_work_state(task.id).unwrap(), before_work);
-        assert!(store.dispatch_hold(task.id).unwrap().is_none());
-        std::fs::remove_file(checkout.path.join("untracked.txt")).unwrap();
-        let other = workspace.root.join("foreign-continuation-repository");
-        super::git(&workspace.root, &["clone", "--shared", repository.to_str().unwrap(), other.to_str().unwrap()]).unwrap();
-        super::git(&other, &["checkout", "-b", &branch, request["outcome"]["evidence"]["commit"].as_str().unwrap()]).unwrap();
-        let metadata = std::fs::read(checkout.path.join(".git")).unwrap();
-        std::fs::write(checkout.path.join(".git"), format!("gitdir: {}\n", other.join(".git").display())).unwrap();
-        let denied = assignment_rpc(daemon.clone(), "assignment.outcomeSubmit", request.clone()).await;
-        assert_eq!(denied["error"]["data"], "invalid-continuation", "{denied}");
-        assert_eq!(store.record_work_state(task.id).unwrap(), before_work);
-        std::fs::write(checkout.path.join(".git"), metadata).unwrap();
+        assert_eq!(store.list_record_checks(task.id).unwrap(), before_checks);
+        assert_eq!(store.list_record_updates(task.id).unwrap(), before_updates);
     }
-    let accepted =
-        assignment_rpc(daemon.clone(), "assignment.outcomeSubmit", request.clone()).await;
+    // Verdict-adjacent commands are closed to the Implementation Agent as well.
+    let with = |extra: serde_json::Value| {
+        let mut value = credentials_for_denials.clone();
+        value.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        value
+    };
+    for (method, params) in [
+        ("assignment.checkAssess", with(serde_json::json!({"check": check.id, "expectedVersion": 0, "verdict": "pass", "message": "Done"}))),
+        ("assignment.checkInvalidate", with(serde_json::json!({"check": check.id, "expectedVersion": 0, "assessmentId": 1, "message": "No"}))),
+        ("assignment.findingRaise", with(serde_json::json!({"severity": "major", "blocking": true, "message": "Self-raised"}))),
+        ("assignment.findingMutate", with(serde_json::json!({"finding": 1, "expectedVersion": 1, "change": {"action": "resolve"}, "message": "Self-resolved"}))),
+    ] {
+        let rejected = assignment_rpc(daemon.clone(), method, params).await;
+        assert_eq!(rejected["error"]["data"], "implementation-outcome-forbidden", "{method}: {rejected}");
+        assert_eq!(store.list_record_checks(task.id).unwrap(), before_checks);
+        assert_eq!(store.list_record_updates(task.id).unwrap(), before_updates);
+        assert_eq!(store.list_record_findings(task.id, None, 100).unwrap(), before_findings);
+    }
+    // The Review Request is the Implementation Agent's only way to finish; Forge derives it.
+    let credentials = serde_json::json!({"assignmentId":"bound-check", "secret":"check-secret"});
+    let accepted = assignment_rpc(daemon.clone(), "assignment.reviewRequest", credentials.clone()).await;
+    assert_eq!(accepted["result"]["attempt"]["actor"], "bound-check", "{accepted}");
+    assert_eq!(accepted["result"]["evidence"], request["outcome"]["evidence"], "{accepted}");
     assert_eq!(
-        accepted["result"]["attempt"]["actor"], "bound-check",
+        accepted["result"]["check"]["latest_assessment"]["assignment_id"], "bound-check",
         "{accepted}"
     );
-    if continuation {
-        assert!(accepted["result"]["check"]["latest_assessment"].is_null(), "{accepted}");
-        let work = store.record_work_state(task.id).unwrap();
-        assert_eq!(work.input, Some(serde_json::from_value(request["outcome"]["evidence"].clone()).unwrap()));
-        assert!(work.output.is_none());
-        assert_eq!(work.progress.continuations[0].total, 1);
-        assert_eq!(work.progress.continuations[0].consecutive_unchanged, 0);
-        assert_eq!(work.progress.continuations[0].checkpoint.handoff.remaining_work, "Finish and run full gates");
-        assert_eq!(store.worktree_claim(task.id).unwrap(), before_claim);
-        let reset = forge_rpc::ResetContinuationsRequest {
-            record: task.id, check: work.progress.continuations[0].check_id,
-            actor: "operator".into(), message: "Investigated checkpoint".into(),
-        };
-        let denied = assignment_rpc(daemon.clone(), "assignment.resetContinuations", serde_json::json!({
-            "assignment_id": "bound-check", "secret": "check-secret", "record": task.id, "check": reset.check,
-            "actor": "operator", "message": "impersonation"
-        })).await;
-        assert!(denied.get("error").is_some(), "{denied}");
-        assert_eq!(store.record_work_state(task.id).unwrap(), work);
-        let mut invalid = reset.clone();
-        invalid.actor = " ".into();
-        let selection = forge_rpc::RecordSelection { workspace: Some("test".into()), ..Default::default() };
-        assert!(forge_rpc::RecordApiServer::reset_continuations(&daemon, forge_rpc::SelectedRecordRequest { selection: selection.clone(), record: invalid }).await.is_err());
-        let state = forge_rpc::RecordApiServer::reset_continuations(&daemon, forge_rpc::SelectedRecordRequest { selection: selection.clone(), record: reset }).await.unwrap();
-        assert_eq!(state.progress.continuations[0].total, 0);
-        assert_eq!(state.progress.continuations[0].resets.len(), 1);
-        let inspected = forge_rpc::RecordApiServer::record_work_state(&daemon, forge_rpc::SelectedRecordRequest { selection, record: forge_rpc::RecordWorkStateRequest { record: task.id } }).await.unwrap();
-        assert_eq!(inspected, state);
-        assert_eq!(store.worktree_claim(task.id).unwrap(), before_claim);
-    } else if human_input {
-        assert!(accepted["result"]["check"]["latest_assessment"].is_null());
-        // Persist the clean retirement facts; no external provider is needed by inspection.
-        for resource in store.list_agent_assignment_resources("bound-check").unwrap() {
-            store.retire_agent_assignment_resource("bound-check", &resource.resource_kind, &resource.resource_id).unwrap();
-        }
-        store.close_agent_assignment("bound-check", forge_app::AgentAssignmentClosureReason::Retired).unwrap();
-        let before = store.agent_assignment_info("bound-check").unwrap();
-        assert_eq!(before.assignment.state, forge_app::AgentAssignmentState::Working);
-        let selection = forge_rpc::RecordSelection { workspace: Some("test".into()), ..Default::default() };
-        let shown = forge_rpc::RecordApiServer::show(&daemon, forge_rpc::SelectedRecordRequest {
-            selection: selection.clone(), record: forge_rpc::RecordIdRequest { id: task.id },
-        }).await.unwrap();
-        let listed = forge_rpc::RecordApiServer::list(&daemon, forge_rpc::SelectedRecordRequest {
-            selection,
-            record: forge_rpc::ListRecordsRequest { project_slug: None, status: None, record_type: Some("task".into()) },
-        }).await.unwrap();
-        assert_eq!(listed.records.iter().find(|r| r.id == task.id), Some(&shown));
-        assert_eq!(shown.status, "in_progress");
-        let activity = shown.activity.as_ref().unwrap();
-        assert_eq!(activity.state, forge_rpc::TaskActivityState::Closed);
-        assert_eq!(activity.retained_resources, 0);
-        assert!(activity.dispatch_hold.as_ref().unwrap().contains("Human input required"));
-        assert!(shown.checks.as_ref().unwrap().iter().all(|c| c.verdict().is_none()));
-        let json = serde_json::to_string(&shown).unwrap();
-        for secret in ["check-secret", "prompt_template", "launch_policy", "resource_id"] {
-            assert!(!json.contains(secret), "{json}");
-        }
-        assert_eq!(store.agent_assignment_info("bound-check").unwrap(), before);
-    } else {
-        assert_eq!(
-            accepted["result"]["check"]["latest_assessment"]["assignment_id"], "bound-check",
-            "{accepted}"
-        );
-    }
     assert_eq!(
-        assignment_rpc(daemon.clone(), "assignment.outcomeSubmit", request.clone()).await["result"],
+        assignment_rpc(daemon.clone(), "assignment.reviewRequest", credentials).await["result"],
         accepted["result"]
-    );
-    request["outcome"]["message"] = "Conflicting replay".into();
-    assert!(
-        assignment_rpc(daemon.clone(), "assignment.outcomeSubmit", request)
-            .await
-            .get("error")
-            .is_some()
     );
     assert_eq!(
         store.show_record(task.id).unwrap().status,

@@ -640,6 +640,29 @@ impl AuthenticatedAssignment<'_> {
         }))
     }
 
+    /// Implementation Agents never judge their own work; the server calls this before every
+    /// verdict-bearing command (outcome, Finding raise/mutate, Check assess/invalidate).
+    /// # Errors
+    /// Returns `implementation-outcome-forbidden` for an Assignment bound to the Implementation
+    /// Check, and authentication or lookup failures otherwise.
+    pub fn ensure_not_implementation(&self) -> Result<(), RegistrationError> {
+        let assignment = self.authenticate_identity(true)?;
+        let Some(attempt) = self
+            .application
+            .dispatch()?
+            .assignment_check_attempt(&assignment.id)?
+        else {
+            return Ok(());
+        };
+        if self.is_implementation_attempt(&attempt)? {
+            return Err(RegistrationError::new(
+                "implementation-outcome-forbidden",
+                "Implementation Agents do not decide their Check's outcome or manage Findings and Assessments; commit your work and run `forge assignment request-review`, or comment if you are blocked",
+            ));
+        }
+        Ok(())
+    }
+
     fn is_implementation_attempt(
         &self,
         attempt: &crate::outcomes::Attempt,
