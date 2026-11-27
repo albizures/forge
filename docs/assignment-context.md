@@ -197,11 +197,11 @@ work. Inspection adds a default-empty `sessions` collection. New clients supplyi
 
 ## Implementation profile delivery
 
-The tracked [Continuation profile source](profiles/implementation-continuations.md)
-provides full outcome JSON and stopping guidance. Its
-[handoff](profiles/implementation-continuations-handoff.md) records provenance,
-isolated validation and separate rollout approvals. This artifact is not a live
-registered revision and does not alter existing immutable Check pins.
+Implementation Agents receive Forge-owned instructions at bootstrap, not profile outcome
+guidance, and cannot submit outcomes (see below). The tracked
+[Continuation profile source](profiles/implementation-continuations.md) and its
+[handoff](profiles/implementation-continuations-handoff.md) are historical, not live
+registered revisions, and do not alter existing immutable Check pins.
 
 ## Agent CLI examples
 
@@ -234,11 +234,17 @@ forge assignment comment --message 'Progress update' --json
 forge assignment start --json
 ```
 
-Task workers submit their bound Check outcome rather than calling Done:
+Review Check workers submit their bound Check outcome rather than calling Done:
 
 ```sh
 forge assignment outcome --file outcome.json --json
 ```
+
+Implementation workers never do. From an Implementation Assignment the server rejects
+`assignment outcome` (every disposition), `check assess`, `check invalidate`,
+`finding raise` and `finding mutate` with `implementation-outcome-forbidden`, changing
+nothing. They may use only `request-review`, `comment`, `context`, `finding list` and
+`record`.
 
 An Implementation worker whose committed work is ready finishes with a Review Request,
 which needs no outcome file and states no verdict:
@@ -254,22 +260,16 @@ the Implementation Check's Assignment may use it (`review-request-not-implementa
 otherwise). After requesting review, end your turn and wait. See
 [Review Requests](dispatch.md#check-attempts-and-controlled-acceptance).
 
-Use the actual `bound.checkAttempt` id/generation/input and the clean authorized
-output evidence. An `interrupted` outcome must instead repeat its bound input
-evidence. Changed evidence is rejected with `interrupted-evidence-changed`, without
-acceptance or retry-budget effects; Forge preserves the checkout. Deliberate
-checkpoint handoffs use the explicit `disposition: {"continuation": {...}}`
-Implementation outcome, with `verdict: "fail"`, all four required handoff strings
-and no Finding effects. Acceptance passes no Check and requires a clean independently
-observed full checkpoint commit. Same-Check replacement remains gated by confirmed
-retirement and resources, capacity, dependencies, provider readiness and holds.
-Budgets stop after 20 total or two consecutive unchanged-evidence Continuations;
-the limit-reaching checkpoint is retained. Genuinely interrupted retained work
-requires the operator's explicit `dispatcher recover-retained-work` authorization
-after verified retirement/resource reconciliation. Dirty salvage is content-bound
-and transfers inspection authority, not correctness. Preserve the work and ask the operator; do not reset,
-discard changes, or report completion merely to hand off work. Exact replay of
-already accepted historical outcomes remains supported and confers no new authority.
+Review outcomes use the actual `bound.checkAttempt` id/generation and repeat the bound
+input evidence. An `interrupted` outcome likewise repeats its bound input evidence;
+changed evidence is rejected with `interrupted-evidence-changed`, without acceptance or
+retry-budget effects, and Forge preserves the checkout. Implementation work interrupted
+by safe retirement without an outcome requires the operator's explicit
+`dispatcher recover-retained-work` authorization after verified retirement/resource
+reconciliation. Dirty salvage is content-bound and transfers inspection authority, not
+correctness. Preserve the work and ask the operator; do not reset or discard changes.
+Exact replay of already accepted historical review outcomes remains supported and confers no
+new authority; an Implementation Assignment cannot replay an outcome through `outcome`.
 See [outcome shape and handback rules](dispatch.md#check-attempts-and-controlled-acceptance).
 Implementation cannot self-verify review Findings. Reviews cannot modify the
 checkout. Final review acceptance leaves In Progress until Forge separately

@@ -123,6 +123,7 @@ pub async fn assignment_finding(
                     | "invalid-finding"
                     | "invalid-revision"
                     | "invalid-page"
+                    | "implementation-outcome-forbidden"
             )
         });
         format!(

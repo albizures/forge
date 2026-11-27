@@ -1,5 +1,9 @@
 # Implementation Continuation profile delivery (T06)
 
+> Historical. Implementation Agents no longer submit outcomes or Continuations (ADR 0012);
+> Forge delivers their instructions at bootstrap and ignores this profile's body. Pending removal
+> of the Continuation subsystem.
+
 ## Source and review
 
 [implementation-continuations.md](implementation-continuations.md) is a complete

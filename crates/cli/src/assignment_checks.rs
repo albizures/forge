@@ -115,6 +115,7 @@ pub async fn assignment_check(action: AssignmentCheckAction) -> Result<serde_jso
                     | "attempt-required"
                     | "invalid-revision"
                     | "invalid-page"
+                    | "implementation-outcome-forbidden"
             )
         });
         format!(
