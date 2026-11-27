@@ -174,9 +174,13 @@ fn exhausted_limit(state: &NudgeState, next_no_commit: u32) -> Option<NudgeLimit
 impl Application {
     /// Nudge each open Check-bound Assignment whose Agent finished a turn without finishing
     /// the Assignment. Failures are logged and never stop the scan.
-    pub(crate) fn nudge_idle_agents(&self) -> Result<(), RegistrationError> {
+    pub(crate) fn nudge_idle_agents(&self, now_millis: u64) -> Result<(), RegistrationError> {
         let repository = self.dispatch()?;
         for assignment in repository.list_open_agent_assignments()? {
+            if let Err(error) = self.hold_unacknowledged_launch(&assignment, now_millis) {
+                tracing::warn!(assignment_id = %assignment.id, code = error.code,
+                    "Acknowledgement deadline evaluation failed");
+            }
             match self.reap_absent_agent(&assignment) {
                 Ok(true) => continue,
                 Ok(false) => {}
@@ -192,6 +196,31 @@ impl Application {
             }
         }
         Ok(())
+    }
+
+    /// Hold the Task when a Check-bound Assignment is still `provisioning` after its
+    /// acknowledgement deadline. The Assignment stays open and is never relaunched: the
+    /// launch may have been delivered (Prompt Delivery Uncertainty). Before the deadline, and
+    /// for an Assignment that never recorded a launch intent, nothing happens.
+    fn hold_unacknowledged_launch(
+        &self,
+        assignment: &AgentAssignment,
+        now_millis: u64,
+    ) -> Result<(), RegistrationError> {
+        let repository = self.dispatch()?;
+        if assignment.state != AgentAssignmentState::Provisioning
+            || repository
+                .assignment_check_attempt(&assignment.id)?
+                .is_none()
+        {
+            return Ok(());
+        }
+        match repository.agent_launch_intent(&assignment.id)? {
+            Some(intent) if intent.acknowledgement_deadline_millis <= now_millis => {
+                crate::provisioning_holds::hold_expired_acknowledgement(repository, assignment)
+            }
+            _ => Ok(()),
+        }
     }
 
     /// Liveness for an open Check-bound Assignment whose Agent Herdr no longer has (`Absent`):

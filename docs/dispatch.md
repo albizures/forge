@@ -557,7 +557,16 @@ unset create immutable Agent Profile revisions for future Assignments only;
 existing Assignments retain their bound profiles. Unset restores **300000 ms**.
 
 A missed deadline or interrupted uncertain launch retains the Assignment,
-evidence, and capacity with a Dispatch Hold. Pre-upgrade Provisioning Assignments
+evidence, and capacity with a Dispatch Hold. For a Check-bound Task Assignment
+the hold is placed at once when provisioning fails (an explicit Herdr error, a
+lost response, or a failure before the launch intent such as the probe, Workspace
+verification or `tab.create`), and as soon as a daemon scan sees the Assignment
+still `provisioning` after its acknowledgement deadline. Each writes an
+`agent-dispatch` comment with the cause and the recovery runbook, only when the
+Task has no Dispatch Hold yet. Forge never retries such a launch: it may have been
+partly delivered (Prompt Delivery Uncertainty). The cause is Herdr's error code in
+the form `Herdr <method>: <code>` when it is a bare identifier, otherwise
+`details withheld`; Herdr's error message is never recorded. Pre-upgrade Provisioning Assignments
 without a deadline are uncertain, not automatically relaunched. Late
 acknowledgement may still let the existing agent start, without clearing the hold.
 **Do not infer agent absence or launch a replacement to bypass a hold.**
@@ -623,8 +632,10 @@ death or undo external actions. Closed Assignments can still reserve capacity.
 Forge does not reset, rebase, delete, recreate, or automatically repair
 dispatcher-created branches/worktrees. Failed setup hooks, branch collisions,
 unavailable bases, invalid checkouts, and provider/workspace failures retain
-diagnostics for investigation. Repeated definite provisioning failures can create
-a hold; uncertain launches require the more conservative recovery runbook.
+diagnostics for investigation. A failed or unacknowledged Check-bound Task
+launch holds the Task immediately and stays open (it is not closed or retried);
+every launch failure is treated as uncertain and requires the conservative
+recovery runbook.
 
 Back up existing evidence before upgrades. Owned development schemas can evolve;
 pre-Workspace unowned data requires a new store, not legacy import or implicit

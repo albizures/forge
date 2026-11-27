@@ -26,6 +26,9 @@ struct ProviderState {
     agents: std::collections::BTreeMap<String, Value>,
     tab_closed: bool,
     lose_launch_response: bool,
+    // Scripted `{"code":..,"message":..}` errors for launch calls.
+    start_error: Option<Value>,
+    tab_create_error: Option<Value>,
 }
 struct Provider {
     path: PathBuf,
@@ -76,6 +79,12 @@ impl Provider {
                                 } else {
                                     json!({"workspace":{"workspace_id": if state.mismatch { json!("wrong-identity") } else { request["params"]["workspace_id"].clone() }, "cwd":"/unrelated/focused-pane", "cwd_policy":"home"}})
                                 }
+                            }
+                            "tab.create" if state.tab_create_error.is_some() => {
+                                json!({"scripted_error": state.tab_create_error.clone()})
+                            }
+                            "agent.start" if state.start_error.is_some() => {
+                                json!({"scripted_error": state.start_error.clone()})
                             }
                             "tab.create" => {
                                 json!({"tab":{"tab_id":"tab"},"root_pane":{"pane_id":"pane"}})
@@ -141,7 +150,9 @@ impl Provider {
                             }
                             method => panic!("unexpected provider operation {method}"),
                         };
-                        if result["absent"] == true {
+                        if let Some(error) = result.get("scripted_error") {
+                            json!({"error":error})
+                        } else if result["absent"] == true {
                             json!({"error":{"code":"not_found", "message":"missing"}})
                         } else {
                             json!({"result":result})
@@ -166,6 +177,27 @@ impl Provider {
     }
     fn reset(&self) {
         *self.state.lock().unwrap() = ProviderState::default();
+    }
+    fn fail_agent_start(&self, code: &str, message: &str) {
+        self.state.lock().unwrap().start_error = Some(json!({"code":code, "message":message}));
+    }
+    fn fail_tab_create(&self, code: &str, message: &str) {
+        self.state.lock().unwrap().tab_create_error = Some(json!({"code":code, "message":message}));
+    }
+    fn heal(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.start_error = None;
+        state.tab_create_error = None;
+        state.lose_launch_response = false;
+    }
+    fn calls_of(&self, method: &str) -> usize {
+        self.state
+            .lock()
+            .unwrap()
+            .calls
+            .iter()
+            .filter(|call| call["method"] == method)
+            .count()
     }
     fn set_agent_status(&self, status: &str) {
         for agent in self.state.lock().unwrap().agents.values_mut() {
@@ -289,6 +321,11 @@ mod recovery {
 mod nudges {
     use super::*;
     include!("nudge_tests.rs");
+}
+
+mod provisioning_holds {
+    use super::*;
+    include!("task_provisioning_hold_tests.rs");
 }
 
 fn has(ready: &forge_app::WorkspaceDispatchReadiness, code: &str) -> bool {
