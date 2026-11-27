@@ -180,6 +180,10 @@ _Avoid_: coding check, implementation progress, implementation verdict
 An Implementation Agent's submission of its committed work for judgment by the Task's review Checks. It is the Implementation Agent's only way to finish its Agent Assignment and carries no verdict of its own.
 _Avoid_: ready signal, implementation outcome, self-assessment
 
+**Nudge**:
+A Forge-sent prompt instructing a live Implementation Agent that ended its turn without a Review Request to continue its work. Nudges are bounded per Agent Assignment; exhausting them places a Dispatch Hold.
+_Avoid_: continuation, retry, reminder
+
 **Continuation**:
 A deliberate handoff of unfinished Implementation work for another Agent to continue without passing the bound Check.
 _Avoid_: interruption, implementation failure, Task completion
@@ -265,7 +269,7 @@ A capability-authenticated signal from an Agent Assignment's session that provid
 _Avoid_: proof of death, readiness signal
 
 **Prompt Delivery Uncertainty**:
-A condition in which Forge cannot establish whether an Agent Assignment's initial prompt was admitted. It requires explicit resolution before another prompt attempt.
+A condition in which Forge cannot establish whether a prompt it sent to an Agent Assignment's Agent, initial or later, was admitted. It requires explicit resolution before another prompt attempt.
 
 **Comment**:
 A non-blank free-text entry on a Record, optionally attributed to a free-text author. Its content cannot be edited, any Forge client may delete it, and it may be added even after its Record is Done.

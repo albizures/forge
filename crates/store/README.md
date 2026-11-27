@@ -9,7 +9,7 @@ by migrations—not just the initial `CREATE TABLE` statements.
 - [`src/lib.rs`](src/lib.rs): `SqliteProjectRepository::from_connection`,
   `migrate_*` functions, profile seeds, and repository operations.
 - [`src/workspaces.rs`](src/workspaces.rs): Workspace ownership and Project identity.
-- [`src/upgrade.rs`](src/upgrade.rs): explicit offline schema 7 → 8 → 9 → 10 → 11 → 12 → 13 → 14 → 15 → 16 → 17 → 18 → 19 conversion,
+- [`src/upgrade.rs`](src/upgrade.rs): explicit offline schema 7 → 8 → 9 → 10 → 11 → 12 → 13 → 14 → 15 → 16 → 17 → 18 → 19 → 20 conversion,
   frozen contract validation, consistent snapshots, and preservation inventories.
   See [Revision State upgrades](../../docs/state-upgrades.md) for orchestration.
 - [`src/record_workspaces.rs`](src/record_workspaces.rs): Record ownership,
@@ -45,8 +45,26 @@ is documented separately in [Records](../../docs/records.md),
   Most references do **not** cascade.
 - Ordinary repository opening accepts only the current marked schema revision.
   Triggers and repository validation also enforce invariants. Explicit managed
-  copy-and-upgrade targets revision 19 from revisions 7 through 19; unsupported
+  copy-and-upgrade targets revision 20 from revisions 7 through 20; unsupported
   stores are rejected without automatic conversion or reset.
+
+## Nudge counters and prompt intents (revision 20)
+
+`assignment_nudges` holds one row per Assignment that has settled a Nudge:
+`assignment_id` (PK, FK to `agent_assignments`), `last_completion_seq` (Herdr finished-turn
+sequence last nudged), `total` (Nudges attempted, counting uncertain ones),
+`consecutive_no_commit` and `last_head` (HEAD observed at the last Nudge). A missing row
+means all zeros. `assignment_prompt_intents` is keyed by (`assignment_id`, `sequence`) and
+is written before any prompt is sent: `completion_seq`, the planned `consecutive_no_commit`
+and `head`, `created_at_millis`, and `settled_at_millis` plus `settlement`
+(`confirmed` or `uncertain`), both null while unsettled. An unsettled intent found after a
+restart is settled as uncertain and never resent. Settling applies the intent's values to
+`assignment_nudges` in the same transaction; cancelling deletes an unsettled intent whose
+prompt was provably never sent. The primary key makes an intent exclusive per sequence.
+
+Revision 20 is a breaking storage expansion: ordinary opening rejects revision 19 and
+earlier before writes. Explicit offline upgrade adds the two **empty** tables and preserves
+every existing value; no Nudge history is invented.
 
 ## Retained-work salvage authorization (revision 17)
 

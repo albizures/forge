@@ -14,7 +14,8 @@ use tokio::{
 
 use forge_app::{
     AgentAdapterError, AgentAssignmentResource, AgentDispatchAdapter, AgentDispatchContext,
-    AgentDispatchRepository, AgentObservation, AgentProfile, NewAgentAssignmentResource,
+    AgentDispatchRepository, AgentObservation, AgentProfile, AgentPrompt, AgentPromptOutcome,
+    AgentTurn, NewAgentAssignmentResource,
 };
 use forge_store::SqliteProjectRepository;
 use serde_json::{Value, json};
@@ -558,6 +559,17 @@ impl HerdrAdapter {
         name: &str,
         tuple: (&str, &str, &str),
     ) -> Result<AgentObservation, AgentAdapterError> {
+        self.agent_snapshot(name, tuple)
+            .map(|(observation, _)| observation)
+    }
+
+    /// The normalized status plus the authoritative `AgentInfo` when `agent.get` supplied it.
+    /// The list fallback after a not-found response carries no further facts.
+    fn agent_snapshot(
+        &self,
+        name: &str,
+        tuple: (&str, &str, &str),
+    ) -> Result<(AgentObservation, Option<Value>), AgentAdapterError> {
         match self.request("agent.get", json!({"target": name})) {
             Ok(result) => {
                 // agent.get returns AgentInfo inside an agent_info envelope; list entries
@@ -578,9 +590,14 @@ impl HerdrAdapter {
                         "Herdr agent does not match the persisted name".into(),
                     ));
                 }
-                Self::observation_from_agent(agent, tuple)
+                Ok((
+                    Self::observation_from_agent(agent, tuple)?,
+                    Some(agent.clone()),
+                ))
             }
-            Err(AgentAdapterError::NotFound(_)) => self.agent_list_fallback(name, tuple),
+            Err(AgentAdapterError::NotFound(_)) => {
+                Ok((self.agent_list_fallback(name, tuple)?, None))
+            }
             Err(error) => Err(error),
         }
     }
@@ -938,6 +955,14 @@ impl HerdrAdapter {
             }
             let started = self.request("agent.start", json!({"name": label, "kind": "pi", "pane_id": pane, "args": launch_args, "timeout_ms": context.assignment.profile.startup_timeout_millis}))?;
             Self::retain(resources, context, "agent-name", label)?;
+            // Pin the terminal too, so later prompts can prove they reach the launched process.
+            if let Some(terminal) = started
+                .pointer("/agent/terminal_id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+            {
+                Self::retain(resources, context, "terminal", terminal)?;
+            }
             self.bootstrap_started_agent(context, label, (workspace, &tab, &pane), &started)?;
         }
         // All allocation/launch responses and their resource identities are now durable.
@@ -998,6 +1023,94 @@ impl AgentDispatchAdapter for HerdrAdapter {
         context: &AgentDispatchContext,
     ) -> Result<AgentObservation, AgentAdapterError> {
         self.observe(context)
+    }
+
+    fn observe_turn(&self, context: &AgentDispatchContext) -> Result<AgentTurn, AgentAdapterError> {
+        let workspace = self.dispatch_workspace_from_context(context)?;
+        let (Some(tab), Some(pane), Some(agent)) = (
+            Self::active(&context.resources, "tab"),
+            Self::active(&context.resources, "pane"),
+            Self::active(&context.resources, "agent-name"),
+        ) else {
+            return Ok(AgentTurn {
+                observation: AgentObservation::Absent,
+                completion_seq: None,
+            });
+        };
+        let (observation, info) = self.agent_snapshot(agent, (&workspace, tab, pane))?;
+        Ok(AgentTurn {
+            observation,
+            completion_seq: info
+                .as_ref()
+                .and_then(|agent| agent.get("completion_seq"))
+                .and_then(Value::as_u64),
+        })
+    }
+
+    /// Re-verifies the pinned identity and that the finished turn is still current, then sends.
+    /// Herdr gives `agent.prompt` no idempotency key, so any error after this point is an
+    /// unknown outcome that the caller must never retry.
+    fn prompt(
+        &self,
+        context: &AgentDispatchContext,
+        prompt: &AgentPrompt,
+    ) -> Result<AgentPromptOutcome, AgentAdapterError> {
+        let workspace = self.dispatch_workspace_from_context(context)?;
+        let (Some(tab), Some(pane), Some(agent)) = (
+            Self::active(&context.resources, "tab"),
+            Self::active(&context.resources, "pane"),
+            Self::active(&context.resources, "agent-name"),
+        ) else {
+            return Err(AgentAdapterError::Conflict(
+                "the Agent's pinned identity is not retained".into(),
+            ));
+        };
+        let terminal = Self::active(&context.resources, "terminal");
+        let (observation, info) = self.agent_snapshot(agent, (&workspace, tab, pane))?;
+        if observation == AgentObservation::Absent {
+            return Ok(AgentPromptOutcome::NotReady);
+        }
+        let info = info.ok_or_else(|| {
+            AgentAdapterError::Conflict("the Agent's identity could not be verified".into())
+        })?;
+        if terminal.is_some_and(|id| info.get("terminal_id").and_then(Value::as_str) != Some(id))
+            || info
+                .get("agent")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| kind != "pi")
+        {
+            return Err(AgentAdapterError::Conflict(
+                "the Agent's terminal identity changed".into(),
+            ));
+        }
+        if !matches!(observation, AgentObservation::Idle | AgentObservation::Done)
+            || info.get("completion_seq").and_then(Value::as_u64) != Some(prompt.completion_seq)
+        {
+            return Ok(AgentPromptOutcome::NotReady);
+        }
+        let delivered = self.request(
+            "agent.prompt",
+            json!({"target": agent, "text": prompt.text}),
+        )?;
+        if delivered.get("type").and_then(Value::as_str) != Some("agent_prompted") {
+            return Err(AgentAdapterError::Endpoint(
+                "invalid agent.prompt response".into(),
+            ));
+        }
+        Self::matching_resource(
+            &delivered,
+            "agent",
+            &[
+                ("name", agent),
+                ("workspace_id", &workspace),
+                ("tab_id", tab),
+                ("pane_id", pane),
+            ],
+        )?;
+        if let Some(terminal) = terminal {
+            Self::matching_resource(&delivered, "agent", &[("terminal_id", terminal)])?;
+        }
+        Ok(AgentPromptOutcome::Delivered)
     }
 
     fn retire(
@@ -1103,7 +1216,12 @@ impl AgentDispatchAdapter for HerdrAdapter {
                 "agent remains after cleanup".into(),
             ));
         }
-        for (kind, id) in [("tab", tab), ("pane", pane), ("agent-name", agent)] {
+        for (kind, id) in [
+            ("tab", tab),
+            ("pane", pane),
+            ("agent-name", agent),
+            ("terminal", Self::resource_is_active(context, "terminal")),
+        ] {
             if let Some(id) = id {
                 Self::retire_resource(resources, context, kind, &id)?;
             }
@@ -1114,6 +1232,8 @@ impl AgentDispatchAdapter for HerdrAdapter {
 
 #[cfg(all(test, unix))]
 mod pi_flags_tests;
+#[cfg(all(test, unix))]
+mod prompt_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1412,6 +1532,12 @@ mod tests {
         assert!(
             intent.retired_at_millis.is_some(),
             "successful provisioning must reconcile its uncertainty marker"
+        );
+        assert!(
+            retained
+                .iter()
+                .any(|r| r.resource_kind == "terminal" && r.resource_id == "terminal"),
+            "the launched terminal identity must be pinned for later prompts"
         );
         assert!(
             retained

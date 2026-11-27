@@ -5,7 +5,12 @@ another. It preserves the source database and upgrades a consistent copy. Ordina
 repository opening still rejects incompatible schemas before initialization writes;
 it never migrates, resets, or rewrites an older store's marker.
 
-Supported transfers target schema **19** from schemas **7** through **19**.
+Supported transfers target schema **20** from schemas **7** through **20**.
+The 19 → 20 step adds the empty `assignment_nudges` and `assignment_prompt_intents`
+tables for [Nudge](dispatch.md#nudges-for-idle-implementation-agents) counters and
+durable prompt intents. No Nudge or prompt intent is invented for existing Assignments,
+and every earlier table is preserved byte-for-byte; ordinary schema-19 opening rejects
+before writes.
 The 18 → 19 step fences corrected Repository/branch/Base Commit revalidation for
 clean checkpoints and salvage, configuration-independent cleanliness checks, and
 v2 dirty fingerprints including extended index flags (not mutable stat-cache data).

@@ -128,6 +128,47 @@ returns to Implementation only after old ownership/resources are safely retired.
 Historical Assessments and Findings remain, but invalidated passes never revive.
 A false output commit claim is rejected without publishing an Assessment.
 
+### Nudges for idle Implementation Agents
+
+When an Implementation Agent ends a turn without a Review Request, reconciliation sends
+exactly one **Nudge** to the same live Herdr session. Only open Assignments bound to the
+Task's Implementation Check are nudged; Review and Publication Assignments never are.
+Nudge evaluation reads Herdr `completion_seq` from `agent.get` (earlier Forge versions
+ignored it) and sends one Nudge when all of these hold:
+
+- the Agent is observed `idle` or `done` and `completion_seq` is greater than the last
+  nudged value for this Assignment (one Nudge per finished turn; the same turn observed
+  again sends nothing). `working`, `blocked`, `unknown`, an absent sequence or an
+  absent Agent never nudge;
+- the Assignment is past bootstrap (its context was read);
+- the bound attempt has accepted no outcome, so no Review Request exists (a Review
+  Request or any other accepted outcome means the Assignment is being retired);
+- the Task has no Dispatch Hold.
+
+The Nudge text is fixed Forge text that names the Managed Worktree, tells the Agent to
+continue and commit, to run `forge assignment request-review` only when the Task and every
+open Finding are met, and to explain a blocker with `forge assignment comment`. It does not
+repeat the Task body and ends with the state line `No new commit since the last nudge: N
+of 3.`, where N counts consecutive Nudges (including this one) after which the observed
+HEAD had not moved. The baseline HEAD is the attempt's input commit for the first
+Nudge and the HEAD observed at the previous Nudge afterwards; a new commit resets N to 0.
+Per-Assignment counters (last nudged `completion_seq`, total Nudges, consecutive no-commit
+Nudges, last HEAD) start at zero for each new Assignment. In this version they only
+count; the three-in-a-row and twenty-total limits are not yet enforced.
+
+Delivery is durable and never retried. Before any provider call Forge records a prompt
+intent keyed by Assignment and prompt sequence, then re-reads the Agent and verifies its
+pinned Workspace, tab, pane and terminal identity (the terminal is pinned at launch; an
+Assignment launched before that keeps the remaining checks) and that it is still `idle` or
+`done` at the same `completion_seq`, and only then calls `agent.prompt`. If the Agent
+moved on in that window nothing was sent, the intent is forgotten and the next finished
+turn is nudged. Any other failure (timeout, lost response, malformed or foreign response,
+identity mismatch) records **Prompt Delivery Uncertainty**: the intent is settled as
+uncertain, the prompt still counts as spent, a Dispatch Hold with a comment on the Task
+is placed, and that prompt is never resent. A daemon restart that finds an intent
+without a confirmed response treats it the same way. The Assignment and its Agent stay
+open. Inspect the pane before resuming the Task.
+
 ### Deliberate Implementation Continuations
 
 Use the delivered [Implementation profile](profiles/implementation-continuations.md)
