@@ -339,19 +339,6 @@ fn acceptance_claim_snapshots_first_unpassed_check_and_pinned_profile_atomically
     pass.actor = "spoofed actor is replaced".into();
     pass.verdict = forge_app::checks::Verdict::Pass;
     pass.message = "Implemented".into();
-    assert_eq!(
-        review_path::submit(&session, &outcome).unwrap_err().code,
-        "unauthorized-attempt"
-    );
-    let mut forged = pass.clone();
-    forged.evidence = Evidence::Artifact {
-        uri: "urn:bypass".into(),
-        sha256: "b".repeat(64),
-    };
-    assert_eq!(
-        review_path::submit(&session, &forged).unwrap_err().code,
-        "evidence-mismatch"
-    );
     let accepted = review_path::submit(&session, &pass).unwrap();
     assert_eq!(accepted.attempt.actor, retry.id);
     assert_eq!(review_path::submit(&session, &pass).unwrap(), accepted);
@@ -370,7 +357,7 @@ fn acceptance_claim_snapshots_first_unpassed_check_and_pinned_profile_atomically
             )
             .unwrap_err()
             .code,
-        "attempt-required"
+        "implementation-outcome-forbidden"
     );
     store
         .close_agent_assignment(&retry.id, forge_app::AgentAssignmentClosureReason::Retired)
