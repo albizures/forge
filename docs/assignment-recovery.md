@@ -214,6 +214,16 @@ Inspect again, then clear the hold separately below if justified. Authorization
 is distinct from `worktree recover`: that older command adopts an **unclaimed Open
 Task checkout**, not interrupted In Progress work or unexplained commits.
 
+## Prompt Delivery Uncertainty after a Nudge
+
+A Dispatch Hold whose reason begins with `Prompt Delivery Uncertainty` means Forge
+recorded a [Nudge](dispatch.md#nudges-for-idle-implementation-agents) and could not
+establish that Herdr admitted it (timeout, lost response, identity mismatch, or a daemon
+restart before confirmation). The Assignment stays open and keeps its capacity because the
+Agent may still be live. Forge never resends that prompt. Look at the Agent's pane to see
+whether it received the instruction, then resume or `task unstick` as appropriate; a
+resume is the explicit resolution that lets later finished turns be nudged again.
+
 ## Clear the hold separately; eligibility is not a launch guarantee
 
 After the previous Assignment is closed and all known and uncertain resources
