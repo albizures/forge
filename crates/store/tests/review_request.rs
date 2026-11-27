@@ -355,3 +355,23 @@ fn every_verdict_entry_point_refuses_an_implementation_assignment_and_records_no
     f.set_head(&"b".repeat(40));
     session.request_review().unwrap();
 }
+
+#[test]
+fn assignment_instructions_withhold_the_profile_body_from_implementation_only() {
+    const BODY: &str = "Submit an outcome with fail/complete and list what remains";
+    let f = Fixture::with_profile_body(BODY);
+    let app = f.app();
+    let id = f.launch(&app);
+    let instructions = f.session(&app, &id).behavior().unwrap();
+    assert_eq!(
+        instructions,
+        forge_app::assignment::IMPLEMENTATION_COMMAND_CONTRACT
+    );
+    assert!(!instructions.contains(BODY));
+
+    f.session(&app, &id).request_review().unwrap();
+    app.reconcile_agent_dispatch("review-request", 100_000)
+        .unwrap();
+    let review = f.launch(&app);
+    assert_eq!(f.session(&app, &review).behavior().unwrap(), BODY);
+}

@@ -238,6 +238,14 @@ async fn an_implementation_assignment_reads_comments_and_requests_review_but_can
     assert!(boot["result"].get("context").is_none(), "{boot}");
     let context = rig.rpc("assignment.context", credentials.clone()).await;
     assert!(context.get("error").is_none(), "{context}");
+    // The pinned profile body stays closed; the Forge-owned contract is all it can read.
+    let instructions_request = serde_json::json!({
+        "assignment_id": credentials["assignmentId"],
+        "secret": credentials["secret"],
+        "correlation_id": "instructions",
+    });
+    let instructions = rig.rpc("agentDispatch.assignmentInstructions", instructions_request).await;
+    assert_eq!(instructions["result"], boot["result"]["commandContract"], "{instructions}");
     let comment = rig.rpc("assignment.comment", with(serde_json::json!({"body": "Progress note"}))).await;
     assert!(comment.get("error").is_none(), "{comment}");
     let findings = rig.rpc("assignment.findingList", with(serde_json::json!({"after": null, "limit": 10, "compareRevision": null}))).await;

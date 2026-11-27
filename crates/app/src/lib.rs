@@ -3017,6 +3017,9 @@ impl Application {
                 && task.status == RecordStatus::InProgress
                 && repository.assignment_context_read(assignment_id)?,
         )?;
+        if self.is_implementation_assignment(assignment_id)? {
+            return Ok(assignment::IMPLEMENTATION_COMMAND_CONTRACT.into());
+        }
         if let Some(policy) = assignment.profile.launch_policy {
             Ok(policy.behavior)
         } else {

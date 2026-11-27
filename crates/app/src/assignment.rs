@@ -19,6 +19,22 @@ pub struct AuthenticatedAssignment<'a> {
 }
 
 impl Application {
+    /// Whether the Assignment is bound to its Task's Implementation Check (position 0).
+    /// # Errors
+    /// Returns attempt or Check lookup failures; a failed lookup never reads as `false`.
+    pub(crate) fn is_implementation_assignment(
+        &self,
+        assignment_id: &str,
+    ) -> Result<bool, RegistrationError> {
+        let Some(attempt) = self.dispatch()?.assignment_check_attempt(assignment_id)? else {
+            return Ok(false);
+        };
+        Ok(self
+            .list_record_checks(attempt.record_id)?
+            .first()
+            .is_some_and(|c| c.id == attempt.check_id))
+    }
+
     /// Authenticates delivered credentials without consulting profile source files.
     /// # Errors
     /// Returns a redacted authorization failure for invalid or closed delivery.
@@ -606,7 +622,7 @@ impl AuthenticatedAssignment<'_> {
         let Some(attempt) = bootstrap.context.bound.check_attempt.as_ref() else {
             return Ok(AgentBootstrap::Standard(Box::new(bootstrap)));
         };
-        if !self.is_implementation_attempt(attempt)? {
+        if !self.application.is_implementation_assignment(self.id)? {
             return Ok(AgentBootstrap::Standard(Box::new(bootstrap)));
         }
         let mut findings = Vec::new();
@@ -652,33 +668,14 @@ impl AuthenticatedAssignment<'_> {
     /// Returns `implementation-outcome-forbidden` for an Assignment bound to the Implementation
     /// Check, and authentication or lookup failures otherwise.
     pub fn ensure_not_implementation(&self) -> Result<(), RegistrationError> {
-        let assignment = self.authenticate_identity(true)?;
-        let Some(attempt) = self
-            .application
-            .dispatch()?
-            .assignment_check_attempt(&assignment.id)?
-        else {
-            return Ok(());
-        };
-        if self.is_implementation_attempt(&attempt)? {
+        self.authenticate_identity(true)?;
+        if self.application.is_implementation_assignment(self.id)? {
             return Err(RegistrationError::new(
                 "implementation-outcome-forbidden",
                 "Implementation Agents do not decide their Check's outcome or manage Findings and Assessments; commit your work and run `forge assignment request-review`, or comment if you are blocked",
             ));
         }
         Ok(())
-    }
-
-    fn is_implementation_attempt(
-        &self,
-        attempt: &crate::outcomes::Attempt,
-    ) -> Result<bool, RegistrationError> {
-        // A failed lookup must fail the bootstrap rather than fall back to the full form.
-        Ok(self
-            .application
-            .list_record_checks(attempt.record_id)?
-            .first()
-            .is_some_and(|c| c.id == attempt.check_id))
     }
 
     /// Fetches bound identity separately from live Record, scope and direct-neighbor facts.
@@ -886,6 +883,11 @@ impl AuthenticatedAssignment<'_> {
                 "assignment-bootstrap-incomplete",
                 "acknowledge, start and fetch trusted context before behavior",
             ));
+        }
+        // Implementation Agents never read the pinned profile body, which may still carry
+        // outcome language; they get the Forge-owned command contract instead.
+        if self.application.is_implementation_assignment(self.id)? {
+            return Ok(IMPLEMENTATION_COMMAND_CONTRACT.into());
         }
         if let Some(policy) = assignment.profile.launch_policy {
             Ok(policy.behavior)
