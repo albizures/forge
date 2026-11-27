@@ -119,16 +119,200 @@ fn no_nudge_under_a_dispatch_hold() {
     assert!(w.script.sent().is_empty());
 }
 
+impl World {
+    /// The Implementation Agent asks for review; the next scan launches the Review Assignment.
+    fn review(&mut self) -> String {
+        self.f
+            .session(&self.app, &self.assignment)
+            .request_review()
+            .unwrap();
+        self.scan();
+        let review = self.f.launch(&self.app);
+        assert_ne!(review, self.assignment);
+        review
+    }
+    fn nudges_of(&self, id: &str) -> NudgeState {
+        self.f.store.assignment_nudge_state(id).unwrap()
+    }
+    fn worktree(&self, id: &str) -> String {
+        self.f
+            .store
+            .assignment_execution_directory(id)
+            .unwrap()
+            .unwrap()
+            .display()
+            .to_string()
+    }
+    fn verdict(&self, id: &str, generation_offset: u64) -> forge_app::outcomes::OutcomeInput {
+        let attempt = self.f.store.assignment_check_attempt(id).unwrap().unwrap();
+        forge_app::outcomes::OutcomeInput {
+            attempt_id: attempt.id,
+            generation: attempt.generation + generation_offset,
+            evidence: attempt.evidence,
+            verdict: forge_app::checks::Verdict::Pass,
+            actor: "ignored".into(),
+            message: "Reviewed".into(),
+            disposition: forge_app::outcomes::OutcomeDisposition::Complete,
+            findings: vec![],
+            verifications: vec![],
+        }
+    }
+}
+
 #[test]
-fn review_assignments_are_never_nudged() {
+fn a_review_agent_that_finishes_a_turn_without_a_verdict_is_nudged_once_with_the_review_text() {
     let mut w = World::new();
-    w.f.session(&w.app, &w.assignment).request_review().unwrap();
-    w.scan(); // retires the Implementation Assignment and launches review
-    let review = w.f.launch(&w.app);
-    assert_ne!(review, w.assignment);
+    let review = w.review();
     w.script.report(AgentObservation::Idle, 9);
     w.scan();
-    assert!(w.script.sent().is_empty());
+    w.scan();
+    let sent = w.script.sent();
+    assert_eq!(sent.len(), 1, "one nudge for the finished turn: {sent:?}");
+    let text = &sent[0];
+    assert!(text.contains("Review"), "names the Check: {text}");
+    assert!(
+        text.contains(&w.worktree(&review)),
+        "names the worktree: {text}"
+    );
+    assert!(text.contains("forge assignment outcome --file"), "{text}");
+    assert!(text.contains("request-review"), "forbids it: {text}");
+    assert!(!text.contains("Deliver work"), "does not repeat the Task");
+    assert!(
+        text.ends_with("Nudges without a verdict: 1 of 3."),
+        "{text}"
+    );
+    assert_eq!(w.nudges_of(&review).total, 1);
+}
+
+#[test]
+fn an_accepted_verdict_ends_review_nudges_but_a_rejected_outcome_does_not() {
+    let mut w = World::new();
+    let review = w.review();
+    let stale = w.verdict(&review, 99);
+    w.f.session(&w.app, &review)
+        .submit_outcome(&stale)
+        .unwrap_err();
+    w.script.report(AgentObservation::Idle, 9);
+    w.scan();
+    assert_eq!(
+        w.script.sent().len(),
+        1,
+        "a rejected outcome is still nudged"
+    );
+
+    let accepted = w.verdict(&review, 0);
+    w.f.session(&w.app, &review)
+        .submit_outcome(&accepted)
+        .unwrap();
+    w.script.report(AgentObservation::Idle, 10);
+    w.scan();
+    assert_eq!(
+        w.script.sent().len(),
+        1,
+        "an accepted verdict is never nudged"
+    );
+}
+
+#[test]
+fn three_review_nudges_then_another_idle_hold_even_when_head_moved() {
+    let mut w = World::new();
+    let review = w.review();
+    w.f.store
+        .add_record_comment(w.f.task, "Cannot reach the tests", None)
+        .unwrap();
+    for seq in 1..=3 {
+        w.f.set_head(&format!("{seq:040x}"));
+        w.script.report(AgentObservation::Idle, seq);
+        w.scan();
+    }
+    assert_eq!(w.script.sent().len(), 3);
+    assert_eq!(w.nudges_of(&review).consecutive_no_commit, 3);
+    assert!(w.hold().is_none());
+    w.f.set_head(&format!("{:040x}", 4));
+    w.script.report(AgentObservation::Idle, 4);
+    w.scan();
+    assert_eq!(w.script.sent().len(), 3, "no fourth nudge");
+    let hold = w.hold().expect("exhaustion holds the Task");
+    assert!(hold.contains("without a verdict"), "{hold}");
+    assert!(!hold.contains("no new commit"), "{hold}");
+    assert!(hold.contains("Cannot reach the tests"), "{hold}");
+    assert!(
+        w.f.store
+            .agent_assignment(&review)
+            .unwrap()
+            .closed_at_millis
+            .is_none(),
+        "the Agent is not retired"
+    );
+}
+
+#[test]
+fn a_publication_agent_gets_the_review_text() {
+    let f = Fixture::with_checks("Work", &["Implementation", "Review", "Publication"]);
+    let script = Script::new();
+    let app = f.app_with(Box::new(Factory(script.clone())));
+    let implementation = f.launch(&app);
+    f.session(&app, &implementation).request_review().unwrap();
+    let mut now = 100_000;
+    app.reconcile_agent_dispatch("nudges", now).unwrap();
+    let review = f.launch(&app);
+    let attempt = f.store.assignment_check_attempt(&review).unwrap().unwrap();
+    let input = forge_app::outcomes::OutcomeInput {
+        attempt_id: attempt.id,
+        generation: attempt.generation,
+        evidence: attempt.evidence,
+        verdict: forge_app::checks::Verdict::Pass,
+        actor: "ignored".into(),
+        message: "Reviewed".into(),
+        disposition: forge_app::outcomes::OutcomeDisposition::Complete,
+        findings: vec![],
+        verifications: vec![],
+    };
+    f.session(&app, &review).submit_outcome(&input).unwrap();
+    now += 100_000;
+    app.reconcile_agent_dispatch("nudges", now).unwrap();
+    let publication = f.launch(&app);
+    script.report(AgentObservation::Idle, 3);
+    now += 100_000;
+    app.reconcile_agent_dispatch("nudges", now).unwrap();
+    let sent = script.sent();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert!(sent[0].contains("Publication"), "{}", sent[0]);
+    assert!(sent[0].ends_with("Nudges without a verdict: 1 of 3."));
+    assert_eq!(
+        f.store.assignment_nudge_state(&publication).unwrap().total,
+        1
+    );
+}
+
+#[test]
+fn resume_with_an_explanation_on_a_review_hold_resets_counters_and_carries_it_in_the_review_text() {
+    let mut w = World::new();
+    let review = w.review();
+    for seq in 1..=4 {
+        w.script.report(AgentObservation::Idle, seq);
+        w.scan();
+    }
+    assert_eq!(w.script.sent().len(), 3);
+    assert!(w.hold().is_some());
+    w.app
+        .resume_task_dispatch(w.f.task, Some("Use the staging key."))
+        .unwrap();
+    assert_eq!(w.nudges_of(&review).consecutive_no_commit, 0);
+    w.scan();
+    let sent = w.script.sent();
+    assert_eq!(sent.len(), 4);
+    assert!(
+        sent[3].contains("Operator explanation: Use the staging key."),
+        "{}",
+        sent[3]
+    );
+    assert!(sent[3].contains("forge assignment outcome --file"));
+    assert!(
+        sent[3].ends_with("Nudges without a verdict: 1 of 3."),
+        "{}",
+        sent[3]
+    );
 }
 
 #[test]

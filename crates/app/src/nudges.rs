@@ -1,5 +1,6 @@
-//! Nudges: Forge-sent prompts that keep a live Implementation Agent working after it ends a
-//! turn without a Review Request.
+//! Nudges: Forge-sent prompts that keep a live Check-bound Agent working after it ends a turn
+//! without finishing its Agent Assignment: a Review Request for the Implementation Check, an
+//! accepted verdict for any review Check.
 //!
 //! Every Nudge is durably recorded as a prompt intent before it is sent, and an uncertain
 //! delivery places a Dispatch Hold instead of being retried (ADR-0008, extended to all prompts).
@@ -10,7 +11,9 @@ use crate::{
 };
 use std::path::Path;
 
-/// Consecutive no-commit Nudges allowed per Assignment; the next idle turn holds instead.
+/// Consecutive no-progress Nudges allowed per Assignment; the next idle turn holds instead.
+/// Progress is a new commit for Implementation; a review Check has no progress, so every
+/// review Nudge counts.
 pub const NO_COMMIT_NUDGE_LIMIT: u32 = 3;
 /// Nudges allowed per Assignment overall; the next idle turn holds instead.
 pub const TOTAL_NUDGE_LIMIT: u32 = 20;
@@ -22,7 +25,9 @@ pub struct NudgeState {
     pub last_completion_seq: u64,
     /// Nudges attempted for this Assignment, counting uncertain deliveries.
     pub total: u32,
-    /// Nudges in a row after which the observed HEAD had not moved.
+    /// Nudges in a row without progress. For an Implementation Assignment this counts Nudges
+    /// after which the observed HEAD had not moved; for a review Assignment it counts
+    /// consecutive Nudges without a verdict (HEAD is ignored). The column keeps its name.
     pub consecutive_no_commit: u32,
     /// HEAD observed at the last nudge; absent until the first nudge.
     pub last_head: Option<String>,
@@ -52,9 +57,20 @@ pub enum NudgeSettlement {
     Uncertain,
 }
 
-/// The Forge-owned Nudge text. It does not repeat the Task body.
+/// What finishing means for a Check-bound Assignment, resolved from the Check's position.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum NudgeRole {
+    /// The Task's first Check: finished by a Review Request.
+    Implementation,
+    /// Any later Check (Review Implementation, Review Coding Standards, Publication, ...):
+    /// finished by an accepted verdict.
+    Review { check_name: String },
+}
+
+/// The Forge-owned Nudge text for `role`. It does not repeat the Task body.
 #[must_use]
 pub fn nudge_text(
+    role: &NudgeRole,
     worktree: &Path,
     consecutive_no_commit: u32,
     explanation: Option<&str>,
@@ -62,6 +78,33 @@ pub fn nudge_text(
     let explanation = explanation.map_or_else(String::new, |text| {
         format!("\nOperator explanation: {text}\n\n")
     });
+    match role {
+        NudgeRole::Implementation => {
+            implementation_text(worktree, consecutive_no_commit, &explanation)
+        }
+        NudgeRole::Review { check_name } => {
+            review_text(check_name, worktree, consecutive_no_commit, &explanation)
+        }
+    }
+}
+
+fn review_text(
+    check_name: &str,
+    worktree: &Path,
+    nudges_without_verdict: u32,
+    explanation: &str,
+) -> String {
+    format!(
+        "Your turn ended without a verdict on the {check_name} Check. Finish the review of {}.\n{explanation}\
+- Submit your verdict with `forge assignment outcome --file <json>`: `pass`/`complete`; `fail`/`handback` with blocking Findings; or `fail`/`human-input` naming the concrete blocker.\n\
+- Do not commit and do not run `forge assignment request-review`.\n\
+- If you are blocked, explain why with `forge assignment comment --message '<explanation>'`, then end your turn.\n\n\
+Nudges without a verdict: {nudges_without_verdict} of {NO_COMMIT_NUDGE_LIMIT}.",
+        worktree.display()
+    )
+}
+
+fn implementation_text(worktree: &Path, consecutive_no_commit: u32, explanation: &str) -> String {
     format!(
         "Your turn ended without a Review Request. Keep working in {}.\n{explanation}\
 - Continue the Task and every open Finding, and commit your work as you go.\n\
@@ -80,19 +123,31 @@ enum NudgeLimit {
 }
 
 impl NudgeLimit {
-    fn describe(self) -> String {
-        match self {
-            Self::ConsecutiveNoCommit => format!(
+    fn describe(self, role: &NudgeRole) -> String {
+        match (self, role) {
+            (Self::ConsecutiveNoCommit, NudgeRole::Implementation) => format!(
                 "{NO_COMMIT_NUDGE_LIMIT} consecutive Nudges produced no new commit (consecutive-no-commit limit)"
             ),
-            Self::Total => format!("{TOTAL_NUDGE_LIMIT} Nudges were sent (total limit)"),
+            (Self::ConsecutiveNoCommit, NudgeRole::Review { .. }) => format!(
+                "{NO_COMMIT_NUDGE_LIMIT} consecutive Nudges ended without a verdict (no-verdict limit)"
+            ),
+            (Self::Total, _) => format!("{TOTAL_NUDGE_LIMIT} Nudges were sent (total limit)"),
         }
     }
 }
 
-/// How many Nudges in a row (including the next) found HEAD unmoved from its baseline: the last
-/// Nudge's HEAD, or for the first Nudge the attempt's input commit. A new commit restarts at 0.
-fn next_no_commit_count(state: &NudgeState, evidence: &Evidence, head: &str) -> u32 {
+/// How many Nudges in a row (including the next) made no progress. Implementation: HEAD
+/// unmoved from its baseline, the last Nudge's HEAD or for the first Nudge the attempt's input
+/// commit; a new commit restarts at 0. Review: HEAD is ignored and every Nudge counts.
+fn next_no_commit_count(
+    role: &NudgeRole,
+    state: &NudgeState,
+    evidence: &Evidence,
+    head: &str,
+) -> u32 {
+    if matches!(role, NudgeRole::Review { .. }) {
+        return state.consecutive_no_commit + 1;
+    }
     let previous = match (&state.last_head, evidence) {
         (Some(last), _) => Some(last.as_str()),
         (None, Evidence::Repository { commit, .. }) => Some(commit.as_str()),
@@ -117,9 +172,9 @@ fn exhausted_limit(state: &NudgeState, next_no_commit: u32) -> Option<NudgeLimit
 }
 
 impl Application {
-    /// Nudge each open Implementation Assignment whose Agent finished a turn without a Review
-    /// Request. Failures are logged and never stop the scan.
-    pub(crate) fn nudge_idle_implementation_agents(&self) -> Result<(), RegistrationError> {
+    /// Nudge each open Check-bound Assignment whose Agent finished a turn without finishing
+    /// the Assignment. Failures are logged and never stop the scan.
+    pub(crate) fn nudge_idle_agents(&self) -> Result<(), RegistrationError> {
         let repository = self.dispatch()?;
         for assignment in repository.list_open_agent_assignments()? {
             match self.reap_absent_agent(&assignment) {
@@ -202,19 +257,27 @@ impl Application {
         Ok(true)
     }
 
-    /// The bound attempt when the Assignment is bound to the Task's first (Implementation) Check.
-    fn implementation_attempt(
+    /// The Assignment's Nudge role and bound attempt; `None` when it is not Check-bound. The
+    /// first Check is Implementation, any later Check is a review Check.
+    fn nudge_role(
         &self,
         assignment: &AgentAssignment,
-    ) -> Result<Option<crate::outcomes::Attempt>, RegistrationError> {
+    ) -> Result<Option<(NudgeRole, crate::outcomes::Attempt)>, RegistrationError> {
         let Some(attempt) = self.dispatch()?.assignment_check_attempt(&assignment.id)? else {
             return Ok(None);
         };
-        let first = self
-            .list_record_checks(attempt.record_id)?
-            .first()
-            .is_some_and(|check| check.id == attempt.check_id);
-        Ok(first.then_some(attempt))
+        let checks = self.list_record_checks(attempt.record_id)?;
+        let Some(position) = checks.iter().position(|check| check.id == attempt.check_id) else {
+            return Ok(None);
+        };
+        let role = if position == 0 {
+            NudgeRole::Implementation
+        } else {
+            NudgeRole::Review {
+                check_name: checks[position].name.clone(),
+            }
+        };
+        Ok(Some((role, attempt)))
     }
 
     fn nudge_assignment(&self, assignment: &AgentAssignment) -> Result<(), RegistrationError> {
@@ -222,7 +285,7 @@ impl Application {
         if assignment.state == AgentAssignmentState::Provisioning {
             return Ok(());
         }
-        let Some(attempt) = self.implementation_attempt(assignment)? else {
+        let Some((role, attempt)) = self.nudge_role(assignment)? else {
             return Ok(());
         };
         // A restart (or crash) between recording an intent and settling it leaves an
@@ -271,9 +334,9 @@ impl Application {
             return Ok(());
         };
         let head = self.inspector.head_commit(&worktree)?;
-        let consecutive_no_commit = next_no_commit_count(&state, &attempt.evidence, &head);
+        let consecutive_no_commit = next_no_commit_count(&role, &state, &attempt.evidence, &head);
         if let Some(limit) = exhausted_limit(&state, consecutive_no_commit) {
-            return self.hold_exhausted_nudges(assignment, limit);
+            return self.hold_exhausted_nudges(assignment, &role, limit);
         }
         let intent = NudgeIntent {
             sequence: state.prompt_sequence + 1,
@@ -287,6 +350,7 @@ impl Application {
         }
         let prompt = AgentPrompt {
             text: nudge_text(
+                &role,
                 &worktree,
                 consecutive_no_commit,
                 state.pending_explanation.as_deref(),
@@ -324,6 +388,7 @@ impl Application {
     fn hold_exhausted_nudges(
         &self,
         assignment: &AgentAssignment,
+        role: &NudgeRole,
         limit: NudgeLimit,
     ) -> Result<(), RegistrationError> {
         let repository = self.dispatch()?;
@@ -343,7 +408,7 @@ impl Application {
         );
         let reason = format!(
             "Nudges exhausted: {}. The Assignment stays open and the Agent is not retired.{comment} Resume with an explanation to nudge it again, or `forge task unstick --retire-working --agent-gone` to retire it and start over.",
-            limit.describe()
+            limit.describe(role)
         );
         repository.hold_dispatch(assignment.record_id, &reason)?;
         repository
@@ -375,5 +440,78 @@ impl Application {
         repository
             .add_record_comment(assignment.record_id, &reason, Some("agent-dispatch"))
             .map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn review() -> NudgeRole {
+        NudgeRole::Review {
+            check_name: "Review Implementation".into(),
+        }
+    }
+
+    #[test]
+    fn implementation_text_asks_for_a_review_request_and_counts_commits() {
+        let text = nudge_text(&NudgeRole::Implementation, Path::new("/wt"), 2, None);
+        assert!(text.starts_with("Your turn ended without a Review Request. Keep working in /wt."));
+        assert!(text.contains("forge assignment request-review"));
+        assert!(text.ends_with("No new commit since the last nudge: 2 of 3."));
+    }
+
+    #[test]
+    fn review_text_names_the_check_and_worktree_and_forbids_commits_and_review_requests() {
+        let text = nudge_text(&review(), Path::new("/wt"), 1, None);
+        assert!(text.contains("Review Implementation"), "{text}");
+        assert!(text.contains("/wt"), "{text}");
+        assert!(
+            text.contains("forge assignment outcome --file <json>"),
+            "{text}"
+        );
+        assert!(text.contains("`pass`/`complete`"), "{text}");
+        assert!(text.contains("`fail`/`handback`"), "{text}");
+        assert!(text.contains("`fail`/`human-input`"), "{text}");
+        assert!(text.contains("Do not commit"), "{text}");
+        assert!(
+            text.contains("do not run `forge assignment request-review`"),
+            "{text}"
+        );
+        assert!(!text.contains("interrupted"), "{text}");
+        assert!(!text.contains("Operator explanation"), "{text}");
+        assert!(
+            text.ends_with("Nudges without a verdict: 1 of 3."),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn both_roles_carry_the_operator_explanation() {
+        for role in [NudgeRole::Implementation, review()] {
+            let text = nudge_text(&role, Path::new("/wt"), 1, Some("Use staging."));
+            assert!(
+                text.contains("\nOperator explanation: Use staging.\n"),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn review_nudges_ignore_head_and_always_count() {
+        let state = NudgeState {
+            consecutive_no_commit: 2,
+            last_head: Some("a".into()),
+            ..NudgeState::default()
+        };
+        let evidence = Evidence::Repository {
+            repository: "r".into(),
+            commit: "a".into(),
+        };
+        assert_eq!(next_no_commit_count(&review(), &state, &evidence, "b"), 3);
+        assert_eq!(
+            next_no_commit_count(&NudgeRole::Implementation, &state, &evidence, "b"),
+            0
+        );
     }
 }
