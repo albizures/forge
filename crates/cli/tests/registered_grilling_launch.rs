@@ -226,13 +226,23 @@ async fn exercise_launch() {
             generation,
         )
         .unwrap();
-    let record = store
+    let parent = store
         .open_typed_record(&NewTypedRecord {
-            record_type: RecordType::Grilling,
-            body: "A decision".into(),
+            record_type: RecordType::Wayfinder,
+            body: "A parent".into(),
             project_slugs: vec!["test/api".into()],
             generated_by_ids: vec![],
         })
+        .unwrap();
+    let observation = forge_app::planning_context::ProjectPlanningContext {
+        project: "test/api".into(),
+        context: forge_app::planning_context::PlanningContext::Available {
+            repository: workspace.to_string_lossy().into_owned(),
+            branch: "initiating-feature".into(),
+        },
+    };
+    let record = store
+        .open_grilling_with_planning("A decision", parent.id, None, vec![], &[observation])
         .unwrap();
     drop(store);
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -316,6 +326,10 @@ async fn exercise_launch() {
     assert_eq!(context["behavior"], "FROZEN GRILLING BEHAVIOR");
     assert_eq!(context["context"]["record"]["id"], record.id);
     assert_eq!(context["context"]["record"]["status"], "in_progress");
+    assert_eq!(
+        context["context"]["record"]["planning_context"][0]["context"]["branch"],
+        "initiating-feature"
+    );
     let store = SqliteProjectRepository::open(&db).unwrap();
     assert!(
         store
