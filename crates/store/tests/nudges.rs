@@ -1,7 +1,8 @@
 //! Nudges: exactly one durable prompt per finished Implementation turn, driven by reconciliation
 //! against a scripted provider (the same seam the fake Herdr serves in the server tests).
 use forge_app::{
-    AgentAdapterError, AgentDispatchRepository, AgentObservation, AgentPromptOutcome, Application,
+    AgentAdapterError, AgentAssignmentClosureReason, AgentDispatchRepository, AgentObservation,
+    AgentPromptOutcome, Application,
     RecordRepository,
     nudges::{NudgeIntent, NudgeSettlement, NudgeState},
 };
@@ -456,4 +457,64 @@ fn unstick_with_retirement_retires_the_held_agent_and_counts_an_interruption() {
         .progress
         .interrupted_checks;
     assert_eq!(interrupted[0].interruptions, 1);
+}
+
+#[test]
+fn an_absent_check_bound_agent_closes_its_assignment_lost_and_holds_the_task() {
+    let mut w = World::new();
+    w.script.report(AgentObservation::Absent, 1);
+    w.scan();
+    let closed = w.f.store.agent_assignment(&w.assignment).unwrap();
+    assert!(closed.closed_at_millis.is_some());
+    assert_eq!(closed.closure_reason, Some(AgentAssignmentClosureReason::Lost));
+    assert_eq!(*w.script.retirements.lock().unwrap(), 1);
+    let hold = w.hold().expect("an Absent Agent holds the Task");
+    assert!(hold.contains(&w.assignment), "{hold}");
+    assert!(hold.contains("recover-retained-work"), "{hold}");
+    assert!(w.script.sent().is_empty(), "an Absent Agent is never prompted");
+    // Never automatically relaunched while the hold stands.
+    w.scan();
+    w.scan();
+    assert!(w.f.store.list_open_agent_assignments().unwrap().is_empty());
+}
+
+#[test]
+fn an_unknown_agent_is_not_closed_by_the_absent_rule() {
+    let mut w = World::new();
+    w.script.report(AgentObservation::Unknown, 1);
+    w.scan();
+    assert!(
+        w.f.store
+            .agent_assignment(&w.assignment)
+            .unwrap()
+            .closed_at_millis
+            .is_none()
+    );
+    assert!(w.hold().is_none());
+}
+
+#[test]
+fn an_absent_agent_whose_retirement_fails_keeps_the_assignment_open_but_the_task_held() {
+    let mut w = World::new();
+    *w.script.retire_result.lock().unwrap() =
+        Err(AgentAdapterError::Transient("herdr down".into()));
+    w.script.report(AgentObservation::Absent, 1);
+    w.scan();
+    assert!(
+        w.f.store
+            .agent_assignment(&w.assignment)
+            .unwrap()
+            .closed_at_millis
+            .is_none()
+    );
+    assert!(w.hold().is_some());
+    *w.script.retire_result.lock().unwrap() = Ok(());
+    w.scan();
+    assert!(
+        w.f.store
+            .agent_assignment(&w.assignment)
+            .unwrap()
+            .closed_at_millis
+            .is_some()
+    );
 }
