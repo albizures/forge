@@ -149,10 +149,19 @@ impl From<forge_app::assignment::Context> for AssignmentContextResponse {
 // Behavior-bearing responses intentionally have no Debug implementation.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AssignmentBootstrapResponse {
+pub struct StandardBootstrapResponse {
     pub schema_version: u32,
     pub context: AssignmentContextResponse,
     pub behavior: String,
+}
+
+/// Review and Publication Assignments keep the full bootstrap; an Implementation Assignment
+/// receives only its worktree, Task, open Findings and Forge-owned command contract.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AssignmentBootstrapResponse {
+    Standard(Box<StandardBootstrapResponse>),
+    Implementation(forge_app::assignment::ImplementationBootstrap),
 }
 
 #[derive(Clone, Serialize, Deserialize)]

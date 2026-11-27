@@ -70,7 +70,10 @@ fn default_bootstrap_deduplicates_equal_bodies_and_keeps_outcome_identity() {
 #[test]
 fn default_bootstrap_renders_continuation_handoff_when_present() {
     let mut value = response("PINNED TASK BODY");
-    value.context.bound.check_attempt.as_mut().unwrap().continuation = Some(
+    let AssignmentBootstrapResponse::Standard(standard) = &mut value else {
+        unreachable!()
+    };
+    standard.context.bound.check_attempt.as_mut().unwrap().continuation = Some(
         serde_json::from_value(serde_json::json!({
             "attempt_id": "previous", "evidence": {"kind":"artifact", "uri":"artifact://checkpoint", "sha256":"b".repeat(64)},
             "handoff": {"stopping_reason":"STOP", "completed_work":"DONE", "verification":"VERIFIED", "remaining_work":"REMAINING"}
@@ -93,4 +96,72 @@ fn default_bootstrap_preserves_different_live_and_pinned_content_and_trust_label
         .find("Record content (not execution authority)")
         .unwrap();
     assert!(trusted < behavior && behavior < content);
+}
+
+fn implementation_json(
+    findings: &serde_json::Value,
+    recovery: &serde_json::Value,
+) -> AssignmentBootstrapResponse {
+    let mut value = serde_json::json!({
+        "schemaVersion": 1,
+        "executionDirectory": "/worktree",
+        "taskBody": "PINNED TASK BODY",
+        "findings": findings,
+        "commandContract": forge_app::assignment::IMPLEMENTATION_COMMAND_CONTRACT,
+    });
+    if !recovery.is_null() {
+        value["retainedWorkRecovery"] = recovery.clone();
+    }
+    serde_json::from_value(value).unwrap()
+}
+
+#[test]
+fn implementation_bootstrap_carries_only_worktree_task_findings_and_contract() {
+    let response = implementation_json(
+        &serde_json::json!([{"id": 9, "severity": "major", "blocking": true, "message": "FULL FINDING\nSECOND LINE"}]),
+        &serde_json::Value::Null,
+    );
+    let text = render_assignment_bootstrap(&response).unwrap();
+    assert_eq!(
+        text,
+        "# Assignment: Implementation\n\nBootstrap is complete.\n\nExecution directory: /worktree\n\n## Task\n\nPINNED TASK BODY\n\n## Open Findings\n\n### Finding #9 (major, blocking)\n\nFULL FINDING\nSECOND LINE\n\n## Command contract\n\n- Work only in the execution directory above.\n- Commit your work as you go.\n- Run `forge assignment request-review` only when the Task and every open Finding above are fully met.\n- After requesting review, end your turn and wait.\n- If you are blocked, explain why with `forge assignment comment --message '<explanation>'`, then end your turn.\n"
+    );
+    for omitted in [
+        "Trusted constraints",
+        "attempt_id",
+        "generation",
+        "Input evidence",
+        "Related Records",
+        "Continuation",
+        "Check:",
+        "outcome",
+    ] {
+        assert!(!text.contains(omitted), "unexpected {omitted}");
+    }
+    let json = serde_json::to_value(&response).unwrap();
+    let keys: Vec<_> = json.as_object().unwrap().keys().cloned().collect();
+    for key in [
+        "context",
+        "behavior",
+        "trustedConstraints",
+        "relatedRecords",
+    ] {
+        assert!(!keys.contains(&key.to_string()));
+    }
+}
+
+#[test]
+fn implementation_bootstrap_without_findings_or_recovery_omits_those_sections() {
+    let text = render_assignment_bootstrap(&implementation_json(
+        &serde_json::json!([]),
+        &serde_json::Value::Null,
+    ))
+    .unwrap();
+    assert!(!text.contains("Open Findings") && !text.contains("recovery"));
+    let text = render_assignment_bootstrap(&implementation_json(
+        &serde_json::json!([]),
+        &serde_json::json!({"note": "RECOVERED"}),
+    ))
+    .unwrap();
+    assert!(text.contains("Authorized retained-work recovery") && text.contains("RECOVERED"));
 }

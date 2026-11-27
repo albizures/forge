@@ -160,7 +160,7 @@ async fn verify_clean_recovery_rpc(
         std::fs::write(secret_root.join("salvage-successor"), "salvage-secret").unwrap();
         let credentials = serde_json::json!({"assignmentId":"salvage-successor", "secret":"salvage-secret"});
         let boot = assignment_rpc(daemon.clone(), "assignment.bootstrap", credentials.clone()).await;
-        assert_eq!(boot["result"]["context"]["bound"]["checkAttempt"]["recovery"], serde_json::to_value(&recovery).unwrap(), "{boot}");
+        assert_eq!(boot["result"]["retainedWorkRecovery"], serde_json::to_value(&recovery).unwrap(), "{boot}");
         assert_eq!(std::fs::read(checkout.join("untracked.txt")).unwrap(), b"Untracked retained work\0\xff");
         assert_eq!(super::git(checkout, &["show", ":deliverable.txt"]).unwrap(), "Staged retained work");
         assert_eq!(std::fs::read_to_string(checkout.join("deliverable.txt")).unwrap(), "Unstaged retained work\n");

@@ -1,6 +1,52 @@
 //! Agent-facing presentation of authenticated bootstrap, separate from its JSON contract.
-use forge_rpc::AssignmentBootstrapResponse;
+use forge_rpc::{AssignmentBootstrapResponse, StandardBootstrapResponse};
 use std::fmt::Write;
+
+/// Render the role-specific bootstrap. Implementation Agents get the minimal form; review and
+/// Publication Agents get the full form below.
+///
+/// # Errors
+/// Returns serialization failures for structured attempt evidence.
+pub fn render_assignment_bootstrap(
+    response: &AssignmentBootstrapResponse,
+) -> Result<String, serde_json::Error> {
+    match response {
+        AssignmentBootstrapResponse::Standard(response) => render_standard_bootstrap(response),
+        AssignmentBootstrapResponse::Implementation(bootstrap) => {
+            let mut output = format!(
+                "# Assignment: Implementation\n\nBootstrap is complete.\n\nExecution directory: {}\n\n## Task\n\n{}\n",
+                bootstrap.execution_directory.display(),
+                bootstrap.task_body.trim_end(),
+            );
+            if !bootstrap.findings.is_empty() {
+                output.push_str("\n## Open Findings\n");
+                for finding in &bootstrap.findings {
+                    let _ = write!(
+                        output,
+                        "\n### Finding #{} ({}{})\n\n{}\n",
+                        finding.id,
+                        finding.severity,
+                        if finding.blocking { ", blocking" } else { "" },
+                        finding.message.trim_end(),
+                    );
+                }
+            }
+            if let Some(recovery) = &bootstrap.retained_work_recovery {
+                let _ = write!(
+                    output,
+                    "\n## Authorized retained-work recovery\n\n```json\n{}\n```\n",
+                    serde_json::to_string_pretty(recovery)?
+                );
+            }
+            let _ = write!(
+                output,
+                "\n## Command contract\n\n{}\n",
+                bootstrap.command_contract
+            );
+            Ok(output)
+        }
+    }
+}
 
 /// Render trusted context separately from behavioral instructions and Record prose.
 ///
@@ -11,8 +57,8 @@ use std::fmt::Write;
 ///
 /// # Errors
 /// Returns serialization failures for structured attempt evidence.
-pub fn render_assignment_bootstrap(
-    response: &AssignmentBootstrapResponse,
+fn render_standard_bootstrap(
+    response: &StandardBootstrapResponse,
 ) -> Result<String, serde_json::Error> {
     let context = &response.context;
     let bound = &context.bound;

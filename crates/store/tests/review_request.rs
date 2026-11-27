@@ -79,6 +79,10 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
+        Self::with_profile_body("Work")
+    }
+
+    fn with_profile_body(profile_body: &str) -> Self {
         let root = std::env::temp_dir().join(format!(
             "forge-review-request-{}-{}",
             std::process::id(),
@@ -96,7 +100,7 @@ impl Fixture {
         std::fs::create_dir_all(root.join(".agents/profiles")).unwrap();
         std::fs::write(
             root.join(".agents/profiles/work.md"),
-            "---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\nthinkingLevel: low\ntools: [read]\n---\nWork",
+            format!("---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\nthinkingLevel: low\ntools: [read]\n---\n{profile_body}"),
         )
         .unwrap();
         let path = root.join("store.sqlite");
@@ -203,6 +207,32 @@ impl Fixture {
         session.acknowledge().unwrap();
         session.start().unwrap();
         session.context().unwrap();
+        assignment.id
+    }
+
+    fn raise_finding(&self, message: &str) -> u64 {
+        self.app()
+            .raise_record_finding(
+                self.task,
+                &forge_app::findings::FindingRaiseInput {
+                    severity: forge_app::findings::Severity::Major,
+                    blocking: Some(false),
+                    check_id: None,
+                    assessment_id: None,
+                    actor: "reviewer".into(),
+                    message: message.into(),
+                    revision: None,
+                    dirty: None,
+                },
+            )
+            .unwrap()
+            .id
+    }
+
+    fn acknowledged(&self, app: &Application) -> String {
+        let (assignment, _) = app.execute_task_check_acceptance(self.task).unwrap();
+        std::fs::create_dir_all(&self.secrets).unwrap();
+        std::fs::write(self.secrets.join(&assignment.id), "secret").unwrap();
         assignment.id
     }
 
@@ -382,4 +412,111 @@ fn unacknowledged_assignment_cannot_request_review() {
         .unwrap_err();
     assert_eq!(error.code, "assignment-inactive");
     assert_eq!(f.store.list_record_checks(f.task).unwrap(), before);
+}
+
+const OUTCOME_LANGUAGE: &str = "Submit an outcome with fail/complete";
+
+fn implementation(
+    f: &Fixture,
+    app: &Application,
+) -> forge_app::assignment::ImplementationBootstrap {
+    let id = f.acknowledged(app);
+    match f
+        .session(app, &id)
+        .agent_bootstrap_with_session(None)
+        .unwrap()
+    {
+        forge_app::assignment::AgentBootstrap::Implementation(value) => value,
+        forge_app::assignment::AgentBootstrap::Standard(_) => panic!("expected Implementation"),
+    }
+}
+
+#[test]
+fn implementation_bootstrap_carries_only_worktree_task_open_findings_and_contract() {
+    let f = Fixture::with_profile_body(OUTCOME_LANGUAGE);
+    let open = f.raise_finding("Fix the parser\nand its tests");
+    let dismissed = f.raise_finding("Not a problem");
+    f.app()
+        .mutate_record_finding(
+            f.task,
+            dismissed,
+            &forge_app::findings::FindingMutationInput {
+                change: forge_app::findings::FindingMutation::Dismiss,
+                explanation: forge_app::findings::FindingResolveInput {
+                    expected_version: 1,
+                    actor: "reviewer".into(),
+                    message: "ok".into(),
+                    revision: None,
+                    dirty: None,
+                },
+            },
+        )
+        .unwrap();
+    let app = f.app();
+    let bootstrap = implementation(&f, &app);
+    assert_eq!(bootstrap.task_body, "Deliver work");
+    assert_eq!(
+        bootstrap.execution_directory,
+        f.store
+            .assignment_execution_directory(&f.store.list_agent_assignments(f.task).unwrap()[0].id)
+            .unwrap()
+            .unwrap()
+    );
+    assert_eq!(bootstrap.findings.len(), 1);
+    assert_eq!(bootstrap.findings[0].id, open);
+    assert_eq!(
+        bootstrap.findings[0].message,
+        "Fix the parser\nand its tests"
+    );
+    assert_eq!(
+        bootstrap.command_contract,
+        forge_app::assignment::IMPLEMENTATION_COMMAND_CONTRACT
+    );
+    let json = serde_json::to_string(&bootstrap).unwrap();
+    for omitted in [
+        OUTCOME_LANGUAGE,
+        "trusted",
+        "attempt",
+        "generation",
+        "evidence",
+        "related",
+        "continuation",
+    ] {
+        assert!(
+            !json.to_lowercase().contains(&omitted.to_lowercase()),
+            "unexpected {omitted}"
+        );
+    }
+}
+
+#[test]
+fn contract_is_identical_across_pinned_profile_revisions() {
+    let (a, b) = (
+        Fixture::with_profile_body("Be concise"),
+        Fixture::with_profile_body(OUTCOME_LANGUAGE),
+    );
+    let (first, second) = (implementation(&a, &a.app()), implementation(&b, &b.app()));
+    assert_eq!(first.command_contract, second.command_contract);
+    assert!(!first.command_contract.contains("outcome"));
+}
+
+#[test]
+fn review_check_bootstrap_keeps_the_full_standard_form() {
+    let f = Fixture::new();
+    let app = f.app();
+    let id = f.launch(&app);
+    f.session(&app, &id).request_review().unwrap();
+    app.reconcile_agent_dispatch("review-request", 100_000)
+        .unwrap();
+    let review = f.acknowledged(&app);
+    let forge_app::assignment::AgentBootstrap::Standard(standard) = f
+        .session(&app, &review)
+        .agent_bootstrap_with_session(None)
+        .unwrap()
+    else {
+        panic!("review bootstrap must stay standard")
+    };
+    assert_eq!(standard.behavior, "Work");
+    assert!(!standard.context.trusted_constraints.is_empty());
+    assert!(standard.context.bound.check_attempt.is_some());
 }
