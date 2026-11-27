@@ -55,7 +55,7 @@ Check-bound Assignment history; lifecycle status or missing ownership alone is
 not sufficient. Normal `dispatcher dispatch <task-id>` uses the same guarded
 Check execution path, preparing a Managed Worktree first if needed for an eligible
 Open Task. Automatic scheduling starts eligible Open Tasks; after a current
-passing outcome, deliberate Implementation Continuation, or substantive review handback, daemon reconciliation retires the
+passing outcome (including an Implementation Review Request) or substantive review handback, daemon reconciliation retires the
 old agent, reconciles its retained resources, then launches the next required
 Check with its pinned profile. The explicit command does not create a worktree or
 complete the Task; daemon reconciliation can complete enrolled work only through
@@ -70,9 +70,9 @@ not the current Workspace Task selection or template. Missing, policy-less or
 unusable pins fail without fallback. Workspace provider configuration and its
 verified exact binding remain required.
 
-The worker uses `forge assignment bootstrap --json`. Its trusted context includes
-`bound.checkAttempt` (attempt id, Check id, starting generation, input evidence and
-Task body), alongside the pinned profile and execution directory. Submit an
+A review Check worker uses `forge assignment bootstrap --json`. Its trusted context
+includes `bound.checkAttempt` (attempt id, Check id, starting generation, input evidence
+and Task body), alongside the pinned profile and execution directory. Submit an
 `OutcomeInput` JSON file using `forge assignment outcome --file outcome.json
 --json`; credentials come only from protected Assignment delivery and `actor` is
 replaced with the authenticated Assignment identity. Example file shape (use the
@@ -106,8 +106,17 @@ accepted-outcome path (output evidence set, interruption count reset, progress
 accounting); reconciliation then retires the Assignment and launches the next Check as for
 any accepted Implementation pass. An exact repeat returns the stored result, including
 after retirement; a Review Request after a different outcome on the same attempt fails
-with `outcome-conflict`. An Implementation session ends at its Review Request. The
-existing outcome paths remain available for now.
+with `outcome-conflict`. An Implementation session ends at its Review Request.
+
+Implementation Agents do not judge their own work ([ADR 0012](../crates/docs/adr/0012-implementation-agents-do-not-judge-their-own-work.md)).
+The server permits an Implementation Assignment only `request-review`, `comment`,
+`context`, `finding list` and `record`. `assignment outcome` (every disposition),
+`check assess`, `check invalidate`, `finding raise` and `finding mutate` are rejected
+with `implementation-outcome-forbidden` and change nothing. Review Checks keep
+`pass/complete`, `fail/handback`, `fail/human-input` and `fail/interrupted` under the
+rules below. A handback launches a fresh Implementation Assignment whose minimal
+bootstrap lists every open Finding. Interruption of an Implementation attempt arises only
+from safe retirement without an outcome.
 
 Implementation may report a new output commit in the same Repository. Reviews
 must assess their bound output evidence and must not modify deliverables. Forge
@@ -185,12 +194,13 @@ open. Inspect the pane before resuming the Task.
 
 ### Deliberate Implementation Continuations
 
-Use the delivered [Implementation profile](profiles/implementation-continuations.md)
-for the complete submission shape and stopping instructions. Its
-[rollout handoff](profiles/implementation-continuations-handoff.md) is explicitly
-separate from registration, immutable Check pins and live recovery.
+**Superseded.** Implementation Agents can no longer submit outcomes, so new Continuations
+cannot be created (`assignment outcome` fails with `implementation-outcome-forbidden`);
+the remainder of this section describes historical behavior pending removal of the
+Continuation subsystem. The [Implementation profile](profiles/implementation-continuations.md)
+and its [rollout handoff](profiles/implementation-continuations-handoff.md) are historical.
 
-Only the authenticated Task Implementation agent may deliberately hand off unfinished
+Only the authenticated Task Implementation agent could deliberately hand off unfinished
 work. Keep implementing and testing until complete or a concrete execution constraint;
 inspection, a small commit, or complexity alone is not a stopping reason. Use the
 same outcome command and identity/evidence fields, with `verdict: "fail"` (a wire
@@ -366,9 +376,10 @@ Dispatch Hold atomically. Success of a different Check, restarting, changing mod
 redispatching or resetting remediation does not renew interruption allowance.
 An explicitly retired, current attempt with no outcome consumes the same interruption
 allowance once retirement and every retained resource are reconciled.
-Substantive Implementation failure consumes remediation budget, not review retries.
+Remediation cycles arise only from review handbacks, not from Implementation outcomes,
+which no longer exist.
 
-Each handback/failed Implementation records a cycle baseline. At the next failed
+Each handback records a cycle baseline. At the next failed
 Implementation, review handback or final passing review, unchanged deliverable
 evidence with no newly verified Finding resolution is **no progress**. Verified
 resolution of an overlooked fix counts even at the same commit. Earlier review
@@ -378,8 +389,9 @@ retry allowance, but cannot bypass exhausted remediation or no-progress state:
 the next acceptance reestablishes that diagnostic hold until remediation is
 explicitly reset. Existing safety holds are not overwritten.
 
-Agents may submit `disposition: "human-input"` with `verdict: "fail"` and an
-explanation, without Findings or verifications. This creates a human-input hold
+Review Agents may submit `disposition: "human-input"` with `verdict: "fail"` and an
+explanation, without Findings or verifications (an Implementation Agent that is blocked
+explains itself with `assignment comment` instead). This creates a human-input hold
 and no substantive Assessment or handback; retirement/resource gates still apply.
 The operator must intervene and explicitly resume. `interrupted` likewise creates
 no Assessment, Finding or substantive handback.

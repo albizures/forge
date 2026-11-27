@@ -285,5 +285,7 @@ fn only_the_implementation_assignment_is_closed_to_verdict_commands() {
     app.reconcile_agent_dispatch("review-request", 100_000)
         .unwrap();
     let review = f.acknowledged(&app);
-    f.session(&app, &review).ensure_not_implementation().unwrap();
+    f.session(&app, &review)
+        .ensure_not_implementation()
+        .unwrap();
 }

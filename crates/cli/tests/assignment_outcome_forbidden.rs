@@ -44,7 +44,10 @@ async fn implementation_outcome_rejection_names_the_specific_error() {
     server.abort();
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("implementation-outcome-forbidden"), "{stderr}");
+    assert!(
+        stderr.contains("implementation-outcome-forbidden"),
+        "{stderr}"
+    );
     assert!(!stderr.contains("sentinel-secret"), "{stderr}");
     assert!(output.stdout.is_empty());
 }
