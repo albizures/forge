@@ -437,8 +437,8 @@ enum AgentDispatchCommand {
     ResetContinuations(ResetContinuationsArgs),
     /// Authorize clean or content-bound dirty/staged/untracked salvage after verified retirement; retains holds.
     RecoverRetainedWork(RecoverRetainedWorkArgs),
-    /// Clear a Dispatch Hold and reset interrupted-Check retries (not remediation or recovery blockers).
-    Resume(DispatchTaskArgs),
+    /// Clear a Dispatch Hold, reset interrupted-Check retries and Nudge counters, and optionally nudge the warm Agent with an operator explanation.
+    Resume(ResumeArgs),
     /// Inspect persisted Assignment evidence without contacting the provider.
     AssignmentInfo(AssignmentRetireArgs),
     /// Revoke an Assignment and verify provider cleanup; retains unresolved capacity and hold.
@@ -527,6 +527,17 @@ struct DispatchRecordArgs {
 #[derive(Args, Debug)]
 struct DispatchTaskArgs {
     task_id: u64,
+    #[arg(long, value_name = "URL")]
+    server_url: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Args, Debug)]
+struct ResumeArgs {
+    task_id: u64,
+    /// Operator explanation delivered to the open Implementation Agent as its next Nudge.
+    #[arg(long, value_name = "TEXT")]
+    explanation: Option<String>,
     #[arg(long, value_name = "URL")]
     server_url: Option<String>,
     #[arg(long)]
@@ -1581,15 +1592,16 @@ async fn dispatcher_config(command: DispatcherConfigCommand, workspace: Option<S
     }
 }
 
-async fn dispatcher_resume(args: DispatchTaskArgs) -> i32 {
+async fn dispatcher_resume(args: ResumeArgs) -> i32 {
     match request_resume_dispatch_task(
         &resolve_endpoint(args.server_url.as_deref()).await,
         args.task_id,
+        args.explanation.clone(),
     )
     .await
     {
         Ok(()) => {
-            let warning = "Clearing a Dispatch Hold does not resolve recovery blockers or prove an agent is absent. It does not resend a prompt and does not authorize a replacement. Replacement requires retirement and safe resolution of all known and uncertain resources; hold clearing is separate. Use assignment-info <assignment-id> to investigate.";
+            let warning = "Clearing a Dispatch Hold does not resolve recovery blockers or prove an agent is absent. It does not resend an earlier prompt and does not authorize a replacement. Replacement requires retirement and safe resolution of all known and uncertain resources; hold clearing is separate. Use assignment-info <assignment-id> to investigate.";
             if args.json {
                 println!(
                     "{}",
@@ -2259,6 +2271,26 @@ mod tests {
             return Err("unclosed shell fence or no examples".into());
         }
         Ok(examples)
+    }
+
+    #[test]
+    fn dispatcher_resume_accepts_an_operator_explanation() {
+        let cli = Cli::try_parse_from([
+            "forge",
+            "dispatcher",
+            "resume",
+            "42",
+            "--explanation",
+            "Use the staging key",
+        ])
+        .unwrap();
+        let Command::Dispatcher { command } = cli.command else {
+            panic!("expected dispatcher command");
+        };
+        let crate::AgentDispatchCommand::Resume(args) = command else {
+            panic!("expected resume");
+        };
+        assert_eq!(args.explanation.as_deref(), Some("Use the staging key"));
     }
 
     #[test]

@@ -415,7 +415,7 @@ fn late_bootstrap_absence_repair_and_resume_do_not_authorize_replacement() {
     );
     app.reopen_task(original.record_id).unwrap();
     let (replacement, _) = registered_policy(&fixture, RecordType::Task);
-    app.resume_task_dispatch(original.record_id).unwrap();
+    app.resume_task_dispatch(original.record_id, None).unwrap();
     assert!(
         fixture
             .store()

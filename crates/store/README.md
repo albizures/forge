@@ -53,14 +53,18 @@ is documented separately in [Records](../../docs/records.md),
 `assignment_nudges` holds one row per Assignment that has settled a Nudge:
 `assignment_id` (PK, FK to `agent_assignments`), `last_completion_seq` (Herdr finished-turn
 sequence last nudged), `total` (Nudges attempted, counting uncertain ones),
-`consecutive_no_commit` and `last_head` (HEAD observed at the last Nudge). A missing row
+`consecutive_no_commit` and `last_head` (HEAD observed at the last Nudge), and
+`pending_explanation` (operator text from `resume`, carried by the next Nudge and cleared when
+that Nudge settles). Operator resume zeroes `total` and `consecutive_no_commit` of the Task's
+open Assignments in the hold-clearing transaction. A missing row
 means all zeros. `assignment_prompt_intents` is keyed by (`assignment_id`, `sequence`) and
 is written before any prompt is sent: `completion_seq`, the planned `consecutive_no_commit`
 and `head`, `created_at_millis`, and `settled_at_millis` plus `settlement`
 (`confirmed` or `uncertain`), both null while unsettled. An unsettled intent found after a
 restart is settled as uncertain and never resent. Settling applies the intent's values to
 `assignment_nudges` in the same transaction; cancelling deletes an unsettled intent whose
-prompt was provably never sent. The primary key makes an intent exclusive per sequence.
+prompt was provably never sent. The primary key makes an intent exclusive per sequence; the next sequence is the greatest
+recorded one plus one, independent of the resettable counters.
 
 Revision 20 is a breaking storage expansion: ordinary opening rejects revision 19 and
 earlier before writes. Explicit offline upgrade adds the two **empty** tables and preserves

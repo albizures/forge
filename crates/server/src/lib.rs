@@ -1150,9 +1150,9 @@ impl AgentDispatchApiServer for Daemon {
             .map_err(rpc_error)
     }
 
-    async fn resume(&self, request: RecordIdRequest) -> RpcResult<()> {
+    async fn resume(&self, request: forge_rpc::ResumeRequest) -> RpcResult<()> {
         self.application
-            .resume_task_dispatch(request.id)
+            .resume_task_dispatch(request.id, request.explanation.as_deref())
             .map_err(rpc_error)
     }
 

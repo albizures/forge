@@ -5,7 +5,7 @@ use forge_app::{
     NewAgentAssignmentResource, NewTypedRecord, Project, RecordRepository, RecordStatus,
     RecordType, RegistrationError, RepositoryInspector,
 };
-use forge_rpc::{AgentDispatchApiServer, RecordIdRequest, RetireAgentAssignmentRequest};
+use forge_rpc::{AgentDispatchApiServer, RetireAgentAssignmentRequest};
 use forge_server::Daemon;
 use forge_store::SqliteProjectRepository;
 use std::path::{Path, PathBuf};
@@ -164,7 +164,7 @@ impl Drop for Fixture {
 async fn resume_and_restart_do_not_relaunch_and_late_ack_can_work_under_hold() {
     let f = Fixture::new();
     for now in [302_000, 340_000] {
-        AgentDispatchApiServer::resume(&Daemon::new(f.app()), RecordIdRequest { id: f.task })
+        AgentDispatchApiServer::resume(&Daemon::new(f.app()), resume_request(f.task))
             .await
             .unwrap();
         assert!(f.store().dispatch_hold(f.task).unwrap().is_none());
@@ -182,7 +182,7 @@ async fn resume_and_restart_do_not_relaunch_and_late_ack_can_work_under_hold() {
     );
     assert!(f.store().dispatch_hold(f.task).unwrap().is_none());
     f.scan(380_000);
-    AgentDispatchApiServer::resume(&Daemon::new(f.app()), RecordIdRequest { id: f.task })
+    AgentDispatchApiServer::resume(&Daemon::new(f.app()), resume_request(f.task))
         .await
         .unwrap();
     f.scan(420_000);
@@ -211,7 +211,7 @@ fn race_resume_late_acknowledgement_and_scan() {
         let resume = scope.spawn(|| {
             let app = f.app();
             barrier.wait();
-            app.resume_task_dispatch(f.task).unwrap();
+            app.resume_task_dispatch(f.task, None).unwrap();
         });
         let acknowledge = scope.spawn(|| {
             let app = f.app();
@@ -294,7 +294,7 @@ async fn replacement_requires_revocation_all_resource_resolution_and_separate_re
     let closed = f.store().agent_assignment_info("old").unwrap();
     assert!(closed.assignment.closed_at_millis.is_some());
     assert!(closed.capacity_reserved());
-    AgentDispatchApiServer::resume(&Daemon::new(f.app()), RecordIdRequest { id: f.task })
+    AgentDispatchApiServer::resume(&Daemon::new(f.app()), resume_request(f.task))
         .await
         .unwrap();
     assert!(
@@ -345,7 +345,7 @@ async fn replacement_requires_revocation_all_resource_resolution_and_separate_re
             .unwrap()
             .is_none()
     );
-    AgentDispatchApiServer::resume(&Daemon::new(f.app()), RecordIdRequest { id: f.task })
+    AgentDispatchApiServer::resume(&Daemon::new(f.app()), resume_request(f.task))
         .await
         .unwrap();
 
@@ -372,4 +372,11 @@ async fn replacement_requires_revocation_all_resource_resolution_and_separate_re
     assert_eq!(claimed[0].record_id, f.task);
     assert_eq!(claimed[0].attempt_number, 2);
     assert_eq!(f.store().list_open_agent_assignments().unwrap().len(), 1);
+}
+
+fn resume_request(id: u64) -> forge_rpc::ResumeRequest {
+    forge_rpc::ResumeRequest {
+        id,
+        explanation: None,
+    }
 }

@@ -3,7 +3,7 @@
 use forge_app::{
     AgentAdapterError, AgentDispatchAdapter, AgentDispatchAdapterFactory, AgentDispatchContext,
     AgentDispatchRepository, AgentObservation, AgentProfile, AgentPrompt, AgentPromptOutcome,
-    AgentTurn, Application, DispatchWorkspace,
+    AgentTurn, Application, DispatchWorkspace, RecordRepository,
     nudges::{NudgeIntent, NudgeSettlement, NudgeState},
 };
 use std::sync::{Arc, Mutex};
@@ -372,4 +372,167 @@ fn an_intent_is_exclusive_per_assignment_and_sequence() {
             .total,
         1
     );
+}
+
+/// Idle turns with a fresh head each time never accumulate a no-commit streak.
+fn nudge_with_commit(w: &mut World, seq: u64) {
+    w.f.set_head(&format!("{seq:040x}"));
+    w.script.report(AgentObservation::Idle, seq);
+    w.scan();
+}
+
+fn exhaust_consecutive_no_commit(w: &mut World) {
+    for seq in 1..=3 {
+        w.script.report(AgentObservation::Idle, seq);
+        w.scan();
+    }
+    assert_eq!(w.script.sent().len(), 3);
+    assert!(w.hold().is_none());
+    w.script.report(AgentObservation::Idle, 4);
+    w.scan();
+}
+
+#[test]
+fn three_no_commit_nudges_then_another_idle_hold_instead_of_a_fourth() {
+    let mut w = World::new();
+    exhaust_consecutive_no_commit(&mut w);
+    assert_eq!(w.script.sent().len(), 3, "no fourth nudge");
+    let hold = w.hold().expect("exhaustion holds the Task");
+    assert!(hold.contains("consecutive-no-commit limit"), "{hold}");
+    assert!(hold.contains("no comment"), "{hold}");
+    // Further idle turns neither nudge nor re-hold.
+    w.script.report(AgentObservation::Idle, 5);
+    w.scan();
+    assert_eq!(w.script.sent().len(), 3);
+}
+
+#[test]
+fn twenty_nudges_with_commits_then_another_idle_hold_naming_the_total_limit() {
+    let mut w = World::new();
+    for seq in 1..=20 {
+        nudge_with_commit(&mut w, seq);
+    }
+    assert_eq!(w.script.sent().len(), 20);
+    assert!(w.hold().is_none());
+    nudge_with_commit(&mut w, 21);
+    assert_eq!(w.script.sent().len(), 20, "no twenty-first nudge");
+    let hold = w.hold().expect("the total limit holds the Task");
+    assert!(hold.contains("total limit"), "{hold}");
+}
+
+#[test]
+fn the_hold_references_the_latest_agent_comment_and_keeps_the_assignment_open() {
+    let mut w = World::new();
+    w.f.store
+        .add_record_comment(w.f.task, "first thoughts", None)
+        .unwrap();
+    let latest =
+        w.f.store
+            .add_record_comment(w.f.task, "Blocked: need the API key", None)
+            .unwrap();
+    exhaust_consecutive_no_commit(&mut w);
+    let hold = w.hold().unwrap();
+    assert!(hold.contains(&format!("#{}", latest.id.0)), "{hold}");
+    assert!(hold.contains("Blocked: need the API key"), "{hold}");
+    assert!(!hold.contains("first thoughts"), "{hold}");
+    assert!(
+        w.f.store
+            .agent_assignment(&w.assignment)
+            .unwrap()
+            .closed_at_millis
+            .is_none(),
+        "the Agent is not retired"
+    );
+    assert_eq!(w.f.store.list_open_agent_assignments().unwrap().len(), 1);
+}
+
+#[test]
+fn resume_with_an_explanation_sends_exactly_one_nudge_and_restarts_the_counters() {
+    let mut w = World::new();
+    exhaust_consecutive_no_commit(&mut w);
+    let sequence_before = w.nudges().prompt_sequence;
+    w.app
+        .resume_task_dispatch(w.f.task, Some("  Use the staging key.  "))
+        .unwrap();
+    assert!(w.hold().is_none());
+    assert_eq!(w.nudges().total, 0);
+    assert_eq!(w.nudges().consecutive_no_commit, 0);
+
+    // The Agent is still idle on the turn that tripped the limit.
+    w.scan();
+    w.scan();
+    let sent = w.script.sent();
+    assert_eq!(sent.len(), 4, "exactly one more nudge");
+    assert!(
+        sent[3].contains("Operator explanation: Use the staging key."),
+        "{}",
+        sent[3]
+    );
+    assert!(sent[3].ends_with("No new commit since the last nudge: 1 of 3."));
+    assert_eq!(w.nudges().total, 1, "counting restarted from zero");
+    assert_eq!(w.nudges().prompt_sequence, sequence_before + 1);
+    assert_eq!(w.nudges().pending_explanation, None);
+
+    // The explanation is not repeated at the next finished turn.
+    w.script.report(AgentObservation::Idle, 5);
+    w.scan();
+    assert!(!w.script.sent()[4].contains("Operator explanation"));
+}
+
+#[test]
+fn resume_with_an_explanation_waits_for_the_agent_to_finish_a_turn() {
+    let mut w = World::new();
+    exhaust_consecutive_no_commit(&mut w);
+    w.app.resume_task_dispatch(w.f.task, Some("Hint")).unwrap();
+    w.script.report(AgentObservation::Working, 4);
+    w.scan();
+    assert_eq!(w.script.sent().len(), 3);
+    w.script.report(AgentObservation::Idle, 5);
+    w.scan();
+    assert!(w.script.sent()[3].contains("Operator explanation: Hint"));
+}
+
+#[test]
+fn resume_without_an_explanation_sends_the_plain_template() {
+    let mut w = World::new();
+    exhaust_consecutive_no_commit(&mut w);
+    w.app.resume_task_dispatch(w.f.task, Some("   ")).unwrap();
+    w.scan();
+    let sent = w.script.sent();
+    assert_eq!(sent.len(), 4);
+    assert!(!sent[3].contains("Operator explanation"));
+}
+
+#[test]
+fn unstick_with_retirement_retires_the_held_agent_and_counts_an_interruption() {
+    let mut w = World::new();
+    exhaust_consecutive_no_commit(&mut w);
+    let report = w
+        .app
+        .unstick_apply(
+            w.f.task,
+            &forge_app::unstick::UnstickConsent {
+                agent_gone: true,
+                retire_working: true,
+                actor: Some("operator".into()),
+                message: Some("Starting over".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(format!("{:?}", report.verdict), "Unstuck", "{report:?}");
+    assert!(
+        w.f.store
+            .agent_assignment(&w.assignment)
+            .unwrap()
+            .closed_at_millis
+            .is_some()
+    );
+    let interrupted = w
+        .app
+        .record_work_state(w.f.task)
+        .unwrap()
+        .progress
+        .interrupted_checks;
+    assert_eq!(interrupted[0].interruptions, 1);
 }

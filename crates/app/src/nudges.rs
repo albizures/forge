@@ -9,8 +9,10 @@ use crate::{
 };
 use std::path::Path;
 
-/// Consecutive no-commit Nudges shown in the state line; enforcement belongs to nudge limits.
+/// Consecutive no-commit Nudges allowed per Assignment; the next idle turn holds instead.
 pub const NO_COMMIT_NUDGE_LIMIT: u32 = 3;
+/// Nudges allowed per Assignment overall; the next idle turn holds instead.
+pub const TOTAL_NUDGE_LIMIT: u32 = 20;
 
 /// Per-Assignment Nudge accounting. A new Assignment starts at zero.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -23,10 +25,15 @@ pub struct NudgeState {
     pub consecutive_no_commit: u32,
     /// HEAD observed at the last nudge; absent until the first nudge.
     pub last_head: Option<String>,
+    /// Operator explanation from `resume`, carried by the next Nudge.
+    pub pending_explanation: Option<String>,
+    /// Prompt intents ever recorded for this Assignment. Unlike `total` it never resets, so the
+    /// next intent's sequence is this plus one.
+    pub prompt_sequence: u32,
 }
 
 /// A prompt intent recorded before a Nudge is sent. `sequence` is the Assignment's prompt
-/// sequence: the nudge number, starting at one.
+/// sequence, starting at one; it keeps counting across an operator resume.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NudgeIntent {
     pub sequence: u32,
@@ -46,15 +53,66 @@ pub enum NudgeSettlement {
 
 /// The Forge-owned Nudge text. It does not repeat the Task body.
 #[must_use]
-pub fn nudge_text(worktree: &Path, consecutive_no_commit: u32) -> String {
+pub fn nudge_text(
+    worktree: &Path,
+    consecutive_no_commit: u32,
+    explanation: Option<&str>,
+) -> String {
+    let explanation = explanation.map_or_else(String::new, |text| {
+        format!("\nOperator explanation: {text}\n\n")
+    });
     format!(
-        "Your turn ended without a Review Request. Keep working in {}.\n\
+        "Your turn ended without a Review Request. Keep working in {}.\n{explanation}\
 - Continue the Task and every open Finding, and commit your work as you go.\n\
 - Run `forge assignment request-review` only when the Task and every open Finding are fully met.\n\
 - If you are blocked, explain why with `forge assignment comment --message '<explanation>'`, then end your turn.\n\n\
 No new commit since the last nudge: {consecutive_no_commit} of {NO_COMMIT_NUDGE_LIMIT}.",
         worktree.display()
     )
+}
+
+/// Which Nudge limit an idle Agent has reached.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NudgeLimit {
+    ConsecutiveNoCommit,
+    Total,
+}
+
+impl NudgeLimit {
+    fn describe(self) -> String {
+        match self {
+            Self::ConsecutiveNoCommit => format!(
+                "{NO_COMMIT_NUDGE_LIMIT} consecutive Nudges produced no new commit (consecutive-no-commit limit)"
+            ),
+            Self::Total => format!("{TOTAL_NUDGE_LIMIT} Nudges were sent (total limit)"),
+        }
+    }
+}
+
+/// How many Nudges in a row (including the next) found HEAD unmoved from its baseline: the last
+/// Nudge's HEAD, or for the first Nudge the attempt's input commit. A new commit restarts at 0.
+fn next_no_commit_count(state: &NudgeState, evidence: &Evidence, head: &str) -> u32 {
+    let previous = match (&state.last_head, evidence) {
+        (Some(last), _) => Some(last.as_str()),
+        (None, Evidence::Repository { commit, .. }) => Some(commit.as_str()),
+        (None, Evidence::Artifact { .. }) => None,
+    };
+    if previous == Some(head) {
+        state.consecutive_no_commit + 1
+    } else {
+        0
+    }
+}
+
+/// The limit that forbids another Nudge, given how many no-commit Nudges the next one would be.
+fn exhausted_limit(state: &NudgeState, next_no_commit: u32) -> Option<NudgeLimit> {
+    if state.total >= TOTAL_NUDGE_LIMIT {
+        Some(NudgeLimit::Total)
+    } else if next_no_commit > NO_COMMIT_NUDGE_LIMIT {
+        Some(NudgeLimit::ConsecutiveNoCommit)
+    } else {
+        None
+    }
 }
 
 impl Application {
@@ -131,25 +189,21 @@ impl Application {
             return Ok(());
         };
         let state = repository.assignment_nudge_state(&assignment.id)?;
-        if completion_seq <= state.last_completion_seq {
+        // An operator explanation from `resume` is delivered at the next finished turn, even
+        // one that was already seen before the hold.
+        if completion_seq <= state.last_completion_seq && state.pending_explanation.is_none() {
             return Ok(());
         }
         let Some(worktree) = context.agent_workspace.clone() else {
             return Ok(());
         };
         let head = self.inspector.head_commit(&worktree)?;
-        let previous = match (&state.last_head, &attempt.evidence) {
-            (Some(head), _) => Some(head.as_str()),
-            (None, Evidence::Repository { commit, .. }) => Some(commit.as_str()),
-            (None, Evidence::Artifact { .. }) => None,
-        };
-        let consecutive_no_commit = if previous == Some(head.as_str()) {
-            state.consecutive_no_commit + 1
-        } else {
-            0
-        };
+        let consecutive_no_commit = next_no_commit_count(&state, &attempt.evidence, &head);
+        if let Some(limit) = exhausted_limit(&state, consecutive_no_commit) {
+            return self.hold_exhausted_nudges(assignment, limit);
+        }
         let intent = NudgeIntent {
-            sequence: state.total + 1,
+            sequence: state.prompt_sequence + 1,
             completion_seq,
             consecutive_no_commit,
             head,
@@ -159,7 +213,11 @@ impl Application {
             return Ok(());
         }
         let prompt = AgentPrompt {
-            text: nudge_text(&worktree, consecutive_no_commit),
+            text: nudge_text(
+                &worktree,
+                consecutive_no_commit,
+                state.pending_explanation.as_deref(),
+            ),
             completion_seq,
         };
         match adapter.prompt(&context, &prompt) {
@@ -186,6 +244,38 @@ impl Application {
                 )
             }
         }
+    }
+
+    /// Place a Dispatch Hold instead of a further Nudge. The Assignment stays open and the
+    /// Agent is not retired; the operator resumes with an explanation or retires via unstick.
+    fn hold_exhausted_nudges(
+        &self,
+        assignment: &AgentAssignment,
+        limit: NudgeLimit,
+    ) -> Result<(), RegistrationError> {
+        let repository = self.dispatch()?;
+        let latest = repository
+            .list_record_comments(assignment.record_id)?
+            .into_iter()
+            .find(|comment| comment.author.as_deref() != Some("agent-dispatch"));
+        let comment = latest.map_or_else(
+            || " The Agent left no comment explaining itself.".to_owned(),
+            |comment| {
+                let mut excerpt: String = comment.body.chars().take(200).collect();
+                if comment.body.chars().count() > 200 {
+                    excerpt.push_str("...");
+                }
+                format!(" Latest comment (#{}): {excerpt}", comment.id.0)
+            },
+        );
+        let reason = format!(
+            "Nudges exhausted: {}. The Assignment stays open and the Agent is not retired.{comment} Resume with an explanation to nudge it again, or `forge task unstick --retire-working --agent-gone` to retire it and start over.",
+            limit.describe()
+        );
+        repository.hold_dispatch(assignment.record_id, &reason)?;
+        repository
+            .add_record_comment(assignment.record_id, &reason, Some("agent-dispatch"))
+            .map(|_| ())
     }
 
     /// Record Prompt Delivery Uncertainty and hold the Task. An existing hold keeps its reason.

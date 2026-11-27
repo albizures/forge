@@ -767,12 +767,20 @@ pub fn render_continuations(state: &forge_rpc::WorkState) -> String {
     text
 }
 
-/// Clear only the operator-controlled Dispatch Hold.
+/// Clear only the operator-controlled Dispatch Hold. An explanation is delivered to the warm
+/// Implementation Agent as its next Nudge.
 /// # Errors
 /// Returns endpoint or daemon hold-clearing failures.
-pub async fn request_resume_dispatch_task(url: &str, task_id: u64) -> Result<(), String> {
+pub async fn request_resume_dispatch_task(
+    url: &str,
+    task_id: u64,
+    explanation: Option<String>,
+) -> Result<(), String> {
     client(url)?
-        .resume(RecordIdRequest { id: task_id })
+        .resume(forge_rpc::ResumeRequest {
+            id: task_id,
+            explanation,
+        })
         .await
         .map_err(|error| format!("could not resume Task dispatch through Forge daemon: {error}"))
 }

@@ -3,7 +3,8 @@ CREATE TABLE IF NOT EXISTS assignment_nudges (
     last_completion_seq INTEGER NOT NULL CHECK (last_completion_seq >= 0),
     total INTEGER NOT NULL CHECK (total >= 0),
     consecutive_no_commit INTEGER NOT NULL CHECK (consecutive_no_commit >= 0),
-    last_head TEXT
+    last_head TEXT,
+    pending_explanation TEXT
 );
 CREATE TABLE IF NOT EXISTS assignment_prompt_intents (
     assignment_id TEXT NOT NULL REFERENCES agent_assignments(id),

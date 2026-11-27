@@ -332,7 +332,7 @@ impl Application {
                 Ok(None)
             }
             UnstickStepKind::Resume => {
-                self.resume_task_dispatch(record)?;
+                self.resume_task_dispatch(record, None)?;
                 Ok(None)
             }
             UnstickStepKind::Dispatch => Ok(Some(self.dispatch_record(record)?.0)),
