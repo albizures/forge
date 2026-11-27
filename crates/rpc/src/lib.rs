@@ -169,7 +169,7 @@ pub trait AgentDispatchApi {
     #[method(name = "taskReopen")]
     async fn task_reopen(&self, request: RecordIdRequest) -> RpcResult<RecordResponse>;
     #[method(name = "resume")]
-    async fn resume(&self, request: RecordIdRequest) -> RpcResult<()>;
+    async fn resume(&self, request: ResumeRequest) -> RpcResult<()>;
     /// Trusted operator operation, deliberately absent from the Assignment capability API.
     #[method(name = "resetRemediation")]
     async fn reset_remediation(
@@ -1190,6 +1190,13 @@ pub struct ProjectScopeRequest {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RecordIdRequest {
     pub id: u64,
+}
+/// Operator resume of a Task's dispatch, with an optional explanation for the warm Agent.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
+pub struct ResumeRequest {
+    pub id: u64,
+    pub explanation: Option<String>,
 }
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default)]

@@ -23,21 +23,52 @@ pub(super) fn state(
     assignment: &str,
 ) -> Result<NudgeState, RegistrationError> {
     let c = lock(repository)?;
-    Ok(c.query_row(
-        "SELECT last_completion_seq, total, consecutive_no_commit, last_head FROM assignment_nudges WHERE assignment_id = ?1",
-        [assignment],
-        |r| {
-            Ok(NudgeState {
-                last_completion_seq: r.get::<_, i64>(0)?.cast_unsigned(),
-                total: r.get::<_, i64>(1)?.try_into().unwrap_or(u32::MAX),
-                consecutive_no_commit: r.get::<_, i64>(2)?.try_into().unwrap_or(u32::MAX),
-                last_head: r.get(3)?,
-            })
-        },
+    let mut state = c
+        .query_row(
+            "SELECT last_completion_seq, total, consecutive_no_commit, last_head, pending_explanation FROM assignment_nudges WHERE assignment_id = ?1",
+            [assignment],
+            |r| {
+                Ok(NudgeState {
+                    last_completion_seq: r.get::<_, i64>(0)?.cast_unsigned(),
+                    total: r.get::<_, i64>(1)?.try_into().unwrap_or(u32::MAX),
+                    consecutive_no_commit: r.get::<_, i64>(2)?.try_into().unwrap_or(u32::MAX),
+                    last_head: r.get(3)?,
+                    pending_explanation: r.get(4)?,
+                    prompt_sequence: 0,
+                })
+            },
+        )
+        .optional()
+        .map_err(storage_error)?
+        .unwrap_or_default();
+    state.prompt_sequence = c
+        .query_row(
+            "SELECT COALESCE(MAX(sequence), 0) FROM assignment_prompt_intents WHERE assignment_id = ?1",
+            [assignment],
+            |r| r.get::<_, i64>(0),
+        )
+        .map_err(storage_error)?
+        .try_into()
+        .unwrap_or(u32::MAX);
+    Ok(state)
+}
+
+/// Restart the counters of every open Assignment of a Task at an operator resume, keeping the
+/// prompt sequence, finished-turn marker and HEAD baseline. The explanation, if any, is held
+/// until the next Nudge carries it. The caller owns the transaction.
+pub(super) fn reset_for_resume(
+    c: &rusqlite::Connection,
+    record: u64,
+    explanation: Option<&str>,
+) -> Result<(), RegistrationError> {
+    c.execute(
+        "INSERT INTO assignment_nudges (assignment_id, last_completion_seq, total, consecutive_no_commit, last_head, pending_explanation)
+         SELECT id, 0, 0, 0, NULL, ?2 FROM agent_assignments WHERE record_id = ?1 AND closed_at_millis IS NULL
+         ON CONFLICT(assignment_id) DO UPDATE SET total = 0, consecutive_no_commit = 0, pending_explanation = excluded.pending_explanation",
+        params![record.cast_signed(), explanation],
     )
-    .optional()
-    .map_err(storage_error)?
-    .unwrap_or_default())
+    .map(|_| ())
+    .map_err(storage_error)
 }
 
 pub(super) fn begin(
@@ -46,13 +77,13 @@ pub(super) fn begin(
     intent: &NudgeIntent,
 ) -> Result<bool, RegistrationError> {
     let c = lock(repository)?;
-    // The primary key makes the (Assignment, sequence) intent exclusive across writers. A
-    // counter that already reached this sequence means the intent was settled earlier.
+    // The primary key makes the (Assignment, sequence) intent exclusive across writers. The
+    // sequence is the Assignment's own prompt count, independent of the resettable counters.
     let inserted = c
         .execute(
             "INSERT INTO assignment_prompt_intents (assignment_id, sequence, completion_seq, consecutive_no_commit, head, created_at_millis)
              SELECT ?1, ?2, ?3, ?4, ?5, ?6
-             WHERE COALESCE((SELECT total FROM assignment_nudges WHERE assignment_id = ?1), 0) + 1 = ?2
+             WHERE COALESCE((SELECT MAX(sequence) FROM assignment_prompt_intents WHERE assignment_id = ?1), 0) + 1 = ?2
              ON CONFLICT DO NOTHING",
             params![
                 assignment,
@@ -110,10 +141,11 @@ pub(super) fn settle(
         .map_err(storage_error)?;
     if settled == 1 {
         tx.execute(
-            "INSERT INTO assignment_nudges (assignment_id, last_completion_seq, total, consecutive_no_commit, last_head)
-             SELECT assignment_id, completion_seq, sequence, consecutive_no_commit, head FROM assignment_prompt_intents WHERE assignment_id = ?1 AND sequence = ?2
+            "INSERT INTO assignment_nudges (assignment_id, last_completion_seq, total, consecutive_no_commit, last_head, pending_explanation)
+             SELECT assignment_id, completion_seq, 1, consecutive_no_commit, head, NULL FROM assignment_prompt_intents WHERE assignment_id = ?1 AND sequence = ?2
              ON CONFLICT(assignment_id) DO UPDATE SET last_completion_seq = excluded.last_completion_seq,
-                total = excluded.total, consecutive_no_commit = excluded.consecutive_no_commit, last_head = excluded.last_head",
+                total = assignment_nudges.total + 1, consecutive_no_commit = excluded.consecutive_no_commit,
+                last_head = excluded.last_head, pending_explanation = NULL",
             params![assignment, sequence],
         )
         .map_err(storage_error)?;

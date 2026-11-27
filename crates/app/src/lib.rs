@@ -2134,7 +2134,18 @@ pub trait AgentDispatchRepository: RecordRepository + WorkspaceDispatchRepositor
         reason: &str,
     ) -> Result<DispatchHold, RegistrationError>;
     /// Clears a durable automatic-dispatch block.
-    fn resume_dispatch(&self, record_id: u64) -> Result<(), RegistrationError>;
+    fn resume_dispatch(&self, record_id: u64) -> Result<(), RegistrationError> {
+        self.resume_dispatch_with_explanation(record_id, None)
+    }
+    /// Clear the hold like `resume_dispatch`, restart the Nudge counters of the Task's open
+    /// Assignments, and queue the operator's explanation for the next Nudge.
+    /// # Errors
+    /// Returns persistence failures; nothing changes on failure.
+    fn resume_dispatch_with_explanation(
+        &self,
+        record_id: u64,
+        explanation: Option<&str>,
+    ) -> Result<(), RegistrationError>;
     /// Record an operator-only remediation reset without clearing any safety hold or retry count.
     /// # Errors
     /// Rejects unsupported storage, unsafe ownership or invalid attribution.
@@ -3154,8 +3165,14 @@ impl Application {
     /// # Errors
     ///
     /// Returns persistence failures.
-    pub fn resume_task_dispatch(&self, task_id: u64) -> Result<(), RegistrationError> {
-        self.dispatch()?.resume_dispatch(task_id)
+    pub fn resume_task_dispatch(
+        &self,
+        task_id: u64,
+        explanation: Option<&str>,
+    ) -> Result<(), RegistrationError> {
+        let explanation = explanation.map(str::trim).filter(|text| !text.is_empty());
+        self.dispatch()?
+            .resume_dispatch_with_explanation(task_id, explanation)
     }
 
     /// Inspects persisted Assignment evidence without contacting the provider or changing state.

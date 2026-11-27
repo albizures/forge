@@ -2334,7 +2334,11 @@ impl AgentDispatchRepository for SqliteProjectRepository {
         Ok(state)
     }
 
-    fn resume_dispatch(&self, record_id: u64) -> Result<(), RegistrationError> {
+    fn resume_dispatch_with_explanation(
+        &self,
+        record_id: u64,
+        explanation: Option<&str>,
+    ) -> Result<(), RegistrationError> {
         let mut connection = self
             .connection
             .lock()
@@ -2342,7 +2346,7 @@ impl AgentDispatchRepository for SqliteProjectRepository {
         let tx = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(storage_error)?;
-        task_progress::resume(&tx, record_id)?;
+        task_progress::resume(&tx, record_id, explanation)?;
         tx.commit().map_err(storage_error)?;
         Ok(())
     }

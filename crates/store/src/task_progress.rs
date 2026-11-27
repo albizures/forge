@@ -43,7 +43,12 @@ pub(super) fn hold(c: &Connection, record: u64, reason: &str) -> Result<(), Regi
 
 /// Explicit operator resume renews interruption allowance, not remediation or ownership.
 /// The caller commits both changes in one writer transaction.
-pub(super) fn resume(c: &Connection, record: u64) -> Result<(), RegistrationError> {
+pub(super) fn resume(
+    c: &Connection,
+    record: u64,
+    explanation: Option<&str>,
+) -> Result<(), RegistrationError> {
+    super::nudges::reset_for_resume(c, record, explanation)?;
     c.execute(
         "UPDATE task_retry_counts SET interruptions = 0 WHERE check_id IN (SELECT id FROM record_checks WHERE record_id = ?1)",
         [record.cast_signed()],
