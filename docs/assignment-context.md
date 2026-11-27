@@ -268,8 +268,8 @@ by safe retirement without an outcome requires the operator's explicit
 `dispatcher recover-retained-work` authorization after verified retirement/resource
 reconciliation. Dirty salvage is content-bound and transfers inspection authority, not
 correctness. Preserve the work and ask the operator; do not reset or discard changes.
-Exact replay of already accepted historical outcomes remains supported and confers no new
-authority.
+Exact replay of already accepted historical review outcomes remains supported and confers no
+new authority; an Implementation Assignment cannot replay an outcome through `outcome`.
 See [outcome shape and handback rules](dispatch.md#check-attempts-and-controlled-acceptance).
 Implementation cannot self-verify review Findings. Reviews cannot modify the
 checkout. Final review acceptance leaves In Progress until Forge separately
