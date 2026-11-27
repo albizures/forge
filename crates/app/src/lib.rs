@@ -951,6 +951,23 @@ pub trait RecordRepository: ProjectRepository {
     ///
     /// Returns a user-facing validation or storage failure.
     fn open_typed_record(&self, record: &NewTypedRecord) -> Result<Record, RegistrationError>;
+    /// Opens a typed Record and its planning observations in one transaction.
+    ///
+    /// # Errors
+    /// Rejects unsupported persistence, invalid observations or storage failures.
+    fn open_typed_record_with_planning(
+        &self,
+        record: &NewTypedRecord,
+        observations: &[planning_context::ProjectPlanningContext],
+    ) -> Result<Record, RegistrationError> {
+        if !observations.is_empty() {
+            return Err(RegistrationError::new(
+                "planning-context-unavailable",
+                "planning context persistence is unavailable",
+            ));
+        }
+        self.open_typed_record(record)
+    }
     /// Persists the immutable Task Base Commit captured when the Task opens.
     ///
     /// # Errors

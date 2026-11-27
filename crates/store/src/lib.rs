@@ -982,7 +982,22 @@ impl RecordRepository for SqliteProjectRepository {
     }
 
     fn open_typed_record(&self, record: &NewTypedRecord) -> Result<Record, RegistrationError> {
+        self.open_typed_record_with_planning(record, &[])
+    }
+
+    fn open_typed_record_with_planning(
+        &self,
+        record: &NewTypedRecord,
+        observations: &[forge_app::planning_context::ProjectPlanningContext],
+    ) -> Result<Record, RegistrationError> {
         validate_typed_record(record)?;
+        if !observations.is_empty() && record.record_type != RecordType::Spec {
+            return Err(RegistrationError::new(
+                "invalid-planning-context",
+                "only a Spec may receive direct planning observations",
+            ));
+        }
+        forge_app::planning_context::validate_scope(observations, &record.project_slugs)?;
         let mut connection = self
             .connection
             .lock()
@@ -1016,6 +1031,21 @@ impl RecordRepository for SqliteProjectRepository {
                     params![id.cast_signed(), slug],
                 )
                 .map_err(storage_error)?;
+        }
+        for observation in observations {
+            use forge_app::planning_context::PlanningContext;
+            let (status, repository, branch, reason) = match &observation.context {
+                PlanningContext::Available { repository, branch } => {
+                    ("available", Some(repository), Some(branch), None)
+                }
+                PlanningContext::Unavailable { reason } => {
+                    ("unavailable", None, None, Some(reason))
+                }
+            };
+            transaction.execute(
+                "INSERT INTO record_planning_context (record_id, project_slug, status, repository, branch, reason) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![id.cast_signed(), observation.project, status, repository, branch, reason],
+            ).map_err(storage_error)?;
         }
         insert_update(&transaction, id, RecordUpdateKind::Created)?;
         add_generated_by_relationships(&transaction, id, &record.generated_by_ids)?;
@@ -4214,6 +4244,58 @@ mod tests {
             project_root: root.canonicalize().unwrap(),
             origin_url: "https://example.test/repo.git".into(),
         }
+    }
+
+    #[test]
+    fn spec_planning_observation_is_atomic_with_record_opening() {
+        use forge_app::planning_context::{PlanningContext, ProjectPlanningContext};
+        let store = SqliteProjectRepository::in_memory().unwrap();
+        let mut p = project("alpha", "/planning-context-atomic");
+        p.reference = "test/alpha".into();
+        store.register(&p).unwrap();
+        let observation = ProjectPlanningContext {
+            project: p.reference.clone(),
+            context: PlanningContext::Unavailable {
+                reason: "detached HEAD".into(),
+            },
+        };
+        let mut input = NewTypedRecord {
+            record_type: RecordType::Spec,
+            body: "spec".into(),
+            project_slugs: vec![p.reference],
+            generated_by_ids: vec![999_999],
+        };
+        assert!(
+            store
+                .open_typed_record_with_planning(&input, std::slice::from_ref(&observation))
+                .is_err()
+        );
+        {
+            let db = store.connection.lock().unwrap();
+            let count: i64 = db
+                .query_row("SELECT count(*) FROM record_planning_context", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0);
+            let count: i64 = db
+                .query_row("SELECT count(*) FROM records", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(count, 0);
+        }
+        input.generated_by_ids.clear();
+        let record = store
+            .open_typed_record_with_planning(&input, &[observation])
+            .unwrap();
+        let db = store.connection.lock().unwrap();
+        let reason: String = db
+            .query_row(
+                "SELECT reason FROM record_planning_context WHERE record_id = ?1",
+                [record.id.cast_signed()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(reason, "detached HEAD");
     }
 
     #[test]
