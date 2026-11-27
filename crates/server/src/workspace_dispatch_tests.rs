@@ -988,6 +988,17 @@ fn herdr_done_is_a_finished_turn_and_only_an_absent_agent_is_lost() {
             .store()
             .list_agent_assignment_resources(&assignment.id)
             .unwrap();
+        let prompts = |provider: &Provider| {
+            provider
+                .state
+                .lock()
+                .unwrap()
+                .calls
+                .iter()
+                .filter(|call| call["method"] == "agent.prompt")
+                .count()
+        };
+        let launched_with = prompts(&provider);
         provider.set_agent_status(status);
         app.reconcile_agent_dispatch("finished-turn", 40_000)
             .unwrap();
@@ -1004,6 +1015,21 @@ fn herdr_done_is_a_finished_turn_and_only_an_absent_agent_is_lost() {
                 .unwrap(),
             resources,
             "{status} retired Herdr resources"
+        );
+        // A finished Grilling turn is never nudged and never completes the Record.
+        assert_eq!(
+            prompts(&provider),
+            launched_with,
+            "{status} Grilling was prompted"
+        );
+        assert_eq!(
+            fixture
+                .store()
+                .show_record(assignment.record_id)
+                .unwrap()
+                .status,
+            forge_app::RecordStatus::InProgress,
+            "{status} closed the Grilling"
         );
     }
     let fixture = Fixture::new();

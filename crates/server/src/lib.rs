@@ -2533,6 +2533,7 @@ mod tests {
     }
     include!("assignment_actions_tests.rs");
     include!("task_check_attempt_tests.rs");
+    include!("implementation_rpc_tests.rs");
     include!("assignment_finding_tests.rs");
     include!("assignment_finding_security_tests.rs");
     include!("assignment_context_tests.rs");
