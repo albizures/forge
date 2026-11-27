@@ -532,7 +532,7 @@ struct DispatchTaskArgs {
 #[derive(Args, Debug)]
 struct ResumeArgs {
     task_id: u64,
-    /// Operator explanation delivered to the open Implementation Agent as its next Nudge.
+    /// Operator explanation delivered to the open Check-bound Agent as its next Nudge.
     #[arg(long, value_name = "TEXT")]
     explanation: Option<String>,
     #[arg(long, value_name = "URL")]

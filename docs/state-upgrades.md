@@ -7,7 +7,7 @@ it never migrates, resets, or rewrites an older store's marker.
 
 Supported transfers target schema **20** from schemas **7** through **20**.
 The 19 → 20 step adds the empty `assignment_nudges` and `assignment_prompt_intents`
-tables for [Nudge](dispatch.md#nudges-for-idle-implementation-agents) counters and
+tables for [Nudge](dispatch.md#nudges-for-idle-check-bound-agents) counters and
 durable prompt intents. No Nudge or prompt intent is invented for existing Assignments;
 ordinary schema-19 opening rejects before writes. The `pending_explanation` column
 (operator resume text) belongs to this same unreleased revision rather than a 21st step;
