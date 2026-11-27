@@ -3668,6 +3668,29 @@ impl Application {
         self.open_typed_record(RecordType::Spec, body, vec![project_slug])
     }
 
+    /// Opens a Spec with initiating-client observations and provenance atomically.
+    ///
+    /// # Errors
+    /// Rejects invalid input, observations, provenance or storage failures.
+    pub fn open_spec_with_planning(
+        &self,
+        body: &str,
+        project_slug: String,
+        generated_by_ids: Vec<u64>,
+        observations: &[planning_context::ProjectPlanningContext],
+    ) -> Result<Record, RegistrationError> {
+        Self::require_body(body)?;
+        self.records.open_typed_record_with_planning(
+            &NewTypedRecord {
+                record_type: RecordType::Spec,
+                body: body.to_owned(),
+                project_slugs: vec![project_slug],
+                generated_by_ids,
+            },
+            observations,
+        )
+    }
+
     /// Opens a Wayfinder with immutable Project Scope, possibly Projectless within a selected Workspace.
     ///
     /// # Errors
@@ -3772,6 +3795,28 @@ impl Application {
             wayfinder_id,
             project_slugs,
             generated_by_ids,
+        )
+    }
+
+    /// Opens a Grilling with initiating-client observations atomically.
+    ///
+    /// # Errors
+    /// Rejects invalid input, parent scope or storage failures.
+    pub fn open_grilling_with_planning(
+        &self,
+        body: &str,
+        wayfinder_id: u64,
+        project_slugs: Option<Vec<String>>,
+        generated_by_ids: Vec<u64>,
+        observations: &[planning_context::ProjectPlanningContext],
+    ) -> Result<Record, RegistrationError> {
+        Self::require_body(body)?;
+        self.records.open_grilling_with_planning(
+            body,
+            wayfinder_id,
+            project_slugs,
+            generated_by_ids,
+            observations,
         )
     }
 

@@ -1075,6 +1075,7 @@ pub async fn request_open_spec(
 ) -> Result<RecordResponse, String> {
     record_client(url)?
         .open_spec(OpenSpecRequest {
+            planning_context: vec![],
             body: body.into(),
             project_slug,
             generated_by_ids,
@@ -1186,6 +1187,7 @@ pub async fn request_open_grilling_under_wayfinder(
 ) -> Result<RecordResponse, String> {
     record_client(url)?
         .open_grilling_under_wayfinder(OpenGrillingUnderWayfinderRequest {
+            planning_context: vec![],
             body: body.into(),
             wayfinder_id,
             project_scope: project_slugs.map(|project_slugs| ProjectScopeRequest { project_slugs }),

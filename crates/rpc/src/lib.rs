@@ -1087,6 +1087,8 @@ pub struct OpenSpecRequest {
     pub body: String,
     pub project_slug: String,
     pub generated_by_ids: Vec<u64>,
+    #[serde(default)]
+    pub planning_context: Vec<forge_app::planning_context::ProjectPlanningContext>,
 }
 /// Opens a Wayfinder with zero or more Projects in its selected Workspace.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1129,6 +1131,8 @@ pub struct OpenGrillingUnderWayfinderRequest {
     pub wayfinder_id: u64,
     pub project_scope: Option<ProjectScopeRequest>,
     pub generated_by_ids: Vec<u64>,
+    #[serde(default)]
+    pub planning_context: Vec<forge_app::planning_context::ProjectPlanningContext>,
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProjectScopeRequest {
