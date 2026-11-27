@@ -4250,8 +4250,23 @@ mod tests {
         );
         assert_eq!(
             safe_adapter_detail("Herdr tab.create: secret-token"),
-            "details withheld; adapter message is not allowlisted"
+            "Herdr tab.create: secret-token"
         );
+        for withheld in [
+            "Herdr tab.create: Secret-Token",
+            "Herdr tab.create: secret token",
+            "Herdr tab.create: secret/token",
+            "Herdr tab.create: conflict PRIVATE",
+            "Herdr tab.create: ",
+            "Herdr tab.create: 1secret",
+            "Herdr unknown.method: conflict",
+        ] {
+            assert_eq!(
+                safe_adapter_detail(withheld),
+                "details withheld; adapter message is not allowlisted",
+                "{withheld}"
+            );
+        }
         assert_eq!(
             safe_adapter_detail("Assignment has no Agent Workspace secret-token"),
             "details withheld; adapter message is not allowlisted"
@@ -4275,8 +4290,9 @@ mod tests {
             for unsafe_detail in [
                 format!("{detail} PRIVATE-CAPABILITY"),
                 format!("{detail}\nPRIVATE-CAPABILITY"),
-                format!("Herdr tab.create: {code}"),
                 format!("Herdr unknown.method: {code}"),
+                format!("{detail}; PRIVATE"),
+                format!("{} ", detail.to_uppercase()),
             ] {
                 assert_eq!(
                     safe_adapter_detail(&unsafe_detail),
