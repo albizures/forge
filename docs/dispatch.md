@@ -162,9 +162,13 @@ ignored it) and sends one Nudge when all of these hold:
   outcome is not accepted, so the Agent is still nudged;
 - the Task has no Dispatch Hold.
 
-The Implementation Nudge text is fixed Forge text that names the Managed Worktree, tells the Agent to
-continue and commit, to run `forge assignment request-review` only when the Task and every
-open Finding are met, and to explain a blocker with `forge assignment comment`. It does not
+The Implementation Nudge text is fixed Forge text that names the Managed Worktree, states that the
+Assignment has no time, capacity or attempt limit and continues across as many turns as
+needed, tells the Agent to continue and commit as it goes (a commit is not a stopping
+point), to run `forge assignment request-review` only when the Task and every open Finding
+are met, and defines a blocker as only a missing prerequisite or a human decision (the
+size of the work is never one), to be explained with `forge assignment comment` before
+ending the turn. Every Implementation Nudge carries this text. It does not
 repeat the Task body and ends with the state line `No new commit since the last nudge: N
 of 3.`, where N counts consecutive Nudges (including this one) after which the observed
 HEAD had not moved. The baseline HEAD is the attempt's input commit for the first

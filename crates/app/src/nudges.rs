@@ -107,9 +107,10 @@ Nudges without a verdict: {nudges_without_verdict} of {NO_COMMIT_NUDGE_LIMIT}.",
 fn implementation_text(worktree: &Path, consecutive_no_commit: u32, explanation: &str) -> String {
     format!(
         "Your turn ended without a Review Request. Keep working in {}.\n{explanation}\
-- Continue the Task and every open Finding, and commit your work as you go.\n\
+- There is no time, capacity or attempt limit; this Assignment continues across as many turns as needed.\n\
+- Continue the Task and every open Finding, and commit as you go. A commit is not a stopping point.\n\
 - Run `forge assignment request-review` only when the Task and every open Finding are fully met.\n\
-- If you are blocked, explain why with `forge assignment comment --message '<explanation>'`, then end your turn.\n\n\
+- A blocker is only a missing prerequisite or a human decision; the size of the work is never a blocker. If you hit a real blocker, explain it with `forge assignment comment --message '<explanation>'`, then end your turn.\n\n\
 No new commit since the last nudge: {consecutive_no_commit} of {NO_COMMIT_NUDGE_LIMIT}.",
         worktree.display()
     )
@@ -488,6 +489,34 @@ mod tests {
         assert!(text.starts_with("Your turn ended without a Review Request. Keep working in /wt."));
         assert!(text.contains("forge assignment request-review"));
         assert!(text.ends_with("No new commit since the last nudge: 2 of 3."));
+    }
+
+    const IMPLEMENTATION_RULE_LINES: [&str; 4] = [
+        "- There is no time, capacity or attempt limit; this Assignment continues across as many turns as needed.\n",
+        "- Continue the Task and every open Finding, and commit as you go. A commit is not a stopping point.\n",
+        "- Run `forge assignment request-review` only when the Task and every open Finding are fully met.\n",
+        "- A blocker is only a missing prerequisite or a human decision; the size of the work is never a blocker. If you hit a real blocker, explain it with `forge assignment comment --message '<explanation>'`, then end your turn.\n\n",
+    ];
+
+    #[test]
+    fn implementation_text_states_no_limit_and_defines_a_blocker_without_explanation() {
+        let text = nudge_text(&NudgeRole::Implementation, Path::new("/wt"), 1, None);
+        let expected = format!(
+            "Your turn ended without a Review Request. Keep working in /wt.\n{}No new commit since the last nudge: 1 of 3.",
+            IMPLEMENTATION_RULE_LINES.concat()
+        );
+        assert_eq!(text, expected);
+        assert!(!text.contains("If you are blocked"), "{text}");
+    }
+
+    #[test]
+    fn implementation_text_states_no_limit_and_defines_a_blocker_with_explanation() {
+        let text = nudge_text(&NudgeRole::Implementation, Path::new("/wt"), 3, Some("Use staging."));
+        let expected = format!(
+            "Your turn ended without a Review Request. Keep working in /wt.\n\nOperator explanation: Use staging.\n\n{}No new commit since the last nudge: 3 of 3.",
+            IMPLEMENTATION_RULE_LINES.concat()
+        );
+        assert_eq!(text, expected);
     }
 
     #[test]
