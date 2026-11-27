@@ -263,6 +263,13 @@ async fn an_implementation_assignment_reads_comments_and_requests_review_but_can
     assert_eq!(rig.store.list_record_checks(task.id).unwrap(), before_checks);
     assert_eq!(rig.store.list_record_findings(task.id, None, 100).unwrap(), before_findings);
 
+    // `done` is not a back door: a Dispatched Task cannot be completed by its Agent.
+    let done = rig
+        .rpc("assignment.done", with(serde_json::json!({"resolution": "All done", "human": null})))
+        .await;
+    assert!(done.get("error").is_some(), "{done}");
+    assert_eq!(rig.store.show_record(task.id).unwrap().status, forge_app::RecordStatus::InProgress);
+
     // A dirty worktree rejects the Review Request; a committed one is accepted, repeatably.
     std::fs::write(task.checkout.join("deliverable.txt"), "Implemented\n").unwrap();
     let dirty = rig.rpc("assignment.reviewRequest", credentials.clone()).await;

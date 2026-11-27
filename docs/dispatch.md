@@ -109,8 +109,9 @@ after retirement; a Review Request after a different outcome on the same attempt
 with `outcome-conflict`. An Implementation session ends at its Review Request.
 
 Implementation Agents do not judge their own work ([ADR 0012](../crates/docs/adr/0012-implementation-agents-do-not-judge-their-own-work.md)).
-The server permits an Implementation Assignment only `request-review`, `comment`,
-`context`, `finding list` and `record`. `assignment outcome` (every disposition),
+An Implementation Agent is given `request-review`, `comment`, `context`, `finding list`
+and `record`; the server stays closed to verdicts rather than listing every read. From an
+Implementation Assignment, `assignment outcome` (every disposition),
 `check assess`, `check invalidate`, `finding raise` and `finding mutate` are rejected
 with `implementation-outcome-forbidden` and change nothing. Review Checks keep
 `pass/complete`, `fail/handback`, `fail/human-input` and `fail/interrupted` under the
@@ -118,7 +119,8 @@ rules below. A handback launches a fresh Implementation Assignment whose minimal
 bootstrap lists every open Finding. Interruption of an Implementation attempt arises only
 from safe retirement without an outcome.
 
-Implementation may report a new output commit in the same Repository. Reviews
+A Review Request reports the observed clean HEAD, which may be a new output commit in
+the same Repository. Reviews
 must assess their bound output evidence and must not modify deliverables. Forge
 observes the actual clean checkout at outcome acceptance and again after retirement
 before selecting another Check. Implementation input A and authorized output B
@@ -225,7 +227,7 @@ Check passes but blockers remain, acceptance retains a diagnostic hold, never Do
 Existing holds are never automatically cleared, including after verified resolution.
 Manual outcome execution retains its explicit operator-clearance policy.
 
-Failed Implementation remains Implementation. Acceptance records evidence and outcomes,
+A Review Request or review outcome records evidence and outcomes,
 not provider retirement or permission for another live attempt. Handoff atomically
 revokes the old capability and retains a `check-handoff` resource blocker before
 provider cleanup. Failed or uncertain cleanup retains capacity across restart;
@@ -244,8 +246,9 @@ invalidate earlier passes. An attempt retired explicitly before submitting a res
 can likewise retry only after its durable operator-retirement marker and all other
 resources are reconciled, and the operator clears the retirement hold. Closure,
 missing acknowledgement, absent provider resources or a lost launch response alone
-never authorize replacement. Failed Implementation retries only Implementation,
-under the same bounded remediation/no-progress policy as review handback.
+never authorize replacement. A review handback restarts at Implementation under the
+bounded remediation/no-progress policy; an Implementation attempt retired without a
+Review Request retries only Implementation as an interruption.
 The final passing outcome leaves the Task In Progress. Reconciliation first confirms
 agent retirement and all retained resources, then observes the clean active Managed
 Worktree again. A separate writer transaction rechecks Dispatched eligibility,
@@ -280,8 +283,8 @@ allowance once retirement and every retained resource are reconciled.
 Remediation cycles arise only from review handbacks, not from Implementation outcomes,
 which no longer exist.
 
-Each handback records a cycle baseline. At the next failed
-Implementation, review handback or final passing review, unchanged deliverable
+Each handback records a cycle baseline. At the next
+review handback or final passing review, unchanged deliverable
 evidence with no newly verified Finding resolution is **no progress**. Verified
 resolution of an overlooked fix counts even at the same commit. Earlier review
 passes and new Findings alone do not establish progress. Exhaustion/no progress
@@ -304,7 +307,7 @@ checkout (including committed, tracked and untracked work) is preserved. Genuine
 interrupted retained work requires the operator to use the separate retained-work
 recovery operation after verified retirement. Preserve the checkout rather than
 resetting, discarding changes, or reporting completion merely to hand off work. This does not
-change substantive failed Implementation or `human-input` semantics.
+change `human-input` semantics.
 
 Exact replay of a previously accepted outcome, including a historical changed-evidence
 interruption, still returns the original durable result after authorization;
