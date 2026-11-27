@@ -340,6 +340,66 @@ impl SqliteProjectRepository {
         tx.commit().map_err(storage_error)?;
         Ok(attempt)
     }
+    /// Review Request: derive the Implementation Pass from the bound attempt and observed clean HEAD
+    /// and accept it through `submit_outcome`. Replay and conflict are decided before the observation
+    /// is consulted so an accepted request stays idempotent after retirement; an invalid observation
+    /// rejects before any hold or Assessment is recorded.
+    pub(super) fn submit_review_request(
+        &self,
+        record: u64,
+        assignment: &str,
+        observed: &Result<Evidence, RegistrationError>,
+    ) -> Result<AcceptedOutcome, RegistrationError> {
+        let attempt = {
+            let c = self
+                .connection
+                .lock()
+                .map_err(|_| error("storage", "storage lock poisoned"))?;
+            let attempt = super::task_attempts::binding(&c, assignment)?
+                .filter(|attempt| attempt.record_id == record)
+                .ok_or_else(|| {
+                    error(
+                        "review-request-not-implementation",
+                        "Review Request requires an Assignment bound to the Implementation Check",
+                    )
+                })?;
+            if checks::load(&c, record, attempt.check_id)?.position != 0 {
+                return Err(error(
+                    "review-request-not-implementation",
+                    "Review Request requires an Assignment bound to the Implementation Check",
+                ));
+            }
+            let stored: (Option<String>, Option<String>) = c
+                .query_row(
+                    "SELECT outcome_json, result_json FROM record_attempts WHERE id = ?1",
+                    [&attempt.id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .map_err(storage_error)?;
+            if let (Some(outcome), Some(result)) = stored {
+                let accepted: OutcomeInput = serde_json::from_str(&outcome).map_err(json_error)?;
+                if !accepted.is_review_request(assignment) {
+                    return Err(error(
+                        "outcome-conflict",
+                        "attempt already accepted a different outcome",
+                    ));
+                }
+                return serde_json::from_str(&result).map_err(json_error);
+            }
+            attempt
+        };
+        let evidence = observed.as_ref().map_err(|e| {
+            RegistrationError::new(
+                "review-request-worktree-invalid",
+                format!(
+                    "Review Request needs a clean, committed Managed Worktree ({}: {}); commit your work and request review again",
+                    e.code, e.message
+                ),
+            )
+        })?;
+        let input = OutcomeInput::review_request(&attempt, evidence.clone(), assignment);
+        self.submit_outcome(record, &input, Some(assignment), Some(observed))
+    }
     // Replay, authorization, Assessment and handback share this acceptance boundary.
     #[allow(clippy::too_many_lines)]
     pub(super) fn submit_outcome(

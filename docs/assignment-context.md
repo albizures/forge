@@ -210,6 +210,20 @@ Task workers submit their bound Check outcome rather than calling Done:
 forge assignment outcome --file outcome.json --json
 ```
 
+An Implementation worker whose committed work is ready finishes with a Review Request,
+which needs no outcome file and states no verdict:
+
+```sh
+forge assignment request-review --json
+```
+
+Commit all work first: a dirty or invalid Managed Worktree is rejected with
+`review-request-worktree-invalid` and nothing is recorded. Forge records the clean HEAD it
+observes as the Implementation Check's pass and hands the work to the review Checks. Only
+the Implementation Check's Assignment may use it (`review-request-not-implementation`
+otherwise). After requesting review, end your turn and wait. See
+[Review Requests](dispatch.md#check-attempts-and-controlled-acceptance).
+
 Use the actual `bound.checkAttempt` id/generation/input and the clean authorized
 output evidence. An `interrupted` outcome must instead repeat its bound input
 evidence. Changed evidence is rejected with `interrupted-evidence-changed`, without
