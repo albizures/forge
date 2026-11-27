@@ -1027,6 +1027,26 @@ pub trait RecordRepository: ProjectRepository {
         project_slugs: Option<Vec<String>>,
         generated_by_ids: Vec<u64>,
     ) -> Result<Record, RegistrationError>;
+    /// Opens a Grilling and its planning observations atomically.
+    ///
+    /// # Errors
+    /// Rejects unsupported persistence, invalid scope or storage errors.
+    fn open_grilling_with_planning(
+        &self,
+        body: &str,
+        wayfinder_id: u64,
+        project_slugs: Option<Vec<String>>,
+        generated_by_ids: Vec<u64>,
+        observations: &[planning_context::ProjectPlanningContext],
+    ) -> Result<Record, RegistrationError> {
+        if !observations.is_empty() {
+            return Err(RegistrationError::new(
+                "planning-context-unavailable",
+                "planning context persistence is unavailable",
+            ));
+        }
+        self.open_grilling_under_wayfinder(body, wayfinder_id, project_slugs, generated_by_ids)
+    }
     /// Lists Records matching Project Scope membership and lifecycle status.
     ///
     /// # Errors
