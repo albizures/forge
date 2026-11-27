@@ -393,9 +393,6 @@ impl HerdrAdapter {
                     "unavailable" | "timeout" | "temporarily_unavailable" => {
                         AgentAdapterError::Transient(format!("Herdr {method}: {code}"))
                     }
-                    "agentblocked" | "agent_blocked" => {
-                        AgentAdapterError::InvalidRequest("agentblocked".into())
-                    }
                     _ => AgentAdapterError::InvalidRequest(format!("Herdr {method}: {code}")),
                 });
             }

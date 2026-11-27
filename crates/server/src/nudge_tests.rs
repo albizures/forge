@@ -6,7 +6,7 @@ use super::recovery::registered_policy;
 use forge_app::check_templates::{CheckCriterion, TemplateReplacement};
 
 /// A clean Managed Worktree whose HEAD the test controls; no Git is invoked.
-struct CleanCheckout(Arc<Mutex<String>>);
+pub(super) struct CleanCheckout(Arc<Mutex<String>>);
 impl forge_app::RepositoryInspector for CleanCheckout {
     fn inspect(&self, _: &Path) -> Result<forge_app::Project, forge_app::RegistrationError> {
         unreachable!()
@@ -54,7 +54,7 @@ impl forge_app::ManagedWorktreeAdapter for CleanWorktrees {
 
 /// The daemon's production composition, except that Git is stubbed out: provider adapters come
 /// from `ServerAgentDispatchAdapterFactory`, which wraps Herdr in `CapabilityDeliveryAdapter`.
-fn daemon_application(fixture: &Fixture, head: &Arc<Mutex<String>>) -> Application {
+pub(super) fn daemon_application(fixture: &Fixture, head: &Arc<Mutex<String>>) -> Application {
     let open = || Box::new(fixture.store());
     Application::with_managed_worktrees_and_agent_dispatch(
         open(),

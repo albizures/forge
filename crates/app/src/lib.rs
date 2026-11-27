@@ -16,6 +16,7 @@ pub mod nudges;
 pub mod outcomes;
 pub mod prerequisites;
 mod profile_catalog;
+mod provisioning_holds;
 pub mod retained_work;
 pub mod spec_plans;
 pub mod stacks;
@@ -1409,53 +1410,51 @@ fn log_adapter_failure(assignment: &AgentAssignment, operation: &str, error: &Ag
         detail = %safe_adapter_detail(message), "agent dispatch adapter failed");
 }
 
+/// `Herdr <method>: <code>` when the message is a reviewed Herdr method with a bare
+/// identifier code. Herdr's `error.message`, trailing text and any other code shape stay
+/// withheld: they are provider-controlled and may carry paths or credentials.
+fn safe_herdr_detail(message: &str) -> Option<String> {
+    let (method, code) = message.strip_prefix("Herdr ")?.split_once(": ")?;
+    let method_reviewed = matches!(
+        method,
+        "ping"
+            | "state.get"
+            | "workspace.create"
+            | "workspace.get"
+            | "tab.create"
+            | "tab.get"
+            | "pane.split"
+            | "pane.get"
+            | "agent.start"
+            | "agent.prompt"
+            | "agent.get"
+            | "agent.list"
+            | "agent.stop"
+            | "tab.close"
+            | "pane.close"
+    );
+    // `^[a-z][a-z0-9_-]{0,63}$`
+    let mut bytes = code.bytes();
+    let code_is_identifier = code.len() <= 64
+        && bytes.next().is_some_and(|b| b.is_ascii_lowercase())
+        && bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-');
+    (method_reviewed && code_is_identifier).then(|| format!("Herdr {method}: {code}"))
+}
+
+fn adapter_error_message(error: &AgentAdapterError) -> &str {
+    match error {
+        AgentAdapterError::Endpoint(message)
+        | AgentAdapterError::Transient(message)
+        | AgentAdapterError::NotFound(message)
+        | AgentAdapterError::Conflict(message)
+        | AgentAdapterError::InvalidRequest(message)
+        | AgentAdapterError::Cleanup(message) => message,
+    }
+}
+
 fn safe_adapter_detail(message: &str) -> String {
-    if let Some((method, code)) = message
-        .strip_prefix("Herdr ")
-        .and_then(|s| s.split_once(": "))
-        && matches!(
-            method,
-            "ping"
-                | "state.get"
-                | "workspace.create"
-                | "workspace.get"
-                | "tab.create"
-                | "tab.get"
-                | "pane.split"
-                | "pane.get"
-                | "agent.start"
-                | "agent.prompt"
-                | "agent.get"
-                | "agent.list"
-                | "agent.stop"
-                | "tab.close"
-                | "pane.close"
-        )
-        && (matches!(
-            code,
-            "not_found"
-                | "not-found"
-                | "conflict"
-                | "already_exists"
-                | "already-exists"
-                | "unavailable"
-                | "timeout"
-                | "temporarily_unavailable"
-                | "unknown"
-        ) || method == "agent.start"
-            && matches!(
-                code,
-                "invalid_agent_name"
-                    | "unsupported_agent_kind"
-                    | "invalid_agent_argument"
-                    | "invalid_agent_timeout"
-                    | "agent_pane_not_found"
-                    | "agent_pane_unavailable"
-                    | "agent_start_input_failed"
-                    | "agent_not_ready"
-            ))
-    {
-        return format!("Herdr {method}: {code}");
+    if let Some(detail) = safe_herdr_detail(message) {
+        return detail;
     }
     match message {
         "Assignment has no Agent Workspace" => "Assignment has no Agent Workspace",
@@ -1654,6 +1653,19 @@ fn reconcile_assignment<A: AgentDispatchAdapter + ?Sized>(
     assignment: &AgentAssignment,
     controlled_acceptance: bool,
 ) -> Result<AssignmentReconciliation, RegistrationError> {
+    reconcile_assignment_reporting(repository, adapter, assignment, controlled_acceptance)
+        .map(|(outcome, _)| outcome)
+}
+
+/// Like `reconcile_assignment`, and also returns the redacted detail of a failed provisioning
+/// call (`Herdr <method>: <code>` or "details withheld"), which the outcome alone cannot tell
+/// apart from normal waiting for acknowledgement.
+fn reconcile_assignment_reporting<A: AgentDispatchAdapter + ?Sized>(
+    repository: &dyn AgentDispatchRepository,
+    adapter: &A,
+    assignment: &AgentAssignment,
+    controlled_acceptance: bool,
+) -> Result<(AssignmentReconciliation, Option<String>), RegistrationError> {
     if !controlled_acceptance
         && assignment.profile.record_type == RecordType::Task
         && assignment.state == AgentAssignmentState::Provisioning
@@ -1670,7 +1682,12 @@ fn reconcile_assignment<A: AgentDispatchAdapter + ?Sized>(
         | AgentAssignmentState::Blocked
         | AgentAssignmentState::Unknown => adapter.observe(&context),
     };
+    let mut failure = None;
     if let Err(error) = &observed {
+        failure = (assignment.state == AgentAssignmentState::Provisioning).then(|| {
+            safe_herdr_detail(adapter_error_message(error))
+                .unwrap_or_else(|| provisioning_holds::WITHHELD.to_owned())
+        });
         let operation = if assignment.state == AgentAssignmentState::Provisioning {
             "provision"
         } else {
@@ -1683,28 +1700,25 @@ fn reconcile_assignment<A: AgentDispatchAdapter + ?Sized>(
     if assignment.state == AgentAssignmentState::Provisioning
         && (observed.is_ok() || repository.agent_launch_intent(&assignment.id)?.is_some())
     {
-        return if repository.agent_assignment(&assignment.id)?.state
+        let outcome = if repository.agent_assignment(&assignment.id)?.state
             == AgentAssignmentState::Provisioning
         {
-            Ok(AssignmentReconciliation::AwaitingAcknowledgement)
+            AssignmentReconciliation::AwaitingAcknowledgement
         } else {
-            Ok(AssignmentReconciliation::Stale)
+            AssignmentReconciliation::Stale
         };
+        return Ok((outcome, failure));
     }
     let observation = match observed {
         Ok(observation) => observation,
         Err(error) => {
-            return Ok(AssignmentReconciliation::Retained(match error {
-                AgentAdapterError::Endpoint(_) => AdapterRetention::Endpoint,
-                AgentAdapterError::Transient(_) => AdapterRetention::Transient,
-                AgentAdapterError::NotFound(_) => AdapterRetention::NotFound,
-                AgentAdapterError::Conflict(_) => AdapterRetention::Conflict,
-                AgentAdapterError::InvalidRequest(_) => AdapterRetention::InvalidRequest,
-                AgentAdapterError::Cleanup(_) => AdapterRetention::Cleanup,
-            }));
+            return Ok((
+                AssignmentReconciliation::Retained(retention_from_error(&error)),
+                failure,
+            ));
         }
     };
-    match observation {
+    let outcome = match observation {
         AgentObservation::Working => {
             update_assignment_state(repository, assignment, AgentAssignmentState::Working)
         }
@@ -1721,14 +1735,10 @@ fn reconcile_assignment<A: AgentDispatchAdapter + ?Sized>(
         AgentObservation::Absent => {
             if let Err(error) = adapter.retire(&context, repository) {
                 log_adapter_failure(assignment, "retire", &error);
-                return Ok(AssignmentReconciliation::Retained(match error {
-                    AgentAdapterError::Endpoint(_) => AdapterRetention::Endpoint,
-                    AgentAdapterError::Transient(_) => AdapterRetention::Transient,
-                    AgentAdapterError::NotFound(_) => AdapterRetention::NotFound,
-                    AgentAdapterError::Conflict(_) => AdapterRetention::Conflict,
-                    AgentAdapterError::InvalidRequest(_) => AdapterRetention::InvalidRequest,
-                    AgentAdapterError::Cleanup(_) => AdapterRetention::Cleanup,
-                }));
+                return Ok((
+                    AssignmentReconciliation::Retained(retention_from_error(&error)),
+                    None,
+                ));
             }
             repository
                 .compare_and_close_agent_assignment(
@@ -1743,7 +1753,8 @@ fn reconcile_assignment<A: AgentDispatchAdapter + ?Sized>(
                     )
                 })
         }
-    }
+    }?;
+    Ok((outcome, None))
 }
 
 fn task_dispatch_unsupported() -> RegistrationError {
@@ -1784,7 +1795,10 @@ pub struct AgentDispatchScan {
 /// Reconciles all open Assignments without holding storage over adapter calls.
 ///
 /// The caller supplies time so grace and retry behavior is deterministic in tests and durable
-/// across daemon restarts. A provisioning failure holds the Task and retains its Assignment.
+/// across daemon restarts. This scan covers Assignments that are not Check-bound (Grillings):
+/// an uncertain provisioning failure holds the record and retains its Assignment. Check-bound
+/// Task Assignments are skipped here; their launch failure is held when the launch is
+/// attempted and their acknowledgement deadline by the Nudge pass (`nudge_idle_agents`).
 #[allow(clippy::missing_errors_doc)]
 pub fn reconcile_agent_dispatch<F: AgentDispatchAdapterFactory + ?Sized>(
     repository: &dyn AgentDispatchRepository,
@@ -3304,7 +3318,7 @@ impl Application {
             );
         })?;
         if scan.acquired_lease {
-            if let Err(error) = self.nudge_idle_agents() {
+            if let Err(error) = self.nudge_idle_agents(now_millis) {
                 tracing::warn!(
                     phase = "nudge-agents",
                     code = error.code,

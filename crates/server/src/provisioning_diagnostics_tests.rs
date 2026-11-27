@@ -149,3 +149,22 @@ fn provisioning_failures_with_launch_intent_redact_unreviewed_details() {
         }
     }
 }
+
+#[test]
+fn any_bare_identifier_herdr_code_is_logged_and_other_shapes_are_withheld() {
+    for code in ["mystery_failure", "agentblocked", "x"] {
+        let logs = capture_provisioning_diagnostic(true, Some(Box::leak(
+            format!("Herdr agent.start: {code}").into_boxed_str(),
+        )));
+        assert!(logs.contains(&format!("Herdr agent.start: {code}")), "{logs}");
+    }
+    for code in ["Upper", "has space", "a/b", "a:b", "-lead", "9lead", "", &"a".repeat(65)] {
+        let message: &'static str = Box::leak(format!("Herdr agent.start: {code}").into_boxed_str());
+        let logs = capture_provisioning_diagnostic(true, Some(message));
+        assert!(logs.contains("details withheld"), "{code}: {logs}");
+        assert!(!logs.contains("Herdr agent.start:"), "{code}: {logs}");
+    }
+    let longest = "a".repeat(64);
+    let message: &'static str = Box::leak(format!("Herdr agent.start: {longest}").into_boxed_str());
+    assert!(capture_provisioning_diagnostic(true, Some(message)).contains(&longest));
+}

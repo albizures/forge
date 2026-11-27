@@ -302,7 +302,34 @@ impl Application {
             recovery.as_ref(),
         )?;
         if !existing {
-            crate::reconcile_assignment(repository, adapter.as_ref(), &assignment, true)?;
+            // A failed launch is not "waiting for acknowledgement": hold the Task at once.
+            match crate::reconcile_assignment_reporting(
+                repository,
+                adapter.as_ref(),
+                &assignment,
+                true,
+            ) {
+                Ok((_, Some(detail))) => {
+                    crate::provisioning_holds::hold_failed_launch(
+                        repository,
+                        &assignment,
+                        &detail,
+                    )?;
+                }
+                Ok((_, None)) => {}
+                Err(error) => {
+                    // Provisioning could not even start: the claimed Assignment would
+                    // otherwise stay silently open. Keep the original error for the caller.
+                    tracing::warn!(assignment_id = %assignment.id, code = error.code,
+                        "Task Assignment provisioning could not be attempted");
+                    crate::provisioning_holds::hold_failed_launch(
+                        repository,
+                        &assignment,
+                        crate::provisioning_holds::WITHHELD,
+                    )?;
+                    return Err(error);
+                }
+            }
         }
         Ok((repository.agent_assignment(&assignment.id)?, existing))
     }
