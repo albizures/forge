@@ -1703,6 +1703,25 @@ pub fn render_record(record: &RecordResponse) -> String {
         record.body
     );
     render_completion(record, &mut text);
+    for observation in &record.planning_context {
+        use forge_app::planning_context::PlanningContext;
+        match &observation.context {
+            PlanningContext::Available { repository, branch } => {
+                let _ = write!(
+                    text,
+                    "\nPlanning context {}: repository {repository}, branch {branch}",
+                    observation.project
+                );
+            }
+            PlanningContext::Unavailable { reason } => {
+                let _ = write!(
+                    text,
+                    "\nPlanning context {}: unavailable ({reason})",
+                    observation.project
+                );
+            }
+        }
+    }
     for relationship in &record.relationships {
         let _ = write!(
             text,

@@ -139,6 +139,25 @@ async fn planning_records_capture_only_the_initiating_checkout() {
             .unwrap()
             .contains("branch unavailable")
     );
+    let detached_id = detached["id"].as_u64().unwrap().to_string();
+    let human = Command::new(env!("CARGO_BIN_EXE_forge"))
+        .args([
+            "record",
+            "show",
+            &detached_id,
+            "--server-url",
+            &endpoint,
+            "--workspace",
+            "one",
+        ])
+        .current_dir(&other)
+        .output()
+        .unwrap();
+    assert!(human.status.success());
+    assert!(
+        String::from_utf8_lossy(&human.stdout)
+            .contains("Planning context one/api: unavailable (branch unavailable")
+    );
     let id = linked_spec["id"].as_u64().unwrap().to_string();
     let shown = run(&other, &["record", "show", &id]);
     assert_eq!(shown["planning_context"], linked_spec["planning_context"]);
