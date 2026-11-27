@@ -11,87 +11,9 @@ use std::sync::{Arc, Mutex};
 mod fixture;
 use fixture::Fixture;
 
-/// The scripted agent: what Herdr would report and how `agent.prompt` behaves.
-struct Script {
-    turn: Mutex<AgentTurn>,
-    prompts: Mutex<Vec<AgentPrompt>>,
-    prompt_result: Mutex<Result<AgentPromptOutcome, AgentAdapterError>>,
-}
-impl Script {
-    fn new() -> Arc<Self> {
-        Arc::new(Self {
-            turn: Mutex::new(turn(AgentObservation::Working, Some(0))),
-            prompts: Mutex::new(vec![]),
-            prompt_result: Mutex::new(Ok(AgentPromptOutcome::Delivered)),
-        })
-    }
-    fn report(&self, observation: AgentObservation, seq: u64) {
-        *self.turn.lock().unwrap() = turn(observation, Some(seq));
-    }
-    fn sent(&self) -> Vec<String> {
-        self.prompts
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|p| p.text.clone())
-            .collect()
-    }
-}
-fn turn(observation: AgentObservation, completion_seq: Option<u64>) -> AgentTurn {
-    AgentTurn {
-        observation,
-        completion_seq,
-    }
-}
-struct Factory(Arc<Script>);
-impl AgentDispatchAdapterFactory for Factory {
-    fn adapter_for(
-        &self,
-        _: &AgentProfile,
-    ) -> Result<Box<dyn AgentDispatchAdapter>, AgentAdapterError> {
-        Ok(Box::new(Adapter(self.0.clone())))
-    }
-}
-struct Adapter(Arc<Script>);
-impl AgentDispatchAdapter for Adapter {
-    fn probe(&self) -> Result<(), AgentAdapterError> {
-        Ok(())
-    }
-    fn verify_workspace(&self, id: &str) -> Result<DispatchWorkspace, AgentAdapterError> {
-        Ok(DispatchWorkspace { id: id.into() })
-    }
-    fn provision(
-        &self,
-        _: &AgentDispatchContext,
-        _: &dyn AgentDispatchRepository,
-    ) -> Result<(), AgentAdapterError> {
-        Ok(())
-    }
-    fn observe(&self, _: &AgentDispatchContext) -> Result<AgentObservation, AgentAdapterError> {
-        Ok(self.0.turn.lock().unwrap().observation)
-    }
-    fn observe_turn(&self, _: &AgentDispatchContext) -> Result<AgentTurn, AgentAdapterError> {
-        Ok(*self.0.turn.lock().unwrap())
-    }
-    fn prompt(
-        &self,
-        _: &AgentDispatchContext,
-        prompt: &AgentPrompt,
-    ) -> Result<AgentPromptOutcome, AgentAdapterError> {
-        self.0.prompts.lock().unwrap().push(prompt.clone());
-        self.0.prompt_result.lock().unwrap().clone()
-    }
-    fn recover(&self, _: &AgentDispatchContext) -> Result<AgentObservation, AgentAdapterError> {
-        unreachable!()
-    }
-    fn retire(
-        &self,
-        _: &AgentDispatchContext,
-        _: &dyn AgentDispatchRepository,
-    ) -> Result<(), AgentAdapterError> {
-        Ok(())
-    }
-}
+#[path = "support/scripted_agent.rs"]
+mod scripted;
+use scripted::{Factory, Script, turn};
 
 struct World {
     f: Fixture,

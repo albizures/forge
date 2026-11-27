@@ -183,6 +183,28 @@ impl Fixture {
         }
     }
 
+    /// Register a newer Task profile revision with `body` and make it the Workspace default; the
+    /// Check Template keeps pinning the revision the Fixture started with.
+    pub fn select_newer_profile(&self, body: &str) -> u32 {
+        std::fs::write(
+            self.root.join(".agents/profiles/work.md"),
+            format!("---\nversion: 1\nruntime: herdr/pi\nmodel: openai/gpt-5\nthinkingLevel: low\ntools: [read]\n---\n{body}"),
+        )
+        .unwrap();
+        let policy = ResourceCatalog::discover(&self.root.join("operator"), &self.root)
+            .unwrap()
+            .resolve(&self.root, ".agents/profiles/work.md")
+            .unwrap();
+        let newer = self
+            .store
+            .register_agent_profile("test", RecordType::Task, &policy)
+            .unwrap();
+        self.store
+            .select_workspace_profile("test", RecordType::Task, Some(newer.revision))
+            .unwrap();
+        newer.revision
+    }
+
     pub fn app(&self) -> Application {
         self.app_with(Box::new(Provider {
             unavailable: Arc::new(AtomicBool::new(false)),
