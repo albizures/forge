@@ -13,6 +13,7 @@ pub mod checks;
 pub mod completion;
 pub mod findings;
 pub mod outcomes;
+pub mod planning_context;
 pub mod prerequisites;
 mod profile_catalog;
 pub mod spec_plans;
@@ -185,6 +186,8 @@ pub struct Record {
     pub body: String,
     /// Immutable, lexically ordered Project Scope selected at opening.
     pub project_slugs: Vec<String>,
+    /// Planning observations captured at creation, empty for older Records.
+    pub planning_context: Vec<planning_context::ProjectPlanningContext>,
     /// Explicit policy; never inferred from status or absence of Assignments.
     pub execution_mode: ExecutionMode,
     /// The Record's lifecycle status.
@@ -950,6 +953,23 @@ pub trait RecordRepository: ProjectRepository {
     ///
     /// Returns a user-facing validation or storage failure.
     fn open_typed_record(&self, record: &NewTypedRecord) -> Result<Record, RegistrationError>;
+    /// Opens a typed Record and its planning observations in one transaction.
+    ///
+    /// # Errors
+    /// Rejects unsupported persistence, invalid observations or storage failures.
+    fn open_typed_record_with_planning(
+        &self,
+        record: &NewTypedRecord,
+        observations: &[planning_context::ProjectPlanningContext],
+    ) -> Result<Record, RegistrationError> {
+        if !observations.is_empty() {
+            return Err(RegistrationError::new(
+                "planning-context-unavailable",
+                "planning context persistence is unavailable",
+            ));
+        }
+        self.open_typed_record(record)
+    }
     /// Persists the immutable Task Base Commit captured when the Task opens.
     ///
     /// # Errors
@@ -1009,6 +1029,26 @@ pub trait RecordRepository: ProjectRepository {
         project_slugs: Option<Vec<String>>,
         generated_by_ids: Vec<u64>,
     ) -> Result<Record, RegistrationError>;
+    /// Opens a Grilling and its planning observations atomically.
+    ///
+    /// # Errors
+    /// Rejects unsupported persistence, invalid scope or storage errors.
+    fn open_grilling_with_planning(
+        &self,
+        body: &str,
+        wayfinder_id: u64,
+        project_slugs: Option<Vec<String>>,
+        generated_by_ids: Vec<u64>,
+        observations: &[planning_context::ProjectPlanningContext],
+    ) -> Result<Record, RegistrationError> {
+        if !observations.is_empty() {
+            return Err(RegistrationError::new(
+                "planning-context-unavailable",
+                "planning context persistence is unavailable",
+            ));
+        }
+        self.open_grilling_under_wayfinder(body, wayfinder_id, project_slugs, generated_by_ids)
+    }
     /// Lists Records matching Project Scope membership and lifecycle status.
     ///
     /// # Errors
@@ -3628,6 +3668,31 @@ impl Application {
         self.open_typed_record(RecordType::Spec, body, vec![project_slug])
     }
 
+    /// Opens a Spec with initiating-client observations and provenance atomically.
+    ///
+    /// # Errors
+    /// Rejects invalid input, observations, provenance or storage failures.
+    pub fn open_spec_with_planning(
+        &self,
+        body: &str,
+        project_slug: String,
+        generated_by_ids: Vec<u64>,
+        observations: &[planning_context::ProjectPlanningContext],
+    ) -> Result<Record, RegistrationError> {
+        Self::require_body(body)?;
+        let scope = vec![project_slug];
+        let observations = planning_context::with_unavailable_projects(observations, &scope);
+        self.records.open_typed_record_with_planning(
+            &NewTypedRecord {
+                record_type: RecordType::Spec,
+                body: body.to_owned(),
+                project_slugs: scope,
+                generated_by_ids,
+            },
+            &observations,
+        )
+    }
+
     /// Opens a Wayfinder with immutable Project Scope, possibly Projectless within a selected Workspace.
     ///
     /// # Errors
@@ -3732,6 +3797,33 @@ impl Application {
             wayfinder_id,
             project_slugs,
             generated_by_ids,
+        )
+    }
+
+    /// Opens a Grilling with initiating-client observations atomically.
+    ///
+    /// # Errors
+    /// Rejects invalid input, parent scope or storage failures.
+    pub fn open_grilling_with_planning(
+        &self,
+        body: &str,
+        wayfinder_id: u64,
+        project_slugs: Option<Vec<String>>,
+        generated_by_ids: Vec<u64>,
+        observations: &[planning_context::ProjectPlanningContext],
+    ) -> Result<Record, RegistrationError> {
+        Self::require_body(body)?;
+        let scope = match &project_slugs {
+            Some(scope) => scope.clone(),
+            None => self.records.show_record(wayfinder_id)?.project_slugs,
+        };
+        let observations = planning_context::with_unavailable_projects(observations, &scope);
+        self.records.open_grilling_with_planning(
+            body,
+            wayfinder_id,
+            project_slugs,
+            generated_by_ids,
+            &observations,
         )
     }
 
@@ -4126,6 +4218,7 @@ mod tests {
         fn open_record(&self, record: &NewRecord) -> Result<Record, RegistrationError> {
             let mut records = self.records.lock().unwrap();
             let record = Record {
+                planning_context: vec![],
                 workspace_id: "test".into(),
                 id: (records.len() + 1) as u64,
                 record_type: RecordType::Generic,
@@ -4145,6 +4238,7 @@ mod tests {
                 workspace_id: "test".into(),
                 id: (records.len() + 1) as u64,
                 record_type: record.record_type,
+                planning_context: vec![],
                 execution_mode: if record.record_type == RecordType::Task
                     && !record.project_slugs.is_empty()
                 {
@@ -4197,6 +4291,7 @@ mod tests {
                 id: task_id,
                 record_type: RecordType::Task,
                 body: body.to_owned(),
+                planning_context: vec![],
                 project_slugs: spec.project_slugs,
                 execution_mode: ExecutionMode::Dispatched,
                 workspace_id: spec.workspace_id,
@@ -4257,6 +4352,7 @@ mod tests {
                 id: task_id,
                 record_type: RecordType::Task,
                 body: body.to_owned(),
+                planning_context: vec![],
                 project_slugs: vec![project_slug],
                 execution_mode: ExecutionMode::Dispatched,
                 workspace_id: wayfinder.workspace_id,
@@ -4323,6 +4419,7 @@ mod tests {
                 workspace_id: wayfinder.workspace_id,
                 id: grilling_id,
                 record_type: RecordType::Grilling,
+                planning_context: vec![],
                 execution_mode: ExecutionMode::Manual,
                 body: body.to_owned(),
                 project_slugs,
@@ -4872,6 +4969,7 @@ mod tests {
     fn task_repository() -> Repository {
         Repository {
             records: Mutex::new(vec![Record {
+                planning_context: vec![],
                 workspace_id: "test".into(),
                 id: 7,
                 record_type: RecordType::Task,
@@ -4931,6 +5029,7 @@ mod tests {
     #[test]
     fn worktree_eligibility_requires_an_open_single_project_task() {
         let mut record = Record {
+            planning_context: vec![],
             workspace_id: "test".into(),
             id: 7,
             record_type: RecordType::Task,
@@ -5228,6 +5327,7 @@ mod tests {
                 .open_record("body", vec!["zeta".into(), "alpha".into()])
                 .unwrap(),
             Record {
+                planning_context: vec![],
                 workspace_id: "test".into(),
                 id: 1,
                 record_type: RecordType::Generic,

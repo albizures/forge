@@ -14,6 +14,7 @@ fn application_inspection_emits_canonical_waits_for_and_preserves_unrelated_kind
         child_id: 0,
     };
     let record = Record {
+        planning_context: vec![],
         workspace_id: "isolated".into(),
         id: 42,
         record_type: RecordType::Task,

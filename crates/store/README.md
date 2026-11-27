@@ -9,7 +9,7 @@ by migrations—not just the initial `CREATE TABLE` statements.
 - [`src/lib.rs`](src/lib.rs): `SqliteProjectRepository::from_connection`,
   `migrate_*` functions, profile seeds, and repository operations.
 - [`src/workspaces.rs`](src/workspaces.rs): Workspace ownership and Project identity.
-- [`src/upgrade.rs`](src/upgrade.rs): explicit offline schema 7 → 8 → 9 → 10 → 11 → 12 → 13 → 14 conversion,
+- [`src/upgrade.rs`](src/upgrade.rs): explicit offline schema 7 → 8 → 9 → 10 → 11 → 12 → 13 → 14 → 15 conversion,
   frozen contract validation, consistent snapshots, and preservation inventories.
   See [Revision State upgrades](../../docs/state-upgrades.md) for orchestration.
 - [`src/record_workspaces.rs`](src/record_workspaces.rs): Record ownership,
@@ -45,8 +45,16 @@ is documented separately in [Records](../../docs/records.md),
   Most references do **not** cascade.
 - Ordinary repository opening accepts only the current marked schema revision.
   Triggers and repository validation also enforce invariants. Explicit managed
-  copy-and-upgrade targets revision 14 from revisions 7 through 14; unsupported
+  copy-and-upgrade targets revision 15 from revisions 7 through 15; unsupported
   stores are rejected without automatic conversion or reset.
+
+## Planning observations (revision 15)
+
+`record_planning_context` is an additive table keyed by `(record_id, project_slug)`,
+with a composite foreign key to `record_projects`. An available observation stores
+nonblank `repository` and `branch`; an unavailable observation stores a nonblank
+`reason` instead. An absent row does not infer context for older Records. This
+offline upgrade creates an empty table without backfilling historical observations.
 
 ## Project Base Branch Policy (revision 14)
 

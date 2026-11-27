@@ -262,6 +262,9 @@ impl SqliteProjectRepository {
         stacks::schema(connection)?;
         ordering_dependencies::schema(connection)?;
         project_policy::schema(connection)?;
+        connection
+            .execute_batch(include_str!("planning_context.sql"))
+            .map_err(storage_error)?;
         Ok(())
     }
 }
@@ -979,7 +982,22 @@ impl RecordRepository for SqliteProjectRepository {
     }
 
     fn open_typed_record(&self, record: &NewTypedRecord) -> Result<Record, RegistrationError> {
+        self.open_typed_record_with_planning(record, &[])
+    }
+
+    fn open_typed_record_with_planning(
+        &self,
+        record: &NewTypedRecord,
+        observations: &[forge_app::planning_context::ProjectPlanningContext],
+    ) -> Result<Record, RegistrationError> {
         validate_typed_record(record)?;
+        if !observations.is_empty() && record.record_type != RecordType::Spec {
+            return Err(RegistrationError::new(
+                "invalid-planning-context",
+                "only a Spec may receive direct planning observations",
+            ));
+        }
+        forge_app::planning_context::validate_scope(observations, &record.project_slugs)?;
         let mut connection = self
             .connection
             .lock()
@@ -1014,6 +1032,7 @@ impl RecordRepository for SqliteProjectRepository {
                 )
                 .map_err(storage_error)?;
         }
+        insert_planning_observations(&transaction, id, observations)?;
         insert_update(&transaction, id, RecordUpdateKind::Created)?;
         add_generated_by_relationships(&transaction, id, &record.generated_by_ids)?;
         let opened = load_record(&transaction, id)?;
@@ -1187,6 +1206,17 @@ impl RecordRepository for SqliteProjectRepository {
         project_slugs: Option<Vec<String>>,
         generated_by_ids: Vec<u64>,
     ) -> Result<Record, RegistrationError> {
+        self.open_grilling_with_planning(body, wayfinder_id, project_slugs, generated_by_ids, &[])
+    }
+
+    fn open_grilling_with_planning(
+        &self,
+        body: &str,
+        wayfinder_id: u64,
+        project_slugs: Option<Vec<String>>,
+        generated_by_ids: Vec<u64>,
+        observations: &[forge_app::planning_context::ProjectPlanningContext],
+    ) -> Result<Record, RegistrationError> {
         let mut connection = self
             .connection
             .lock()
@@ -1224,6 +1254,7 @@ impl RecordRepository for SqliteProjectRepository {
                 "Grilling Project Scope must be a subset of the Wayfinder scope",
             ));
         }
+        forge_app::planning_context::validate_scope(observations, &project_slugs)?;
         transaction
             .execute(
                 "INSERT INTO records (record_type, body, status, workspace_id) VALUES ('grilling', ?1, 'open', ?2)",
@@ -1239,6 +1270,7 @@ impl RecordRepository for SqliteProjectRepository {
                 )
                 .map_err(storage_error)?;
         }
+        insert_planning_observations(&transaction, grilling_id, observations)?;
         transaction
             .execute(
                 "INSERT INTO record_relationships (from_id, to_id, parent_id, child_id, kind) VALUES (?1, ?2, ?2, ?1, 'parent-child')",
@@ -4017,7 +4049,9 @@ fn load_record(connection: &Connection, id: u64) -> Result<Record, RegistrationE
             _ => Err(RegistrationError::new("storage", "stored Record has an invalid Relationship kind")),
         })
         .collect::<Result<Vec<_>, RegistrationError>>()?;
+    let planning_context = load_planning_observations(connection, id)?;
     Ok(Record {
+        planning_context,
         workspace_id: record_workspaces::owner(connection, id)?,
         id,
         record_type: record_type(&stored_record_type)?,
@@ -4119,6 +4153,72 @@ fn migrate_record_status_schema(connection: &Connection) -> Result<(), Registrat
     Ok(())
 }
 
+fn load_planning_observations(
+    connection: &Connection,
+    id: u64,
+) -> Result<Vec<forge_app::planning_context::ProjectPlanningContext>, RegistrationError> {
+    use forge_app::planning_context::{PlanningContext, ProjectPlanningContext};
+    // Offline upgrade validation reads historical Records before the new table exists.
+    let revision: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(storage_error)?;
+    if (1..15).contains(&revision) {
+        return Ok(vec![]);
+    }
+    let mut statement = connection.prepare("SELECT project_slug, status, repository, branch, reason FROM record_planning_context WHERE record_id = ?1 ORDER BY project_slug").map_err(storage_error)?;
+    let rows = statement
+        .query_map([id.cast_signed()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+            ))
+        })
+        .map_err(storage_error)?;
+    rows.map(|row| {
+        let (project, status, repository, branch, reason) = row.map_err(storage_error)?;
+        let context = match (status.as_str(), repository, branch, reason) {
+            ("available", Some(repository), Some(branch), None) => {
+                PlanningContext::Available { repository, branch }
+            }
+            ("unavailable", None, None, Some(reason)) => PlanningContext::Unavailable { reason },
+            _ => {
+                return Err(RegistrationError::new(
+                    "storage",
+                    "invalid persisted planning context",
+                ));
+            }
+        };
+        let value = ProjectPlanningContext { project, context };
+        value.validate()?;
+        Ok(value)
+    })
+    .collect()
+}
+
+fn insert_planning_observations(
+    connection: &Connection,
+    id: u64,
+    observations: &[forge_app::planning_context::ProjectPlanningContext],
+) -> Result<(), RegistrationError> {
+    use forge_app::planning_context::PlanningContext;
+    for observation in observations {
+        let (status, repository, branch, reason) = match &observation.context {
+            PlanningContext::Available { repository, branch } => {
+                ("available", Some(repository), Some(branch), None)
+            }
+            PlanningContext::Unavailable { reason } => ("unavailable", None, None, Some(reason)),
+        };
+        connection.execute(
+            "INSERT INTO record_planning_context (record_id, project_slug, status, repository, branch, reason) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id.cast_signed(), observation.project, status, repository, branch, reason],
+        ).map_err(storage_error)?;
+    }
+    Ok(())
+}
+
 #[allow(clippy::needless_pass_by_value)]
 fn storage_error(error: rusqlite::Error) -> RegistrationError {
     RegistrationError::new("storage", format!("could not persist Forge data: {error}"))
@@ -4211,6 +4311,122 @@ mod tests {
             project_root: root.canonicalize().unwrap(),
             origin_url: "https://example.test/repo.git".into(),
         }
+    }
+
+    #[test]
+    fn grilling_planning_observation_follows_selected_scope_atomically() {
+        use forge_app::planning_context::{PlanningContext, ProjectPlanningContext};
+        let store = SqliteProjectRepository::in_memory().unwrap();
+        let mut p = project("alpha", "/planning-grilling-atomic");
+        p.reference = "test/alpha".into();
+        store.register(&p).unwrap();
+        let parent = store
+            .open_typed_record(&NewTypedRecord {
+                record_type: RecordType::Wayfinder,
+                body: "wayfinder".into(),
+                project_slugs: vec![p.reference.clone()],
+                generated_by_ids: vec![],
+            })
+            .unwrap();
+        let observation = ProjectPlanningContext {
+            project: p.reference,
+            context: PlanningContext::Available {
+                repository: "/checkout".into(),
+                branch: "feature".into(),
+            },
+        };
+        assert!(
+            store
+                .open_grilling_with_planning(
+                    "grilling",
+                    parent.id,
+                    None,
+                    vec![999_999],
+                    std::slice::from_ref(&observation)
+                )
+                .is_err()
+        );
+        let grilling = store
+            .open_grilling_with_planning(
+                "grilling",
+                parent.id,
+                None,
+                vec![],
+                std::slice::from_ref(&observation),
+            )
+            .unwrap();
+        assert_eq!(grilling.planning_context, vec![observation.clone()]);
+        assert_eq!(
+            store.show_record(grilling.id).unwrap().planning_context,
+            vec![observation]
+        );
+        let db = store.connection.lock().unwrap();
+        let count: i64 = db
+            .query_row("SELECT count(*) FROM record_planning_context", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 1);
+        let branch: String = db
+            .query_row(
+                "SELECT branch FROM record_planning_context WHERE record_id = ?1",
+                [grilling.id.cast_signed()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(branch, "feature");
+    }
+
+    #[test]
+    fn spec_planning_observation_is_atomic_with_record_opening() {
+        use forge_app::planning_context::{PlanningContext, ProjectPlanningContext};
+        let store = SqliteProjectRepository::in_memory().unwrap();
+        let mut p = project("alpha", "/planning-context-atomic");
+        p.reference = "test/alpha".into();
+        store.register(&p).unwrap();
+        let observation = ProjectPlanningContext {
+            project: p.reference.clone(),
+            context: PlanningContext::Unavailable {
+                reason: "detached HEAD".into(),
+            },
+        };
+        let mut input = NewTypedRecord {
+            record_type: RecordType::Spec,
+            body: "spec".into(),
+            project_slugs: vec![p.reference],
+            generated_by_ids: vec![999_999],
+        };
+        assert!(
+            store
+                .open_typed_record_with_planning(&input, std::slice::from_ref(&observation))
+                .is_err()
+        );
+        {
+            let db = store.connection.lock().unwrap();
+            let count: i64 = db
+                .query_row("SELECT count(*) FROM record_planning_context", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0);
+            let count: i64 = db
+                .query_row("SELECT count(*) FROM records", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(count, 0);
+        }
+        input.generated_by_ids.clear();
+        let record = store
+            .open_typed_record_with_planning(&input, &[observation])
+            .unwrap();
+        let db = store.connection.lock().unwrap();
+        let reason: String = db
+            .query_row(
+                "SELECT reason FROM record_planning_context WHERE record_id = ?1",
+                [record.id.cast_signed()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(reason, "detached HEAD");
     }
 
     #[test]

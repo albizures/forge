@@ -744,6 +744,7 @@ async fn record_commands_and_rpc_are_confined_by_explicit_or_client_cwd_selectio
             .open_spec(SelectedRecordRequest::selected(
                 "one",
                 forge_rpc::OpenSpecRequest {
+                    planning_context: vec![],
                     body: "API conflict".into(),
                     project_slug: "two/api".into(),
                     generated_by_ids: vec![],

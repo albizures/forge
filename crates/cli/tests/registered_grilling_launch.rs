@@ -226,13 +226,32 @@ async fn exercise_launch() {
             generation,
         )
         .unwrap();
-    let record = store
+    let parent = store
         .open_typed_record(&NewTypedRecord {
-            record_type: RecordType::Grilling,
-            body: "A decision".into(),
+            record_type: RecordType::Wayfinder,
+            body: "A parent".into(),
             project_slugs: vec!["test/api".into()],
             generated_by_ids: vec![],
         })
+        .unwrap();
+    let observation = forge_app::planning_context::ProjectPlanningContext {
+        project: "test/api".into(),
+        context: forge_app::planning_context::PlanningContext::Available {
+            repository: workspace.to_string_lossy().into_owned(),
+            branch: "initiating-feature".into(),
+        },
+    };
+    let record = store
+        .open_grilling_with_planning(
+            "A decision",
+            parent.id,
+            None,
+            vec![],
+            std::slice::from_ref(&observation),
+        )
+        .unwrap();
+    let hidden = store
+        .open_grilling_with_planning("Private sibling", parent.id, None, vec![], &[observation])
         .unwrap();
     drop(store);
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -297,6 +316,9 @@ async fn exercise_launch() {
     assert_eq!(env["FORGE_ASSIGNMENT_ID"], assignment);
     let cli = Path::new(env["FORGE_ASSIGNMENT_FORGE_CLI"].as_str().unwrap()).to_owned();
     let environment = env.as_object().unwrap().clone();
+    let read_cli = cli.clone();
+    let read_env = environment.clone();
+    let hidden_id = hidden.id.to_string();
     let bootstrap = tokio::task::spawn_blocking(move || {
         let mut cmd = Command::new(cli);
         cmd.args(["assignment", "bootstrap", "--json"]);
@@ -316,6 +338,22 @@ async fn exercise_launch() {
     assert_eq!(context["behavior"], "FROZEN GRILLING BEHAVIOR");
     assert_eq!(context["context"]["record"]["id"], record.id);
     assert_eq!(context["context"]["record"]["status"], "in_progress");
+    assert_eq!(
+        context["context"]["record"]["planning_context"][0]["context"]["branch"],
+        "initiating-feature"
+    );
+    let denied = tokio::task::spawn_blocking(move || {
+        let mut cmd = Command::new(read_cli);
+        cmd.args(["assignment", "record", &hidden_id, "--json"]);
+        for (key, value) in read_env {
+            cmd.env(key, value.as_str().unwrap());
+        }
+        cmd.output().unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(!denied.status.success());
+    assert!(!String::from_utf8_lossy(&denied.stdout).contains("initiating-feature"));
     let store = SqliteProjectRepository::open(&db).unwrap();
     assert!(
         store

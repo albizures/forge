@@ -4,6 +4,7 @@ mod assignment_findings;
 pub use assignment_findings::{AssignmentFindingAction, assignment_finding};
 mod assignment_checks;
 pub use assignment_checks::{AssignmentCheckAction, assignment_check};
+pub mod planning_capture;
 mod record_selection;
 pub use record_selection::RecordEndpoint;
 use record_selection::record_client;
@@ -1061,6 +1062,47 @@ pub async fn request_ready_records(
         .map_err(record_error("ready"))
 }
 
+async fn observe_planning_projects(
+    endpoint: &RecordEndpoint,
+    projects: &[String],
+) -> Vec<forge_app::planning_context::ProjectPlanningContext> {
+    use forge_app::planning_context::{PlanningContext, ProjectPlanningContext};
+    let cwd = std::env::current_dir();
+    let mut observations = Vec::with_capacity(projects.len());
+    for project in projects {
+        let context = match &cwd {
+            Ok(cwd) => match request_select_project(
+                &endpoint.url,
+                &cwd.to_string_lossy(),
+                endpoint.workspace.clone(),
+                Some(project.clone()),
+            )
+            .await
+            {
+                Ok(info) => {
+                    observations.push(planning_capture::observe(
+                        &info.reference,
+                        std::path::Path::new(&info.project_root),
+                        cwd,
+                    ));
+                    continue;
+                }
+                Err(error) => PlanningContext::Unavailable {
+                    reason: format!("cannot inspect Project: {error}"),
+                },
+            },
+            Err(error) => PlanningContext::Unavailable {
+                reason: format!("cannot inspect initiating directory: {error}"),
+            },
+        };
+        observations.push(ProjectPlanningContext {
+            project: project.clone(),
+            context,
+        });
+    }
+    observations
+}
+
 /// Opens a Spec through the daemon.
 ///
 /// # Errors
@@ -1072,8 +1114,12 @@ pub async fn request_open_spec(
     project_slug: String,
     generated_by_ids: Vec<u64>,
 ) -> Result<RecordResponse, String> {
-    record_client(url)?
+    let endpoint = url.into();
+    let planning_context =
+        observe_planning_projects(&endpoint, std::slice::from_ref(&project_slug)).await;
+    record_client(endpoint)?
         .open_spec(OpenSpecRequest {
+            planning_context,
             body: body.into(),
             project_slug,
             generated_by_ids,
@@ -1183,8 +1229,23 @@ pub async fn request_open_grilling_under_wayfinder(
     project_slugs: Option<Vec<String>>,
     generated_by_ids: Vec<u64>,
 ) -> Result<RecordResponse, String> {
-    record_client(url)?
+    let endpoint = url.into();
+    let client = record_client(endpoint.clone())?;
+    let projects = match &project_slugs {
+        Some(projects) => projects.clone(),
+        None => {
+            client
+                .show(RecordIdRequest { id: wayfinder_id })
+                .await
+                .map_err(record_error("read Wayfinder"))?
+                .project_scope
+                .project_slugs
+        }
+    };
+    let planning_context = observe_planning_projects(&endpoint, &projects).await;
+    client
         .open_grilling_under_wayfinder(OpenGrillingUnderWayfinderRequest {
+            planning_context,
             body: body.into(),
             wayfinder_id,
             project_scope: project_slugs.map(|project_slugs| ProjectScopeRequest { project_slugs }),
@@ -1630,6 +1691,29 @@ fn render_completion(record: &RecordResponse, text: &mut String) {
     }
 }
 
+fn render_planning_context(record: &RecordResponse, text: &mut String) {
+    use std::fmt::Write as _;
+    for observation in &record.planning_context {
+        use forge_app::planning_context::PlanningContext;
+        match &observation.context {
+            PlanningContext::Available { repository, branch } => {
+                let _ = write!(
+                    text,
+                    "\nPlanning context {}: repository {repository}, branch {branch}",
+                    observation.project
+                );
+            }
+            PlanningContext::Unavailable { reason } => {
+                let _ = write!(
+                    text,
+                    "\nPlanning context {}: unavailable ({reason})",
+                    observation.project
+                );
+            }
+        }
+    }
+}
+
 #[must_use]
 pub fn render_record(record: &RecordResponse) -> String {
     use std::fmt::Write as _;
@@ -1642,6 +1726,7 @@ pub fn render_record(record: &RecordResponse) -> String {
         record.body
     );
     render_completion(record, &mut text);
+    render_planning_context(record, &mut text);
     for relationship in &record.relationships {
         let _ = write!(
             text,
@@ -1957,7 +2042,9 @@ mod tests {
                 .iter()
                 .all(|record| record.record_type == "task")
         );
-        assert_eq!(render_record(&spec), "spec 1 (open, manual)\n\nSpec body");
+        assert!(render_record(&spec).starts_with(
+            "spec 1 (open, manual)\n\nSpec body\nPlanning context test/cli-test-project:"
+        ));
         assert_eq!(render_record_opened(&child), "Opened task 5 (open)");
 
         server.abort();
@@ -1967,6 +2054,7 @@ mod tests {
     fn record_list_renders_records_in_response_order() {
         let records = ListRecordsResponse {
             records: vec![RecordResponse {
+                planning_context: vec![],
                 dependency_consequences: None,
                 already_done: false,
                 forced_completion: None,
@@ -2020,6 +2108,7 @@ mod tests {
     fn record_output_identifies_the_new_record() {
         assert_eq!(
             render_record_opened(&RecordResponse {
+                planning_context: vec![],
                 dependency_consequences: None,
                 already_done: false,
                 forced_completion: None,

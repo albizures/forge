@@ -1542,11 +1542,11 @@ impl RecordApiServer for Daemon {
         let application =
             self.record_application(&selection, std::slice::from_mut(&mut request.project_slug))?;
         application
-            .open_typed_record_with_generators(
-                forge_app::RecordType::Spec,
+            .open_spec_with_planning(
                 &request.body,
-                vec![request.project_slug],
+                request.project_slug,
                 request.generated_by_ids,
+                &request.planning_context,
             )
             .map(Into::into)
             .map_err(rpc_error)
@@ -1644,11 +1644,12 @@ impl RecordApiServer for Daemon {
             .map_or(&mut [][..], |scope| scope.project_slugs.as_mut_slice());
         let application = self.record_application(&selection, projects)?;
         application
-            .open_grilling_under_wayfinder(
+            .open_grilling_with_planning(
                 &request.body,
                 request.wayfinder_id,
                 request.project_scope.map(|scope| scope.project_slugs),
                 request.generated_by_ids,
+                &request.planning_context,
             )
             .map(Into::into)
             .map_err(rpc_error)
@@ -4716,8 +4717,15 @@ mod tests {
                 .records,
             vec![record.clone()]
         );
+        let observation = forge_app::planning_context::ProjectPlanningContext {
+            project: project.reference.clone(),
+            context: forge_app::planning_context::PlanningContext::Unavailable {
+                reason: "detached HEAD".into(),
+            },
+        };
         let spec = client
             .open_spec(selected(OpenSpecRequest {
+                planning_context: vec![observation.clone()],
                 body: "A daemon-backed Spec".into(),
                 project_slug: project.reference.clone(),
                 generated_by_ids: vec![],
@@ -4725,6 +4733,15 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(spec.record_type, "spec");
+        assert_eq!(spec.planning_context, vec![observation.clone()]);
+        assert_eq!(
+            client
+                .show(selected(RecordIdRequest { id: spec.id }))
+                .await
+                .unwrap()
+                .planning_context,
+            vec![observation]
+        );
         let task = client
             .open_task_under_spec(selected(OpenTaskUnderSpecRequest {
                 body: "A daemon-backed Task".into(),
@@ -4772,6 +4789,7 @@ mod tests {
         assert_eq!(wayfinder_task.relationships[0].parent_id, wayfinder.id);
         let grilling = client
             .open_grilling_under_wayfinder(selected(OpenGrillingUnderWayfinderRequest {
+                planning_context: vec![],
                 body: "A daemon-backed Grilling".into(),
                 wayfinder_id: wayfinder.id,
                 project_scope: None,
@@ -4780,6 +4798,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(grilling.record_type, "grilling");
+        assert_eq!(grilling.planning_context.len(), 1);
+        assert!(matches!(
+            grilling.planning_context[0].context,
+            forge_app::planning_context::PlanningContext::Unavailable { .. }
+        ));
         assert_eq!(grilling.project_scope, wayfinder.project_scope);
         assert_eq!(grilling.relationships[0].parent_id, wayfinder.id);
         let wayfinders = client
